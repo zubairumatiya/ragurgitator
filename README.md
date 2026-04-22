@@ -1,0 +1,2 @@
+# ragurgitator
+rag your documents
