@@ -1,0 +1,3 @@
+# If you build a local file-based vector store (the simple learning option),
+# persist it here. This folder is intentionally empty in git (.gitkeep).
+# Consider adding "/data/vector-store/*" to .gitignore once it holds real data.
