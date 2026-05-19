@@ -1,3 +1,0 @@
-# Drop the source documents you want the RAG app to learn from in this folder
-# (e.g. .txt / .md files to start). The ingestion pipeline reads from here.
-# .gitkeep just keeps this otherwise-empty folder in git.

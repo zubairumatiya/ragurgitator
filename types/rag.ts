@@ -13,3 +13,21 @@
 // TODO: turn the comments above into real `export interface` / `export type`
 //       declarations as you decide what each stage needs.
 // ---------------------------------------------------------------------------
+export type SourceDocument = {
+  id: string;
+  text: string;
+  metadata: { fileName: string };
+};
+
+export type Chunk = {
+  id: string;
+  documentId: string;
+  text: string;
+  position: number;
+};
+
+export type EmbeddedChunk = { embedding: number[]; chunk: Chunk };
+
+export type RetrievedChunk = { score: number; chunk: EmbeddedChunk };
+
+export type ChatMessage = { role: "user" | "assistant"; content: string };
