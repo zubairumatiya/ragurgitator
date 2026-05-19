@@ -13,3 +13,10 @@
 // TODO: export a typed config object. Read secrets from process.env, never
 //       hard-code API keys here (see .env.example).
 // ---------------------------------------------------------------------------
+export const config = {
+  EMBEDDING_MODEL: "voyage-4-lite",
+  LLM_MODEL: "claude-sonnet-4-6",
+  CHUNK_SIZE: 512,
+  CHUNK_OVERLAP: 50,
+  TOP_K: 5,
+} as const;
