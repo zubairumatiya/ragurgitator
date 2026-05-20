@@ -1,15 +1,18 @@
 // ---------------------------------------------------------------------------
 // LLM / embedding provider client setup.
 //
-// Single place that constructs and exports the SDK client(s) you call from
-// embeddings.ts and generator.ts. Centralizing this means you can switch
-// providers (Anthropic, OpenAI, a local model, ...) in one file.
-//
-// Notes:
-//   - read the API key from process.env (see .env.example) — never commit keys
-//   - this project pins Next.js 16; before adding an SDK, check the relevant
-//     guide in node_modules/next/dist/docs/ (see AGENTS.md) for any route /
-//     runtime constraints (e.g. node vs edge runtime for SDK calls)
-//
-// TODO: export a configured client (or a small wrapper) for the rest of lib/.
+// Single place that constructs and exports the SDK clients the rest of lib/
+// calls: `voyageClient` for embeddings (embeddings.ts) and `anthropicClient`
+// for answer generation (generator.ts). Swapping providers happens here, in
+// one file. API keys are read from process.env — never commit them.
 // ---------------------------------------------------------------------------
+import Anthropic from "@anthropic-ai/sdk";
+import { VoyageAIClient } from "voyageai";
+
+export const voyageClient = new VoyageAIClient({
+  apiKey: process.env.VOYAGE_API_KEY,
+});
+
+export const anthropicClient = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+});
