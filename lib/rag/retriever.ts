@@ -5,7 +5,7 @@
 //
 // Flow:
 //   1. embedQuery(question)          -> query vector        (embeddings.ts)
-//   2. vectorStore.query(vec, TOP_K) -> top-K RetrievedChunks (vectorStore.ts)
+//   2. vectorStore.query(vec, topK) -> top-K RetrievedChunks (vectorStore.ts)
 //   3. (optional, later) re-rank or filter the results
 //
 // This module is the "R" in RAG. Keep it thin — it orchestrates embeddings +
