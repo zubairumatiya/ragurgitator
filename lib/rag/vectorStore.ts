@@ -1,18 +1,35 @@
 // ---------------------------------------------------------------------------
 // STEP 4 of ingestion: STORE  (and the backend for retrieval)
 //
-// Responsibility: persist EmbeddedChunks and answer nearest-neighbor queries.
-//
-// Start simple to learn the mechanics, then swap the implementation later
-// without touching the rest of the app (that's why this is its own module):
-//   - learning option: an in-memory array + cosine similarity by hand
-//   - local option:    a JSON file on disk under /data/vector-store
-//   - real option:     a vector DB (pgvector, Pinecone, Chroma, etc.)
-//
-// Suggested interface to keep stable across implementations:
-//   - upsert(chunks: EmbeddedChunk[]): Promise<void>
-//   - query(vector: number[], topK: number): Promise<RetrievedChunk[]>
-//
-// TODO: implement cosine similarity here (or in a math util) for the
-//       in-memory version first — it's the best way to understand retrieval.
+// Persists EmbeddedChunks and answers nearest-neighbor queries. This is the
+// in-memory implementation: a plain array held in the process. It is fast and
+// dependency-free, but the data is lost on restart — re-run ingestion, or swap
+// in a file/DB backend later behind this same upsert/query interface.
 // ---------------------------------------------------------------------------
+import type { EmbeddedChunk, RetrievedChunk } from "@/types/rag";
+
+// Lives in RAM for the lifetime of the process. Not shared across instances,
+// not persisted — see the module header.
+const store: EmbeddedChunk[] = [];
+
+// Voyage returns unit-length vectors, so cosine similarity is just the dot
+// product — no need to divide by magnitudes, both are already 1.
+function dotProduct(a: number[], b: number[]): number {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) sum += a[i] * b[i];
+  return sum;
+}
+
+export async function upsert(chunks: EmbeddedChunk[]): Promise<void> {
+  store.push(...chunks);
+}
+
+export async function query(
+  vector: number[],
+  topK: number,
+): Promise<RetrievedChunk[]> {
+  return store
+    .map((chunk) => ({ score: dotProduct(vector, chunk.embedding), chunk }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topK);
+}
