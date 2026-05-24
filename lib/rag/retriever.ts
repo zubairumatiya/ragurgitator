@@ -10,6 +10,16 @@
 //
 // This module is the "R" in RAG. Keep it thin — it orchestrates embeddings +
 // vectorStore, it doesn't reimplement them.
-//
-// TODO: export `retrieve(question: string): Promise<RetrievedChunk[]>`
 // ---------------------------------------------------------------------------
+import { config } from "@/lib/config";
+import { embedQuery } from "@/lib/rag/embeddings";
+import { query } from "@/lib/rag/vectorStore";
+import type { RetrievedChunk } from "@/types/rag";
+
+export async function retrieve(question: string): Promise<RetrievedChunk[]> {
+  const trimmed = question.trim();
+  if (!trimmed) throw new Error("Cannot retrieve for an empty question.");
+
+  const vector = await embedQuery(trimmed);
+  return query(vector, config.topK);
+}
