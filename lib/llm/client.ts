@@ -7,7 +7,19 @@
 // one file. API keys are read from process.env — never commit them.
 // ---------------------------------------------------------------------------
 import Anthropic from "@anthropic-ai/sdk";
-import { VoyageAIClient } from "voyageai";
+import { createRequire } from "module";
+import type { VoyageAIClient as VoyageAIClientType } from "voyageai";
+
+// voyageai@0.2.1's ESM build is broken (missing .mjs extensions, directory
+// imports — both illegal under strict ESM). The package also ships a working
+// CJS build; createRequire forces Node to resolve through the CJS entry
+// (package.json#main -> dist/cjs/extended/index.js) instead of the broken
+// ESM entry. The `import type` above is erased at compile time so we still
+// get full types without loading the broken module.
+const requireCjs = createRequire(import.meta.url);
+const { VoyageAIClient } = requireCjs("voyageai") as {
+  VoyageAIClient: typeof VoyageAIClientType;
+};
 
 export const voyageClient = new VoyageAIClient({
   apiKey: process.env.VOYAGE_API_KEY,

@@ -19,4 +19,5 @@ export const config = {
   chunkSize: 512,
   chunkOverlap: 50,
   topK: 5,
+  maxAnswerTokens: 1024,
 } as const;

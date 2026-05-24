@@ -1,16 +1,58 @@
 // ---------------------------------------------------------------------------
 // QUERY TIME, STEP 2: GENERATE  (the "G" in RAG)
 //
-// Responsibility: take the retrieved chunks + the user's question, build a
-// prompt that grounds the model in that context, call the LLM, and return
-// the answer.
+// Takes the retrieved chunks + the user's question, builds a grounded prompt,
+// calls the LLM, and returns the answer.
 //
-// Prompt-engineering ideas to learn here:
-//   - clearly separate "context" from "question" in the prompt
-//   - instruct the model to answer ONLY from the provided context and to say
-//     "I don't know" when the context is insufficient (reduces hallucination)
-//   - include chunk metadata so you can show citations/sources in the UI
-//
-// TODO: export `generateAnswer(question, chunks): Promise<string>` and
-//       call the LLM through lib/llm/client.ts (don't put SDK setup here).
+// Prompting decisions:
+//   - system prompt sets the role and the "answer only from context" rule
+//   - context chunks are wrapped in XML-ish tags so the model can tell where
+//     each one starts/ends (Claude is trained to follow this convention)
+//   - each chunk is labeled with its source so the model can cite if asked,
+//     and so a future re-ranker can use the same labels
 // ---------------------------------------------------------------------------
+import { anthropicClient } from "@/lib/llm/client";
+import { config } from "@/lib/config";
+import type { RetrievedChunk } from "@/types/rag";
+
+const SYSTEM_PROMPT = `You are a helpful assistant answering questions about a user-provided document set.
+
+Rules:
+- Answer using ONLY the information inside the <context> block. Do not use outside knowledge.
+- If the context does not contain enough information to answer, say "I don't know based on the provided documents." Do not guess.
+- Be concise. Quote short snippets from the context when it strengthens the answer.`;
+
+export async function generateAnswer(
+  question: string,
+  chunks: RetrievedChunk[],
+): Promise<string> {
+  const userMessage = buildUserMessage(question, chunks);
+
+  const response = await anthropicClient.messages.create({
+    model: config.llmModel,
+    max_tokens: config.maxAnswerTokens,
+    system: SYSTEM_PROMPT,
+    messages: [{ role: "user", content: userMessage }],
+  });
+
+  // The Messages API returns content as an array of blocks; for a non-tool,
+  // non-streaming call there's a single text block.
+  const block = response.content.find((b) => b.type === "text");
+  if (!block) throw new Error("LLM returned no text content.");
+  return block.text;
+}
+
+function buildUserMessage(question: string, chunks: RetrievedChunk[]): string {
+  if (chunks.length === 0) {
+    return `<context>\n(no relevant context was retrieved)\n</context>\n\nQuestion: ${question}`;
+  }
+
+  const contextBlocks = chunks
+    .map((c, i) => {
+      const source = `doc:${c.chunk.chunk.documentId.slice(0, 8)} #${c.chunk.chunk.position}`;
+      return `<chunk id="${i + 1}" source="${source}">\n${c.chunk.chunk.text}\n</chunk>`;
+    })
+    .join("\n\n");
+
+  return `<context>\n${contextBlocks}\n</context>\n\nQuestion: ${question}`;
+}

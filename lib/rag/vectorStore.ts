@@ -22,6 +22,9 @@ function dotProduct(a: number[], b: number[]): number {
 
 export async function upsert(chunks: EmbeddedChunk[]): Promise<void> {
   store.push(...chunks);
+  console.log(
+    `[rag:vectorStore] upserted ${chunks.length} chunks (store size: ${store.length})`,
+  );
 }
 
 export async function query(

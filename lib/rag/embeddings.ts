@@ -21,10 +21,18 @@ async function embed(
   texts: string[],
   inputType: "document" | "query",
 ): Promise<number[][]> {
+  const t0 = performance.now();
+  const totalBatches = Math.ceil(texts.length / MAX_BATCH);
+  console.log(
+    `[rag:embeddings] embedding ${texts.length} ${inputType}(s) in ${totalBatches} batch(es) of up to ${MAX_BATCH}`,
+  );
+
   const vectors: number[][] = [];
 
   for (let start = 0; start < texts.length; start += MAX_BATCH) {
     const batch = texts.slice(start, start + MAX_BATCH);
+    const batchIdx = start / MAX_BATCH + 1;
+    const tBatch = performance.now();
     const response = await voyageClient.embed({
       input: batch,
       model: config.embeddingModel,
@@ -45,8 +53,12 @@ async function embed(
       if (!item.embedding) throw new Error("Voyage returned an empty embedding");
       vectors.push(item.embedding);
     }
+    console.log(
+      `[rag:embeddings] batch ${batchIdx}/${totalBatches}: ${batch.length} vectors (dim=${data[0]?.embedding?.length ?? "?"}) in ${Math.round(performance.now() - tBatch)}ms`,
+    );
   }
 
+  console.log(`[rag:embeddings] done in ${Math.round(performance.now() - t0)}ms`);
   return vectors;
 }
 

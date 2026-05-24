@@ -26,6 +26,7 @@ function getTokenizer() {
 }
 
 export async function chunkDocument(doc: SourceDocument): Promise<Chunk[]> {
+  const t0 = performance.now();
   const tokenizer = await getTokenizer();
   // Special tokens belong at the document boundary, not at every chunk seam.
   const tokenIds = tokenizer.encode(doc.text, { add_special_tokens: false });
@@ -53,5 +54,9 @@ export async function chunkDocument(doc: SourceDocument): Promise<Chunk[]> {
     if (start + chunkSize >= tokenIds.length) break;
   }
 
+  console.log(
+    `[rag:chunker] doc ${doc.id.slice(0, 8)} (${doc.metadata.fileName}): ` +
+      `${tokenIds.length} tokens -> ${chunks.length} chunks (size=${chunkSize}, overlap=${chunkOverlap}) in ${Math.round(performance.now() - t0)}ms`,
+  );
   return chunks;
 }

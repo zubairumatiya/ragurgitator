@@ -16,21 +16,30 @@ export type LoadInput =
   | { kind: "file"; file: File };
 
 export async function loadDocument(input: LoadInput): Promise<SourceDocument[]> {
+  const t0 = performance.now();
   if (input.kind === "text") {
     const text = input.text.trim();
     if (!text) throw new Error("Cannot load empty text.");
-    return [toDocument(text, input.fileName?.trim() || "pasted-text")];
+    const name = input.fileName?.trim() || "pasted-text";
+    console.log(`[rag:loader] text input "${name}" (${text.length} chars) in ${ms(t0)}`);
+    return [toDocument(text, name)];
   }
 
   const { file } = input;
   const dot = file.name.lastIndexOf(".");
   const ext = dot === -1 ? "" : file.name.slice(dot).toLowerCase();
+  console.log(`[rag:loader] file "${file.name}" (${file.size} bytes, ${ext})`);
   const text = (await extractFileText(file, ext)).trim();
 
   if (!text) {
     throw new Error(`No text could be extracted from "${file.name}".`);
   }
+  console.log(`[rag:loader] extracted ${text.length} chars in ${ms(t0)}`);
   return [toDocument(text, file.name)];
+}
+
+function ms(t0: number): string {
+  return `${Math.round(performance.now() - t0)}ms`;
 }
 
 async function extractFileText(file: File, ext: string): Promise<string> {
