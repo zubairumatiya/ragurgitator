@@ -12,6 +12,15 @@ import type { EmbeddedChunk, RetrievedChunk } from "@/types/rag";
 // not persisted — see the module header.
 const store: EmbeddedChunk[] = [];
 
+export type IngestedDocument = {
+  id: string;
+  fileName: string;
+  chunkCount: number;
+  ingestedAt: number;
+};
+
+const documents = new Map<string, IngestedDocument>();
+
 // Voyage returns unit-length vectors, so cosine similarity is just the dot
 // product — no need to divide by magnitudes, both are already 1.
 function dotProduct(a: number[], b: number[]): number {
@@ -35,4 +44,14 @@ export async function query(
     .map((chunk) => ({ score: dotProduct(vector, chunk.embedding), chunk }))
     .sort((a, b) => b.score - a.score)
     .slice(0, topK);
+}
+
+export async function registerDocument(
+  doc: Omit<IngestedDocument, "ingestedAt">,
+): Promise<void> {
+  documents.set(doc.id, { ...doc, ingestedAt: Date.now() });
+}
+
+export async function listDocuments(): Promise<IngestedDocument[]> {
+  return [...documents.values()].sort((a, b) => b.ingestedAt - a.ingestedAt);
 }

@@ -1,3 +1,5 @@
+import { ChatWindow } from "@/app/components/ChatWindow";
+import { DocumentList } from "@/app/components/DocumentList";
 import { FileUpload } from "@/app/components/FileUpload";
 
 export default function Home() {
@@ -9,7 +11,7 @@ export default function Home() {
             RAG playground
           </h1>
           <p className="text-sm text-zinc-600 dark:text-zinc-400">
-            Upload a document, then ask questions about it. (Chat UI coming next.)
+            Upload a document, then ask questions about it.
           </p>
         </header>
 
@@ -18,6 +20,14 @@ export default function Home() {
             1. Ingest
           </h2>
           <FileUpload />
+          <DocumentList />
+        </section>
+
+        <section className="flex flex-col gap-3">
+          <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
+            2. Ask
+          </h2>
+          <ChatWindow />
         </section>
       </main>
     </div>

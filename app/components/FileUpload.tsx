@@ -8,6 +8,7 @@
 "use client";
 
 import { useState } from "react";
+import { RAG_INGESTED_EVENT } from "@/app/components/DocumentList";
 
 type Status =
   | { kind: "idle" }
@@ -57,6 +58,7 @@ export function FileUpload() {
       }
       setStatus({ kind: "success", chunksAdded: data.chunksAdded, label });
       setPickedFileName(null);
+      window.dispatchEvent(new Event(RAG_INGESTED_EVENT));
     } catch (err) {
       setStatus({
         kind: "error",

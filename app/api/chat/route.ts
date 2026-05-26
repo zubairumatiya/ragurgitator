@@ -1,16 +1,41 @@
 // ---------------------------------------------------------------------------
 // API route: POST /api/chat
 //
-// Purpose: receive a user question, run the query flow, return the answer.
+// Body: { question: string }
+// Reply: { answer: string, sources: RetrievedChunk[] }
 //
-// Responsibility split:
-//   - parse/validate the request body (the question, maybe chat history)
-//   - delegate to pipeline.ask()
-//   - return { answer, sources } as JSON  (consider streaming later)
-//
-// Streaming the answer back token-by-token is a great learning extension —
-// check the current Next.js streaming-response API in
-// node_modules/next/dist/docs/ before attempting it (AGENTS.md).
-//
-// TODO: implement and export the POST handler.
+// All RAG logic lives in pipeline.ask — this route just translates HTTP.
 // ---------------------------------------------------------------------------
+import { ask } from "@/lib/rag/pipeline";
+
+export async function POST(request: Request) {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json(
+      { error: "Expected a JSON body." },
+      { status: 400 },
+    );
+  }
+
+  const question =
+    typeof body === "object" && body !== null && "question" in body
+      ? (body as { question: unknown }).question
+      : undefined;
+
+  if (typeof question !== "string" || !question.trim()) {
+    return Response.json(
+      { error: "Provide a non-empty `question` string." },
+      { status: 400 },
+    );
+  }
+
+  try {
+    const result = await ask(question);
+    return Response.json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Chat failed.";
+    return Response.json({ error: message }, { status: 500 });
+  }
+}

@@ -12,10 +12,9 @@
 // ---------------------------------------------------------------------------
 import { chunkDocument } from "@/lib/rag/chunker";
 import { embedTexts } from "@/lib/rag/embeddings";
-import { generateAnswer } from "@/lib/rag/generator";
 import { loadDocument, type LoadInput } from "@/lib/rag/loader";
 import { retrieve } from "@/lib/rag/retriever";
-import { upsert } from "@/lib/rag/vectorStore";
+import { registerDocument, upsert } from "@/lib/rag/vectorStore";
 import type { EmbeddedChunk, RetrievedChunk } from "@/types/rag";
 
 export async function ingest(input: LoadInput): Promise<{ chunksAdded: number }> {
@@ -41,6 +40,16 @@ export async function ingest(input: LoadInput): Promise<{ chunksAdded: number }>
   }));
   await upsert(embedded);
 
+  await Promise.all(
+    documents.map((doc, i) =>
+      registerDocument({
+        id: doc.id,
+        fileName: doc.metadata.fileName,
+        chunkCount: chunksPerDoc[i].length,
+      }),
+    ),
+  );
+
   console.log(
     `[rag:pipeline] ingest done: ${embedded.length} chunks in ${Math.round(performance.now() - t0)}ms`,
   );
@@ -51,6 +60,6 @@ export async function ask(
   question: string,
 ): Promise<{ answer: string; sources: RetrievedChunk[] }> {
   const sources = await retrieve(question);
-  const answer = await generateAnswer(question, sources);
+  const answer = `Retrieved ${sources.length} chunk${sources.length === 1 ? "" : "s"}. Generation is disabled — expand "sources" to inspect retrieval.`;
   return { answer, sources };
 }
