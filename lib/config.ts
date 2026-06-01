@@ -20,4 +20,5 @@ export const config = {
   chunkOverlap: 50,
   topK: 5,
   maxAnswerTokens: 1024,
+  evalQuestionsPerChunk: 1, // target eval questions per chunk; generation tops up the difference
 } as const;

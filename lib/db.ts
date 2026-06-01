@@ -17,7 +17,6 @@ if (!url) {
 }
 
 declare global {
-  // eslint-disable-next-line no-var
   var __ragSql: ReturnType<typeof postgres> | undefined;
 }
 
