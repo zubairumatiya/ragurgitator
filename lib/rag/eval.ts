@@ -72,7 +72,8 @@ async function authorQuestions(
 ): Promise<GeneratedQuestion[]> {
   const response = await anthropicClient.messages.create({
     model: config.llmModel,
-    max_tokens: 1024,
+    // Scale headroom with the ask so a larger target can't truncate the JSON.
+    max_tokens: Math.min(1024 + (count - 1) * 512, 4096),
     thinking: { type: "disabled" },
     output_config: { format: QUESTIONS_FORMAT },
     system: [
@@ -93,8 +94,20 @@ async function authorQuestions(
 
   const textBlock = response.content.find((b) => b.type === "text");
   if (!textBlock || textBlock.type !== "text") return [];
-  const parsed = JSON.parse(textBlock.text) as { questions?: GeneratedQuestion[] };
-  return (parsed.questions ?? []).slice(0, count);
+
+  // Structured outputs guarantee schema-valid JSON on a clean stop, but a
+  // truncation (max_tokens) or refusal can still yield unparseable text. Skip
+  // this chunk rather than failing the whole run — it stays under target and is
+  // retried on the next pass.
+  try {
+    const parsed = JSON.parse(textBlock.text) as { questions?: GeneratedQuestion[] };
+    return (parsed.questions ?? []).slice(0, count);
+  } catch {
+    console.warn(
+      `[rag:eval] could not parse generated questions (stop_reason=${response.stop_reason}); skipping chunk`,
+    );
+    return [];
+  }
 }
 
 // Top up every under-target chunk to `evalQuestionsPerChunk` questions. Only
@@ -166,10 +179,14 @@ export async function processNewChunks(): Promise<{
   const scored = await scoreUnscoredQuestions();
 
   const summary = await getSummary();
-  await createRunSnapshot({
-    questionCount: summary.scored,
-    hitCount: summary.hits,
-  });
+  // Only snapshot when something actually changed, so repeated clicks don't
+  // pile up identical run rows.
+  if (generated > 0 || scored > 0) {
+    await createRunSnapshot({
+      questionCount: summary.scored,
+      hitCount: summary.hits,
+    });
+  }
 
   console.log(
     `[rag:eval] processNewChunks done: generated=${generated} scored=${scored} ` +

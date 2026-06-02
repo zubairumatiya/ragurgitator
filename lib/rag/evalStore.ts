@@ -47,6 +47,7 @@ export type QuestionDetail = {
   foundRank: number | null;
   retrievedIds: string[] | null;
   scoredAt: number | null;
+  stale: boolean; // true = edited since its last score; result shown is for the old text
 };
 
 export type DocumentBreakdown = {
@@ -261,6 +262,7 @@ export async function getSummary(): Promise<EvalSummary> {
         question: string;
         source: string;
         document_id: string;
+        updated_at: Date;
         file_name: string;
         expected_position: number | null;
         hit: boolean | null;
@@ -289,6 +291,7 @@ export async function getSummary(): Promise<EvalSummary> {
         q.question,
         q.source,
         q.document_id,
+        q.updated_at,
         d.file_name,
         c.position as expected_position,
         lt.hit,
@@ -329,9 +332,13 @@ export async function getSummary(): Promise<EvalSummary> {
     foundRank: r.found_rank,
     retrievedIds: r.retrieved_ids,
     scoredAt: r.scored_at ? r.scored_at.getTime() : null,
+    // Edited after its last score -> the shown hit/miss is for the old text. Treat
+    // as pending (it will be re-scored next run, see questionsNeedingScoring).
+    stale: r.scored_at !== null && r.updated_at.getTime() > r.scored_at.getTime(),
   }));
 
-  const scoredRows = questions.filter((q) => q.hit !== null);
+  // Only fresh scores count toward recall; unscored and stale are pending.
+  const scoredRows = questions.filter((q) => q.hit !== null && !q.stale);
   const hits = scoredRows.filter((q) => q.hit === true).length;
 
   const byDoc = new Map<string, DocumentBreakdown>();
@@ -341,7 +348,7 @@ export async function getSummary(): Promise<EvalSummary> {
       d = { documentId: q.documentId, fileName: q.fileName, scored: 0, hits: 0 };
       byDoc.set(q.documentId, d);
     }
-    if (q.hit !== null) {
+    if (q.hit !== null && !q.stale) {
       d.scored += 1;
       if (q.hit) d.hits += 1;
     }

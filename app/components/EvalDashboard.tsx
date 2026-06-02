@@ -213,7 +213,7 @@ export function EvalDashboard() {
                       ) : (
                         <span className="flex-1">{q.question}</span>
                       )}
-                      <Badge hit={q.hit} rank={q.foundRank} />
+                      <Badge hit={q.hit} rank={q.foundRank} stale={q.stale} />
                     </div>
                     <div className="flex items-center justify-between gap-3 text-xs text-zinc-500">
                       <span className="truncate font-mono">
@@ -279,9 +279,24 @@ function Stat({ label, value, big }: { label: string; value: string; big?: boole
   );
 }
 
-function Badge({ hit, rank }: { hit: boolean | null; rank: number | null }) {
+function Badge({
+  hit,
+  rank,
+  stale,
+}: {
+  hit: boolean | null;
+  rank: number | null;
+  stale: boolean;
+}) {
   if (hit === null) {
     return <span className="shrink-0 text-xs text-zinc-400">unscored</span>;
+  }
+  if (stale) {
+    return (
+      <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
+        stale
+      </span>
+    );
   }
   if (hit) {
     return (

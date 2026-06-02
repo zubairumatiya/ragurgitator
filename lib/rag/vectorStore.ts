@@ -61,6 +61,21 @@ export async function insertDocument(
   return rows[0].id;
 }
 
+// Delete a document and everything derived from it. The on-delete-cascade FKs
+// (documents -> document_embeddings -> chunks, and -> eval_questions -> labels
+// -> results) clear the vector AND eval data in one statement, across every
+// config the doc was processed under. eval_runs are intentionally NOT cascaded:
+// they're frozen aggregate snapshots kept for run-to-run comparison.
+// Returns false when no row matched (already gone), so the route can 404.
+export async function deleteDocument(id: string): Promise<boolean> {
+  const rows = await sql`
+    delete from documents
+    where id = ${id}
+    returning id
+  `;
+  return rows.length > 0;
+}
+
 export async function hasEmbeddingRun(
   documentId: string,
   model: string,
