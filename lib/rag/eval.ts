@@ -18,12 +18,14 @@ import { config } from "@/lib/config";
 import { anthropicClient } from "@/lib/llm/client";
 import { retrieve } from "@/lib/rag/retriever";
 import {
+  allLabeledQuestions,
   chunksNeedingQuestions,
   createRunSnapshot,
   getSummary,
   insertQuestionWithLabel,
   insertResults,
   questionsNeedingScoring,
+  type QuestionToScore,
   type ResultInsert,
 } from "@/lib/rag/evalStore";
 
@@ -141,15 +143,14 @@ export async function generateMissingQuestions(): Promise<number> {
   return generated;
 }
 
-// Score every question that has no fresh result (new or edited since last score).
-export async function scoreUnscoredQuestions(): Promise<number> {
-  const pending = await questionsNeedingScoring();
-  if (pending.length === 0) return 0;
-
-  console.log(`[rag:eval] scoring ${pending.length} question(s) @ k=${config.topK}`);
+// Embed each question, vector-search, and record whether its labeled chunk landed in
+// the top-k. Pure retrieval — no LLM at scoring time. Shared by the incremental
+// (scoreUnscoredQuestions) and full (rescoreAllQuestions) scoring paths.
+async function scoreQuestions(questions: QuestionToScore[]): Promise<number> {
+  if (questions.length === 0) return 0;
 
   const results: ResultInsert[] = [];
-  for (const q of pending) {
+  for (const q of questions) {
     const retrieved = await retrieve(q.question);
     const ids = retrieved.map((r) => r.chunk.chunk.id);
     const rank = ids.indexOf(q.sourceChunkId);
@@ -165,6 +166,14 @@ export async function scoreUnscoredQuestions(): Promise<number> {
 
   await insertResults(results);
   return results.length;
+}
+
+// Score every question that has no fresh result (new or edited since last score).
+export async function scoreUnscoredQuestions(): Promise<number> {
+  const pending = await questionsNeedingScoring();
+  if (pending.length === 0) return 0;
+  console.log(`[rag:eval] scoring ${pending.length} question(s) @ k=${config.topK}`);
+  return scoreQuestions(pending);
 }
 
 // The "Process new chunks" button: generate questions for new chunks, score
@@ -193,4 +202,36 @@ export async function processNewChunks(): Promise<{
       `recall=${summary.recall ?? "n/a"} in ${Math.round(performance.now() - t0)}ms`,
   );
   return { generated, scored, recall: summary.recall };
+}
+
+// The "Re-score all" button: re-run retrieval for EVERY labeled question under the
+// active config against the current corpus and freeze a snapshot. Unlike
+// processNewChunks this ignores existing results (it inserts fresh rows; history is
+// preserved), so recall stays apples-to-apples after the corpus changes — e.g. a newly
+// added doc introduces distractors that can push a previously-hit chunk out of the
+// top-k. Generation is untouched; this only scores.
+export async function rescoreAllQuestions(): Promise<{
+  scored: number;
+  recall: number | null;
+}> {
+  const t0 = performance.now();
+  const questions = await allLabeledQuestions();
+  console.log(
+    `[rag:eval] re-scoring all ${questions.length} question(s) @ k=${config.topK}`,
+  );
+  const scored = await scoreQuestions(questions);
+
+  const summary = await getSummary();
+  if (scored > 0) {
+    await createRunSnapshot({
+      questionCount: summary.scored,
+      hitCount: summary.hits,
+    });
+  }
+
+  console.log(
+    `[rag:eval] rescoreAllQuestions done: scored=${scored} ` +
+      `recall=${summary.recall ?? "n/a"} in ${Math.round(performance.now() - t0)}ms`,
+  );
+  return { scored, recall: summary.recall };
 }

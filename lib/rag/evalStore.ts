@@ -199,6 +199,41 @@ export async function questionsNeedingScoring(): Promise<QuestionToScore[]> {
   }));
 }
 
+// Every question with a label under the active config, regardless of whether it
+// already has a (fresh) result. Backs "Re-score all": re-running retrieval for all
+// of these against the current corpus keeps recall apples-to-apples after the corpus
+// changes (e.g. a doc was added/removed and now competes in the top-k).
+// questionsNeedingScoring() is the incremental counterpart used by "Process new chunks".
+export async function allLabeledQuestions(): Promise<QuestionToScore[]> {
+  const rows = await sql<
+    {
+      question_id: string;
+      question: string;
+      label_id: string;
+      source_chunk_id: string;
+    }[]
+  >`
+    select
+      q.id as question_id,
+      q.question,
+      l.id as label_id,
+      l.source_chunk_id
+    from eval_questions q
+    join eval_labels l on l.eval_question_id = q.id
+    join document_embeddings de on de.id = l.document_embedding_id
+    where de.model = ${config.embeddingModel}
+      and de.chunk_size = ${config.chunkSize}
+      and de.chunk_overlap = ${config.chunkOverlap}
+  `;
+
+  return rows.map((r) => ({
+    questionId: r.question_id,
+    question: r.question,
+    labelId: r.label_id,
+    sourceChunkId: r.source_chunk_id,
+  }));
+}
+
 export async function insertResults(rows: ResultInsert[]): Promise<void> {
   if (rows.length === 0) return;
   await sql.begin(async (tx) => {

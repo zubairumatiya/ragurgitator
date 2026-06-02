@@ -74,6 +74,30 @@ export function EvalDashboard() {
     }
   }
 
+  async function onRescore() {
+    setBusy(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const res = await fetch("/api/eval/rescore", { method: "POST" });
+      const data = (await res.json()) as
+        | { scored: number; recall: number | null }
+        | { error: string };
+      if (!res.ok || "error" in data) {
+        setError("error" in data ? data.error : `Request failed (${res.status}).`);
+        return;
+      }
+      setNotice(
+        `Re-scored ${data.scored} question(s). Recall@k = ${pct(data.recall)}.`,
+      );
+      reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Network error.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function saveEdit(id: string) {
     const text = editText.trim();
     if (!text) return;
@@ -120,6 +144,13 @@ export function EvalDashboard() {
           className="rounded-md bg-black px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
         >
           {busy ? "Processing…" : "Process new chunks"}
+        </button>
+        <button
+          onClick={onRescore}
+          disabled={busy}
+          className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium disabled:opacity-50 dark:border-zinc-700"
+        >
+          Re-score all
         </button>
         {notice && <span className="text-sm text-zinc-600 dark:text-zinc-400">{notice}</span>}
       </div>
