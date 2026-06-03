@@ -29,6 +29,26 @@ import {
   type ResultInsert,
 } from "@/lib/rag/evalStore";
 
+// Progress events streamed to the client during a process/rescore run. The
+// routes serialize these as NDJSON; the dashboard turns them into a two-phase
+// progress bar and flips question badges live as each result lands.
+export type EvalEvent =
+  | { type: "generate-start"; total: number }
+  | { type: "generate-progress"; done: number; total: number }
+  | { type: "score-start"; total: number }
+  | {
+      type: "score-result";
+      done: number;
+      total: number;
+      questionId: string;
+      hit: boolean;
+      foundRank: number | null;
+    }
+  | { type: "done"; generated: number; scored: number; recall: number | null }
+  | { type: "error"; message: string };
+
+type Emit = (event: EvalEvent) => void;
+
 // Static across every chunk, so it can sit in a cached prefix. Kept deliberately
 // strict about NOT quoting the passage — verbatim questions make retrieval
 // trivial and inflate recall.
@@ -114,15 +134,17 @@ async function authorQuestions(
 
 // Top up every under-target chunk to `evalQuestionsPerChunk` questions. Only
 // chunks below target are touched, so this is naturally incremental.
-export async function generateMissingQuestions(): Promise<number> {
+export async function generateMissingQuestions(emit: Emit = () => {}): Promise<number> {
   const chunks = await chunksNeedingQuestions(config.evalQuestionsPerChunk);
   if (chunks.length === 0) return 0;
 
   console.log(
     `[rag:eval] generating questions for ${chunks.length} chunk(s) under target=${config.evalQuestionsPerChunk}`,
   );
+  emit({ type: "generate-start", total: chunks.length });
 
   let generated = 0;
+  let done = 0;
   for (const chunk of chunks) {
     const questions = await authorQuestions(chunk.text, chunk.needed);
     for (const q of questions) {
@@ -137,6 +159,8 @@ export async function generateMissingQuestions(): Promise<number> {
       });
       generated += 1;
     }
+    done += 1;
+    emit({ type: "generate-progress", done, total: chunks.length });
   }
 
   console.log(`[rag:eval] generated ${generated} question(s)`);
@@ -146,21 +170,38 @@ export async function generateMissingQuestions(): Promise<number> {
 // Embed each question, vector-search, and record whether its labeled chunk landed in
 // the top-k. Pure retrieval — no LLM at scoring time. Shared by the incremental
 // (scoreUnscoredQuestions) and full (rescoreAllQuestions) scoring paths.
-async function scoreQuestions(questions: QuestionToScore[]): Promise<number> {
+async function scoreQuestions(
+  questions: QuestionToScore[],
+  emit: Emit = () => {},
+): Promise<number> {
   if (questions.length === 0) return 0;
 
+  emit({ type: "score-start", total: questions.length });
+
   const results: ResultInsert[] = [];
+  let done = 0;
   for (const q of questions) {
     const retrieved = await retrieve(q.question);
     const ids = retrieved.map((r) => r.chunk.chunk.id);
     const rank = ids.indexOf(q.sourceChunkId);
+    const hit = rank !== -1;
+    const foundRank = rank === -1 ? null : rank + 1;
     results.push({
       questionId: q.questionId,
       labelId: q.labelId,
       k: config.topK,
-      hit: rank !== -1,
-      foundRank: rank === -1 ? null : rank + 1,
+      hit,
+      foundRank,
       retrievedIds: ids,
+    });
+    done += 1;
+    emit({
+      type: "score-result",
+      done,
+      total: questions.length,
+      questionId: q.questionId,
+      hit,
+      foundRank,
     });
   }
 
@@ -169,23 +210,23 @@ async function scoreQuestions(questions: QuestionToScore[]): Promise<number> {
 }
 
 // Score every question that has no fresh result (new or edited since last score).
-export async function scoreUnscoredQuestions(): Promise<number> {
+export async function scoreUnscoredQuestions(emit: Emit = () => {}): Promise<number> {
   const pending = await questionsNeedingScoring();
   if (pending.length === 0) return 0;
   console.log(`[rag:eval] scoring ${pending.length} question(s) @ k=${config.topK}`);
-  return scoreQuestions(pending);
+  return scoreQuestions(pending, emit);
 }
 
 // The "Process new chunks" button: generate questions for new chunks, score
 // what's unscored, then freeze a comparison snapshot of the current aggregate.
-export async function processNewChunks(): Promise<{
+export async function processNewChunks(emit: Emit = () => {}): Promise<{
   generated: number;
   scored: number;
   recall: number | null;
 }> {
   const t0 = performance.now();
-  const generated = await generateMissingQuestions();
-  const scored = await scoreUnscoredQuestions();
+  const generated = await generateMissingQuestions(emit);
+  const scored = await scoreUnscoredQuestions(emit);
 
   const summary = await getSummary();
   // Only snapshot when something actually changed, so repeated clicks don't
@@ -201,6 +242,7 @@ export async function processNewChunks(): Promise<{
     `[rag:eval] processNewChunks done: generated=${generated} scored=${scored} ` +
       `recall=${summary.recall ?? "n/a"} in ${Math.round(performance.now() - t0)}ms`,
   );
+  emit({ type: "done", generated, scored, recall: summary.recall });
   return { generated, scored, recall: summary.recall };
 }
 
@@ -210,7 +252,7 @@ export async function processNewChunks(): Promise<{
 // preserved), so recall stays apples-to-apples after the corpus changes — e.g. a newly
 // added doc introduces distractors that can push a previously-hit chunk out of the
 // top-k. Generation is untouched; this only scores.
-export async function rescoreAllQuestions(): Promise<{
+export async function rescoreAllQuestions(emit: Emit = () => {}): Promise<{
   scored: number;
   recall: number | null;
 }> {
@@ -219,7 +261,7 @@ export async function rescoreAllQuestions(): Promise<{
   console.log(
     `[rag:eval] re-scoring all ${questions.length} question(s) @ k=${config.topK}`,
   );
-  const scored = await scoreQuestions(questions);
+  const scored = await scoreQuestions(questions, emit);
 
   const summary = await getSummary();
   if (scored > 0) {
@@ -233,5 +275,6 @@ export async function rescoreAllQuestions(): Promise<{
     `[rag:eval] rescoreAllQuestions done: scored=${scored} ` +
       `recall=${summary.recall ?? "n/a"} in ${Math.round(performance.now() - t0)}ms`,
   );
+  emit({ type: "done", generated: 0, scored, recall: summary.recall });
   return { scored, recall: summary.recall };
 }

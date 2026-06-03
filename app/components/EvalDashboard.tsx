@@ -9,16 +9,26 @@
 
 import { useEffect, useState } from "react";
 import type { EvalSummary } from "@/lib/rag/evalStore";
+import type { EvalEvent } from "@/lib/rag/eval";
 
 function pct(n: number | null): string {
   return n === null ? "—" : `${(n * 100).toFixed(1)}%`;
 }
+
+// Live progress for an in-flight process/rescore run. "generate" has no recall
+// yet; "score" tracks a running hit count so the panel can show recall climbing.
+type EvalProgress =
+  | { phase: "generate"; done: number; total: number }
+  | { phase: "score"; done: number; total: number; hits: number };
+
+type RunResult = { generated: number; scored: number; recall: number | null };
 
 export function EvalDashboard() {
   const [summary, setSummary] = useState<EvalSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [progress, setProgress] = useState<EvalProgress | null>(null);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
@@ -50,53 +60,101 @@ export function EvalDashboard() {
     };
   }, [reloadKey]);
 
-  async function onProcess() {
+  // Flip a question's badge in place as its score lands. Only patches rows that
+  // are already in the table; brand-new generated questions appear on reload().
+  function patchQuestion(id: string, hit: boolean, foundRank: number | null) {
+    setSummary((prev) =>
+      prev === null
+        ? prev
+        : {
+            ...prev,
+            questions: prev.questions.map((q) =>
+              q.questionId === id
+                ? { ...q, hit, foundRank, stale: false, scoredAt: Date.now() }
+                : q,
+            ),
+          },
+    );
+  }
+
+  // Drive a process/rescore run from its NDJSON event stream: advance the
+  // progress bar, patch question badges live, and reconcile via reload() at the end.
+  async function runStream(url: string, label: (r: RunResult) => string) {
     setBusy(true);
     setNotice(null);
     setError(null);
+    setProgress(null);
     try {
-      const res = await fetch("/api/eval/process", { method: "POST" });
-      const data = (await res.json()) as
-        | { generated: number; scored: number; recall: number | null }
-        | { error: string };
-      if (!res.ok || "error" in data) {
-        setError("error" in data ? data.error : `Request failed (${res.status}).`);
+      const res = await fetch(url, { method: "POST" });
+      if (!res.ok || !res.body) {
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        setError(data?.error ?? `Request failed (${res.status}).`);
         return;
       }
-      setNotice(
-        `Generated ${data.generated} question(s), scored ${data.scored}. Recall@k = ${pct(data.recall)}.`,
-      );
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let hits = 0;
+      let final: RunResult | null = null;
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line) as EvalEvent;
+          switch (event.type) {
+            case "generate-start":
+              setProgress({ phase: "generate", done: 0, total: event.total });
+              break;
+            case "generate-progress":
+              setProgress({ phase: "generate", done: event.done, total: event.total });
+              break;
+            case "score-start":
+              hits = 0;
+              setProgress({ phase: "score", done: 0, total: event.total, hits: 0 });
+              break;
+            case "score-result":
+              if (event.hit) hits += 1;
+              setProgress({ phase: "score", done: event.done, total: event.total, hits });
+              patchQuestion(event.questionId, event.hit, event.foundRank);
+              break;
+            case "done":
+              final = { generated: event.generated, scored: event.scored, recall: event.recall };
+              break;
+            case "error":
+              setError(event.message);
+              return;
+          }
+        }
+      }
+
+      if (final) setNotice(label(final));
       reload();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Network error.");
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   }
 
-  async function onRescore() {
-    setBusy(true);
-    setNotice(null);
-    setError(null);
-    try {
-      const res = await fetch("/api/eval/rescore", { method: "POST" });
-      const data = (await res.json()) as
-        | { scored: number; recall: number | null }
-        | { error: string };
-      if (!res.ok || "error" in data) {
-        setError("error" in data ? data.error : `Request failed (${res.status}).`);
-        return;
-      }
-      setNotice(
-        `Re-scored ${data.scored} question(s). Recall@k = ${pct(data.recall)}.`,
-      );
-      reload();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Network error.");
-    } finally {
-      setBusy(false);
-    }
-  }
+  const onProcess = () =>
+    runStream(
+      "/api/eval/process",
+      (r) =>
+        `Generated ${r.generated} question(s), scored ${r.scored}. Recall@k = ${pct(r.recall)}.`,
+    );
+
+  const onRescore = () =>
+    runStream(
+      "/api/eval/rescore",
+      (r) => `Re-scored ${r.scored} question(s). Recall@k = ${pct(r.recall)}.`,
+    );
 
   async function saveEdit(id: string) {
     const text = editText.trim();
@@ -135,25 +193,46 @@ export function EvalDashboard() {
     }
   }
 
+  // Disable the actions when they'd be no-ops. "Process" generates questions for
+  // chunks below target and scores unscored/edited ones; "Re-score" re-runs every
+  // labeled question. While the summary is still loading we leave them enabled.
+  const canProcess =
+    summary === null || summary.pendingChunks > 0 || summary.pendingScoring > 0;
+  const canRescore = summary === null || summary.total > 0;
+
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center gap-3">
         <button
           onClick={onProcess}
-          disabled={busy}
-          className="rounded-md bg-black px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
+          disabled={busy || !canProcess}
+          title={
+            canProcess
+              ? "Generate questions for new chunks and score anything unscored"
+              : "Nothing new to process — no new chunks or unscored questions"
+          }
+          className="rounded-md bg-black px-3 py-1.5 text-sm font-medium text-white cursor-pointer transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
         >
           {busy ? "Processing…" : "Process new chunks"}
         </button>
         <button
           onClick={onRescore}
-          disabled={busy}
-          className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium disabled:opacity-50 dark:border-zinc-700"
+          disabled={busy || !canRescore}
+          title={
+            canRescore
+              ? "Re-run retrieval scoring for every labeled question"
+              : "No labeled questions to re-score yet"
+          }
+          className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium cursor-pointer transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
         >
           Re-score all
         </button>
-        {notice && <span className="text-sm text-zinc-600 dark:text-zinc-400">{notice}</span>}
+        {!progress && notice && (
+          <span className="text-sm text-zinc-600 dark:text-zinc-400">{notice}</span>
+        )}
       </div>
+
+      {progress && <RunProgress progress={progress} k={summary?.k ?? 0} />}
 
       {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
 
@@ -257,13 +336,13 @@ export function EvalDashboard() {
                             <button
                               onClick={() => saveEdit(q.questionId)}
                               disabled={busy}
-                              className="text-zinc-700 hover:underline disabled:opacity-50 dark:text-zinc-300"
+                              className="cursor-pointer text-zinc-700 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300"
                             >
                               Save
                             </button>
                             <button
                               onClick={() => setEditingId(null)}
-                              className="hover:underline"
+                              className="cursor-pointer hover:underline"
                             >
                               Cancel
                             </button>
@@ -275,14 +354,14 @@ export function EvalDashboard() {
                                 setEditingId(q.questionId);
                                 setEditText(q.question);
                               }}
-                              className="hover:underline"
+                              className="cursor-pointer hover:underline"
                             >
                               Edit
                             </button>
                             <button
                               onClick={() => remove(q.questionId)}
                               disabled={busy}
-                              className="text-red-600 hover:underline disabled:opacity-50 dark:text-red-400"
+                              className="cursor-pointer text-red-600 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-400"
                             >
                               Delete
                             </button>
@@ -340,5 +419,41 @@ function Badge({
     <span className="shrink-0 rounded bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/40 dark:text-red-400">
       miss
     </span>
+  );
+}
+
+// Live run panel: a per-phase bar (Generate, then Score). During scoring it also
+// shows a running hit count and Recall@k climbing as results stream in.
+function RunProgress({ progress, k }: { progress: EvalProgress; k: number }) {
+  const fraction = progress.total > 0 ? progress.done / progress.total : 0;
+  const percent = Math.round(fraction * 100);
+  const scoring = progress.phase === "score";
+  const recall = scoring && progress.done > 0 ? progress.hits / progress.done : null;
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+      <div className="flex items-center justify-between text-xs text-zinc-500">
+        <span>
+          {scoring ? "Scoring questions" : "Generating questions"}{" "}
+          <span className="tabular-nums">
+            {progress.done}/{progress.total}
+          </span>
+          {scoring && recall !== null && (
+            <span className="ml-2 text-zinc-400">
+              · {progress.hits} hit{progress.hits === 1 ? "" : "s"} · Recall@{k}{" "}
+              {(recall * 100).toFixed(0)}%
+            </span>
+          )}
+        </span>
+        <span className="tabular-nums">{percent}%</span>
+      </div>
+
+      <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
+        <div
+          className="h-full rounded-full bg-zinc-900 transition-all duration-300 dark:bg-zinc-100"
+          style={{ width: `${Math.max(percent, 3)}%` }}
+        />
+      </div>
+    </div>
   );
 }

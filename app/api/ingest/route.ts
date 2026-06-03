@@ -6,13 +6,15 @@
 //     (.txt/.md/.pdf/.docx uploads), or
 //   - multipart/form-data with `text` (a pasted-text string)
 //
-// Delegates the actual work to pipeline.ingest() and returns a per-source
-// summary ({ results: [{ fileName, chunksAdded } | { fileName, error }] }).
-// All RAG logic stays in lib/rag — this route just translates HTTP <-> input.
+// On success it streams ingestion progress back as NDJSON (one IngestEvent per
+// line) so the client can render a live progress bar; validation errors are
+// returned as plain JSON before the stream starts. All RAG logic stays in
+// lib/rag — this route just translates HTTP <-> input.
 // ---------------------------------------------------------------------------
 import { config } from "@/lib/config";
-import { ingest } from "@/lib/rag/pipeline";
+import { ingest, type IngestEvent } from "@/lib/rag/pipeline";
 import type { LoadInput } from "@/lib/rag/loader";
+import { ndjsonStream } from "@/lib/http/ndjson";
 
 function formatMB(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -60,11 +62,13 @@ export async function POST(request: Request) {
     );
   }
 
-  try {
-    const result = await ingest(inputs);
-    return Response.json(result);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Ingestion failed.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  // Stream progress as NDJSON so the client's progress bar advances in real time.
+  return ndjsonStream<IngestEvent>(async (send) => {
+    try {
+      await ingest(inputs, send);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Ingestion failed.";
+      send({ type: "error", message });
+    }
+  });
 }

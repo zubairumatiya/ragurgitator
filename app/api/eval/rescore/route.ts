@@ -5,15 +5,18 @@
 // (not just unscored ones) against the current corpus, inserts fresh result rows,
 // and freezes a run snapshot. Use after the corpus changes (e.g. a doc was added)
 // so Recall@k stays apples-to-apples. Backs the "Re-score all" button on /eval.
+// Streams progress as NDJSON (one EvalEvent per line) for a live bar + results.
 // ---------------------------------------------------------------------------
-import { rescoreAllQuestions } from "@/lib/rag/eval";
+import { rescoreAllQuestions, type EvalEvent } from "@/lib/rag/eval";
+import { ndjsonStream } from "@/lib/http/ndjson";
 
 export async function POST() {
-  try {
-    const result = await rescoreAllQuestions();
-    return Response.json(result);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Re-scoring failed.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  return ndjsonStream<EvalEvent>(async (send) => {
+    try {
+      await rescoreAllQuestions(send);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Re-scoring failed.";
+      send({ type: "error", message });
+    }
+  });
 }

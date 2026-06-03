@@ -74,6 +74,11 @@ export type EvalSummary = {
   perDocument: DocumentBreakdown[];
   questions: QuestionDetail[];
   runs: RunSnapshot[];
+  // Work "Process new chunks" would actually do, so the UI can disable it when
+  // there's nothing pending. pendingChunks: chunks below the per-chunk question
+  // target; pendingScoring: questions never scored or edited since last score.
+  pendingChunks: number;
+  pendingScoring: number;
 };
 
 // Resolve the chunks table for the active config. Returns null when nothing has
@@ -285,12 +290,14 @@ export async function getSummary(): Promise<EvalSummary> {
     perDocument: [],
     questions: [],
     runs: [],
+    pendingChunks: 0,
+    pendingScoring: 0,
   };
 
   const table = await activeChunksTable();
   if (!table) return empty;
 
-  const [detail, runRows] = await Promise.all([
+  const [detail, runRows, pendingChunkRows] = await Promise.all([
     sql<
       {
         question_id: string;
@@ -354,6 +361,24 @@ export async function getSummary(): Promise<EvalSummary> {
       order by created_at desc
       limit 20
     `,
+    // Count of chunks under the active config still below the question target —
+    // the generation half of "Process new chunks". Mirrors chunksNeedingQuestions.
+    sql<{ n: number }[]>`
+      select count(*)::int as n
+      from (
+        select c.id
+        from ${sql(table)} c
+        join document_embeddings de on de.id = c.document_embedding_id
+        left join eval_labels l
+          on l.source_chunk_id = c.id
+         and l.document_embedding_id = c.document_embedding_id
+        where de.model = ${config.embeddingModel}
+          and de.chunk_size = ${config.chunkSize}
+          and de.chunk_overlap = ${config.chunkOverlap}
+        group by c.id
+        having count(l.id) < ${config.evalQuestionsPerChunk}
+      ) t
+    `,
   ]);
 
   const questions: QuestionDetail[] = detail.map((r) => ({
@@ -375,6 +400,10 @@ export async function getSummary(): Promise<EvalSummary> {
   // Only fresh scores count toward recall; unscored and stale are pending.
   const scoredRows = questions.filter((q) => q.hit !== null && !q.stale);
   const hits = scoredRows.filter((q) => q.hit === true).length;
+
+  // Questions "Process new chunks" would score: never scored, or edited since.
+  // Matches questionsNeedingScoring() — no extra query needed.
+  const pendingScoring = questions.filter((q) => q.hit === null || q.stale).length;
 
   const byDoc = new Map<string, DocumentBreakdown>();
   for (const q of questions) {
@@ -404,5 +433,7 @@ export async function getSummary(): Promise<EvalSummary> {
       hitCount: r.hit_count,
       createdAt: r.created_at.getTime(),
     })),
+    pendingChunks: pendingChunkRows[0]?.n ?? 0,
+    pendingScoring,
   };
 }

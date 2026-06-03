@@ -30,7 +30,13 @@ function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
-async function ingestOne(doc: SourceDocument): Promise<number> {
+// Ingestion stages, in order. The UI mirrors these as a step indicator.
+export type IngestStep = "load" | "chunk" | "embed" | "store";
+
+async function ingestOne(
+  doc: SourceDocument,
+  onStep: (step: IngestStep) => void = () => {},
+): Promise<number> {
   const contentHash = sha256(doc.text);
 
   const existing = await findDocumentByHash(contentHash);
@@ -60,12 +66,15 @@ async function ingestOne(doc: SourceDocument): Promise<number> {
     return 0;
   }
 
+  onStep("chunk");
   const chunks = await chunkDocument(doc);
   if (chunks.length === 0) return 0;
 
+  onStep("embed");
   const vectors = await embedTexts(chunks.map((c) => c.text));
   const dimension = vectors[0]?.length ?? 0;
 
+  onStep("store");
   await insertEmbeddingRunWithChunks({
     documentId,
     model: config.embeddingModel,
@@ -88,24 +97,47 @@ export type IngestResult =
   | { fileName: string; chunksAdded: number }
   | { fileName: string; error: string };
 
-export async function ingest(inputs: LoadInput[]): Promise<{ results: IngestResult[] }> {
+// Progress events streamed to the client during ingestion. The route serializes
+// these as NDJSON; the UI turns them into a progress bar + step indicator.
+export type IngestEvent =
+  | { type: "start"; total: number }
+  | { type: "step"; index: number; fileName: string; step: IngestStep }
+  | { type: "file-done"; index: number; result: IngestResult }
+  | { type: "done"; results: IngestResult[] }
+  | { type: "error"; message: string };
+
+type Emit = (event: IngestEvent) => void;
+
+// Sequential on purpose: ordered step events make for a clean progress UI, and
+// it keeps us from firing every file's embeddings at the provider at once.
+export async function ingest(
+  inputs: LoadInput[],
+  onEvent: Emit = () => {},
+): Promise<{ results: IngestResult[] }> {
   const t0 = performance.now();
   console.log(`[rag:pipeline] ingest start (${inputs.length} source(s))`);
+  onEvent({ type: "start", total: inputs.length });
 
-  const results = await Promise.all(
-    inputs.map(async (input): Promise<IngestResult> => {
-      const fileName = labelFor(input);
-      try {
-        const doc = await loadDocument(input);
-        const chunksAdded = await ingestOne(doc);
-        return { fileName, chunksAdded };
-      } catch (err) {
-        const error = err instanceof Error ? err.message : "Ingestion failed.";
-        console.error(`[rag:pipeline] ingest failed for "${fileName}": ${error}`);
-        return { fileName, error };
-      }
-    }),
-  );
+  const results: IngestResult[] = [];
+  for (let index = 0; index < inputs.length; index++) {
+    const input = inputs[index];
+    const fileName = labelFor(input);
+    let result: IngestResult;
+    try {
+      onEvent({ type: "step", index, fileName, step: "load" });
+      const doc = await loadDocument(input);
+      const chunksAdded = await ingestOne(doc, (step) =>
+        onEvent({ type: "step", index, fileName, step }),
+      );
+      result = { fileName, chunksAdded };
+    } catch (err) {
+      const error = err instanceof Error ? err.message : "Ingestion failed.";
+      console.error(`[rag:pipeline] ingest failed for "${fileName}": ${error}`);
+      result = { fileName, error };
+    }
+    results.push(result);
+    onEvent({ type: "file-done", index, result });
+  }
 
   const chunksAdded = results.reduce(
     (sum, r) => sum + ("chunksAdded" in r ? r.chunksAdded : 0),
@@ -115,6 +147,7 @@ export async function ingest(inputs: LoadInput[]): Promise<{ results: IngestResu
     `[rag:pipeline] ingest done: ${chunksAdded} chunks from ${results.length} source(s) in ` +
       `${Math.round(performance.now() - t0)}ms`,
   );
+  onEvent({ type: "done", results });
   return { results };
 }
 
