@@ -21,4 +21,8 @@ export const config = {
   topK: 5,
   maxAnswerTokens: 1024,
   evalQuestionsPerChunk: 1, // target eval questions per chunk; generation tops up the difference
+  // Max total upload size per ingest request, summed across files. Kept under
+  // Vercel's 4.5 MB serverless body cap to leave room for multipart overhead;
+  // raise it if you self-host behind your own limit.
+  maxUploadBytes: 4 * 1024 * 1024,
 } as const;

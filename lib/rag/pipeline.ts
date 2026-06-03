@@ -16,7 +16,7 @@ import { createHash } from "node:crypto";
 import { config } from "@/lib/config";
 import { chunkDocument } from "@/lib/rag/chunker";
 import { embedTexts } from "@/lib/rag/embeddings";
-import { loadDocument, type LoadInput } from "@/lib/rag/loader";
+import { labelFor, loadDocument, type LoadInput } from "@/lib/rag/loader";
 import { retrieve } from "@/lib/rag/retriever";
 import {
   findDocumentByHash,
@@ -82,18 +82,40 @@ async function ingestOne(doc: SourceDocument): Promise<number> {
   return chunks.length;
 }
 
-export async function ingest(input: LoadInput): Promise<{ chunksAdded: number }> {
+// One entry per input source: a chunk count on success, an error string on
+// failure. A single bad file no longer sinks the whole batch.
+export type IngestResult =
+  | { fileName: string; chunksAdded: number }
+  | { fileName: string; error: string };
+
+export async function ingest(inputs: LoadInput[]): Promise<{ results: IngestResult[] }> {
   const t0 = performance.now();
-  console.log(`[rag:pipeline] ingest start (kind=${input.kind})`);
+  console.log(`[rag:pipeline] ingest start (${inputs.length} source(s))`);
 
-  const documents = await loadDocument(input);
-  const counts = await Promise.all(documents.map(ingestOne));
-  const chunksAdded = counts.reduce((a, b) => a + b, 0);
-
-  console.log(
-    `[rag:pipeline] ingest done: ${chunksAdded} chunks in ${Math.round(performance.now() - t0)}ms`,
+  const results = await Promise.all(
+    inputs.map(async (input): Promise<IngestResult> => {
+      const fileName = labelFor(input);
+      try {
+        const doc = await loadDocument(input);
+        const chunksAdded = await ingestOne(doc);
+        return { fileName, chunksAdded };
+      } catch (err) {
+        const error = err instanceof Error ? err.message : "Ingestion failed.";
+        console.error(`[rag:pipeline] ingest failed for "${fileName}": ${error}`);
+        return { fileName, error };
+      }
+    }),
   );
-  return { chunksAdded };
+
+  const chunksAdded = results.reduce(
+    (sum, r) => sum + ("chunksAdded" in r ? r.chunksAdded : 0),
+    0,
+  );
+  console.log(
+    `[rag:pipeline] ingest done: ${chunksAdded} chunks from ${results.length} source(s) in ` +
+      `${Math.round(performance.now() - t0)}ms`,
+  );
+  return { results };
 }
 
 export async function ask(

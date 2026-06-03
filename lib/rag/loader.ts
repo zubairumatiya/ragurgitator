@@ -15,14 +15,24 @@ export type LoadInput =
   | { kind: "text"; text: string; fileName?: string }
   | { kind: "file"; file: File };
 
-export async function loadDocument(input: LoadInput): Promise<SourceDocument[]> {
+// A human-readable label for an input, available even before (or instead of)
+// a successful load — so the pipeline can report which source failed.
+export function labelFor(input: LoadInput): string {
+  return input.kind === "text"
+    ? input.fileName?.trim() || "pasted-text"
+    : input.file.name;
+}
+
+// Loads exactly one source. Throws on failure; the caller isolates errors
+// per-source so one bad file doesn't sink a whole batch.
+export async function loadDocument(input: LoadInput): Promise<SourceDocument> {
   const t0 = performance.now();
   if (input.kind === "text") {
     const text = input.text.trim();
     if (!text) throw new Error("Cannot load empty text.");
-    const name = input.fileName?.trim() || "pasted-text";
+    const name = labelFor(input);
     console.log(`[rag:loader] text input "${name}" (${text.length} chars) in ${ms(t0)}`);
-    return [toDocument(text, name)];
+    return toDocument(text, name);
   }
 
   const { file } = input;
@@ -35,7 +45,7 @@ export async function loadDocument(input: LoadInput): Promise<SourceDocument[]> 
     throw new Error(`No text could be extracted from "${file.name}".`);
   }
   console.log(`[rag:loader] extracted ${text.length} chars in ${ms(t0)}`);
-  return [toDocument(text, file.name)];
+  return toDocument(text, file.name);
 }
 
 function ms(t0: number): string {
