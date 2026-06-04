@@ -239,6 +239,43 @@ export async function allLabeledQuestions(): Promise<QuestionToScore[]> {
   }));
 }
 
+// --- Query-embedding cache (see migrations/0003) -------------------------
+// A question's query vector depends only on (text, model), so it's cached and
+// reused across runs instead of re-embedded every "Re-score all". Keyed by
+// (eval_question_id, model); invalidated on text edit (see updateQuestion) and
+// cascade-deleted with the question/document.
+
+// Cached query vectors for these questions under `model`, as questionId -> vector.
+// Missing entries are simply absent from the map (caller embeds + caches those).
+export async function getCachedQueryEmbeddings(
+  questionIds: string[],
+  model: string,
+): Promise<Map<string, number[]>> {
+  if (questionIds.length === 0) return new Map();
+  const rows = await sql<{ eval_question_id: string; embedding: number[] }[]>`
+    select eval_question_id, embedding
+    from eval_question_embeddings
+    where model = ${model}
+      and eval_question_id = any(${questionIds}::uuid[])
+  `;
+  return new Map(rows.map((r) => [r.eval_question_id, r.embedding]));
+}
+
+// Store one freshly computed query vector. Idempotent on (question, model): a
+// repeat overwrites, so it self-heals if a stale row ever lingers.
+export async function putCachedQueryEmbedding(
+  questionId: string,
+  model: string,
+  embedding: number[],
+): Promise<void> {
+  await sql`
+    insert into eval_question_embeddings (eval_question_id, model, embedding)
+    values (${questionId}, ${model}, ${embedding}::real[])
+    on conflict (eval_question_id, model)
+      do update set embedding = excluded.embedding, created_at = now()
+  `;
+}
+
 export async function insertResults(rows: ResultInsert[]): Promise<void> {
   if (rows.length === 0) return;
   await sql.begin(async (tx) => {
@@ -269,11 +306,16 @@ export async function createRunSnapshot(args: {
 }
 
 export async function updateQuestion(id: string, text: string): Promise<void> {
-  await sql`
-    update eval_questions
-    set question = ${text}, source = 'manual', updated_at = now()
-    where id = ${id}
-  `;
+  // The text changed, so every cached query vector for it (any model) is stale.
+  // Drop them in the same transaction; they repopulate on the next score.
+  await sql.begin(async (tx) => {
+    await tx`
+      update eval_questions
+      set question = ${text}, source = 'manual', updated_at = now()
+      where id = ${id}
+    `;
+    await tx`delete from eval_question_embeddings where eval_question_id = ${id}`;
+  });
 }
 
 export async function deleteQuestion(id: string): Promise<void> {

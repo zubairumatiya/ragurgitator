@@ -21,5 +21,12 @@ export async function retrieve(question: string): Promise<RetrievedChunk[]> {
   if (!trimmed) throw new Error("Cannot retrieve for an empty question.");
 
   const vector = await embedQuery(trimmed);
+  return retrieveWithVector(vector);
+}
+
+// The vector-search half of retrieve(), for callers that already hold the query
+// embedding — e.g. eval scoring, which reuses cached question vectors instead of
+// re-embedding (see lib/rag/eval.ts). Same top-k search, no embedding call.
+export function retrieveWithVector(vector: number[]): Promise<RetrievedChunk[]> {
   return query(vector, config.topK);
 }

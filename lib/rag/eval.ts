@@ -16,14 +16,17 @@
 // ---------------------------------------------------------------------------
 import { config } from "@/lib/config";
 import { anthropicClient } from "@/lib/llm/client";
-import { retrieve } from "@/lib/rag/retriever";
+import { embedQuery } from "@/lib/rag/embeddings";
+import { retrieveWithVector } from "@/lib/rag/retriever";
 import {
   allLabeledQuestions,
   chunksNeedingQuestions,
   createRunSnapshot,
+  getCachedQueryEmbeddings,
   getSummary,
   insertQuestionWithLabel,
   insertResults,
+  putCachedQueryEmbedding,
   questionsNeedingScoring,
   type QuestionToScore,
   type ResultInsert,
@@ -170,6 +173,12 @@ export async function generateMissingQuestions(emit: Emit = () => {}): Promise<n
 // Embed each question, vector-search, and record whether its labeled chunk landed in
 // the top-k. Pure retrieval — no LLM at scoring time. Shared by the incremental
 // (scoreUnscoredQuestions) and full (rescoreAllQuestions) scoring paths.
+//
+// A question's query vector depends only on (text, model), so we reuse cached
+// vectors and embed only cache misses (caching them as we go). On a warm cache
+// each iteration is just a fast vector search — the win that makes repeat
+// "Re-score all" runs cheap. Misses still embed one-at-a-time inside the loop so
+// the per-question progress bar stays accurate.
 async function scoreQuestions(
   questions: QuestionToScore[],
   emit: Emit = () => {},
@@ -178,10 +187,20 @@ async function scoreQuestions(
 
   emit({ type: "score-start", total: questions.length });
 
+  const cached = await getCachedQueryEmbeddings(
+    questions.map((q) => q.questionId),
+    config.embeddingModel,
+  );
+
   const results: ResultInsert[] = [];
   let done = 0;
   for (const q of questions) {
-    const retrieved = await retrieve(q.question);
+    let vector = cached.get(q.questionId);
+    if (!vector) {
+      vector = await embedQuery(q.question);
+      await putCachedQueryEmbedding(q.questionId, config.embeddingModel, vector);
+    }
+    const retrieved = await retrieveWithVector(vector);
     const ids = retrieved.map((r) => r.chunk.chunk.id);
     const rank = ids.indexOf(q.sourceChunkId);
     const hit = rank !== -1;
