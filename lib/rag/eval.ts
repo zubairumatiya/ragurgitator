@@ -202,6 +202,7 @@ async function scoreQuestions(
     }
     const retrieved = await retrieveWithVector(vector);
     const ids = retrieved.map((r) => r.chunk.chunk.id);
+    const scores = retrieved.map((r) => r.score);
     const rank = ids.indexOf(q.sourceChunkId);
     const hit = rank !== -1;
     const foundRank = rank === -1 ? null : rank + 1;
@@ -212,6 +213,7 @@ async function scoreQuestions(
       hit,
       foundRank,
       retrievedIds: ids,
+      retrievedScores: scores,
     });
     done += 1;
     emit({

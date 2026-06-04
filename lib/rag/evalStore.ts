@@ -34,6 +34,7 @@ export type ResultInsert = {
   hit: boolean;
   foundRank: number | null;
   retrievedIds: string[];
+  retrievedScores: number[]; // cosine similarity per retrievedIds entry, same order
 };
 
 export type QuestionDetail = {
@@ -326,6 +327,7 @@ export type ExplainChunk = {
   position: number | null;
   text: string;
   rank: number; // 1-based position in the retrieved list
+  score: number | null; // cosine similarity to the query; null for pre-0004 results
   isExpected: boolean;
 };
 
@@ -339,7 +341,17 @@ export type QuestionExplain = {
     fileName: string | null;
     position: number | null;
     text: string | null;
+    // On a miss, the expected chunk's similarity to the query and its EXACT rank in
+    // the full corpus (computed on demand from the cached query vector), so you can
+    // see how far below the top-k it fell. Both null on a hit (shown in the list
+    // instead) or when the vector isn't cached. Rank is exact (full scan, no HNSW),
+    // so rank <= k on a recorded miss means HNSW dropped it.
+    score: number | null;
+    rank: number | null;
   } | null;
+  // The chunks ranked between the top-k cut-off and the expected chunk (ranks
+  // k+1 .. rank-1), in rank order — the "what beat it" gap. Empty on a hit.
+  between: ExplainChunk[];
   retrieved: ExplainChunk[];
   k: number | null;
   scoredAt: number | null;
@@ -350,6 +362,7 @@ export async function getQuestionExplain(
 ): Promise<QuestionExplain> {
   const empty: QuestionExplain = {
     expected: null,
+    between: [],
     retrieved: [],
     k: null,
     scoredAt: null,
@@ -372,9 +385,14 @@ export async function getQuestionExplain(
 
   // Latest score for that label; retrieved_ids are stored in rank order.
   const [result] = await sql<
-    { retrieved_ids: string[]; k: number; scored_at: Date }[]
+    {
+      retrieved_ids: string[];
+      retrieved_scores: number[] | null;
+      k: number;
+      scored_at: Date;
+    }[]
   >`
-    select retrieved_ids, k, scored_at
+    select retrieved_ids, retrieved_scores, k, scored_at
     from eval_results
     where eval_label_id = ${label.label_id}
     order by scored_at desc
@@ -382,6 +400,7 @@ export async function getQuestionExplain(
   `;
 
   const retrievedIds = result?.retrieved_ids ?? [];
+  const retrievedScores = result?.retrieved_scores ?? null;
   // One lookup covers the expected chunk and everything retrieved.
   const ids = [...new Set([label.source_chunk_id, ...retrievedIds])];
   const chunkRows = await sql<
@@ -394,6 +413,87 @@ export async function getQuestionExplain(
   `;
   const byId = new Map(chunkRows.map((c) => [c.id, c]));
 
+  // On a miss the expected chunk isn't in the top-k, so its score/rank weren't
+  // stored. Compute them on demand from the cached query vector (0003): rank the
+  // WHOLE corpus exactly (row_number, full scan — no HNSW), pull the expected
+  // chunk's rank + score, and return the chunks sitting between the top-k cut-off
+  // and it (ranks k+1 .. rank-1) — the "what beat it" gap. Best-effort: stays null
+  // / empty if the vector isn't cached (e.g. edited since scoring) so the
+  // drill-down never breaks over it. Exact ranking means rank <= k here would mean
+  // HNSW dropped a chunk it should have surfaced.
+  const expectedInRetrieved = retrievedIds.includes(label.source_chunk_id);
+  const kForRank = result?.k ?? config.topK;
+  let expectedScore: number | null = null;
+  let expectedRank: number | null = null;
+  let between: ExplainChunk[] = [];
+  if (!expectedInRetrieved) {
+    try {
+      const rows = await sql<
+        {
+          id: string;
+          file_name: string;
+          position: number | null;
+          text: string;
+          score: number;
+          rn: number;
+          expected_rn: number;
+          expected_score: number;
+          is_expected: boolean;
+        }[]
+      >`
+        with q as (
+          select embedding::vector as vec
+          from eval_question_embeddings
+          where eval_question_id = ${questionId}
+            and model = ${config.embeddingModel}
+          limit 1
+        ),
+        ranked as (
+          select
+            c.id,
+            d.file_name,
+            c.position,
+            c.text,
+            1 - (c.embedding <=> (select vec from q)) as score,
+            (row_number() over (order by c.embedding <=> (select vec from q)))::int as rn
+          from ${sql(table)} c
+          join documents d on d.id = c.document_id
+          where exists (select 1 from q)
+        ),
+        expected as (select rn, score from ranked where id = ${label.source_chunk_id})
+        select
+          r.id, r.file_name, r.position, r.text, r.score, r.rn,
+          e.rn as expected_rn,
+          e.score as expected_score,
+          (r.id = ${label.source_chunk_id}) as is_expected
+        from ranked r
+        cross join expected e
+        where r.id = ${label.source_chunk_id}
+           or (r.rn > ${kForRank} and r.rn < e.rn)
+        order by r.rn
+      `;
+      if (rows.length > 0) {
+        expectedRank = Number(rows[0].expected_rn);
+        expectedScore = Number(rows[0].expected_score);
+        between = rows
+          .filter((r) => !r.is_expected)
+          .map((r) => ({
+            chunkId: r.id,
+            fileName: r.file_name,
+            position: r.position,
+            text: r.text,
+            rank: Number(r.rn),
+            score: Number(r.score),
+            isExpected: false,
+          }));
+      }
+    } catch {
+      expectedScore = null;
+      expectedRank = null;
+      between = [];
+    }
+  }
+
   const expectedRow = byId.get(label.source_chunk_id);
   const retrieved: ExplainChunk[] = retrievedIds.map((id, i) => {
     const row = byId.get(id);
@@ -403,6 +503,7 @@ export async function getQuestionExplain(
       position: row?.position ?? null,
       text: row?.text ?? "",
       rank: i + 1,
+      score: retrievedScores?.[i] ?? null,
       isExpected: id === label.source_chunk_id,
     };
   });
@@ -413,7 +514,10 @@ export async function getQuestionExplain(
       fileName: expectedRow?.file_name ?? null,
       position: expectedRow?.position ?? null,
       text: expectedRow?.text ?? null,
+      score: expectedScore,
+      rank: expectedRank,
     },
+    between,
     retrieved,
     k: result?.k ?? null,
     scoredAt: result ? result.scored_at.getTime() : null,
@@ -426,10 +530,11 @@ export async function insertResults(rows: ResultInsert[]): Promise<void> {
     for (const r of rows) {
       await tx`
         insert into eval_results
-          (eval_question_id, eval_label_id, k, hit, found_rank, retrieved_ids)
+          (eval_question_id, eval_label_id, k, hit, found_rank, retrieved_ids,
+           retrieved_scores)
         values
           (${r.questionId}, ${r.labelId}, ${r.k}, ${r.hit}, ${r.foundRank},
-           ${r.retrievedIds}::uuid[])
+           ${r.retrievedIds}::uuid[], ${r.retrievedScores}::real[])
       `;
     }
   });

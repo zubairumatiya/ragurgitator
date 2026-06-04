@@ -10,6 +10,7 @@
 import { useEffect, useState } from "react";
 import type {
   EvalSummary,
+  ExplainChunk,
   QuestionDetail,
   QuestionExplain,
 } from "@/lib/rag/evalStore";
@@ -627,18 +628,29 @@ function ExplainPanel({ state, k }: { state: ExplainState | undefined; k: number
     return <p className="mt-1 text-xs text-red-600 dark:text-red-400">{state.message}</p>;
   }
 
-  const { expected, retrieved } = state.data;
+  const { expected, between, retrieved } = state.data;
   const scored = retrieved.length > 0;
   const expectedInTopK = retrieved.some((c) => c.isExpected);
+  const toggle = (id: string) => setOpen((o) => ({ ...o, [id]: !o[id] }));
+
+  // Range label for the gap section, e.g. "ranks 6–22" (or "rank 6" for one).
+  const gapLo = k + 1;
+  const gapHi = (expected?.rank ?? k + 1) - 1;
 
   return (
     <div className="mt-1 flex flex-col gap-3 text-xs">
-      {/* Only when the ground-truth chunk isn't in the list below. */}
+      {/* Only when the ground-truth chunk isn't in the top-k list below. */}
       {!expectedInTopK && (
         <div className="flex flex-col gap-1">
           <span className="font-medium uppercase tracking-wide text-zinc-500">
             Expected · <span className="font-mono normal-case">{expected?.fileName ?? "?"}</span> · chunk #{expected?.position ?? "?"}
             {scored && ` · not in top ${k}`}
+            {expected?.rank != null && (
+              <span className="text-zinc-400"> · rank #{expected.rank}</span>
+            )}
+            {expected?.score != null && (
+              <span className="text-zinc-400"> · sim {expected.score.toFixed(3)}</span>
+            )}
           </span>
           <ChunkText text={expected?.text ?? "Chunk text unavailable."} expected />
         </div>
@@ -652,31 +664,71 @@ function ExplainPanel({ state, k }: { state: ExplainState | undefined; k: number
           <span className="text-zinc-400">Not scored yet — no retrieval recorded.</span>
         ) : (
           <ol className="flex flex-col gap-1">
-            {retrieved.map((c) => {
-              const isOpen = open[c.chunkId] ?? false;
-              return (
-                <li key={c.chunkId} className="flex flex-col gap-0.5">
-                  <button
-                    type="button"
-                    onClick={() => setOpen((o) => ({ ...o, [c.chunkId]: !isOpen }))}
-                    className={`flex cursor-pointer items-center gap-1 text-left hover:underline ${
-                      c.isExpected
-                        ? "font-medium text-green-700 dark:text-green-400"
-                        : "text-zinc-500"
-                    }`}
-                  >
-                    <span className="text-zinc-400">{isOpen ? "▾" : "▸"}</span>
-                    #{c.rank} · <span className="font-mono">{c.fileName ?? "?"}</span> · chunk #{c.position ?? "?"}
-                    {c.isExpected && " · ground truth ✓"}
-                  </button>
-                  {isOpen && <ChunkText text={c.text} expected={c.isExpected} />}
-                </li>
-              );
-            })}
+            {retrieved.map((c) => (
+              <ChunkRow
+                key={c.chunkId}
+                chunk={c}
+                isOpen={open[c.chunkId] ?? false}
+                onToggle={() => toggle(c.chunkId)}
+              />
+            ))}
           </ol>
         )}
       </div>
+
+      {/* The gap: chunks ranked between the cut-off and the expected chunk (miss only) */}
+      {between.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <span className="font-medium uppercase tracking-wide text-zinc-500">
+            Between · {gapLo === gapHi ? `rank ${gapLo}` : `ranks ${gapLo}–${gapHi}`}
+          </span>
+          <ol className="flex flex-col gap-1">
+            {between.map((c) => (
+              <ChunkRow
+                key={c.chunkId}
+                chunk={c}
+                isOpen={open[c.chunkId] ?? false}
+                onToggle={() => toggle(c.chunkId)}
+              />
+            ))}
+          </ol>
+        </div>
+      )}
     </div>
+  );
+}
+
+// One retrieved/in-between chunk: a collapsed header (rank · file · chunk # · sim,
+// green when it's the ground truth) that expands to the chunk text on click.
+function ChunkRow({
+  chunk,
+  isOpen,
+  onToggle,
+}: {
+  chunk: ExplainChunk;
+  isOpen: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <li className="flex flex-col gap-0.5">
+      <button
+        type="button"
+        onClick={onToggle}
+        className={`flex cursor-pointer items-center gap-1 text-left hover:underline ${
+          chunk.isExpected
+            ? "font-medium text-green-700 dark:text-green-400"
+            : "text-zinc-500"
+        }`}
+      >
+        <span className="text-zinc-400">{isOpen ? "▾" : "▸"}</span>
+        #{chunk.rank} · <span className="font-mono">{chunk.fileName ?? "?"}</span> · chunk #{chunk.position ?? "?"}
+        {chunk.score !== null && (
+          <span className="text-zinc-400"> · sim {chunk.score.toFixed(3)}</span>
+        )}
+        {chunk.isExpected && " · ground truth ✓"}
+      </button>
+      {isOpen && <ChunkText text={chunk.text} expected={chunk.isExpected} />}
+    </li>
   );
 }
 
