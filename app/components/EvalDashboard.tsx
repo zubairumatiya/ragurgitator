@@ -8,11 +8,44 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { EvalSummary, QuestionExplain } from "@/lib/rag/evalStore";
+import type {
+  EvalSummary,
+  QuestionDetail,
+  QuestionExplain,
+} from "@/lib/rag/evalStore";
 import type { EvalEvent } from "@/lib/rag/eval";
 
 function pct(n: number | null): string {
   return n === null ? "—" : `${(n * 100).toFixed(1)}%`;
+}
+
+type ChunkGroup = {
+  chunkId: string;
+  fileName: string;
+  position: number | null;
+  questions: QuestionDetail[];
+};
+
+// Group questions by their labeled chunk, preserving the server's order (document
+// order, then oldest-first within a chunk) so groups appear in a stable sequence.
+function groupByChunk(questions: QuestionDetail[]): ChunkGroup[] {
+  const groups: ChunkGroup[] = [];
+  const indexByChunk = new Map<string, number>();
+  for (const q of questions) {
+    let i = indexByChunk.get(q.sourceChunkId);
+    if (i === undefined) {
+      i = groups.length;
+      indexByChunk.set(q.sourceChunkId, i);
+      groups.push({
+        chunkId: q.sourceChunkId,
+        fileName: q.fileName,
+        position: q.expectedPosition,
+        questions: [],
+      });
+    }
+    groups[i].questions.push(q);
+  }
+  return groups;
 }
 
 // Live progress for an in-flight process/rescore run. "generate" has no recall
@@ -44,12 +77,18 @@ export function EvalDashboard() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [explains, setExplains] = useState<Record<string, ExplainState>>({});
 
-  // Bump to re-fetch the summary (used after process / edit / delete). A reload
-  // means scores may have changed, so drop the cached drill-downs and collapse.
+  // Inline "add a question" form: which chunk group it's open for, and its text.
+  const [addingChunkId, setAddingChunkId] = useState<string | null>(null);
+  const [addText, setAddText] = useState("");
+
+  // Bump to re-fetch the summary (used after process / edit / delete / add). A
+  // reload means questions/scores may have changed, so reset transient UI.
   const [reloadKey, setReloadKey] = useState(0);
   const reload = () => {
     setExplains({});
     setExpandedId(null);
+    setAddingChunkId(null);
+    setAddText("");
     setReloadKey((k) => k + 1);
   };
 
@@ -229,6 +268,30 @@ export function EvalDashboard() {
     }
   }
 
+  // Add a hand-written question to a chunk. It lands unscored; the next "Process
+  // new chunks" / "Re-score all" scores it like any other.
+  async function addQuestion(chunkId: string) {
+    const text = addText.trim();
+    if (!text) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/eval/questions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chunkId, question: text }),
+      });
+      if (!res.ok) {
+        const data = (await res.json()) as { error?: string };
+        setError(data.error ?? `Request failed (${res.status}).`);
+        return;
+      }
+      reload();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // Disable the actions when they'd be no-ops. "Process" generates questions for
   // chunks below target and scores unscored/edited ones; "Re-score" re-runs every
   // labeled question. While the summary is still loading we leave them enabled.
@@ -339,90 +402,164 @@ export function EvalDashboard() {
             </section>
           )}
 
-          {/* Question detail */}
+          {/* Question detail, grouped by the chunk each question is labeled to */}
           {summary.questions.length > 0 && (
             <section className="flex flex-col gap-2">
               <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
                 Questions
               </h2>
-              <ul className="flex flex-col divide-y divide-zinc-200 rounded-lg border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800">
-                {summary.questions.map((q) => (
-                  <li key={q.questionId} className="flex flex-col gap-1 px-3 py-2 text-sm">
-                    <div className="flex items-start justify-between gap-3">
-                      {editingId === q.questionId ? (
-                        <input
-                          value={editText}
-                          onChange={(e) => setEditText(e.target.value)}
-                          className="flex-1 rounded border border-zinc-300 bg-transparent px-2 py-1 text-sm dark:border-zinc-700"
-                          autoFocus
-                        />
-                      ) : (
-                        <span className="flex-1">{q.question}</span>
-                      )}
-                      <Badge hit={q.hit} rank={q.foundRank} stale={q.stale} />
-                    </div>
-                    <div className="flex items-center justify-between gap-3 text-xs text-zinc-500">
-                      <span className="truncate font-mono">
-                        {q.fileName} ·{" "}
-                        <button
-                          type="button"
-                          onClick={() => toggleExpand(q.questionId)}
-                          title={
-                            expandedId === q.questionId
-                              ? "Hide chunk detail"
-                              : "Show the expected chunk vs. what retrieval returned"
-                          }
-                          className="cursor-pointer underline decoration-dotted underline-offset-2 hover:text-zinc-700 dark:hover:text-zinc-300"
-                        >
-                          chunk #{q.expectedPosition ?? "?"}
-                        </button>
-                        {q.source === "manual" && " · edited"}
-                      </span>
-                      <span className="flex shrink-0 gap-2">
-                        {editingId === q.questionId ? (
-                          <>
+              <div className="flex flex-col gap-3">
+                {groupByChunk(summary.questions).map((group) => {
+                  const scored = group.questions.filter(
+                    (q) => q.hit !== null && !q.stale,
+                  );
+                  const hits = scored.filter((q) => q.hit === true).length;
+                  return (
+                    <div
+                      key={group.chunkId}
+                      className="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800"
+                    >
+                      {/* Which chunk these questions belong to */}
+                      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-50 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900/40">
+                        <span className="truncate font-mono text-xs text-zinc-600 dark:text-zinc-400">
+                          {group.fileName} · chunk #{group.position ?? "?"}
+                        </span>
+                        <span className="shrink-0 text-xs text-zinc-500">
+                          {scored.length > 0
+                            ? `${hits}/${scored.length} hit${scored.length === 1 ? "" : "s"}`
+                            : "unscored"}
+                        </span>
+                      </div>
+
+                      <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800">
+                        {group.questions.map((q) => (
+                          <li
+                            key={q.questionId}
+                            className="flex flex-col gap-1 px-3 py-2 text-sm"
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              {editingId === q.questionId ? (
+                                <input
+                                  value={editText}
+                                  onChange={(e) => setEditText(e.target.value)}
+                                  className="flex-1 rounded border border-zinc-300 bg-transparent px-2 py-1 text-sm dark:border-zinc-700"
+                                  autoFocus
+                                />
+                              ) : (
+                                <span className="flex-1">{q.question}</span>
+                              )}
+                              <Badge hit={q.hit} rank={q.foundRank} stale={q.stale} />
+                            </div>
+                            <div className="flex items-center justify-between gap-3 text-xs text-zinc-500">
+                              <span className="font-mono text-zinc-400">
+                                {q.source === "manual" ? "manual" : ""}
+                              </span>
+                              <span className="flex shrink-0 items-center gap-2">
+                                {editingId === q.questionId ? (
+                                  <>
+                                    <button
+                                      onClick={() => saveEdit(q.questionId)}
+                                      disabled={busy}
+                                      className="cursor-pointer text-zinc-700 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300"
+                                    >
+                                      Save
+                                    </button>
+                                    <button
+                                      onClick={() => setEditingId(null)}
+                                      className="cursor-pointer hover:underline"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </>
+                                ) : (
+                                  <>
+                                    {/* Retrieval drill-down — only once there's a score to show */}
+                                    {q.hit !== null && (
+                                      <button
+                                        type="button"
+                                        onClick={() => toggleExpand(q.questionId)}
+                                        title={
+                                          expandedId === q.questionId
+                                            ? "Hide retrieval detail"
+                                            : "Show what retrieval returned for this question"
+                                        }
+                                        className="cursor-pointer underline decoration-dotted underline-offset-2 hover:text-zinc-700 dark:hover:text-zinc-300"
+                                      >
+                                        top-k
+                                      </button>
+                                    )}
+                                    <button
+                                      onClick={() => {
+                                        setEditingId(q.questionId);
+                                        setEditText(q.question);
+                                      }}
+                                      className="cursor-pointer hover:underline"
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
+                                      onClick={() => remove(q.questionId)}
+                                      disabled={busy}
+                                      className="cursor-pointer text-red-600 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-400"
+                                    >
+                                      Delete
+                                    </button>
+                                  </>
+                                )}
+                              </span>
+                            </div>
+                            {expandedId === q.questionId && (
+                              <ExplainPanel state={explains[q.questionId]} k={summary.k} />
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+
+                      {/* Add a hand-written question to this chunk */}
+                      <div className="border-t border-zinc-200 px-3 py-2 dark:border-zinc-800">
+                        {addingChunkId === group.chunkId ? (
+                          <div className="flex items-center gap-2">
+                            <input
+                              value={addText}
+                              onChange={(e) => setAddText(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") addQuestion(group.chunkId);
+                                if (e.key === "Escape") setAddingChunkId(null);
+                              }}
+                              placeholder="A question this chunk should answer…"
+                              className="flex-1 rounded border border-zinc-300 bg-transparent px-2 py-1 text-sm dark:border-zinc-700"
+                              autoFocus
+                            />
                             <button
-                              onClick={() => saveEdit(q.questionId)}
-                              disabled={busy}
-                              className="cursor-pointer text-zinc-700 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300"
+                              onClick={() => addQuestion(group.chunkId)}
+                              disabled={busy || !addText.trim()}
+                              className="cursor-pointer text-xs font-medium text-zinc-700 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300"
                             >
-                              Save
+                              Add
                             </button>
                             <button
-                              onClick={() => setEditingId(null)}
-                              className="cursor-pointer hover:underline"
+                              onClick={() => setAddingChunkId(null)}
+                              className="cursor-pointer text-xs hover:underline"
                             >
                               Cancel
                             </button>
-                          </>
+                          </div>
                         ) : (
-                          <>
-                            <button
-                              onClick={() => {
-                                setEditingId(q.questionId);
-                                setEditText(q.question);
-                              }}
-                              className="cursor-pointer hover:underline"
-                            >
-                              Edit
-                            </button>
-                            <button
-                              onClick={() => remove(q.questionId)}
-                              disabled={busy}
-                              className="cursor-pointer text-red-600 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-400"
-                            >
-                              Delete
-                            </button>
-                          </>
+                          <button
+                            onClick={() => {
+                              setAddingChunkId(group.chunkId);
+                              setAddText("");
+                            }}
+                            className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-700 hover:underline dark:hover:text-zinc-300"
+                          >
+                            + Add a question
+                          </button>
                         )}
-                      </span>
+                      </div>
                     </div>
-                    {expandedId === q.questionId && (
-                      <ExplainPanel state={explains[q.questionId]} k={summary.k} />
-                    )}
-                  </li>
-                ))}
-              </ul>
+                  );
+                })}
+              </div>
             </section>
           )}
         </>
@@ -500,7 +637,7 @@ function ExplainPanel({ state, k }: { state: ExplainState | undefined; k: number
       {!expectedInTopK && (
         <div className="flex flex-col gap-1">
           <span className="font-medium uppercase tracking-wide text-zinc-500">
-            Expected · chunk #{expected?.position ?? "?"}
+            Expected · <span className="font-mono normal-case">{expected?.fileName ?? "?"}</span> · chunk #{expected?.position ?? "?"}
             {scored && ` · not in top ${k}`}
           </span>
           <ChunkText text={expected?.text ?? "Chunk text unavailable."} expected />
@@ -529,7 +666,7 @@ function ExplainPanel({ state, k }: { state: ExplainState | undefined; k: number
                     }`}
                   >
                     <span className="text-zinc-400">{isOpen ? "▾" : "▸"}</span>
-                    #{c.rank} · chunk #{c.position ?? "?"}
+                    #{c.rank} · <span className="font-mono">{c.fileName ?? "?"}</span> · chunk #{c.position ?? "?"}
                     {c.isExpected && " · ground truth ✓"}
                   </button>
                   {isOpen && <ChunkText text={c.text} expected={c.isExpected} />}

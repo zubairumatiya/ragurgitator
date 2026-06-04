@@ -42,6 +42,7 @@ export type QuestionDetail = {
   source: string;
   documentId: string;
   fileName: string;
+  sourceChunkId: string; // the labeled chunk — questions are grouped by this on /eval
   expectedPosition: number | null;
   hit: boolean | null; // null = not scored yet
   foundRank: number | null;
@@ -140,22 +141,25 @@ export async function chunksNeedingQuestions(
 }
 
 // Insert one question (document-scoped) plus its ground-truth label for the
-// current config, atomically.
+// given config, atomically. Used by both generated questions (source='generated',
+// generatorModel set) and manual additions (source='manual', generatorModel null).
 export async function insertQuestionWithLabel(args: {
   documentId: string;
   documentEmbeddingId: string;
   sourceChunkId: string;
   question: string;
   expectedAnswer: string | null;
-  generatorModel: string;
+  source?: "generated" | "manual";
+  generatorModel: string | null;
 }): Promise<void> {
+  const source = args.source ?? "generated";
   await sql.begin(async (tx) => {
     const [q] = await tx<{ id: string }[]>`
       insert into eval_questions
         (document_id, question, expected_answer, source, generator_model)
       values
         (${args.documentId}, ${args.question}, ${args.expectedAnswer},
-         'generated', ${args.generatorModel})
+         ${source}, ${args.generatorModel})
       returning id
     `;
     await tx`
@@ -165,6 +169,44 @@ export async function insertQuestionWithLabel(args: {
         (${q.id}, ${args.documentEmbeddingId}, ${args.sourceChunkId})
     `;
   });
+}
+
+// Add a hand-written question labeled to a specific chunk under the active config.
+// Resolves the chunk to its document + embedding-run so the label is correct, then
+// inserts as a 'manual' question. Returns false when the chunk isn't part of the
+// active config's corpus (stale id, wrong config). Scoring happens on the next
+// "Process new chunks" / "Re-score all" like any other unscored question.
+export async function addManualQuestion(
+  chunkId: string,
+  question: string,
+): Promise<boolean> {
+  const table = await activeChunksTable();
+  if (!table) return false;
+
+  const [chunk] = await sql<
+    { document_id: string; document_embedding_id: string }[]
+  >`
+    select c.document_id, c.document_embedding_id
+    from ${sql(table)} c
+    join document_embeddings de on de.id = c.document_embedding_id
+    where c.id = ${chunkId}
+      and de.model = ${config.embeddingModel}
+      and de.chunk_size = ${config.chunkSize}
+      and de.chunk_overlap = ${config.chunkOverlap}
+    limit 1
+  `;
+  if (!chunk) return false;
+
+  await insertQuestionWithLabel({
+    documentId: chunk.document_id,
+    documentEmbeddingId: chunk.document_embedding_id,
+    sourceChunkId: chunkId,
+    question,
+    expectedAnswer: null,
+    source: "manual",
+    generatorModel: null,
+  });
+  return true;
 }
 
 // Questions (with a label under the active config) that have no fresh result —
@@ -280,6 +322,7 @@ export async function putCachedQueryEmbedding(
 // rank, flagged when it's the ground-truth chunk.
 export type ExplainChunk = {
   chunkId: string;
+  fileName: string | null; // which document it came from — retrieval spans all docs
   position: number | null;
   text: string;
   rank: number; // 1-based position in the retrieved list
@@ -291,7 +334,12 @@ export type ExplainChunk = {
 // flagged at its rank; for a miss it's absent and you see the distractors that
 // beat it. Scoped to the active config, like everything else here.
 export type QuestionExplain = {
-  expected: { chunkId: string; position: number | null; text: string | null } | null;
+  expected: {
+    chunkId: string;
+    fileName: string | null;
+    position: number | null;
+    text: string | null;
+  } | null;
   retrieved: ExplainChunk[];
   k: number | null;
   scoredAt: number | null;
@@ -337,11 +385,12 @@ export async function getQuestionExplain(
   // One lookup covers the expected chunk and everything retrieved.
   const ids = [...new Set([label.source_chunk_id, ...retrievedIds])];
   const chunkRows = await sql<
-    { id: string; position: number | null; text: string }[]
+    { id: string; file_name: string; position: number | null; text: string }[]
   >`
-    select id, position, text
-    from ${sql(table)}
-    where id = any(${ids}::uuid[])
+    select c.id, d.file_name, c.position, c.text
+    from ${sql(table)} c
+    join documents d on d.id = c.document_id
+    where c.id = any(${ids}::uuid[])
   `;
   const byId = new Map(chunkRows.map((c) => [c.id, c]));
 
@@ -350,6 +399,7 @@ export async function getQuestionExplain(
     const row = byId.get(id);
     return {
       chunkId: id,
+      fileName: row?.file_name ?? null,
       position: row?.position ?? null,
       text: row?.text ?? "",
       rank: i + 1,
@@ -360,6 +410,7 @@ export async function getQuestionExplain(
   return {
     expected: {
       chunkId: label.source_chunk_id,
+      fileName: expectedRow?.file_name ?? null,
       position: expectedRow?.position ?? null,
       text: expectedRow?.text ?? null,
     },
@@ -441,6 +492,7 @@ export async function getSummary(): Promise<EvalSummary> {
         document_id: string;
         updated_at: Date;
         file_name: string;
+        source_chunk_id: string;
         expected_position: number | null;
         hit: boolean | null;
         found_rank: number | null;
@@ -470,6 +522,7 @@ export async function getSummary(): Promise<EvalSummary> {
         q.document_id,
         q.updated_at,
         d.file_name,
+        al.source_chunk_id,
         c.position as expected_position,
         lt.hit,
         lt.found_rank,
@@ -480,7 +533,9 @@ export async function getSummary(): Promise<EvalSummary> {
       join documents d on d.id = q.document_id
       left join ${sql(table)} c on c.id = al.source_chunk_id
       left join latest lt on lt.eval_question_id = q.id
-      order by lt.hit asc nulls first, d.file_name, c.position
+      -- Document order so questions group cleanly by chunk on /eval; within a
+      -- chunk, oldest first (generated, then any manual additions).
+      order by d.file_name, c.position, q.created_at
     `,
     sql<
       {
@@ -522,6 +577,7 @@ export async function getSummary(): Promise<EvalSummary> {
     source: r.source,
     documentId: r.document_id,
     fileName: r.file_name,
+    sourceChunkId: r.source_chunk_id,
     expectedPosition: r.expected_position,
     hit: r.hit,
     foundRank: r.found_rank,
