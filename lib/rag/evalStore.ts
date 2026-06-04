@@ -276,6 +276,99 @@ export async function putCachedQueryEmbedding(
   `;
 }
 
+// One chunk in the "why did it miss?" view: a retrieved result with its text and
+// rank, flagged when it's the ground-truth chunk.
+export type ExplainChunk = {
+  chunkId: string;
+  position: number | null;
+  text: string;
+  rank: number; // 1-based position in the retrieved list
+  isExpected: boolean;
+};
+
+// Drill-down for a single question: the ground-truth chunk plus exactly what the
+// latest scoring run retrieved (in rank order). For a hit the expected chunk is
+// flagged at its rank; for a miss it's absent and you see the distractors that
+// beat it. Scoped to the active config, like everything else here.
+export type QuestionExplain = {
+  expected: { chunkId: string; position: number | null; text: string | null } | null;
+  retrieved: ExplainChunk[];
+  k: number | null;
+  scoredAt: number | null;
+};
+
+export async function getQuestionExplain(
+  questionId: string,
+): Promise<QuestionExplain> {
+  const empty: QuestionExplain = {
+    expected: null,
+    retrieved: [],
+    k: null,
+    scoredAt: null,
+  };
+  const table = await activeChunksTable();
+  if (!table) return empty;
+
+  // Ground-truth label for this question under the active config.
+  const [label] = await sql<{ label_id: string; source_chunk_id: string }[]>`
+    select l.id as label_id, l.source_chunk_id
+    from eval_labels l
+    join document_embeddings de on de.id = l.document_embedding_id
+    where l.eval_question_id = ${questionId}
+      and de.model = ${config.embeddingModel}
+      and de.chunk_size = ${config.chunkSize}
+      and de.chunk_overlap = ${config.chunkOverlap}
+    limit 1
+  `;
+  if (!label) return empty;
+
+  // Latest score for that label; retrieved_ids are stored in rank order.
+  const [result] = await sql<
+    { retrieved_ids: string[]; k: number; scored_at: Date }[]
+  >`
+    select retrieved_ids, k, scored_at
+    from eval_results
+    where eval_label_id = ${label.label_id}
+    order by scored_at desc
+    limit 1
+  `;
+
+  const retrievedIds = result?.retrieved_ids ?? [];
+  // One lookup covers the expected chunk and everything retrieved.
+  const ids = [...new Set([label.source_chunk_id, ...retrievedIds])];
+  const chunkRows = await sql<
+    { id: string; position: number | null; text: string }[]
+  >`
+    select id, position, text
+    from ${sql(table)}
+    where id = any(${ids}::uuid[])
+  `;
+  const byId = new Map(chunkRows.map((c) => [c.id, c]));
+
+  const expectedRow = byId.get(label.source_chunk_id);
+  const retrieved: ExplainChunk[] = retrievedIds.map((id, i) => {
+    const row = byId.get(id);
+    return {
+      chunkId: id,
+      position: row?.position ?? null,
+      text: row?.text ?? "",
+      rank: i + 1,
+      isExpected: id === label.source_chunk_id,
+    };
+  });
+
+  return {
+    expected: {
+      chunkId: label.source_chunk_id,
+      position: expectedRow?.position ?? null,
+      text: expectedRow?.text ?? null,
+    },
+    retrieved,
+    k: result?.k ?? null,
+    scoredAt: result ? result.scored_at.getTime() : null,
+  };
+}
+
 export async function insertResults(rows: ResultInsert[]): Promise<void> {
   if (rows.length === 0) return;
   await sql.begin(async (tx) => {

@@ -8,7 +8,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { EvalSummary } from "@/lib/rag/evalStore";
+import type { EvalSummary, QuestionExplain } from "@/lib/rag/evalStore";
 import type { EvalEvent } from "@/lib/rag/eval";
 
 function pct(n: number | null): string {
@@ -23,6 +23,12 @@ type EvalProgress =
 
 type RunResult = { generated: number; scored: number; recall: number | null };
 
+// Lazy-loaded "why did it miss?" detail for an expanded question.
+type ExplainState =
+  | { status: "loading" }
+  | { status: "ready"; data: QuestionExplain }
+  | { status: "error"; message: string };
+
 export function EvalDashboard() {
   const [summary, setSummary] = useState<EvalSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -33,9 +39,39 @@ export function EvalDashboard() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
 
-  // Bump to re-fetch the summary (used after process / edit / delete).
+  // Which question's chunk drill-down is expanded, and the per-question detail
+  // we lazy-fetch on first expand (cached so re-opening is instant).
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [explains, setExplains] = useState<Record<string, ExplainState>>({});
+
+  // Bump to re-fetch the summary (used after process / edit / delete). A reload
+  // means scores may have changed, so drop the cached drill-downs and collapse.
   const [reloadKey, setReloadKey] = useState(0);
-  const reload = () => setReloadKey((k) => k + 1);
+  const reload = () => {
+    setExplains({});
+    setExpandedId(null);
+    setReloadKey((k) => k + 1);
+  };
+
+  // Toggle a question's drill-down, fetching its detail the first time it opens.
+  function toggleExpand(id: string) {
+    const opening = expandedId !== id;
+    setExpandedId(opening ? id : null);
+    if (!opening || explains[id]) return;
+    setExplains((m) => ({ ...m, [id]: { status: "loading" } }));
+    fetch(`/api/eval/questions/${id}/explain`)
+      .then(async (res) => {
+        const data = (await res.json()) as QuestionExplain | { error: string };
+        if (!res.ok || "error" in data) {
+          throw new Error("error" in data ? data.error : `Request failed (${res.status}).`);
+        }
+        setExplains((m) => ({ ...m, [id]: { status: "ready", data } }));
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : "Failed to load.";
+        setExplains((m) => ({ ...m, [id]: { status: "error", message } }));
+      });
+  }
 
   useEffect(() => {
     let alive = true;
@@ -327,7 +363,19 @@ export function EvalDashboard() {
                     </div>
                     <div className="flex items-center justify-between gap-3 text-xs text-zinc-500">
                       <span className="truncate font-mono">
-                        {q.fileName} · chunk #{q.expectedPosition ?? "?"}
+                        {q.fileName} ·{" "}
+                        <button
+                          type="button"
+                          onClick={() => toggleExpand(q.questionId)}
+                          title={
+                            expandedId === q.questionId
+                              ? "Hide chunk detail"
+                              : "Show the expected chunk vs. what retrieval returned"
+                          }
+                          className="cursor-pointer underline decoration-dotted underline-offset-2 hover:text-zinc-700 dark:hover:text-zinc-300"
+                        >
+                          chunk #{q.expectedPosition ?? "?"}
+                        </button>
                         {q.source === "manual" && " · edited"}
                       </span>
                       <span className="flex shrink-0 gap-2">
@@ -369,6 +417,9 @@ export function EvalDashboard() {
                         )}
                       </span>
                     </div>
+                    {expandedId === q.questionId && (
+                      <ExplainPanel state={explains[q.questionId]} k={summary.k} />
+                    )}
                   </li>
                 ))}
               </ul>
@@ -419,6 +470,92 @@ function Badge({
     <span className="shrink-0 rounded bg-red-100 px-1.5 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/40 dark:text-red-400">
       miss
     </span>
+  );
+}
+
+// The "why did it miss?" drill-down: what retrieval returned in rank order, each
+// chunk collapsed to its header and expandable on click. The ground-truth chunk
+// is flagged green at its rank when it's in the top-k; when it's NOT (a miss, or
+// unscored), it's shown up top on its own since the list won't contain it.
+// Lazy-loaded, so it renders loading/error states too.
+function ExplainPanel({ state, k }: { state: ExplainState | undefined; k: number }) {
+  // Which retrieved chunks are expanded (keyed by chunk id). Resets when the
+  // panel unmounts on collapse — top-k starts collapsed each time it opens.
+  const [open, setOpen] = useState<Record<string, boolean>>({});
+
+  if (!state || state.status === "loading") {
+    return <p className="mt-1 text-xs text-zinc-400">Loading chunk detail…</p>;
+  }
+  if (state.status === "error") {
+    return <p className="mt-1 text-xs text-red-600 dark:text-red-400">{state.message}</p>;
+  }
+
+  const { expected, retrieved } = state.data;
+  const scored = retrieved.length > 0;
+  const expectedInTopK = retrieved.some((c) => c.isExpected);
+
+  return (
+    <div className="mt-1 flex flex-col gap-3 text-xs">
+      {/* Only when the ground-truth chunk isn't in the list below. */}
+      {!expectedInTopK && (
+        <div className="flex flex-col gap-1">
+          <span className="font-medium uppercase tracking-wide text-zinc-500">
+            Expected · chunk #{expected?.position ?? "?"}
+            {scored && ` · not in top ${k}`}
+          </span>
+          <ChunkText text={expected?.text ?? "Chunk text unavailable."} expected />
+        </div>
+      )}
+
+      <div className="flex flex-col gap-1">
+        <span className="font-medium uppercase tracking-wide text-zinc-500">
+          Retrieved · top {k}
+        </span>
+        {!scored ? (
+          <span className="text-zinc-400">Not scored yet — no retrieval recorded.</span>
+        ) : (
+          <ol className="flex flex-col gap-1">
+            {retrieved.map((c) => {
+              const isOpen = open[c.chunkId] ?? false;
+              return (
+                <li key={c.chunkId} className="flex flex-col gap-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setOpen((o) => ({ ...o, [c.chunkId]: !isOpen }))}
+                    className={`flex cursor-pointer items-center gap-1 text-left hover:underline ${
+                      c.isExpected
+                        ? "font-medium text-green-700 dark:text-green-400"
+                        : "text-zinc-500"
+                    }`}
+                  >
+                    <span className="text-zinc-400">{isOpen ? "▾" : "▸"}</span>
+                    #{c.rank} · chunk #{c.position ?? "?"}
+                    {c.isExpected && " · ground truth ✓"}
+                  </button>
+                  {isOpen && <ChunkText text={c.text} expected={c.isExpected} />}
+                </li>
+              );
+            })}
+          </ol>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// A single chunk's text in a scrollable box. The ground-truth chunk gets a green
+// tint so it stands out wherever it appears (expected header and, on a hit, in
+// the retrieved list).
+function ChunkText({ text, expected }: { text: string; expected?: boolean }) {
+  const tint = expected
+    ? "border-green-300 bg-green-50 dark:border-green-900/50 dark:bg-green-900/15"
+    : "border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/40";
+  return (
+    <pre
+      className={`max-h-40 overflow-auto whitespace-pre-wrap rounded border p-2 font-mono leading-relaxed text-zinc-700 dark:text-zinc-300 ${tint}`}
+    >
+      {text}
+    </pre>
   );
 }
 
