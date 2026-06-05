@@ -16,18 +16,24 @@
 // ---------------------------------------------------------------------------
 import { config } from "@/lib/config";
 import { anthropicClient } from "@/lib/llm/client";
-import { embedQuery } from "@/lib/rag/embeddings";
+import { splitText, tokenizeWithOffsets } from "@/lib/rag/chunker";
+import { embedQuery, embedTexts } from "@/lib/rag/embeddings";
+import { stitchChunks } from "@/lib/rag/reconstruct";
 import { retrieveWithVector } from "@/lib/rag/retriever";
 import {
   allLabeledQuestions,
   chunksNeedingQuestions,
   createRunSnapshot,
   getCachedQueryEmbeddings,
+  getChunkWindow,
+  getExperimentContext,
   getSummary,
   insertQuestionWithLabel,
   insertResults,
   putCachedQueryEmbedding,
   questionsNeedingScoring,
+  rankWithSubstitutedChunk,
+  type ExperimentContext,
   type QuestionToScore,
   type ResultInsert,
 } from "@/lib/rag/evalStore";
@@ -298,4 +304,214 @@ export async function rescoreAllQuestions(emit: Emit = () => {}): Promise<{
   );
   emit({ type: "done", generated: 0, scored, recall: summary.recall });
   return { scored, recall: summary.recall };
+}
+
+// ---------------------------------------------------------------------------
+// Re-chunk experiment: an ephemeral per-chunk "what-if".
+//
+// Re-split ONE labeled chunk at a trial (size, overlap), embed the pieces, and
+// re-rank the question against a corpus where that chunk is replaced by its
+// sub-chunks. Nothing is persisted — no new chunks, no scores, no config change
+// — so the live retrieval index and every other question's score are untouched.
+//
+// This is a LOCAL APPROXIMATION of a full re-chunk: the chunk's document
+// neighbors stay frozen, so the seams between this chunk and its neighbors are
+// not re-formed (overlap only moves this chunk's INTERNAL seams). Size is the
+// high-signal knob here; read overlap results with that caveat. Methodology
+// matches the miss drill-down: exact full-scan rank (see rankWithSubstitutedChunk).
+// ---------------------------------------------------------------------------
+
+// One sub-chunk's standing in the experiment ranking.
+export type RechunkSubChunk = {
+  subIndex: number; // 0-based piece order within the original chunk
+  rank: number; // 1-based exact rank in the substituted corpus
+  score: number; // cosine similarity to the query
+  text: string;
+  inTopK: boolean;
+};
+
+// One row of the experiment's top-k, flagged when it's one of this chunk's pieces.
+export type RechunkRankedChunk = {
+  rank: number;
+  fileName: string | null;
+  position: number | null;
+  subIndex: number | null;
+  text: string;
+  score: number;
+  isSubChunk: boolean;
+};
+
+// Shared result of both experiment modes (uniform sub-divide and custom-boundary).
+// The trial knobs (size/overlap, or boundaries) aren't echoed back — the caller
+// already submitted them and renders them itself.
+export type RechunkResult = {
+  subChunkCount: number;
+  k: number;
+  hit: boolean; // did any sub-chunk land in the top-k?
+  bestSubRank: number | null; // best (lowest) rank across all sub-chunks
+  topK: RechunkRankedChunk[];
+  subChunks: RechunkSubChunk[];
+};
+
+// Core: replace the labeled chunk with `subTexts`, embed those, and exact-rank the
+// question against the substituted corpus. Reuses the cached query vector (embeds
+// only on a cache miss). Shared by both modes; nothing is persisted.
+async function rankExperiment(
+  ctx: ExperimentContext,
+  subTexts: string[],
+): Promise<RechunkResult> {
+  const queryVector = ctx.queryVector ?? (await embedQuery(ctx.question));
+  const subVectors = await embedTexts(subTexts);
+
+  const k = config.topK;
+  const ranked = await rankWithSubstitutedChunk({
+    queryVector,
+    sourceChunkId: ctx.chunkId,
+    subTexts,
+    subVectors,
+    k,
+  });
+
+  const topK: RechunkRankedChunk[] = ranked
+    .filter((r) => r.rank <= k)
+    .map((r) => ({
+      rank: r.rank,
+      fileName: r.fileName,
+      position: r.position,
+      subIndex: r.subIndex,
+      text: r.text,
+      score: r.score,
+      isSubChunk: r.subIndex !== null,
+    }));
+
+  const subChunks: RechunkSubChunk[] = ranked
+    .filter((r) => r.subIndex !== null)
+    .map((r) => ({
+      subIndex: r.subIndex as number,
+      rank: r.rank,
+      score: r.score,
+      text: r.text,
+      inTopK: r.rank <= k,
+    }))
+    .sort((a, b) => a.subIndex - b.subIndex);
+
+  const hit = subChunks.some((s) => s.inTopK);
+  const bestSubRank =
+    subChunks.length > 0 ? Math.min(...subChunks.map((s) => s.rank)) : null;
+
+  return { subChunkCount: subTexts.length, k, hit, bestSubRank, topK, subChunks };
+}
+
+// Mode A — uniform sub-divide: split the labeled chunk at a trial (size, overlap)
+// and re-rank. Returns null when the question has no label under the active config.
+export async function runRechunkExperiment(
+  questionId: string,
+  size: number,
+  overlap: number,
+): Promise<RechunkResult | null> {
+  const t0 = performance.now();
+  const ctx = await getExperimentContext(questionId);
+  if (!ctx) return null;
+
+  const subTexts = await splitText(ctx.chunkText, size, overlap);
+  const result = await rankExperiment(ctx, subTexts);
+
+  console.log(
+    `[rag:eval] rechunk q=${questionId.slice(0, 8)} size=${size} overlap=${overlap}: ` +
+      `${result.subChunkCount} sub-chunk(s), hit=${result.hit} ` +
+      `bestRank=${result.bestSubRank ?? "n/a"} in ${Math.round(performance.now() - t0)}ms`,
+  );
+  return result;
+}
+
+// Mode B — custom boundaries: replace the labeled chunk with the supplied section
+// text(s) (a single hand-reshaped chunk today) and re-rank. Same null contract.
+export async function runCustomChunkExperiment(
+  questionId: string,
+  sections: string[],
+): Promise<RechunkResult | null> {
+  const t0 = performance.now();
+  const ctx = await getExperimentContext(questionId);
+  if (!ctx) return null;
+
+  const result = await rankExperiment(ctx, sections);
+
+  console.log(
+    `[rag:eval] custom-chunk q=${questionId.slice(0, 8)}: ${sections.length} section(s), ` +
+      `hit=${result.hit} bestRank=${result.bestSubRank ?? "n/a"} in ${Math.round(performance.now() - t0)}ms`,
+  );
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Boundary editor: assemble the local window the "resize one custom chunk" mode
+// renders. Stitches the labeled chunk + neighbors back into contiguous text (see
+// reconstruct.ts), tokenizes it to map token borders to char offsets, and reports
+// each chunk's token span so the UI can draw frozen-neighbor bands and the test
+// chunk's editable [start, end). Read-only; nothing is persisted.
+// ---------------------------------------------------------------------------
+export type ChunkWindow = {
+  testPosition: number;
+  totalChunks: number; // chunks in the doc (so the UI knows the range bounds)
+  rangeFrom: number; // first/last chunk position included in this window
+  rangeTo: number;
+  text: string; // stitched window text
+  tokenCount: number;
+  offsets: number[]; // length tokenCount+1; char index of each token boundary
+  chunks: { position: number; tokenStart: number; tokenEnd: number; frozen: boolean }[];
+  exclusive: { tokenStart: number; tokenEnd: number }; // test chunk's exclusive zone
+  testDefault: { tokenStart: number; tokenEnd: number }; // the test chunk's own span
+};
+
+export async function buildChunkWindow(
+  questionId: string,
+  fromPos: number,
+  toPos: number,
+): Promise<ChunkWindow | null> {
+  const win = await getChunkWindow(questionId, fromPos, toPos);
+  if (!win || win.chunks.length === 0) return null;
+
+  const { text, spans } = stitchChunks(win.chunks);
+  const { tokenCount, offsets } = await tokenizeWithOffsets(text);
+
+  // First token boundary at or after a char index (binary search over offsets).
+  const charToToken = (charIdx: number): number => {
+    let lo = 0;
+    let hi = tokenCount;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (offsets[mid] < charIdx) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+
+  const chunks = spans.map((s) => ({
+    position: s.position,
+    tokenStart: charToToken(s.charStart),
+    tokenEnd: charToToken(s.charEnd),
+    frozen: s.position !== win.testPosition,
+  }));
+
+  const test = chunks.find((c) => c.position === win.testPosition)!;
+  const prev = chunks.filter((c) => c.position < win.testPosition).at(-1);
+  const next = chunks.find((c) => c.position > win.testPosition);
+
+  return {
+    testPosition: win.testPosition,
+    totalChunks: win.totalChunks,
+    rangeFrom: win.chunks[0].position,
+    rangeTo: win.chunks[win.chunks.length - 1].position,
+    text,
+    tokenCount,
+    offsets,
+    chunks,
+    // Tokens covered ONLY by the test chunk: between the previous neighbor's end
+    // and the next neighbor's start. Shrinking inside this zone leaves a real gap.
+    exclusive: {
+      tokenStart: prev ? prev.tokenEnd : 0,
+      tokenEnd: next ? next.tokenStart : tokenCount,
+    },
+    testDefault: { tokenStart: test.tokenStart, tokenEnd: test.tokenEnd },
+  };
 }

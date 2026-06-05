@@ -524,6 +524,229 @@ export async function getQuestionExplain(
   };
 }
 
+// --- Re-chunk experiment (ephemeral, see lib/rag/eval.runRechunkExperiment) --
+// A per-chunk "what-if": re-split ONE labeled chunk at a trial size/overlap and
+// re-rank for its question, to see whether a smaller piece would have been
+// retrieved. Nothing is persisted — these helpers only read the corpus and rank
+// in-memory sub-chunk vectors against it, so the live index is never touched.
+
+export type ExperimentContext = {
+  chunkId: string;
+  chunkText: string;
+  question: string;
+  fileName: string;
+  queryVector: number[] | null; // cached query embedding, or null if not cached
+};
+
+// The labeled chunk + its question for a re-chunk experiment, scoped to the
+// active config. Pulls the chunk's text (what we re-split), the question text
+// (to embed on a cache miss), and the cached query vector when present. Null
+// when the question has no label under the active config (stale id / wrong config).
+export async function getExperimentContext(
+  questionId: string,
+): Promise<ExperimentContext | null> {
+  const table = await activeChunksTable();
+  if (!table) return null;
+
+  const [row] = await sql<
+    {
+      chunk_id: string;
+      chunk_text: string;
+      question: string;
+      file_name: string;
+      query_vector: number[] | null;
+    }[]
+  >`
+    select
+      l.source_chunk_id as chunk_id,
+      c.text as chunk_text,
+      q.question,
+      d.file_name,
+      qe.embedding as query_vector
+    from eval_labels l
+    join eval_questions q on q.id = l.eval_question_id
+    join document_embeddings de on de.id = l.document_embedding_id
+    join ${sql(table)} c on c.id = l.source_chunk_id
+    join documents d on d.id = q.document_id
+    left join eval_question_embeddings qe
+      on qe.eval_question_id = q.id and qe.model = ${config.embeddingModel}
+    where q.id = ${questionId}
+      and de.model = ${config.embeddingModel}
+      and de.chunk_size = ${config.chunkSize}
+      and de.chunk_overlap = ${config.chunkOverlap}
+    limit 1
+  `;
+  if (!row) return null;
+  return {
+    chunkId: row.chunk_id,
+    chunkText: row.chunk_text,
+    question: row.question,
+    fileName: row.file_name,
+    queryVector: row.query_vector,
+  };
+}
+
+export type ChunkWindowRows = {
+  testPosition: number;
+  testChunkId: string;
+  totalChunks: number; // chunks in the doc under the active config (range bounds)
+  chunks: { position: number; text: string }[]; // positions in [fromPos, toPos]
+};
+
+// Fetch a window of a question's document chunks (the labeled chunk plus the
+// neighbors in [fromPos, toPos]) for the boundary editor, scoped to the active
+// config. Returns null when the question has no label under the active config.
+// Read-only; the stitching/tokenizing happens in eval.buildChunkWindow.
+export async function getChunkWindow(
+  questionId: string,
+  fromPos: number,
+  toPos: number,
+): Promise<ChunkWindowRows | null> {
+  const table = await activeChunksTable();
+  if (!table) return null;
+
+  const [test] = await sql<
+    { position: number; chunk_id: string; document_id: string }[]
+  >`
+    select c.position, c.id as chunk_id, c.document_id
+    from eval_labels l
+    join eval_questions q on q.id = l.eval_question_id
+    join document_embeddings de on de.id = l.document_embedding_id
+    join ${sql(table)} c on c.id = l.source_chunk_id
+    where q.id = ${questionId}
+      and de.model = ${config.embeddingModel}
+      and de.chunk_size = ${config.chunkSize}
+      and de.chunk_overlap = ${config.chunkOverlap}
+    limit 1
+  `;
+  if (!test) return null;
+
+  const [counts] = await sql<{ total: number }[]>`
+    select count(*)::int as total
+    from ${sql(table)} c
+    join document_embeddings de on de.id = c.document_embedding_id
+    where c.document_id = ${test.document_id}
+      and de.model = ${config.embeddingModel}
+      and de.chunk_size = ${config.chunkSize}
+      and de.chunk_overlap = ${config.chunkOverlap}
+  `;
+
+  const rows = await sql<{ position: number; text: string }[]>`
+    select c.position, c.text
+    from ${sql(table)} c
+    join document_embeddings de on de.id = c.document_embedding_id
+    where c.document_id = ${test.document_id}
+      and de.model = ${config.embeddingModel}
+      and de.chunk_size = ${config.chunkSize}
+      and de.chunk_overlap = ${config.chunkOverlap}
+      and c.position between ${fromPos} and ${toPos}
+    order by c.position
+  `;
+
+  return {
+    testPosition: test.position,
+    testChunkId: test.chunk_id,
+    totalChunks: counts?.total ?? rows.length,
+    chunks: rows.map((r) => ({ position: r.position, text: r.text })),
+  };
+}
+
+export type RankedChunk = {
+  id: string; // chunk id, or "sub-<i>" for an experiment sub-chunk
+  fileName: string | null; // null for sub-chunks (they share the source chunk's file)
+  position: number | null; // corpus chunk position; null for sub-chunks
+  subIndex: number | null; // 0-based index among sub-chunks; null for corpus chunks
+  text: string;
+  rank: number; // 1-based exact rank in the substituted corpus
+  score: number; // cosine similarity to the query
+};
+
+// Exact full-scan rank of the query against the corpus with ONE chunk swapped
+// for the supplied sub-chunks: (active-config chunks − sourceChunkId) ∪ subs.
+// Same exact-ranking approach as getQuestionExplain, but the sub-chunk vectors
+// are injected ad-hoc (never written to the table). Returns the top-k rows PLUS
+// every sub-chunk row (even below k) so each sub-chunk's standing is known.
+export async function rankWithSubstitutedChunk(args: {
+  queryVector: number[];
+  sourceChunkId: string;
+  subTexts: string[];
+  subVectors: number[][];
+  k: number;
+}): Promise<RankedChunk[]> {
+  const table = await activeChunksTable();
+  if (!table) return [];
+
+  const queryLit = `[${args.queryVector.join(",")}]`;
+  const indices = args.subTexts.map((_, i) => i);
+  const subLits = args.subVectors.map((v) => `[${v.join(",")}]`);
+
+  const rows = await sql<
+    {
+      id: string;
+      file_name: string | null;
+      position: number | null;
+      sub_index: number | null;
+      text: string;
+      score: number;
+      rn: number;
+    }[]
+  >`
+    with q as (select ${queryLit}::vector as vec),
+    sub as (
+      select i as sub_index, txt as text, vec::vector as embedding
+      from unnest(
+        ${indices}::int[], ${args.subTexts}::text[], ${subLits}::text[]
+      ) as t(i, txt, vec)
+    ),
+    corpus as (
+      select
+        c.id::text as id,
+        d.file_name,
+        c.position,
+        null::int as sub_index,
+        c.text,
+        c.embedding::vector as embedding
+      from ${sql(table)} c
+      join documents d on d.id = c.document_id
+      join document_embeddings de on de.id = c.document_embedding_id
+      where de.model = ${config.embeddingModel}
+        and de.chunk_size = ${config.chunkSize}
+        and de.chunk_overlap = ${config.chunkOverlap}
+        and c.id <> ${args.sourceChunkId}
+      union all
+      select
+        'sub-' || s.sub_index::text as id,
+        null::text as file_name,
+        null::int as position,
+        s.sub_index,
+        s.text,
+        s.embedding
+      from sub s
+    ),
+    ranked as (
+      select
+        id, file_name, position, sub_index, text,
+        1 - (embedding <=> (select vec from q)) as score,
+        (row_number() over (order by embedding <=> (select vec from q)))::int as rn
+      from corpus
+    )
+    select id, file_name, position, sub_index, text, score, rn
+    from ranked
+    where rn <= ${args.k} or sub_index is not null
+    order by rn
+  `;
+
+  return rows.map((r) => ({
+    id: r.id,
+    fileName: r.file_name,
+    position: r.position,
+    subIndex: r.sub_index,
+    text: r.text,
+    rank: Number(r.rn),
+    score: Number(r.score),
+  }));
+}
+
 export async function insertResults(rows: ResultInsert[]): Promise<void> {
   if (rows.length === 0) return;
   await sql.begin(async (tx) => {
