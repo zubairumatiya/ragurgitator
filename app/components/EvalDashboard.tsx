@@ -744,13 +744,28 @@ function RechunkExperiment({
 }) {
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<"uniform" | "custom">("uniform");
+  // Both tabs stay mounted (just hidden) once visited, so switching between them
+  // preserves each one's inputs/results. Closing with ✕ resets everything. The
+  // custom tab is lazy-mounted so its window fetch only fires once it's opened.
+  const [mounted, setMounted] = useState({ uniform: true, custom: false });
+
+  function show(next: "uniform" | "custom") {
+    setMode(next);
+    setMounted((m) => (m[next] ? m : { ...m, [next]: true }));
+  }
+
+  function close() {
+    setOpen(false);
+    setMode("uniform");
+    setMounted({ uniform: true, custom: false });
+  }
 
   if (!open) {
     return (
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="self-start rounded border border-dashed border-zinc-300 px-2 py-1 text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-900/40"
+        className="cursor-pointer self-start rounded border border-dashed border-zinc-300 px-2 py-1 text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-900/40"
       >
         Re-chunk this chunk
       </button>
@@ -760,33 +775,36 @@ function RechunkExperiment({
   return (
     <div className="flex flex-col gap-2 rounded border border-dashed border-zinc-300 p-2 dark:border-zinc-700">
       <div className="flex items-center justify-between gap-2">
-        <div className="flex gap-1">
-          <ModeTab active={mode === "uniform"} onClick={() => setMode("uniform")}>
+        <div className="flex gap-2">
+          <ModeTab active={mode === "uniform"} onClick={() => show("uniform")}>
             Uniform sub-divide
           </ModeTab>
-          <ModeTab active={mode === "custom"} onClick={() => setMode("custom")}>
+          <ModeTab active={mode === "custom"} onClick={() => show("custom")}>
             Resize borders
           </ModeTab>
         </div>
         <button
           type="button"
-          onClick={() => setOpen(false)}
+          onClick={close}
           className="cursor-pointer text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
         >
           ✕
         </button>
       </div>
 
-      {mode === "uniform" ? (
-        <RechunkLab questionId={questionId} baseline={baseline} k={k} />
-      ) : (
-        <ChunkBoundaryLab
-          questionId={questionId}
-          baseline={baseline}
-          k={k}
-          positionHint={positionHint}
-        />
-      )}
+      <div className={mode === "uniform" ? "" : "hidden"}>
+        {mounted.uniform && <RechunkLab questionId={questionId} baseline={baseline} k={k} />}
+      </div>
+      <div className={mode === "custom" ? "" : "hidden"}>
+        {mounted.custom && (
+          <ChunkBoundaryLab
+            questionId={questionId}
+            baseline={baseline}
+            k={k}
+            positionHint={positionHint}
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -804,10 +822,10 @@ function ModeTab({
     <button
       type="button"
       onClick={onClick}
-      className={`cursor-pointer rounded px-2 py-1 font-medium ${
+      className={`cursor-pointer rounded border px-2 py-1 font-medium ${
         active
-          ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-black"
-          : "text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+          ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-black"
+          : "border-zinc-300 text-zinc-500 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
       }`}
     >
       {children}
@@ -1020,8 +1038,9 @@ function RechunkLab({
 
 // Mode B — resize one custom chunk. Stitches the labeled chunk + frozen neighbors
 // into contiguous text, lets the user set the chunk's [start, end) token borders
-// (numeric for now; drag later), warns when the borders leave document text
-// uncovered (a gap), then re-ranks with that one reshaped chunk. Ephemeral.
+// (numeric inputs, or by dragging the borders in the preview — each drag snaps to
+// the nearest token), warns when the borders leave document text uncovered (a
+// gap), then re-ranks with that one reshaped chunk. Ephemeral.
 function ChunkBoundaryLab({
   questionId,
   baseline,
@@ -1047,6 +1066,9 @@ function ChunkBoundaryLab({
   const [busy, setBusy] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [result, setResult] = useState<RechunkResult | null>(null);
+
+  // Which border the user is currently dragging in the text preview, if any.
+  const [dragging, setDragging] = useState<"start" | "end" | null>(null);
 
   // (Re)fetch the window when the range changes. Widening shifts token indices,
   // so the selection resets to the chunk's own span on each load. Keeping the
@@ -1079,6 +1101,76 @@ function ChunkBoundaryLab({
       alive = false;
     };
   }, [questionId, range.from, range.to]);
+
+  // While a border is being dragged, follow the pointer: map its position to a
+  // character with the caret APIs, snap to the nearest token boundary, and move
+  // that border there. Listening on `window` keeps the drag alive even when the
+  // pointer leaves the text box.
+  useEffect(() => {
+    if (!dragging || !win) return;
+    const { offsets, tokenCount } = win;
+
+    // Nearest token boundary to a char index (offsets is ascending).
+    const charToToken = (charIdx: number) => {
+      let lo = 0;
+      let hi = tokenCount;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (offsets[mid] < charIdx) lo = mid + 1;
+        else hi = mid;
+      }
+      if (lo > 0 && Math.abs(offsets[lo - 1] - charIdx) <= Math.abs(offsets[lo] - charIdx)) {
+        return lo - 1;
+      }
+      return lo;
+    };
+
+    // Pointer → token, via whichever caret API the browser exposes. Returns null
+    // when the hit lands off the painted text (e.g. on the handle itself).
+    const pointToToken = (x: number, y: number): number | null => {
+      const doc = document as Document & {
+        caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+        caretRangeFromPoint?: (x: number, y: number) => Range | null;
+      };
+      let node: Node | null = null;
+      let offset = 0;
+      if (doc.caretPositionFromPoint) {
+        const pos = doc.caretPositionFromPoint(x, y);
+        if (!pos) return null;
+        node = pos.offsetNode;
+        offset = pos.offset;
+      } else if (doc.caretRangeFromPoint) {
+        const r = doc.caretRangeFromPoint(x, y);
+        if (!r) return null;
+        node = r.startContainer;
+        offset = r.startOffset;
+      } else {
+        return null;
+      }
+      const host = node.nodeType === Node.TEXT_NODE ? node.parentElement : (node as Element);
+      const span = host?.closest<HTMLElement>("[data-cs]");
+      if (!span) return null;
+      const base = Number(span.dataset.cs);
+      if (Number.isNaN(base)) return null;
+      return charToToken(base + offset);
+    };
+
+    const onMove = (e: PointerEvent) => {
+      const tok = pointToToken(e.clientX, e.clientY);
+      if (tok == null) return;
+      if (dragging === "start") setStart(tok);
+      else setEnd(tok);
+    };
+    const onUp = () => setDragging(null);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, [dragging, win]);
 
   if (loading && !win) return <span className="text-zinc-400">Loading window…</span>;
   if (winError) return <span className="text-red-600 dark:text-red-400">{winError}</span>;
@@ -1126,32 +1218,82 @@ function ChunkBoundaryLab({
     }
   }
 
-  // Split the window text into colored bands: selected (the test chunk), gap
-  // (uncovered exclusive zone), or context (frozen neighbors). Breakpoints are the
-  // selection + exclusive-zone char offsets, so every segment is wholly one kind.
+  // Char offsets of the selection and the exclusive zone — the breakpoints used
+  // to paint the preview and to anchor the draggable borders.
   const sStart = off(clampedStart);
   const sEnd = off(clampedEnd);
   const exStartChar = off(exclusive.tokenStart);
   const exEndChar = off(exclusive.tokenEnd);
-  const marks = Array.from(
-    new Set([0, text.length, sStart, sEnd, exStartChar, exEndChar]),
-  ).sort((a, b) => a - b);
-  const segments: { text: string; kind: "sel" | "gap" | "ctx" }[] = [];
-  for (let i = 0; i < marks.length - 1; i++) {
-    const a = marks[i];
-    const b = marks[i + 1];
-    if (b <= a) continue;
-    const selected = validSel && a >= sStart && b <= sEnd;
-    const inExclusive = a >= exStartChar && b <= exEndChar;
-    segments.push({ text: text.slice(a, b), kind: selected ? "sel" : inExclusive ? "gap" : "ctx" });
-  }
+
+  const selClass = "bg-indigo-200/70 text-zinc-900 dark:bg-indigo-500/30 dark:text-zinc-100";
+  const gapClass = "bg-red-200/70 text-zinc-900 dark:bg-red-500/30 dark:text-zinc-100";
+  const ctxClass = "text-zinc-400";
+
+  // Paint a [from, to) char range as frozen-neighbor (ctx) or uncovered
+  // exclusive-zone (gap) bands. Each span carries its absolute char start
+  // (data-cs) so a drag can map a caret hit back to a token. The selected text
+  // is rendered separately, between the handles, so it never appears here.
+  const bands = (from: number, to: number) => {
+    const cuts = Array.from(new Set([from, to, exStartChar, exEndChar]))
+      .filter((c) => c >= from && c <= to)
+      .sort((a, b) => a - b);
+    const out = [];
+    for (let i = 0; i < cuts.length - 1; i++) {
+      const a = cuts[i];
+      const b = cuts[i + 1];
+      if (b <= a) continue;
+      const inExclusive = a >= exStartChar && b <= exEndChar;
+      out.push(
+        <span key={a} data-cs={a} className={inExclusive ? gapClass : ctxClass}>
+          {text.slice(a, b)}
+        </span>,
+      );
+    }
+    return out;
+  };
+
+  // A draggable border on the selected chunk. Dragging snaps to the nearest
+  // token (see the drag effect above); arrow keys nudge by one token (10 with
+  // Shift) for precise/keyboard adjustment.
+  const handle = (side: "start" | "end") => {
+    const value = side === "start" ? clampedStart : clampedEnd;
+    const set = side === "start" ? setStart : setEnd;
+    return (
+      <span
+        role="slider"
+        tabIndex={0}
+        aria-label={`Drag ${side} border`}
+        aria-valuemin={0}
+        aria-valuemax={tokenCount}
+        aria-valuenow={value}
+        title="Drag to resize — snaps to the nearest token"
+        onPointerDown={(e) => {
+          e.preventDefault();
+          setDragging(side);
+        }}
+        onKeyDown={(e) => {
+          const step = e.shiftKey ? 10 : 1;
+          if (e.key === "ArrowLeft") {
+            e.preventDefault();
+            set(Math.max(0, value - step));
+          } else if (e.key === "ArrowRight") {
+            e.preventDefault();
+            set(Math.min(tokenCount, value + step));
+          }
+        }}
+        className={`relative mx-px inline-block h-[1.15em] w-1 cursor-col-resize touch-none rounded-sm bg-indigo-500 align-text-bottom after:absolute after:inset-y-0 after:-inset-x-1 after:content-[''] hover:bg-indigo-600 dark:bg-indigo-400 ${
+          dragging === side ? "ring-2 ring-indigo-400" : ""
+        }`}
+      />
+    );
+  };
 
   const canLoadMore = win.rangeFrom > 0 || win.rangeTo < win.totalChunks - 1;
 
   return (
     <div className="flex flex-col gap-2">
       <span className="text-zinc-500">
-        chunk #{win.testPosition} of {win.totalChunks} · window #{win.rangeFrom}–#{win.rangeTo} ·{" "}
+        chunk #{win.testPosition} of {win.totalChunks} · viewing window #{win.rangeFrom}–#{win.rangeTo} ·{" "}
         {tokenCount} tokens. Neighbors are frozen; this chunk’s exclusive zone is tokens{" "}
         {exclusive.tokenStart}–{exclusive.tokenEnd}.
       </span>
@@ -1204,21 +1346,24 @@ function ChunkBoundaryLab({
         )}
       </div>
 
-      <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded border border-zinc-200 bg-zinc-50 p-2 font-mono leading-relaxed dark:border-zinc-800 dark:bg-zinc-900/40">
-        {segments.map((seg, i) => (
-          <span
-            key={i}
-            className={
-              seg.kind === "sel"
-                ? "bg-indigo-200/70 text-zinc-900 dark:bg-indigo-500/30 dark:text-zinc-100"
-                : seg.kind === "gap"
-                  ? "bg-red-200/70 text-zinc-900 dark:bg-red-500/30 dark:text-zinc-100"
-                  : "text-zinc-400"
-            }
-          >
-            {seg.text}
-          </span>
-        ))}
+      <pre
+        className={`max-h-56 overflow-auto whitespace-pre-wrap rounded border border-zinc-200 bg-zinc-50 p-2 font-mono leading-relaxed dark:border-zinc-800 dark:bg-zinc-900/40 ${
+          dragging ? "cursor-col-resize select-none" : ""
+        }`}
+      >
+        {validSel ? (
+          <>
+            {bands(0, sStart)}
+            {handle("start")}
+            <span data-cs={sStart} className={selClass}>
+              {text.slice(sStart, sEnd)}
+            </span>
+            {handle("end")}
+            {bands(sEnd, text.length)}
+          </>
+        ) : (
+          bands(0, text.length)
+        )}
       </pre>
 
       <div className="flex items-center gap-3 text-zinc-500">
@@ -1227,6 +1372,7 @@ function ChunkBoundaryLab({
           <span className="rounded bg-red-200/70 px-1 dark:bg-red-500/30">gap</span>{" "}
           <span className="text-zinc-400">frozen neighbor</span>
         </span>
+        <span className="text-zinc-400">Drag the indigo borders to resize (snaps to tokens).</span>
         {canLoadMore && (
           <button
             type="button"
