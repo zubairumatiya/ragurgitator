@@ -41,6 +41,7 @@ export type QuestionDetail = {
   questionId: string;
   question: string;
   source: string;
+  difficulty: string | null; // 'easy'|'medium'|'hard' for graded synthetic; null otherwise
   documentId: string;
   fileName: string;
   sourceChunkId: string; // the labeled chunk — questions are grouped by this on /eval
@@ -152,15 +153,16 @@ export async function insertQuestionWithLabel(args: {
   expectedAnswer: string | null;
   source?: "generated" | "manual";
   generatorModel: string | null;
+  difficulty?: string | null; // graded synthetic only; null for manual / default-generated
 }): Promise<void> {
   const source = args.source ?? "generated";
   await sql.begin(async (tx) => {
     const [q] = await tx<{ id: string }[]>`
       insert into eval_questions
-        (document_id, question, expected_answer, source, generator_model)
+        (document_id, question, expected_answer, source, generator_model, difficulty)
       values
         (${args.documentId}, ${args.question}, ${args.expectedAnswer},
-         ${source}, ${args.generatorModel})
+         ${source}, ${args.generatorModel}, ${args.difficulty ?? null})
       returning id
     `;
     await tx`
@@ -208,6 +210,37 @@ export async function addManualQuestion(
     generatorModel: null,
   });
   return true;
+}
+
+// Resolve a chunk (under the active config) to the text + ids needed to author a
+// synthetic question for it on demand. Returns null when the chunk isn't part of
+// the active config's corpus (stale id, wrong config). Mirrors the resolution in
+// addManualQuestion but also returns the chunk text for the generator.
+export async function getChunkForGeneration(
+  chunkId: string,
+): Promise<{ text: string; documentId: string; documentEmbeddingId: string } | null> {
+  const table = await activeChunksTable();
+  if (!table) return null;
+
+  const [chunk] = await sql<
+    { text: string; document_id: string; document_embedding_id: string }[]
+  >`
+    select c.text, c.document_id, c.document_embedding_id
+    from ${sql(table)} c
+    join document_embeddings de on de.id = c.document_embedding_id
+    where c.id = ${chunkId}
+      and de.model = ${config.embeddingModel}
+      and de.chunk_size = ${config.chunkSize}
+      and de.chunk_overlap = ${config.chunkOverlap}
+    limit 1
+  `;
+  if (!chunk) return null;
+
+  return {
+    text: chunk.text,
+    documentId: chunk.document_id,
+    documentEmbeddingId: chunk.document_embedding_id,
+  };
 }
 
 // Questions (with a label under the active config) that have no fresh result —
@@ -817,6 +850,7 @@ export async function getSummary(): Promise<EvalSummary> {
         question_id: string;
         question: string;
         source: string;
+        difficulty: string | null;
         document_id: string;
         updated_at: Date;
         file_name: string;
@@ -847,6 +881,7 @@ export async function getSummary(): Promise<EvalSummary> {
         q.id as question_id,
         q.question,
         q.source,
+        q.difficulty,
         q.document_id,
         q.updated_at,
         d.file_name,
@@ -903,6 +938,7 @@ export async function getSummary(): Promise<EvalSummary> {
     questionId: r.question_id,
     question: r.question,
     source: r.source,
+    difficulty: r.difficulty,
     documentId: r.document_id,
     fileName: r.file_name,
     sourceChunkId: r.source_chunk_id,

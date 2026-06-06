@@ -14,7 +14,7 @@ import type {
   QuestionDetail,
   QuestionExplain,
 } from "@/lib/rag/evalStore";
-import type { ChunkWindow, EvalEvent, RechunkResult } from "@/lib/rag/eval";
+import type { ChunkWindow, Difficulty, EvalEvent, RechunkResult } from "@/lib/rag/eval";
 
 function pct(n: number | null): string {
   return n === null ? "—" : `${(n * 100).toFixed(1)}%`;
@@ -78,9 +78,12 @@ export function EvalDashboard() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [explains, setExplains] = useState<Record<string, ExplainState>>({});
 
-  // Inline "add a question" form: which chunk group it's open for, and its text.
+  // Inline "add a question" form: which chunk group it's open for, the synthetic
+  // vs. manual tab, the manual text, and which difficulty (if any) is generating.
   const [addingChunkId, setAddingChunkId] = useState<string | null>(null);
+  const [addMode, setAddMode] = useState<"synthetic" | "manual">("synthetic");
   const [addText, setAddText] = useState("");
+  const [genDifficulty, setGenDifficulty] = useState<Difficulty | null>(null);
 
   // Bump to re-fetch the summary (used after process / edit / delete / add). A
   // reload means questions/scores may have changed, so reset transient UI.
@@ -293,6 +296,31 @@ export function EvalDashboard() {
     }
   }
 
+  // Author one synthetic question for a chunk at the chosen difficulty. Like a
+  // manual add it lands unscored; the next run scores it. The LLM call runs
+  // server-side, so this can take a moment — the clicked button shows progress.
+  async function generateQuestion(chunkId: string, difficulty: Difficulty) {
+    setBusy(true);
+    setError(null);
+    setGenDifficulty(difficulty);
+    try {
+      const res = await fetch("/api/eval/questions/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chunkId, difficulty }),
+      });
+      if (!res.ok) {
+        const data = (await res.json()) as { error?: string };
+        setError(data.error ?? `Request failed (${res.status}).`);
+        return;
+      }
+      reload();
+    } finally {
+      setBusy(false);
+      setGenDifficulty(null);
+    }
+  }
+
   // Disable the actions when they'd be no-ops. "Process" generates questions for
   // chunks below target and scores unscored/edited ones; "Re-score" re-runs every
   // labeled question. While the summary is still loading we leave them enabled.
@@ -452,8 +480,21 @@ export function EvalDashboard() {
                               <Badge hit={q.hit} rank={q.foundRank} stale={q.stale} />
                             </div>
                             <div className="flex items-center justify-between gap-3 text-xs text-zinc-500">
-                              <span className="font-mono text-zinc-400">
-                                {q.source === "manual" ? "manual" : ""}
+                              <span className="flex items-center gap-1.5 font-mono text-zinc-400">
+                                {q.source === "manual" && <span>manual</span>}
+                                {q.difficulty && (
+                                  <span
+                                    className={
+                                      q.difficulty === "hard"
+                                        ? "rounded px-1 capitalize bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400"
+                                        : q.difficulty === "medium"
+                                          ? "rounded px-1 capitalize bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400"
+                                          : "rounded px-1 capitalize bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400"
+                                    }
+                                  >
+                                    {q.difficulty}
+                                  </span>
+                                )}
                               </span>
                               <span className="flex shrink-0 items-center gap-2">
                                 {editingId === q.questionId ? (
@@ -520,34 +561,71 @@ export function EvalDashboard() {
                         ))}
                       </ul>
 
-                      {/* Add a hand-written question to this chunk */}
+                      {/* Add a question — synthetic (LLM, graded) or hand-written */}
                       <div className="border-t border-zinc-200 px-3 py-2 dark:border-zinc-800">
                         {addingChunkId === group.chunkId ? (
-                          <div className="flex items-center gap-2">
-                            <input
-                              value={addText}
-                              onChange={(e) => setAddText(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") addQuestion(group.chunkId);
-                                if (e.key === "Escape") setAddingChunkId(null);
-                              }}
-                              placeholder="A question this chunk should answer…"
-                              className="flex-1 rounded border border-zinc-300 bg-transparent px-2 py-1 text-sm dark:border-zinc-700"
-                              autoFocus
-                            />
-                            <button
-                              onClick={() => addQuestion(group.chunkId)}
-                              disabled={busy || !addText.trim()}
-                              className="cursor-pointer text-xs font-medium text-zinc-700 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300"
-                            >
-                              Add
-                            </button>
-                            <button
-                              onClick={() => setAddingChunkId(null)}
-                              className="cursor-pointer text-xs hover:underline"
-                            >
-                              Cancel
-                            </button>
+                          <div className="flex flex-col gap-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex gap-2 text-xs">
+                                <ModeTab
+                                  active={addMode === "synthetic"}
+                                  onClick={() => setAddMode("synthetic")}
+                                >
+                                  Synthetic
+                                </ModeTab>
+                                <ModeTab
+                                  active={addMode === "manual"}
+                                  onClick={() => setAddMode("manual")}
+                                >
+                                  Manual
+                                </ModeTab>
+                              </div>
+                              <button
+                                onClick={() => setAddingChunkId(null)}
+                                className="cursor-pointer text-xs text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+                              >
+                                ✕
+                              </button>
+                            </div>
+
+                            {addMode === "synthetic" ? (
+                              <div className="flex flex-wrap items-center gap-2 text-xs">
+                                <span className="text-zinc-500">
+                                  Generate one question at:
+                                </span>
+                                {(["easy", "medium", "hard"] as const).map((d) => (
+                                  <button
+                                    key={d}
+                                    onClick={() => generateQuestion(group.chunkId, d)}
+                                    disabled={busy}
+                                    className="cursor-pointer rounded border border-zinc-300 px-2 py-0.5 font-medium capitalize text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                                  >
+                                    {genDifficulty === d ? "Generating…" : d}
+                                  </button>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-2">
+                                <input
+                                  value={addText}
+                                  onChange={(e) => setAddText(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") addQuestion(group.chunkId);
+                                    if (e.key === "Escape") setAddingChunkId(null);
+                                  }}
+                                  placeholder="A question this chunk should answer…"
+                                  className="flex-1 rounded border border-zinc-300 bg-transparent px-2 py-1 text-sm dark:border-zinc-700"
+                                  autoFocus
+                                />
+                                <button
+                                  onClick={() => addQuestion(group.chunkId)}
+                                  disabled={busy || !addText.trim()}
+                                  className="cursor-pointer text-xs font-medium text-zinc-700 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300"
+                                >
+                                  Add
+                                </button>
+                              </div>
+                            )}
                           </div>
                         ) : (
                           <button

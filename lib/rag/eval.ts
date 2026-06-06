@@ -25,6 +25,7 @@ import {
   chunksNeedingQuestions,
   createRunSnapshot,
   getCachedQueryEmbeddings,
+  getChunkForGeneration,
   getChunkWindow,
   getExperimentContext,
   getSummary,
@@ -57,6 +58,41 @@ export type EvalEvent =
   | { type: "error"; message: string };
 
 type Emit = (event: EvalEvent) => void;
+
+// On-demand synthetic questions can target a difficulty — a dial on how far the
+// question's wording drifts from the passage's surface form. Higher difficulty
+// means less lexical overlap, so retrieval is stress-tested with harder queries.
+export type Difficulty = "easy" | "medium" | "hard";
+
+// Per-difficulty steer, appended to the (per-chunk, uncached) user turn so the
+// static system prompt below stays a cache-stable prefix. Every level keeps the
+// answer uniquely grounded in this passage — otherwise a too-obscure "hard"
+// question could be better answered by another chunk and unfairly tank recall.
+function difficultyInstruction(difficulty: Difficulty): string {
+  switch (difficulty) {
+    case "easy":
+      return (
+        "Difficulty: EASY. Ask a direct, factual question. You may reuse the " +
+        "passage's key terms and nouns; the answer should be obvious to anyone " +
+        "who has read it."
+      );
+    case "medium":
+      return (
+        "Difficulty: MEDIUM. Rephrase entirely in your own words — avoid the " +
+        "passage's distinctive phrasing and prefer synonyms — but keep it a " +
+        "natural, direct question."
+      );
+    case "hard":
+      return (
+        "Difficulty: HARD. Ask indirectly or from a higher level of abstraction " +
+        '(e.g. an applied, "how would I…", or downstream-consequence angle). ' +
+        "Share no distinctive vocabulary with the passage and require the reader " +
+        "to connect concepts. The answer MUST still be found uniquely and " +
+        "completely within this passage — never answerable from general " +
+        "knowledge or from a different passage."
+      );
+  }
+}
 
 // Static across every chunk, so it can sit in a cached prefix. Kept deliberately
 // strict about NOT quoting the passage — verbatim questions make retrieval
@@ -100,7 +136,10 @@ type GeneratedQuestion = { question: string; expected_answer: string };
 async function authorQuestions(
   text: string,
   count: number,
+  difficulty?: Difficulty,
 ): Promise<GeneratedQuestion[]> {
+  // The difficulty steer (when set) leads the user turn; the passage follows.
+  const steer = difficulty ? `${difficultyInstruction(difficulty)}\n\n` : "";
   const response = await anthropicClient.messages.create({
     model: config.llmModel,
     // Scale headroom with the ask so a larger target can't truncate the JSON.
@@ -118,7 +157,7 @@ async function authorQuestions(
       {
         role: "user",
         content:
-          `Write exactly ${count} question(s) for this passage:\n\n${text}`,
+          `${steer}Write exactly ${count} question(s) for this passage:\n\n${text}`,
       },
     ],
   });
@@ -174,6 +213,33 @@ export async function generateMissingQuestions(emit: Emit = () => {}): Promise<n
 
   console.log(`[rag:eval] generated ${generated} question(s)`);
   return generated;
+}
+
+// Author one synthetic question for a single chunk at the requested difficulty
+// and persist it (source 'generated', unscored until the next run) — the
+// on-demand counterpart to the bulk generator above. Returns "not-found" when
+// the chunk isn't part of the active config, "empty" when the model returned no
+// usable question (truncation/refusal), else "ok".
+export async function generateQuestionForChunk(
+  chunkId: string,
+  difficulty: Difficulty,
+): Promise<"ok" | "not-found" | "empty"> {
+  const chunk = await getChunkForGeneration(chunkId);
+  if (!chunk) return "not-found";
+
+  const [q] = await authorQuestions(chunk.text, 1, difficulty);
+  if (!q || !q.question.trim()) return "empty";
+
+  await insertQuestionWithLabel({
+    documentId: chunk.documentId,
+    documentEmbeddingId: chunk.documentEmbeddingId,
+    sourceChunkId: chunkId,
+    question: q.question.trim(),
+    expectedAnswer: q.expected_answer?.trim() || null,
+    generatorModel: config.llmModel,
+    difficulty,
+  });
+  return "ok";
 }
 
 // Embed each question, vector-search, and record whether its labeled chunk landed in
