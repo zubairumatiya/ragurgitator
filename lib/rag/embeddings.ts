@@ -17,14 +17,20 @@ const MAX_BATCH = 128;
 
 // `document` and `query` nudge the vectors so questions align with the answers
 // that satisfy them — same model, just a hint about each text's role.
+//
+// `model` defaults to the active config model (the only one used at ingest/query
+// time). The per-chunk "try a different model" experiment passes an alternate
+// model to embed an ad-hoc candidate pool + queries for in-memory re-ranking —
+// never the live index (see lib/rag/eval.runModelTrial).
 async function embed(
   texts: string[],
   inputType: "document" | "query",
+  model: string = config.embeddingModel,
 ): Promise<number[][]> {
   const t0 = performance.now();
   const totalBatches = Math.ceil(texts.length / MAX_BATCH);
   console.log(
-    `[rag:embeddings] embedding ${texts.length} ${inputType}(s) in ${totalBatches} batch(es) of up to ${MAX_BATCH}`,
+    `[rag:embeddings] embedding ${texts.length} ${inputType}(s) with ${model} in ${totalBatches} batch(es) of up to ${MAX_BATCH}`,
   );
 
   const vectors: number[][] = [];
@@ -35,7 +41,7 @@ async function embed(
     const tBatch = performance.now();
     const response = await voyageClient.embed({
       input: batch,
-      model: config.embeddingModel,
+      model,
       inputType,
     });
 
@@ -62,12 +68,12 @@ async function embed(
   return vectors;
 }
 
-export function embedTexts(texts: string[]): Promise<number[][]> {
+export function embedTexts(texts: string[], model?: string): Promise<number[][]> {
   if (texts.length === 0) return Promise.resolve([]);
-  return embed(texts, "document");
+  return embed(texts, "document", model);
 }
 
-export async function embedQuery(text: string): Promise<number[]> {
-  const [vector] = await embed([text], "query");
+export async function embedQuery(text: string, model?: string): Promise<number[]> {
+  const [vector] = await embed([text], "query", model);
   return vector;
 }

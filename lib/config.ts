@@ -26,3 +26,20 @@ export const config = {
   // raise it if you self-host behind your own limit.
   maxUploadBytes: 4 * 1024 * 1024,
 } as const;
+
+// Alternate embedding models offered by the per-chunk "try a different model"
+// experiment (see lib/rag/eval.runModelTrial). This is an EPHEMERAL re-ranking
+// tool: these models are never ingested into chunks_<model>_<dim> tables — the
+// experiment re-embeds a small candidate pool in memory and ranks by cosine, so
+// any output dimension works and no migration is needed to add one here.
+//
+// Excludes the active embeddingModel (it's the baseline) and voyage-context-3
+// (a different, contextualized embedding API that can't drop into embed()).
+export const altEmbeddingModels: { id: string; label: string }[] = [
+  { id: "voyage-4-large", label: "voyage-4-large" },
+  { id: "voyage-4", label: "voyage-4" },
+  { id: "voyage-code-3", label: "voyage-code-3" },
+  { id: "voyage-code-2", label: "voyage-code-2" },
+  { id: "voyage-finance-2", label: "voyage-finance-2" },
+  { id: "voyage-law-2", label: "voyage-law-2" },
+];

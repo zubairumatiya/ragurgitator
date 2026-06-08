@@ -780,6 +780,282 @@ export async function rankWithSubstitutedChunk(args: {
   }));
 }
 
+// --- "Try a different model" experiment (see lib/rag/eval.runModelTrial) ------
+// Per-chunk model A/B: re-rank the chunk's questions against a small CANDIDATE
+// POOL (the chunk + its questions' top-k + optional hand-picked corpus chunks)
+// re-embedded under an alternate model. Ranking happens in JS (eval.ts); these
+// helpers only read the corpus and persist the runs the user chooses to keep.
+
+export type ModelTrialChunk = {
+  chunkId: string;
+  text: string;
+  fileName: string;
+  position: number | null;
+  documentEmbeddingId: string; // scopes a saved trial to the active config
+};
+
+export type ModelTrialQuestion = {
+  questionId: string;
+  question: string;
+  storedHit: boolean | null; // latest full-corpus result; null if unscored
+  storedRank: number | null; // found_rank; null on a miss or when unscored
+  retrievedIds: string[]; // latest top-k ids — the candidate-pool seed; [] if unscored
+};
+
+export type PoolChunk = {
+  chunkId: string;
+  fileName: string;
+  position: number | null;
+  text: string;
+};
+
+export type CorpusChunkListItem = {
+  chunkId: string;
+  fileName: string;
+  position: number | null;
+  preview: string;
+};
+
+// One question's before/after in a model trial: its stored full-corpus result
+// vs. its rank within the re-embedded pool under the trial model. This is the
+// persisted per-question shape (eval_model_trials.results jsonb).
+export type TrialQuestionOutcome = {
+  questionId: string;
+  question: string;
+  storedHit: boolean | null;
+  storedRank: number | null;
+  newHit: boolean;
+  newRank: number;
+  newScore: number;
+};
+
+export type SavedModelTrial = {
+  id: string;
+  baselineModel: string;
+  trialModel: string;
+  k: number;
+  poolSize: number;
+  questionCount: number;
+  hitCount: number; // hits under the trial model (in-pool)
+  storedHitCount: number; // baseline hits (stored full-corpus result)
+  results: TrialQuestionOutcome[];
+  createdAt: number;
+};
+
+// The chunk under test, resolved to the bits a trial needs. Null when the chunk
+// isn't part of the active config's corpus (stale id / wrong config).
+export async function getModelTrialChunk(
+  chunkId: string,
+): Promise<ModelTrialChunk | null> {
+  const table = await activeChunksTable();
+  if (!table) return null;
+
+  const [row] = await sql<
+    {
+      id: string;
+      text: string;
+      position: number | null;
+      document_embedding_id: string;
+      file_name: string;
+    }[]
+  >`
+    select c.id, c.text, c.position, c.document_embedding_id, d.file_name
+    from ${sql(table)} c
+    join documents d on d.id = c.document_id
+    join document_embeddings de on de.id = c.document_embedding_id
+    where c.id = ${chunkId}
+      and de.model = ${config.embeddingModel}
+      and de.chunk_size = ${config.chunkSize}
+      and de.chunk_overlap = ${config.chunkOverlap}
+    limit 1
+  `;
+  if (!row) return null;
+  return {
+    chunkId: row.id,
+    text: row.text,
+    fileName: row.file_name,
+    position: row.position,
+    documentEmbeddingId: row.document_embedding_id,
+  };
+}
+
+// The chunk's questions plus each one's latest stored result (the full-corpus
+// baseline) and the top-k ids it retrieved (which seed the candidate pool).
+export async function getModelTrialQuestions(
+  chunkId: string,
+): Promise<ModelTrialQuestion[]> {
+  const rows = await sql<
+    {
+      question_id: string;
+      question: string;
+      hit: boolean | null;
+      found_rank: number | null;
+      retrieved_ids: string[] | null;
+    }[]
+  >`
+    with active_labels as (
+      select l.id as label_id, l.eval_question_id
+      from eval_labels l
+      join document_embeddings de on de.id = l.document_embedding_id
+      where l.source_chunk_id = ${chunkId}
+        and de.model = ${config.embeddingModel}
+        and de.chunk_size = ${config.chunkSize}
+        and de.chunk_overlap = ${config.chunkOverlap}
+    ),
+    latest as (
+      select distinct on (r.eval_question_id)
+        r.eval_question_id, r.hit, r.found_rank, r.retrieved_ids
+      from eval_results r
+      join active_labels al on al.label_id = r.eval_label_id
+      order by r.eval_question_id, r.scored_at desc
+    )
+    select
+      q.id as question_id,
+      q.question,
+      lt.hit,
+      lt.found_rank,
+      lt.retrieved_ids
+    from eval_questions q
+    join active_labels al on al.eval_question_id = q.id
+    left join latest lt on lt.eval_question_id = q.id
+    order by q.created_at
+  `;
+
+  return rows.map((r) => ({
+    questionId: r.question_id,
+    question: r.question,
+    storedHit: r.hit,
+    storedRank: r.found_rank,
+    retrievedIds: r.retrieved_ids ?? [],
+  }));
+}
+
+// Full text for a set of chunk ids under the active config (the pool to embed).
+// Silently drops ids not in the active corpus, so a stale selection just yields
+// a smaller pool rather than an error.
+export async function getChunksByIds(ids: string[]): Promise<PoolChunk[]> {
+  if (ids.length === 0) return [];
+  const table = await activeChunksTable();
+  if (!table) return [];
+
+  const rows = await sql<
+    { id: string; position: number | null; text: string; file_name: string }[]
+  >`
+    select c.id, c.position, c.text, d.file_name
+    from ${sql(table)} c
+    join documents d on d.id = c.document_id
+    join document_embeddings de on de.id = c.document_embedding_id
+    where c.id = any(${ids}::uuid[])
+      and de.model = ${config.embeddingModel}
+      and de.chunk_size = ${config.chunkSize}
+      and de.chunk_overlap = ${config.chunkOverlap}
+  `;
+  return rows.map((r) => ({
+    chunkId: r.id,
+    fileName: r.file_name,
+    position: r.position,
+    text: r.text,
+  }));
+}
+
+// The rest of the active-config corpus (excluding the given ids), as previews,
+// for the trial's collapsed "add other chunks" picker.
+export async function getCorpusChunkList(
+  excludeIds: string[],
+): Promise<CorpusChunkListItem[]> {
+  const table = await activeChunksTable();
+  if (!table) return [];
+
+  // any('{}') matches nothing, so an empty exclude list returns the whole corpus.
+  const rows = await sql<
+    { id: string; position: number | null; preview: string; file_name: string }[]
+  >`
+    select c.id, c.position, left(c.text, 200) as preview, d.file_name
+    from ${sql(table)} c
+    join documents d on d.id = c.document_id
+    join document_embeddings de on de.id = c.document_embedding_id
+    where de.model = ${config.embeddingModel}
+      and de.chunk_size = ${config.chunkSize}
+      and de.chunk_overlap = ${config.chunkOverlap}
+      and not (c.id = any(${excludeIds}::uuid[]))
+    order by d.file_name, c.position
+  `;
+  return rows.map((r) => ({
+    chunkId: r.id,
+    fileName: r.file_name,
+    position: r.position,
+    preview: r.preview,
+  }));
+}
+
+// Persist a kept trial as a frozen snapshot (mirrors createRunSnapshot). Returns
+// the new row's id + timestamp so the caller can render it without a re-fetch.
+export async function insertModelTrial(args: {
+  sourceChunkId: string;
+  documentEmbeddingId: string;
+  baselineModel: string;
+  trialModel: string;
+  k: number;
+  poolChunkIds: string[];
+  questionCount: number;
+  hitCount: number;
+  storedHitCount: number;
+  results: TrialQuestionOutcome[];
+}): Promise<{ id: string; createdAt: number }> {
+  const [row] = await sql<{ id: string; created_at: Date }[]>`
+    insert into eval_model_trials
+      (source_chunk_id, document_embedding_id, baseline_model, trial_model, k,
+       pool_chunk_ids, question_count, hit_count, stored_hit_count, results)
+    values
+      (${args.sourceChunkId}, ${args.documentEmbeddingId}, ${args.baselineModel},
+       ${args.trialModel}, ${args.k}, ${args.poolChunkIds}::uuid[],
+       ${args.questionCount}, ${args.hitCount}, ${args.storedHitCount},
+       ${sql.json(args.results)})
+    returning id, created_at
+  `;
+  return { id: row.id, createdAt: row.created_at.getTime() };
+}
+
+export async function listModelTrials(chunkId: string): Promise<SavedModelTrial[]> {
+  const rows = await sql<
+    {
+      id: string;
+      baseline_model: string;
+      trial_model: string;
+      k: number;
+      pool_chunk_ids: string[];
+      question_count: number;
+      hit_count: number;
+      stored_hit_count: number;
+      results: TrialQuestionOutcome[];
+      created_at: Date;
+    }[]
+  >`
+    select id, baseline_model, trial_model, k, pool_chunk_ids,
+           question_count, hit_count, stored_hit_count, results, created_at
+    from eval_model_trials
+    where source_chunk_id = ${chunkId}
+    order by created_at desc
+  `;
+  return rows.map((r) => ({
+    id: r.id,
+    baselineModel: r.baseline_model,
+    trialModel: r.trial_model,
+    k: r.k,
+    poolSize: r.pool_chunk_ids.length,
+    questionCount: r.question_count,
+    hitCount: r.hit_count,
+    storedHitCount: r.stored_hit_count,
+    results: r.results,
+    createdAt: r.created_at.getTime(),
+  }));
+}
+
+export async function deleteModelTrial(id: string): Promise<boolean> {
+  const rows = await sql`delete from eval_model_trials where id = ${id} returning id`;
+  return rows.length > 0;
+}
+
 export async function insertResults(rows: ResultInsert[]): Promise<void> {
   if (rows.length === 0) return;
   await sql.begin(async (tx) => {

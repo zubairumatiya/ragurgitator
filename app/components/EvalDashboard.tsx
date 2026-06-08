@@ -13,8 +13,17 @@ import type {
   ExplainChunk,
   QuestionDetail,
   QuestionExplain,
+  SavedModelTrial,
+  TrialQuestionOutcome,
 } from "@/lib/rag/evalStore";
-import type { ChunkWindow, Difficulty, EvalEvent, RechunkResult } from "@/lib/rag/eval";
+import type {
+  ChunkWindow,
+  Difficulty,
+  EvalEvent,
+  ModelTrialContext,
+  ModelTrialResult,
+  RechunkResult,
+} from "@/lib/rag/eval";
 
 function pct(n: number | null): string {
   return n === null ? "—" : `${(n * 100).toFixed(1)}%`;
@@ -639,6 +648,9 @@ export function EvalDashboard() {
                           </button>
                         )}
                       </div>
+
+                      {/* Ephemeral per-chunk model A/B; saved trials persist */}
+                      <ModelTrial chunkId={group.chunkId} />
                     </div>
                   );
                 })}
@@ -1564,5 +1576,405 @@ function RunProgress({ progress, k }: { progress: EvalProgress; k: number }) {
         />
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Per-chunk "try a different model" experiment. Re-ranks this chunk's questions
+// against a small candidate pool — the chunk (always in) + its questions' top-k
+// + any corpus chunks you add — re-embedded under an alternate model. Ephemeral
+// by default; "Save result" persists a snapshot rendered under "Models tried".
+// Each question's pool rank is shown against its stored full-corpus result.
+// ---------------------------------------------------------------------------
+type TrialState =
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ready"; ctx: ModelTrialContext };
+
+function ModelTrial({ chunkId }: { chunkId: string }) {
+  const [open, setOpen] = useState(false);
+  const [state, setState] = useState<TrialState | null>(null);
+
+  const [model, setModel] = useState("");
+  // Pool chunk ids the user has ticked (the chunk itself is always included
+  // server-side). Seeded with the auto pool — the questions' top-k — on load.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [showCorpus, setShowCorpus] = useState(false);
+
+  const [running, setRunning] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
+  const [result, setResult] = useState<ModelTrialResult | null>(null);
+  const [saved, setSaved] = useState<SavedModelTrial[]>([]);
+
+  // Lazy-load the trial context the first time the panel opens.
+  function toggleOpen() {
+    const opening = !open;
+    setOpen(opening);
+    if (!opening || state) return;
+    setState({ status: "loading" });
+    fetch(`/api/eval/chunks/${chunkId}/try-model`)
+      .then(async (res) => {
+        const data = (await res.json()) as ModelTrialContext | { error: string };
+        if (!res.ok || "error" in data) {
+          throw new Error("error" in data ? data.error : `Request failed (${res.status}).`);
+        }
+        setState({ status: "ready", ctx: data });
+        setModel(data.models[0]?.id ?? "");
+        setSelected(new Set(data.autoPool.map((c) => c.chunkId)));
+        setSaved(data.savedTrials);
+      })
+      .catch((err: unknown) => {
+        setState({
+          status: "error",
+          message: err instanceof Error ? err.message : "Failed to load.",
+        });
+      });
+  }
+
+  function toggleChunk(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function run(save: boolean) {
+    if (!model) return;
+    if (save) setSaving(true);
+    else setRunning(true);
+    setRunError(null);
+    try {
+      const res = await fetch(`/api/eval/chunks/${chunkId}/try-model`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model, poolChunkIds: [...selected], save }),
+      });
+      const data = (await res.json()) as
+        | { result: ModelTrialResult; savedTrial: SavedModelTrial | null }
+        | { error: string };
+      if (!res.ok || "error" in data) {
+        setRunError("error" in data ? data.error : `Request failed (${res.status}).`);
+        return;
+      }
+      setResult(data.result);
+      const st = data.savedTrial;
+      if (st) setSaved((s) => [st, ...s]);
+    } catch (err) {
+      setRunError(err instanceof Error ? err.message : "Network error.");
+    } finally {
+      setSaving(false);
+      setRunning(false);
+    }
+  }
+
+  async function removeSaved(id: string) {
+    setSaved((s) => s.filter((t) => t.id !== id)); // optimistic
+    await fetch(`/api/eval/chunks/${chunkId}/try-model?trialId=${id}`, {
+      method: "DELETE",
+    }).catch(() => {});
+  }
+
+  if (!open) {
+    return (
+      <div className="border-t border-zinc-200 px-3 py-2 dark:border-zinc-800">
+        <button
+          onClick={toggleOpen}
+          className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-700 hover:underline dark:hover:text-zinc-300"
+        >
+          Try a different model
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="border-t border-zinc-200 px-3 py-2 dark:border-zinc-800">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+          Try a different model
+        </span>
+        <button
+          onClick={toggleOpen}
+          className="cursor-pointer text-xs text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+        >
+          ✕
+        </button>
+      </div>
+
+      {(!state || state.status === "loading") && (
+        <p className="mt-2 text-xs text-zinc-400">Loading…</p>
+      )}
+      {state?.status === "error" && (
+        <p className="mt-2 text-xs text-red-600 dark:text-red-400">{state.message}</p>
+      )}
+
+      {state?.status === "ready" && (
+        <div className="mt-2 flex flex-col gap-3 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              className="rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
+            >
+              {state.ctx.models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+            <span className="text-zinc-400">
+              vs baseline <span className="font-mono">{state.ctx.baselineModel}</span>
+            </span>
+            <button
+              onClick={() => run(false)}
+              disabled={running || saving}
+              className="rounded-md bg-black px-3 py-1 font-medium text-white cursor-pointer transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
+            >
+              {running ? "Running…" : "Run"}
+            </button>
+          </div>
+
+          {/* Candidate pool: the chunk (always), its questions' top-k, + corpus */}
+          <div className="flex flex-col gap-1">
+            <span className="font-medium uppercase tracking-wide text-zinc-500">
+              Candidate pool
+            </span>
+            <div className="flex flex-wrap items-center gap-1.5 rounded border border-green-300 bg-green-50 px-2 py-1 dark:border-green-900/50 dark:bg-green-900/15">
+              <span className="font-medium text-green-700 dark:text-green-400">
+                ✓ test chunk
+              </span>
+              <span className="font-mono text-zinc-500">
+                {state.ctx.chunk.fileName} · #{state.ctx.chunk.position ?? "?"}
+              </span>
+              <span className="text-zinc-400">(always included)</span>
+            </div>
+
+            {state.ctx.autoPool.length > 0 ? (
+              <ul className="flex flex-col gap-0.5">
+                {state.ctx.autoPool.map((c) => (
+                  <PoolRow
+                    key={c.chunkId}
+                    label={`${c.fileName} · #${c.position ?? "?"}`}
+                    preview={c.text}
+                    checked={selected.has(c.chunkId)}
+                    onToggle={() => toggleChunk(c.chunkId)}
+                  />
+                ))}
+              </ul>
+            ) : (
+              <span className="text-zinc-400">
+                No top-k candidates yet (questions unscored) — add corpus chunks below.
+              </span>
+            )}
+
+            {state.ctx.restCorpus.length > 0 && (
+              <div className="mt-1 flex flex-col gap-0.5">
+                <button
+                  onClick={() => setShowCorpus((v) => !v)}
+                  className="cursor-pointer self-start text-zinc-500 hover:underline"
+                >
+                  {showCorpus ? "▾" : "▸"} Rest of corpus ({state.ctx.restCorpus.length})
+                </button>
+                {showCorpus && (
+                  <ul className="flex max-h-48 flex-col gap-0.5 overflow-auto rounded border border-zinc-200 p-1 dark:border-zinc-800">
+                    {state.ctx.restCorpus.map((c) => (
+                      <PoolRow
+                        key={c.chunkId}
+                        label={`${c.fileName} · #${c.position ?? "?"}`}
+                        preview={c.preview}
+                        checked={selected.has(c.chunkId)}
+                        onToggle={() => toggleChunk(c.chunkId)}
+                      />
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
+
+          {runError && <span className="text-red-600 dark:text-red-400">{runError}</span>}
+
+          {result && (
+            <div className="flex flex-col gap-2">
+              <TrialOutcomes
+                model={result.model}
+                baselineModel={result.baselineModel}
+                poolSize={result.poolSize}
+                questionCount={result.questionCount}
+                hitCount={result.hitCount}
+                storedHitCount={result.storedHitCount}
+                questions={result.questions}
+              />
+              <button
+                onClick={() => run(true)}
+                disabled={saving || running}
+                className="self-start cursor-pointer rounded border border-zinc-300 px-2 py-1 font-medium text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                {saving ? "Saving…" : "Save result"}
+              </button>
+            </div>
+          )}
+
+          {saved.length > 0 && (
+            <div className="flex flex-col gap-1">
+              <span className="font-medium uppercase tracking-wide text-zinc-500">
+                Models tried
+              </span>
+              <ul className="flex flex-col gap-1">
+                {saved.map((t) => (
+                  <SavedTrialRow key={t.id} trial={t} onDelete={() => removeSaved(t.id)} />
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One selectable pool chunk: a checkbox plus an expandable text/preview.
+function PoolRow({
+  label,
+  preview,
+  checked,
+  onToggle,
+}: {
+  label: string;
+  preview: string;
+  checked: boolean;
+  onToggle: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <li className="flex flex-col gap-0.5">
+      <div className="flex items-center gap-1.5">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={onToggle}
+          className="cursor-pointer"
+        />
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex cursor-pointer items-center gap-1 text-left text-zinc-500 hover:underline"
+        >
+          <span className="text-zinc-400">{open ? "▾" : "▸"}</span>
+          <span className="font-mono">{label}</span>
+        </button>
+      </div>
+      {open && <ChunkText text={preview} />}
+    </li>
+  );
+}
+
+// Before→after for a trial: the chunk's baseline hits (stored full-corpus result)
+// vs. its in-pool hits under the trial model, then each question's stored result
+// next to its pool rank. Shared by the live result and a saved trial's expansion.
+function TrialOutcomes({
+  model,
+  baselineModel,
+  poolSize,
+  questionCount,
+  hitCount,
+  storedHitCount,
+  questions,
+}: {
+  model: string;
+  baselineModel: string;
+  poolSize: number;
+  questionCount: number;
+  hitCount: number;
+  storedHitCount: number;
+  questions: TrialQuestionOutcome[];
+}) {
+  return (
+    <div className="flex flex-col gap-2 text-xs">
+      <span className="text-zinc-600 dark:text-zinc-400">
+        <span className="font-mono font-medium">{model}</span>
+        <span className="ml-1 text-zinc-400">
+          ranked within candidate pool ({poolSize} chunks)
+        </span>
+      </span>
+      <span className="text-zinc-500">
+        baseline <span className="font-mono">{baselineModel}</span> (full corpus):{" "}
+        {storedHitCount}/{questionCount}
+        <span className="mx-1 text-zinc-400">→</span>
+        <span className="font-medium">
+          {model}: {hitCount}/{questionCount} hit{questionCount === 1 ? "" : "s"}
+        </span>
+      </span>
+      <ul className="flex flex-col gap-1.5">
+        {questions.map((q) => (
+          <li key={q.questionId} className="flex flex-col gap-0.5">
+            <span className="text-zinc-700 dark:text-zinc-300">{q.question}</span>
+            <span className="flex flex-wrap items-center gap-1.5 text-zinc-500">
+              full corpus
+              <Badge hit={q.storedHit} rank={q.storedRank} stale={false} />
+              <span className="text-zinc-400">→ pool</span>
+              <Badge hit={q.newHit} rank={q.newRank} stale={false} />
+              <span className="text-zinc-400">sim {q.newScore.toFixed(3)}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// One saved trial under "Models tried": a collapsed headline that expands to the
+// per-question before→after, with a delete button.
+function SavedTrialRow({
+  trial,
+  onDelete,
+}: {
+  trial: SavedModelTrial;
+  onDelete: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <li className="flex flex-col gap-1 rounded border border-zinc-200 p-2 dark:border-zinc-800">
+      <div className="flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex flex-wrap items-center gap-1.5 text-left hover:underline"
+        >
+          <span className="text-zinc-400">{open ? "▾" : "▸"}</span>
+          <span className="font-mono font-medium text-zinc-700 dark:text-zinc-300">
+            {trial.trialModel}
+          </span>
+          <span className="text-zinc-500">
+            {trial.hitCount}/{trial.questionCount} hit{trial.questionCount === 1 ? "" : "s"} ·
+            pool {trial.poolSize}
+          </span>
+          <span className="text-zinc-400">
+            {new Date(trial.createdAt).toLocaleString()}
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={onDelete}
+          className="shrink-0 cursor-pointer text-zinc-400 hover:text-red-600 dark:hover:text-red-400"
+        >
+          ✕
+        </button>
+      </div>
+      {open && (
+        <TrialOutcomes
+          model={trial.trialModel}
+          baselineModel={trial.baselineModel}
+          poolSize={trial.poolSize}
+          questionCount={trial.questionCount}
+          hitCount={trial.hitCount}
+          storedHitCount={trial.storedHitCount}
+          questions={trial.results}
+        />
+      )}
+    </li>
   );
 }

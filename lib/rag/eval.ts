@@ -14,7 +14,7 @@
 //   - Retrieval searches the whole model+dim chunks table (all docs/configs that
 //     share it); fine with today's single fixed config.
 // ---------------------------------------------------------------------------
-import { config } from "@/lib/config";
+import { altEmbeddingModels, config } from "@/lib/config";
 import { anthropicClient } from "@/lib/llm/client";
 import { splitText, tokenizeWithOffsets } from "@/lib/rag/chunker";
 import { embedQuery, embedTexts } from "@/lib/rag/embeddings";
@@ -26,17 +26,27 @@ import {
   createRunSnapshot,
   getCachedQueryEmbeddings,
   getChunkForGeneration,
+  getChunksByIds,
   getChunkWindow,
+  getCorpusChunkList,
   getExperimentContext,
+  getModelTrialChunk,
+  getModelTrialQuestions,
   getSummary,
+  insertModelTrial,
   insertQuestionWithLabel,
   insertResults,
+  listModelTrials,
   putCachedQueryEmbedding,
   questionsNeedingScoring,
   rankWithSubstitutedChunk,
+  type CorpusChunkListItem,
   type ExperimentContext,
+  type PoolChunk,
   type QuestionToScore,
   type ResultInsert,
+  type SavedModelTrial,
+  type TrialQuestionOutcome,
 } from "@/lib/rag/evalStore";
 
 // Progress events streamed to the client during a process/rescore run. The
@@ -580,4 +590,241 @@ export async function buildChunkWindow(
     },
     testDefault: { tokenStart: test.tokenStart, tokenEnd: test.tokenEnd },
   };
+}
+
+// ---------------------------------------------------------------------------
+// "Try a different model" experiment: an ephemeral per-chunk model A/B.
+//
+// Re-rank ONE labeled chunk's questions against a small CANDIDATE POOL — the
+// chunk itself, the top-k chunks its questions already retrieved, and any corpus
+// chunks the user hand-picked — all re-embedded under an ALTERNATE model. For
+// each question we cosine-rank the ground-truth chunk within the pool and check
+// the top-k. Nothing touches the live index; results are ephemeral unless the
+// user saves a snapshot (eval_model_trials).
+//
+// This is a LOCAL APPROXIMATION: the new-model rank is WITHIN the pool, not the
+// full corpus, and it's compared against the question's STORED full-corpus
+// result (the baseline). The pool is far smaller than the corpus, so read a
+// rescued miss as "this model re-orders the candidates better," not as true
+// recall. We re-embed in memory and rank by cosine (not pgvector), so the trial
+// is decoupled from the chunks_<model>_<dim> tables and any output dimension
+// works.
+// ---------------------------------------------------------------------------
+
+// What the trial UI needs to set up a run: the chunk, its questions (with the
+// stored baseline), the auto pool (top-k union), and the rest of the corpus to
+// pick from — plus the models on offer and any saved trials for this chunk.
+export type ModelTrialContext = {
+  models: { id: string; label: string }[];
+  baselineModel: string;
+  k: number;
+  chunk: { chunkId: string; fileName: string; position: number | null; text: string };
+  questions: {
+    questionId: string;
+    question: string;
+    storedHit: boolean | null;
+    storedRank: number | null;
+  }[];
+  autoPool: PoolChunk[]; // top-k union across the chunk's questions, minus the chunk
+  restCorpus: CorpusChunkListItem[]; // everything else, for the manual picker
+  savedTrials: SavedModelTrial[];
+};
+
+// Result of one trial run, returned to the client (ephemeral until saved).
+export type ModelTrialResult = {
+  model: string;
+  baselineModel: string;
+  k: number;
+  poolSize: number;
+  questionCount: number;
+  hitCount: number; // hits under the trial model (in-pool)
+  storedHitCount: number; // baseline hits (stored full-corpus result)
+  recall: number | null;
+  questions: TrialQuestionOutcome[];
+};
+
+const uniq = (ids: string[]): string[] => [...new Set(ids)];
+
+// Cosine similarity. Voyage vectors are already unit-length (so this reduces to
+// a dot product), but normalize defensively so a non-unit vector can't skew a
+// ranking. Pool + query are always the SAME model here, so dimensions match.
+function cosine(a: number[], b: number[]): number {
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  const denom = Math.sqrt(na) * Math.sqrt(nb);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+// Session-scoped embedding cache for trials, keyed by (model, role, text). The
+// pool is tiny so re-embedding is cheap, but this makes a repeat run of the same
+// model (e.g. after toggling one pool chunk) or a "Save" re-run effectively free.
+// In-memory only — it dies with the server process and never persists.
+const trialEmbedCache = new Map<string, number[]>();
+const cacheKey = (model: string, role: "document" | "query", text: string) =>
+  `${model} ${role} ${text}`;
+
+async function embedDocsCached(texts: string[], model: string): Promise<number[][]> {
+  const missing = uniq(texts.filter((t) => !trialEmbedCache.has(cacheKey(model, "document", t))));
+  if (missing.length > 0) {
+    const vecs = await embedTexts(missing, model);
+    missing.forEach((t, i) => trialEmbedCache.set(cacheKey(model, "document", t), vecs[i]));
+  }
+  return texts.map((t) => trialEmbedCache.get(cacheKey(model, "document", t))!);
+}
+
+async function embedQueryCached(text: string, model: string): Promise<number[]> {
+  const key = cacheKey(model, "query", text);
+  let vec = trialEmbedCache.get(key);
+  if (!vec) {
+    vec = await embedQuery(text, model);
+    trialEmbedCache.set(key, vec);
+  }
+  return vec;
+}
+
+// Assemble the context the trial UI renders. Null when the chunk isn't part of
+// the active config's corpus (stale id / wrong config).
+export async function getModelTrialContext(
+  chunkId: string,
+): Promise<ModelTrialContext | null> {
+  const chunk = await getModelTrialChunk(chunkId);
+  if (!chunk) return null;
+
+  const questions = await getModelTrialQuestions(chunkId);
+  // Auto pool = the distractors the chunk's questions already surfaced (the chunk
+  // itself is always added at run time, so drop it here to avoid a duplicate).
+  const autoIds = uniq(questions.flatMap((q) => q.retrievedIds)).filter((id) => id !== chunkId);
+
+  const [autoPool, restCorpus, savedTrials] = await Promise.all([
+    getChunksByIds(autoIds),
+    getCorpusChunkList([chunkId, ...autoIds]),
+    listModelTrials(chunkId),
+  ]);
+
+  return {
+    models: altEmbeddingModels,
+    baselineModel: config.embeddingModel,
+    k: config.topK,
+    chunk: {
+      chunkId: chunk.chunkId,
+      fileName: chunk.fileName,
+      position: chunk.position,
+      text: chunk.text,
+    },
+    questions: questions.map((q) => ({
+      questionId: q.questionId,
+      question: q.question,
+      storedHit: q.storedHit,
+      storedRank: q.storedRank,
+    })),
+    autoPool,
+    restCorpus,
+    savedTrials,
+  };
+}
+
+// Run the trial: embed the pool + each question under `model`, cosine-rank the
+// chunk within the pool per question, and (optionally) persist the snapshot.
+// Returns null when the chunk has no questions / isn't under the active config;
+// throws on an unknown model.
+export async function runModelTrial(
+  chunkId: string,
+  model: string,
+  poolChunkIds: string[],
+  save: boolean,
+): Promise<{ result: ModelTrialResult; savedTrial: SavedModelTrial | null } | null> {
+  if (!altEmbeddingModels.some((m) => m.id === model)) {
+    throw new Error(`Unknown model "${model}".`);
+  }
+
+  const t0 = performance.now();
+  const chunk = await getModelTrialChunk(chunkId);
+  if (!chunk) return null;
+  const questions = await getModelTrialQuestions(chunkId);
+  if (questions.length === 0) return null;
+
+  // The chunk is always in the pool (it's the ground truth we're ranking).
+  const poolIds = uniq([chunkId, ...poolChunkIds]);
+  const poolChunks = await getChunksByIds(poolIds);
+
+  const poolVectors = await embedDocsCached(poolChunks.map((c) => c.text), model);
+  const vecById = new Map(poolChunks.map((c, i) => [c.chunkId, poolVectors[i]]));
+  const testVec = vecById.get(chunkId);
+  if (!testVec) return null; // chunk dropped out of the active corpus mid-run
+
+  const k = config.topK;
+  const questionsOut: TrialQuestionOutcome[] = [];
+  for (const q of questions) {
+    const qVec = await embedQueryCached(q.question, model);
+    const scored = poolChunks.map((c) => ({
+      id: c.chunkId,
+      sim: cosine(qVec, vecById.get(c.chunkId)!),
+    }));
+    scored.sort((a, b) => b.sim - a.sim);
+    const newRank = scored.findIndex((s) => s.id === chunkId) + 1; // 1-based
+    questionsOut.push({
+      questionId: q.questionId,
+      question: q.question,
+      storedHit: q.storedHit,
+      storedRank: q.storedRank,
+      newHit: newRank >= 1 && newRank <= k,
+      newRank,
+      newScore: cosine(qVec, testVec),
+    });
+  }
+
+  const hitCount = questionsOut.filter((o) => o.newHit).length;
+  const storedHitCount = questionsOut.filter((o) => o.storedHit === true).length;
+  const result: ModelTrialResult = {
+    model,
+    baselineModel: config.embeddingModel,
+    k,
+    poolSize: poolChunks.length,
+    questionCount: questionsOut.length,
+    hitCount,
+    storedHitCount,
+    recall: questionsOut.length > 0 ? hitCount / questionsOut.length : null,
+    questions: questionsOut,
+  };
+
+  let savedTrial: SavedModelTrial | null = null;
+  if (save) {
+    const ins = await insertModelTrial({
+      sourceChunkId: chunkId,
+      documentEmbeddingId: chunk.documentEmbeddingId,
+      baselineModel: config.embeddingModel,
+      trialModel: model,
+      k,
+      poolChunkIds: poolIds,
+      questionCount: questionsOut.length,
+      hitCount,
+      storedHitCount,
+      results: questionsOut,
+    });
+    savedTrial = {
+      id: ins.id,
+      baselineModel: config.embeddingModel,
+      trialModel: model,
+      k,
+      poolSize: poolIds.length,
+      questionCount: questionsOut.length,
+      hitCount,
+      storedHitCount,
+      results: questionsOut,
+      createdAt: ins.createdAt,
+    };
+  }
+
+  console.log(
+    `[rag:eval] model-trial chunk=${chunkId.slice(0, 8)} model=${model} ` +
+      `pool=${poolChunks.length} q=${questionsOut.length} hits=${hitCount}/${questionsOut.length} ` +
+      `${save ? "(saved) " : ""}in ${Math.round(performance.now() - t0)}ms`,
+  );
+  return { result, savedTrial };
 }
