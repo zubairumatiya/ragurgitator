@@ -46,6 +46,7 @@ import {
   type QuestionToScore,
   type ResultInsert,
   type SavedModelTrial,
+  type TrialPoolHit,
   type TrialQuestionOutcome,
 } from "@/lib/rag/evalStore";
 
@@ -636,6 +637,7 @@ export type ModelTrialResult = {
   baselineModel: string;
   k: number;
   poolSize: number;
+  pool: PoolChunk[]; // the candidate pool, resolved — for the tooltip + top-k labels
   questionCount: number;
   hitCount: number; // hits under the trial model (in-pool)
   storedHitCount: number; // baseline hits (stored full-corpus result)
@@ -768,6 +770,12 @@ export async function runModelTrial(
     }));
     scored.sort((a, b) => b.sim - a.sim);
     const newRank = scored.findIndex((s) => s.id === chunkId) + 1; // 1-based
+    const topPool: TrialPoolHit[] = scored.slice(0, k).map((s, i) => ({
+      chunkId: s.id,
+      rank: i + 1,
+      score: s.sim,
+      isExpected: s.id === chunkId,
+    }));
     questionsOut.push({
       questionId: q.questionId,
       question: q.question,
@@ -776,6 +784,7 @@ export async function runModelTrial(
       newHit: newRank >= 1 && newRank <= k,
       newRank,
       newScore: cosine(qVec, testVec),
+      topPool,
     });
   }
 
@@ -786,6 +795,7 @@ export async function runModelTrial(
     baselineModel: config.embeddingModel,
     k,
     poolSize: poolChunks.length,
+    pool: poolChunks,
     questionCount: questionsOut.length,
     hitCount,
     storedHitCount,
@@ -813,6 +823,7 @@ export async function runModelTrial(
       trialModel: model,
       k,
       poolSize: poolIds.length,
+      pool: poolChunks,
       questionCount: questionsOut.length,
       hitCount,
       storedHitCount,

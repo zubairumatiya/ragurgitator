@@ -816,6 +816,16 @@ export type CorpusChunkListItem = {
   preview: string;
 };
 
+// One re-ranked pool chunk for a question under the trial model — a row in the
+// trial's top-k, mirroring the question top-k drill-down. The label/text are
+// resolved at display time from the trial's `pool`, so only ids are persisted.
+export type TrialPoolHit = {
+  chunkId: string;
+  rank: number; // 1-based rank within the re-embedded pool
+  score: number; // cosine similarity to the query under the trial model
+  isExpected: boolean; // the chunk under test (ground truth)
+};
+
 // One question's before/after in a model trial: its stored full-corpus result
 // vs. its rank within the re-embedded pool under the trial model. This is the
 // persisted per-question shape (eval_model_trials.results jsonb).
@@ -827,6 +837,10 @@ export type TrialQuestionOutcome = {
   newHit: boolean;
   newRank: number;
   newScore: number;
+  // The trial model's top-k of the re-ranked pool for this question (capped at
+  // k). Lets a saved trial show what accompanied/beat the chunk. Optional —
+  // trials saved before this field existed simply omit it.
+  topPool?: TrialPoolHit[];
 };
 
 export type SavedModelTrial = {
@@ -835,6 +849,10 @@ export type SavedModelTrial = {
   trialModel: string;
   k: number;
   poolSize: number;
+  // The candidate pool resolved to labels + text (in stored order), for the pool
+  // tooltip and the per-question top-k. Stale ids (config changed since the trial
+  // was saved) resolve to a "?" placeholder so the count still matches poolSize.
+  pool: PoolChunk[];
   questionCount: number;
   hitCount: number; // hits under the trial model (in-pool)
   storedHitCount: number; // baseline hits (stored full-corpus result)
@@ -1037,12 +1055,25 @@ export async function listModelTrials(chunkId: string): Promise<SavedModelTrial[
     where source_chunk_id = ${chunkId}
     order by created_at desc
   `;
+
+  // Resolve every trial's pool to labels/text in one query, then map each id back
+  // in stored order. A stale id (config changed since save) gets a placeholder so
+  // the pool length still reflects what was saved.
+  const allPoolIds = [...new Set(rows.flatMap((r) => r.pool_chunk_ids))];
+  const poolChunks = await getChunksByIds(allPoolIds);
+  const byId = new Map(poolChunks.map((c) => [c.chunkId, c]));
+  const resolvePool = (ids: string[]): PoolChunk[] =>
+    ids.map(
+      (id) => byId.get(id) ?? { chunkId: id, fileName: "?", position: null, text: "" },
+    );
+
   return rows.map((r) => ({
     id: r.id,
     baselineModel: r.baseline_model,
     trialModel: r.trial_model,
     k: r.k,
     poolSize: r.pool_chunk_ids.length,
+    pool: resolvePool(r.pool_chunk_ids),
     questionCount: r.question_count,
     hitCount: r.hit_count,
     storedHitCount: r.stored_hit_count,
