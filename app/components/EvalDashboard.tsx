@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // UI: retrieval eval dashboard (/eval).
 //
-// Shows Recall@k for the active config, a per-document breakdown, the run
+// Shows Recall@k, MRR and nDCG for the active config, a per-document breakdown, the run
 // history, and a per-question detail table with inline editing. The "Process
 // new chunks" button generates + scores only new/edited questions.
 // ---------------------------------------------------------------------------
@@ -25,9 +25,15 @@ import type {
   ModelTrialResult,
   RechunkResult,
 } from "@/lib/rag/eval";
+import { ndcgAtRank, reciprocalRank } from "@/lib/rag/evalMetrics";
 
 function pct(n: number | null): string {
   return n === null ? "—" : `${(n * 100).toFixed(1)}%`;
+}
+
+// MRR / nDCG land in [0, 1] but aren't percentages — plain 2-decimal scores.
+function fmtScore(n: number | null): string {
+  return n === null ? "—" : n.toFixed(2);
 }
 
 type ChunkGroup = {
@@ -65,7 +71,13 @@ type EvalProgress =
   | { phase: "generate"; done: number; total: number }
   | { phase: "score"; done: number; total: number; hits: number };
 
-type RunResult = { generated: number; scored: number; recall: number | null };
+type RunResult = {
+  generated: number;
+  scored: number;
+  recall: number | null;
+  mrr: number | null;
+  ndcg: number | null;
+};
 
 // Lazy-loaded "why did it miss?" detail for an expanded question.
 type ExplainState =
@@ -213,7 +225,13 @@ export function EvalDashboard() {
               patchQuestion(event.questionId, event.hit, event.foundRank);
               break;
             case "done":
-              final = { generated: event.generated, scored: event.scored, recall: event.recall };
+              final = {
+                generated: event.generated,
+                scored: event.scored,
+                recall: event.recall,
+                mrr: event.mrr,
+                ndcg: event.ndcg,
+              };
               break;
             case "error":
               setError(event.message);
@@ -236,13 +254,16 @@ export function EvalDashboard() {
     runStream(
       "/api/eval/process",
       (r) =>
-        `Generated ${r.generated} question(s), scored ${r.scored}. Recall@k = ${pct(r.recall)}.`,
+        `Generated ${r.generated} question(s), scored ${r.scored}. ` +
+        `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
     );
 
   const onRescore = () =>
     runStream(
       "/api/eval/rescore",
-      (r) => `Re-scored ${r.scored} question(s). Recall@k = ${pct(r.recall)}.`,
+      (r) =>
+        `Re-scored ${r.scored} question(s). ` +
+        `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
     );
 
   async function saveEdit(id: string) {
@@ -365,6 +386,7 @@ export function EvalDashboard() {
         >
           Re-score all
         </button>
+        <MetricsDropdown k={summary?.k ?? null} />
         {!progress && notice && (
           <span className="text-sm text-zinc-600 dark:text-zinc-400">{notice}</span>
         )}
@@ -378,9 +400,11 @@ export function EvalDashboard() {
         <p className="text-sm text-zinc-500">Loading…</p>
       ) : (
         <>
-          {/* Headline metric */}
+          {/* Headline metrics — one labeled card per eval */}
           <div className="flex flex-wrap gap-4">
             <Stat label={`Recall@${summary.k}`} value={pct(summary.recall)} big />
+            <Stat label="MRR" value={fmtScore(summary.mrr)} big />
+            <Stat label={`nDCG@${summary.k}`} value={fmtScore(summary.ndcg)} big />
             <Stat label="Questions" value={String(summary.total)} />
             <Stat label="Scored" value={String(summary.scored)} />
             <Stat label="Hits" value={String(summary.hits)} />
@@ -432,7 +456,8 @@ export function EvalDashboard() {
                     <span className="shrink-0 font-medium">
                       {pct(r.questionCount > 0 ? r.hitCount / r.questionCount : null)}
                       <span className="ml-2 text-xs font-normal text-zinc-500">
-                        ({r.hitCount}/{r.questionCount} @ k={r.k})
+                        MRR {fmtScore(r.mrr)} · nDCG {fmtScore(r.ndcg)} · (
+                        {r.hitCount}/{r.questionCount} @ k={r.k})
                       </span>
                     </span>
                   </li>
@@ -487,7 +512,25 @@ export function EvalDashboard() {
                               ) : (
                                 <span className="flex-1">{q.question}</span>
                               )}
-                              <Badge hit={q.hit} rank={q.foundRank} stale={q.stale} />
+                              <span className="flex shrink-0 items-center gap-1.5">
+                                <Badge hit={q.hit} rank={q.foundRank} stale={q.stale} />
+                                <MetricChip
+                                  label="MRR"
+                                  value={
+                                    q.hit === null || q.stale
+                                      ? null
+                                      : reciprocalRank(q.foundRank)
+                                  }
+                                />
+                                <MetricChip
+                                  label="nDCG"
+                                  value={
+                                    q.hit === null || q.stale
+                                      ? null
+                                      : ndcgAtRank(q.foundRank)
+                                  }
+                                />
+                              </span>
                             </div>
                             <div className="flex items-center justify-between gap-3 text-xs text-zinc-500">
                               <span className="flex items-center gap-1.5 font-mono text-zinc-400">
@@ -665,12 +708,72 @@ export function EvalDashboard() {
   );
 }
 
+// The per-run metrics selector next to "Re-score all". Every current metric
+// derives from the same retrieval pass (found_rank), so they're always computed
+// together and shown locked; this is the slot where future per-run selectable
+// metrics (e.g. LLM-judged graded relevance) become real toggles.
+function MetricsDropdown({ k }: { k: number | null }) {
+  const [open, setOpen] = useState(false);
+  const metrics = [`Recall@${k ?? "k"}`, "MRR", `nDCG@${k ?? "k"}`];
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        title="Which evals run with Process / Re-score"
+        className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium cursor-pointer transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+      >
+        Metrics ▾
+      </button>
+      {open && (
+        <>
+          {/* Click-away backdrop */}
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 top-full z-20 mt-1 w-64 rounded-md border border-zinc-200 bg-white p-2 shadow-lg dark:border-zinc-800 dark:bg-zinc-900">
+            <ul className="flex flex-col gap-1">
+              {metrics.map((m) => (
+                <li key={m}>
+                  <label className="flex cursor-not-allowed items-center gap-2 px-1 py-0.5 text-sm text-zinc-700 dark:text-zinc-300">
+                    <input type="checkbox" checked disabled readOnly />
+                    {m}
+                  </label>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-2 border-t border-zinc-200 pt-2 text-xs text-zinc-500 dark:border-zinc-800">
+              Computed together from one retrieval pass — no extra cost.
+            </p>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function Stat({ label, value, big }: { label: string; value: string; big?: boolean }) {
   return (
     <div className="flex flex-col gap-0.5 rounded-lg border border-zinc-200 px-4 py-3 dark:border-zinc-800">
       <span className="text-xs uppercase tracking-wide text-zinc-500">{label}</span>
       <span className={big ? "text-2xl font-semibold" : "text-lg font-medium"}>{value}</span>
     </div>
+  );
+}
+
+// A per-question metric value next to the hit/miss badge, labeled so it's clear
+// which eval it belongs to. null = not graded (unscored, or stale so the old
+// score no longer applies) — rendered as the grey-dash placeholder.
+function MetricChip({ label, value }: { label: string; value: number | null }) {
+  if (value === null) {
+    return (
+      <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-xs font-medium text-zinc-400 dark:bg-zinc-800 dark:text-zinc-500">
+        {label} –
+      </span>
+    );
+  }
+  return (
+    <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+      {label} {value.toFixed(2)}
+    </span>
   );
 }
 

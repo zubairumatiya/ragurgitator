@@ -11,6 +11,7 @@
 import { sql } from "@/lib/db";
 import { config } from "@/lib/config";
 import { chunksTable } from "@/lib/rag/vectorStore";
+import { reciprocalRank, ndcgAtRank } from "@/lib/rag/evalMetrics";
 
 export type ChunkNeedingQuestions = {
   chunkId: string;
@@ -65,6 +66,8 @@ export type RunSnapshot = {
   k: number;
   questionCount: number;
   hitCount: number;
+  mrr: number | null; // null for snapshots predating migration 0007
+  ndcg: number | null;
   createdAt: number;
 };
 
@@ -74,6 +77,10 @@ export type EvalSummary = {
   scored: number; // of those, how many have a result
   hits: number;
   recall: number | null; // hits / scored
+  // Mean reciprocal rank / mean nDCG@k over the same fresh-scored set as recall
+  // (see lib/rag/evalMetrics.ts); null when nothing is scored, like recall.
+  mrr: number | null;
+  ndcg: number | null;
   perDocument: DocumentBreakdown[];
   questions: QuestionDetail[];
   runs: RunSnapshot[];
@@ -1107,13 +1114,16 @@ export async function insertResults(rows: ResultInsert[]): Promise<void> {
 export async function createRunSnapshot(args: {
   questionCount: number;
   hitCount: number;
+  mrr: number | null;
+  ndcg: number | null;
 }): Promise<void> {
   await sql`
     insert into eval_runs
-      (model, chunk_size, chunk_overlap, k, question_count, hit_count)
+      (model, chunk_size, chunk_overlap, k, question_count, hit_count, mrr, ndcg)
     values
       (${config.embeddingModel}, ${config.chunkSize}, ${config.chunkOverlap},
-       ${config.topK}, ${args.questionCount}, ${args.hitCount})
+       ${config.topK}, ${args.questionCount}, ${args.hitCount}, ${args.mrr},
+       ${args.ndcg})
   `;
 }
 
@@ -1141,6 +1151,8 @@ export async function getSummary(): Promise<EvalSummary> {
     scored: 0,
     hits: 0,
     recall: null,
+    mrr: null,
+    ndcg: null,
     perDocument: [],
     questions: [],
     runs: [],
@@ -1213,10 +1225,12 @@ export async function getSummary(): Promise<EvalSummary> {
         k: number;
         question_count: number;
         hit_count: number;
+        mrr: number | null;
+        ndcg: number | null;
         created_at: Date;
       }[]
     >`
-      select id, k, question_count, hit_count, created_at
+      select id, k, question_count, hit_count, mrr, ndcg, created_at
       from eval_runs
       order by created_at desc
       limit 20
@@ -1263,6 +1277,15 @@ export async function getSummary(): Promise<EvalSummary> {
   const scoredRows = questions.filter((q) => q.hit !== null && !q.stale);
   const hits = scoredRows.filter((q) => q.hit === true).length;
 
+  // MRR / nDCG over the same fresh-scored set, straight from found_rank — no
+  // extra retrieval, so already-scored questions are covered retroactively.
+  const mean = (f: (rank: number | null) => number): number | null =>
+    scoredRows.length > 0
+      ? scoredRows.reduce((sum, q) => sum + f(q.foundRank), 0) / scoredRows.length
+      : null;
+  const mrr = mean(reciprocalRank);
+  const ndcg = mean(ndcgAtRank);
+
   // Questions "Process new chunks" would score: never scored, or edited since.
   // Matches questionsNeedingScoring() — no extra query needed.
   const pendingScoring = questions.filter((q) => q.hit === null || q.stale).length;
@@ -1286,6 +1309,8 @@ export async function getSummary(): Promise<EvalSummary> {
     scored: scoredRows.length,
     hits,
     recall: scoredRows.length > 0 ? hits / scoredRows.length : null,
+    mrr,
+    ndcg,
     perDocument: [...byDoc.values()],
     questions,
     runs: runRows.map((r) => ({
@@ -1293,6 +1318,8 @@ export async function getSummary(): Promise<EvalSummary> {
       k: r.k,
       questionCount: r.question_count,
       hitCount: r.hit_count,
+      mrr: r.mrr,
+      ndcg: r.ndcg,
       createdAt: r.created_at.getTime(),
     })),
     pendingChunks: pendingChunkRows[0]?.n ?? 0,

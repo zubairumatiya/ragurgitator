@@ -65,7 +65,14 @@ export type EvalEvent =
       hit: boolean;
       foundRank: number | null;
     }
-  | { type: "done"; generated: number; scored: number; recall: number | null }
+  | {
+      type: "done";
+      generated: number;
+      scored: number;
+      recall: number | null;
+      mrr: number | null;
+      ndcg: number | null;
+    }
   | { type: "error"; message: string };
 
 type Emit = (event: EvalEvent) => void;
@@ -339,6 +346,8 @@ export async function processNewChunks(emit: Emit = () => {}): Promise<{
     await createRunSnapshot({
       questionCount: summary.scored,
       hitCount: summary.hits,
+      mrr: summary.mrr,
+      ndcg: summary.ndcg,
     });
   }
 
@@ -346,7 +355,14 @@ export async function processNewChunks(emit: Emit = () => {}): Promise<{
     `[rag:eval] processNewChunks done: generated=${generated} scored=${scored} ` +
       `recall=${summary.recall ?? "n/a"} in ${Math.round(performance.now() - t0)}ms`,
   );
-  emit({ type: "done", generated, scored, recall: summary.recall });
+  emit({
+    type: "done",
+    generated,
+    scored,
+    recall: summary.recall,
+    mrr: summary.mrr,
+    ndcg: summary.ndcg,
+  });
   return { generated, scored, recall: summary.recall };
 }
 
@@ -372,6 +388,8 @@ export async function rescoreAllQuestions(emit: Emit = () => {}): Promise<{
     await createRunSnapshot({
       questionCount: summary.scored,
       hitCount: summary.hits,
+      mrr: summary.mrr,
+      ndcg: summary.ndcg,
     });
   }
 
@@ -379,7 +397,14 @@ export async function rescoreAllQuestions(emit: Emit = () => {}): Promise<{
     `[rag:eval] rescoreAllQuestions done: scored=${scored} ` +
       `recall=${summary.recall ?? "n/a"} in ${Math.round(performance.now() - t0)}ms`,
   );
-  emit({ type: "done", generated: 0, scored, recall: summary.recall });
+  emit({
+    type: "done",
+    generated: 0,
+    scored,
+    recall: summary.recall,
+    mrr: summary.mrr,
+    ndcg: summary.ndcg,
+  });
   return { scored, recall: summary.recall };
 }
 
