@@ -7,7 +7,7 @@
 // ---------------------------------------------------------------------------
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import type {
   EvalSummary,
   ExplainChunk,
@@ -35,6 +35,21 @@ function pct(n: number | null): string {
 function fmtScore(n: number | null): string {
   return n === null ? "—" : n.toFixed(2);
 }
+
+// Continuous tint for a score in [0, 1], mixing from the miss badge's red to
+// the hit badge's green in oklch (passing through amber mid-range), so a
+// perfect score is the exact same green as a Recall@k hit. Consumers set the
+// --mp custom property with this and reference it from the tint*Class
+// arbitrary-value Tailwind classes below, so light/dark variants still apply.
+function scoreTint(score: number): CSSProperties {
+  const pct = Math.round(100 * Math.min(1, Math.max(0, score)));
+  return { "--mp": `${pct}%` } as CSSProperties;
+}
+
+const tintBgClass =
+  "bg-[color-mix(in_oklch,var(--color-red-100),var(--color-green-100)_var(--mp))] dark:bg-[color-mix(in_oklch,var(--color-red-900),var(--color-green-900)_var(--mp))]/40";
+const tintTextClass =
+  "text-[color-mix(in_oklch,var(--color-red-700),var(--color-green-700)_var(--mp))] dark:text-[color-mix(in_oklch,var(--color-red-400),var(--color-green-400)_var(--mp))]";
 
 type ChunkGroup = {
   chunkId: string;
@@ -403,8 +418,13 @@ export function EvalDashboard() {
           {/* Headline metrics — one labeled card per eval */}
           <div className="flex flex-wrap gap-4">
             <Stat label={`Recall@${summary.k}`} value={pct(summary.recall)} big />
-            <Stat label="MRR" value={fmtScore(summary.mrr)} big />
-            <Stat label={`nDCG@${summary.k}`} value={fmtScore(summary.ndcg)} big />
+            <Stat label="MRR" value={fmtScore(summary.mrr)} big score={summary.mrr} />
+            <Stat
+              label={`nDCG@${summary.k}`}
+              value={fmtScore(summary.ndcg)}
+              big
+              score={summary.ndcg}
+            />
             <Stat label="Questions" value={String(summary.total)} />
             <Stat label="Scored" value={String(summary.scored)} />
             <Stat label="Hits" value={String(summary.hits)} />
@@ -750,9 +770,29 @@ function MetricsDropdown({ k }: { k: number | null }) {
   );
 }
 
-function Stat({ label, value, big }: { label: string; value: string; big?: boolean }) {
+// `score` (a metric value in [0, 1]) tints the card background red→green; null
+// or omitted keeps the plain bordered card.
+function Stat({
+  label,
+  value,
+  big,
+  score,
+}: {
+  label: string;
+  value: string;
+  big?: boolean;
+  score?: number | null;
+}) {
+  const tinted = score !== undefined && score !== null;
   return (
-    <div className="flex flex-col gap-0.5 rounded-lg border border-zinc-200 px-4 py-3 dark:border-zinc-800">
+    <div
+      style={tinted ? scoreTint(score) : undefined}
+      className={`flex flex-col gap-0.5 rounded-lg border px-4 py-3 ${
+        tinted
+          ? `border-transparent ${tintBgClass}`
+          : "border-zinc-200 dark:border-zinc-800"
+      }`}
+    >
       <span className="text-xs uppercase tracking-wide text-zinc-500">{label}</span>
       <span className={big ? "text-2xl font-semibold" : "text-lg font-medium"}>{value}</span>
     </div>
@@ -771,7 +811,10 @@ function MetricChip({ label, value }: { label: string; value: number | null }) {
     );
   }
   return (
-    <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+    <span
+      style={scoreTint(value)}
+      className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-medium ${tintBgClass} ${tintTextClass}`}
+    >
       {label} {value.toFixed(2)}
     </span>
   );
