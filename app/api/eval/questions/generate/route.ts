@@ -7,39 +7,28 @@
 // "Process new chunks" / "Re-score all". Backs the synthetic side of the
 // "Add a question" form on each chunk group in /eval.
 // ---------------------------------------------------------------------------
+import { z } from "zod";
+import { parseBody } from "@/lib/http/body";
 import { generateQuestionForChunk, type Difficulty } from "@/lib/rag/eval";
 
-const DIFFICULTIES: readonly Difficulty[] = ["easy", "medium", "hard"];
+// `satisfies` rejects any entry that isn't a real Difficulty while keeping the
+// literal tuple type that z.enum needs. (It can't catch a *missing* level —
+// update this list when Difficulty grows.)
+const DIFFICULTIES = ["easy", "medium", "hard"] as const satisfies readonly Difficulty[];
+
+const Body = z.object({
+  chunkId: z.string({ error: "Provide a `chunkId`." }).min(1, { error: "Provide a `chunkId`." }),
+  difficulty: z.enum(DIFFICULTIES, {
+    error: "Provide a `difficulty` of 'easy', 'medium', or 'hard'.",
+  }),
+});
 
 export async function POST(request: Request) {
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return Response.json({ error: "Expected a JSON body." }, { status: 400 });
-  }
-
-  const chunkId =
-    typeof body === "object" && body !== null && "chunkId" in body
-      ? (body as { chunkId: unknown }).chunkId
-      : undefined;
-  const difficulty =
-    typeof body === "object" && body !== null && "difficulty" in body
-      ? (body as { difficulty: unknown }).difficulty
-      : undefined;
-
-  if (typeof chunkId !== "string" || !chunkId) {
-    return Response.json({ error: "Provide a `chunkId`." }, { status: 400 });
-  }
-  if (!DIFFICULTIES.includes(difficulty as Difficulty)) {
-    return Response.json(
-      { error: "Provide a `difficulty` of 'easy', 'medium', or 'hard'." },
-      { status: 400 },
-    );
-  }
+  const body = await parseBody(request, Body);
+  if (body.response) return body.response;
 
   try {
-    const result = await generateQuestionForChunk(chunkId, difficulty as Difficulty);
+    const result = await generateQuestionForChunk(body.data.chunkId, body.data.difficulty);
     if (result === "not-found") {
       return Response.json(
         { error: "Chunk not found under the active config." },

@@ -6,33 +6,20 @@
 //
 // All RAG logic lives in pipeline.ask — this route just translates HTTP.
 // ---------------------------------------------------------------------------
+import { z } from "zod";
+import { parseBody, requiredTrimmedString } from "@/lib/http/body";
 import { ask } from "@/lib/rag/pipeline";
 
+const Body = z.object({
+  question: requiredTrimmedString("Provide a non-empty `question` string."),
+});
+
 export async function POST(request: Request) {
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return Response.json(
-      { error: "Expected a JSON body." },
-      { status: 400 },
-    );
-  }
-
-  const question =
-    typeof body === "object" && body !== null && "question" in body
-      ? (body as { question: unknown }).question
-      : undefined;
-
-  if (typeof question !== "string" || !question.trim()) {
-    return Response.json(
-      { error: "Provide a non-empty `question` string." },
-      { status: 400 },
-    );
-  }
+  const body = await parseBody(request, Body);
+  if (body.response) return body.response;
 
   try {
-    const result = await ask(question);
+    const result = await ask(body.data.question);
     return Response.json(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Chat failed.";

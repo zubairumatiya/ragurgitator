@@ -6,37 +6,21 @@
 // unscored until the next "Process new chunks" / "Re-score all". Backs the
 // "Add a question" form on each chunk group in /eval.
 // ---------------------------------------------------------------------------
+import { z } from "zod";
+import { parseBody, requiredTrimmedString } from "@/lib/http/body";
 import { addManualQuestion } from "@/lib/rag/evalStore";
 
+const Body = z.object({
+  chunkId: z.string({ error: "Provide a `chunkId`." }).min(1, { error: "Provide a `chunkId`." }),
+  question: requiredTrimmedString("Provide a non-empty `question` string."),
+});
+
 export async function POST(request: Request) {
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return Response.json({ error: "Expected a JSON body." }, { status: 400 });
-  }
-
-  const chunkId =
-    typeof body === "object" && body !== null && "chunkId" in body
-      ? (body as { chunkId: unknown }).chunkId
-      : undefined;
-  const question =
-    typeof body === "object" && body !== null && "question" in body
-      ? (body as { question: unknown }).question
-      : undefined;
-
-  if (typeof chunkId !== "string" || !chunkId) {
-    return Response.json({ error: "Provide a `chunkId`." }, { status: 400 });
-  }
-  if (typeof question !== "string" || !question.trim()) {
-    return Response.json(
-      { error: "Provide a non-empty `question` string." },
-      { status: 400 },
-    );
-  }
+  const body = await parseBody(request, Body);
+  if (body.response) return body.response;
 
   try {
-    const ok = await addManualQuestion(chunkId, question.trim());
+    const ok = await addManualQuestion(body.data.chunkId, body.data.question);
     if (!ok) {
       return Response.json(
         { error: "Chunk not found under the active config." },

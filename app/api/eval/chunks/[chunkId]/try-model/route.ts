@@ -13,9 +13,25 @@
 // Ranking is ephemeral and in-memory; the live index is never touched. `params`
 // is a Promise in this Next.js version — await it.
 // ---------------------------------------------------------------------------
+import { z } from "zod";
 import { altEmbeddingModels } from "@/lib/config";
+import { parseBody } from "@/lib/http/body";
 import { getModelTrialContext, runModelTrial } from "@/lib/rag/eval";
 import { deleteModelTrial } from "@/lib/rag/evalStore";
+
+const MODEL_ERROR = "`model` must be one of the offered alternate models.";
+
+const Body = z.object({
+  model: z
+    .string({ error: MODEL_ERROR })
+    .refine((m) => altEmbeddingModels.some((alt) => alt.id === m), { error: MODEL_ERROR }),
+  poolChunkIds: z
+    .array(z.string({ error: "`poolChunkIds` must be an array of chunk id strings." }), {
+      error: "`poolChunkIds` must be an array of chunk id strings.",
+    })
+    .default([]),
+  save: z.boolean({ error: "`save` must be a boolean." }).default(false),
+});
 
 export async function GET(
   _request: Request,
@@ -43,33 +59,12 @@ export async function POST(
 ) {
   const { chunkId } = await params;
 
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return Response.json({ error: "Expected a JSON body." }, { status: 400 });
-  }
-  if (typeof body !== "object" || body === null) {
-    return Response.json({ error: "Expected a JSON object." }, { status: 400 });
-  }
-  const { model, poolChunkIds, save } = body as {
-    model?: unknown;
-    poolChunkIds?: unknown;
-    save?: unknown;
-  };
-
-  if (typeof model !== "string" || !altEmbeddingModels.some((m) => m.id === model)) {
-    return Response.json(
-      { error: "`model` must be one of the offered alternate models." },
-      { status: 400 },
-    );
-  }
-  const ids = Array.isArray(poolChunkIds)
-    ? poolChunkIds.filter((id): id is string => typeof id === "string")
-    : [];
+  const body = await parseBody(request, Body);
+  if (body.response) return body.response;
+  const { model, poolChunkIds, save } = body.data;
 
   try {
-    const out = await runModelTrial(chunkId, model, ids, save === true);
+    const out = await runModelTrial(chunkId, model, poolChunkIds, save);
     if (!out) {
       return Response.json(
         { error: "Chunk not found, or it has no questions to evaluate." },

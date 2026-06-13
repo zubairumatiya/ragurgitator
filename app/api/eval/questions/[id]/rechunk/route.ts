@@ -9,19 +9,41 @@
 // Both re-rank the question with that chunk swapped out; nothing is persisted
 // (see lib/rag/eval). `params` is a Promise in this Next.js version — await it.
 // ---------------------------------------------------------------------------
+import { z } from "zod";
+import { invalidBody, readJsonBody } from "@/lib/http/body";
 import {
   runCustomChunkExperiment,
   runRechunkExperiment,
   type RechunkResult,
 } from "@/lib/rag/eval";
 
-function readNumber(body: unknown, key: string): number | null {
-  if (typeof body === "object" && body !== null && key in body) {
-    const value = (body as Record<string, unknown>)[key];
-    return typeof value === "number" ? value : null;
-  }
-  return null;
-}
+// Mode B. Validated with refine rather than .trim() so the section text reaches
+// the experiment exactly as sent — whitespace is part of the chunk boundaries.
+const SECTIONS_ERROR = "`sections` must be a non-empty array of non-empty strings.";
+const SectionsBody = z.object({
+  sections: z
+    .array(
+      z
+        .string({ error: SECTIONS_ERROR })
+        .refine((s) => s.trim().length > 0, { error: SECTIONS_ERROR }),
+      { error: SECTIONS_ERROR },
+    )
+    .min(1, { error: SECTIONS_ERROR }),
+});
+
+// Mode A.
+const UniformBody = z
+  .object({
+    size: z
+      .number({ error: "Provide an integer `size` of at least 1." })
+      .int({ error: "Provide an integer `size` of at least 1." })
+      .min(1, { error: "Provide an integer `size` of at least 1." }),
+    overlap: z
+      .number({ error: "Provide an integer `overlap` of at least 0." })
+      .int({ error: "Provide an integer `overlap` of at least 0." })
+      .min(0, { error: "Provide an integer `overlap` of at least 0." }),
+  })
+  .refine((b) => b.overlap < b.size, { error: "`overlap` must be smaller than `size`." });
 
 // Shared response handling: 404 when the question isn't under the active config,
 // 500 on an unexpected failure, else the experiment result.
@@ -48,51 +70,19 @@ export async function POST(
 ) {
   const { id } = await params;
 
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return Response.json({ error: "Expected a JSON body." }, { status: 400 });
+  const raw = await readJsonBody(request);
+  if (raw.response) return raw.response;
+
+  // The presence of `sections` picks the mode, so a malformed Mode B payload
+  // gets a sections error rather than complaints about a missing size/overlap.
+  if (typeof raw.data === "object" && raw.data !== null && "sections" in raw.data) {
+    const body = SectionsBody.safeParse(raw.data);
+    if (!body.success) return invalidBody(body.error);
+    return respond(() => runCustomChunkExperiment(id, body.data.sections));
   }
 
-  // Mode B — explicit section text(s) replacing the chunk.
-  if (typeof body === "object" && body !== null && "sections" in body) {
-    const sections = (body as { sections: unknown }).sections;
-    if (
-      !Array.isArray(sections) ||
-      sections.length === 0 ||
-      !sections.every((s) => typeof s === "string" && s.trim().length > 0)
-    ) {
-      return Response.json(
-        { error: "`sections` must be a non-empty array of non-empty strings." },
-        { status: 400 },
-      );
-    }
-    return respond(() => runCustomChunkExperiment(id, sections as string[]));
-  }
-
-  // Mode A — uniform size/overlap.
-  const size = readNumber(body, "size");
-  const overlap = readNumber(body, "overlap");
-
-  if (size === null || !Number.isInteger(size) || size < 1) {
-    return Response.json(
-      { error: "Provide an integer `size` of at least 1." },
-      { status: 400 },
-    );
-  }
-  if (overlap === null || !Number.isInteger(overlap) || overlap < 0) {
-    return Response.json(
-      { error: "Provide an integer `overlap` of at least 0." },
-      { status: 400 },
-    );
-  }
-  if (overlap >= size) {
-    return Response.json(
-      { error: "`overlap` must be smaller than `size`." },
-      { status: 400 },
-    );
-  }
-
+  const body = UniformBody.safeParse(raw.data);
+  if (!body.success) return invalidBody(body.error);
+  const { size, overlap } = body.data;
   return respond(() => runRechunkExperiment(id, size, overlap));
 }
