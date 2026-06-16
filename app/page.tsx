@@ -13,9 +13,14 @@ export default function Home() {
             <h1 className="text-2xl font-semibold tracking-tight text-black dark:text-zinc-50">
               RAG playground
             </h1>
-            <Link href="/eval" className="text-sm text-zinc-500 hover:underline">
-              Evals →
-            </Link>
+            <div className="flex items-center gap-4">
+              <Link href="/clusters" className="text-sm text-zinc-500 hover:underline">
+                Clusters →
+              </Link>
+              <Link href="/eval" className="text-sm text-zinc-500 hover:underline">
+                Evals →
+              </Link>
+            </div>
           </div>
           <p className="text-sm text-zinc-600 dark:text-zinc-400">
             Upload a document, then ask questions about it.

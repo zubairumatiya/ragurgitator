@@ -1,9 +1,14 @@
 // ---------------------------------------------------------------------------
 // UI: retrieval eval dashboard (/eval).
 //
-// Shows Recall@k, MRR and nDCG for the active config, a per-document breakdown, the run
+// Shows Recall@k and nDCG for the active config, a per-document breakdown, the run
 // history, and a per-question detail table with inline editing. The "Process
 // new chunks" button generates + scores only new/edited questions.
+//
+// MRR is still computed and stored server-side (it rides the same retrieval pass)
+// but isn't surfaced here — Recall@k already covers the in-top-k signal at this
+// altitude. It'll resurface in the planned cross-chunk model-comparison rollup,
+// where averaging rank over many questions makes it pull its weight.
 // ---------------------------------------------------------------------------
 "use client";
 
@@ -25,13 +30,13 @@ import type {
   ModelTrialResult,
   RechunkResult,
 } from "@/lib/rag/eval";
-import { ndcgAtRank, reciprocalRank } from "@/lib/rag/evalMetrics";
+import { ndcgAtRank } from "@/lib/rag/evalMetrics";
 
 function pct(n: number | null): string {
   return n === null ? "—" : `${(n * 100).toFixed(1)}%`;
 }
 
-// MRR / nDCG land in [0, 1] but aren't percentages — plain 2-decimal scores.
+// nDCG lands in [0, 1] but isn't a percentage — plain 2-decimal score.
 function fmtScore(n: number | null): string {
   return n === null ? "—" : n.toFixed(2);
 }
@@ -270,7 +275,7 @@ export function EvalDashboard() {
       "/api/eval/process",
       (r) =>
         `Generated ${r.generated} question(s), scored ${r.scored}. ` +
-        `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
+        `Recall@k ${pct(r.recall)} · nDCG ${fmtScore(r.ndcg)}.`,
     );
 
   const onRescore = () =>
@@ -278,7 +283,7 @@ export function EvalDashboard() {
       "/api/eval/rescore",
       (r) =>
         `Re-scored ${r.scored} question(s). ` +
-        `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
+        `Recall@k ${pct(r.recall)} · nDCG ${fmtScore(r.ndcg)}.`,
     );
 
   async function saveEdit(id: string) {
@@ -418,7 +423,6 @@ export function EvalDashboard() {
           {/* Headline metrics — one labeled card per eval */}
           <div className="flex flex-wrap gap-4">
             <Stat label={`Recall@${summary.k}`} value={pct(summary.recall)} big />
-            <Stat label="MRR" value={fmtScore(summary.mrr)} big score={summary.mrr} />
             <Stat
               label={`nDCG@${summary.k}`}
               value={fmtScore(summary.ndcg)}
@@ -476,8 +480,8 @@ export function EvalDashboard() {
                     <span className="shrink-0 font-medium">
                       {pct(r.questionCount > 0 ? r.hitCount / r.questionCount : null)}
                       <span className="ml-2 text-xs font-normal text-zinc-500">
-                        MRR {fmtScore(r.mrr)} · nDCG {fmtScore(r.ndcg)} · (
-                        {r.hitCount}/{r.questionCount} @ k={r.k})
+                        nDCG {fmtScore(r.ndcg)} · ({r.hitCount}/{r.questionCount} @ k=
+                        {r.k})
                       </span>
                     </span>
                   </li>
@@ -534,14 +538,6 @@ export function EvalDashboard() {
                               )}
                               <span className="flex shrink-0 items-center gap-1.5">
                                 <Badge hit={q.hit} rank={q.foundRank} stale={q.stale} />
-                                <MetricChip
-                                  label="MRR"
-                                  value={
-                                    q.hit === null || q.stale
-                                      ? null
-                                      : reciprocalRank(q.foundRank)
-                                  }
-                                />
                                 <MetricChip
                                   label="nDCG"
                                   value={
@@ -734,7 +730,7 @@ export function EvalDashboard() {
 // metrics (e.g. LLM-judged graded relevance) become real toggles.
 function MetricsDropdown({ k }: { k: number | null }) {
   const [open, setOpen] = useState(false);
-  const metrics = [`Recall@${k ?? "k"}`, "MRR", `nDCG@${k ?? "k"}`];
+  const metrics = [`Recall@${k ?? "k"}`, `nDCG@${k ?? "k"}`];
   return (
     <div className="relative">
       <button
@@ -2067,6 +2063,15 @@ function PoolRow({
   );
 }
 
+// Mean cosine similarity of the ground-truth chunk to its questions under the
+// trial model — the average of the per-question sims (newScore). A model-level
+// read on how tightly this chunk embeds to its own questions, independent of
+// whether it cleared the top-k. null when the trial has no questions.
+function avgTrialSim(questions: TrialQuestionOutcome[]): number | null {
+  if (questions.length === 0) return null;
+  return questions.reduce((sum, q) => sum + q.newScore, 0) / questions.length;
+}
+
 // Before→after for a trial: the chunk's baseline hits (stored full-corpus result)
 // vs. its in-pool hits under the trial model, then each question's stored result
 // next to its pool rank. Shared by the live result and a saved trial's expansion.
@@ -2093,6 +2098,7 @@ function TrialOutcomes({
   const [openQ, setOpenQ] = useState<Record<string, boolean>>({});
   const [openChunk, setOpenChunk] = useState<Record<string, boolean>>({});
   const byId = new Map(pool.map((c) => [c.chunkId, c]));
+  const sim = avgTrialSim(questions);
 
   return (
     // Font size is inherited: text-xs in the runner, smaller in "Models tried".
@@ -2110,6 +2116,9 @@ function TrialOutcomes({
         <span className="font-medium">
           {model}: {hitCount}/{questionCount} hit{questionCount === 1 ? "" : "s"}
         </span>
+        {sim !== null && (
+          <span className="ml-1 text-zinc-400">· avg sim {sim.toFixed(3)}</span>
+        )}
       </span>
       <ul className="flex flex-col gap-1.5">
         {questions.map((q) => {
@@ -2182,6 +2191,7 @@ function SavedTrialRow({
   onDelete: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const sim = avgTrialSim(trial.results);
   return (
     <li className="flex flex-col gap-1 rounded border border-zinc-200 p-2 dark:border-zinc-800">
       {/* The whole header toggles the row; only the ✕ is a separate target. */}
@@ -2206,6 +2216,12 @@ function SavedTrialRow({
               test pool {trial.poolSize}
             </span>
           </PoolTooltip>
+          {sim !== null && (
+            <>
+              <span className="text-zinc-400">·</span>
+              <span className="text-zinc-500">avg sim {sim.toFixed(3)}</span>
+            </>
+          )}
           <span className="text-zinc-400">
             {new Date(trial.createdAt).toLocaleString()}
           </span>

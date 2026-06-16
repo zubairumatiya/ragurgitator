@@ -32,7 +32,7 @@ export function chunksTable(model: string, dimension: number): string {
 
 // pgvector parses the "[x,y,z]" text format and casts to vector via the
 // destination column type, so we just send a string.
-function vectorLiteral(v: number[]): string {
+export function vectorLiteral(v: number[]): string {
   return `[${v.join(",")}]`;
 }
 
