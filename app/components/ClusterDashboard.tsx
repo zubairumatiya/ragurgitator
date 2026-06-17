@@ -254,6 +254,7 @@ function RunCard({
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<ClusterRunDetail | null>(null);
   const [loading, setLoading] = useState(false);
+  const [labeling, setLabeling] = useState(false);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -293,6 +294,24 @@ function RunCard({
     onChanged();
   }
 
+  // Claude-name each bucket. The route returns the updated detail, so swap it in
+  // and open the card to reveal the new labels.
+  async function label() {
+    setLabeling(true);
+    try {
+      const res = await fetch(`/api/clusters/${run.id}/label`, { method: "POST" });
+      const data = await res.json();
+      if (!data.error) {
+        setDetail(data as ClusterRunDetail);
+        setOpen(true);
+      }
+    } catch {
+      // leave existing detail; labels just won't update
+    } finally {
+      setLabeling(false);
+    }
+  }
+
   return (
     <li className="flex flex-col gap-2 rounded-lg border border-zinc-200 p-3 text-sm dark:border-zinc-800">
       <div className="flex flex-wrap items-center gap-2">
@@ -321,6 +340,17 @@ function RunCard({
           </span>
           <Bars values={run.sizes} max={Math.max(1, ...run.sizes)} title="bucket sizes" />
         </button>
+        {run.saved && (
+          <button
+            type="button"
+            onClick={label}
+            disabled={labeling}
+            title="Name each bucket from its chunks using Claude"
+            className="shrink-0 cursor-pointer rounded border border-zinc-300 px-2 py-0.5 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+          >
+            {labeling ? "Labeling…" : "Label buckets"}
+          </button>
+        )}
         {run.saved && (
           <button
             type="button"
