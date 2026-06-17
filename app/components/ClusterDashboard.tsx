@@ -3,9 +3,9 @@
 //
 // Set k and run k-means over the active corpus. Each run produces 3 candidates
 // (random restarts) so the randomness is visible — keep the ones you like as
-// named presets. Each bucket shows its cohesion ("tightness"); each run shows a
+// named presets. Each bucket shows its cohesion; each run shows a
 // silhouette score so different k can be compared fairly (cohesion alone always
-// rises with k). The compare modal lines up headline metrics + sorted tightness
+// rises with k). The compare modal lines up headline metrics + sorted cohesion
 // profiles for up to 5 runs (buckets aren't aligned across runs — numbering is
 // arbitrary and k differs).
 //
@@ -253,6 +253,7 @@ function RunCard({
 }) {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<ClusterRunDetail | null>(null);
+  const [loading, setLoading] = useState(false);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -260,12 +261,15 @@ function RunCard({
     const next = !open;
     setOpen(next);
     if (next && !detail) {
+      setLoading(true);
       try {
         const res = await fetch(`/api/clusters/${run.id}`);
         const data = await res.json();
         if (!data.error) setDetail(data as ClusterRunDetail);
       } catch {
         // leave detail null; header still shows
+      } finally {
+        setLoading(false);
       }
     }
   }
@@ -310,7 +314,7 @@ function RunCard({
           </span>
           <span className="text-zinc-400">k={run.k}</span>
           <span className="text-zinc-500">
-            tightness <span className="tabular-nums">{fmt(run.avgCohesion)}</span>
+            cohesion <span className="tabular-nums">{fmt(run.avgCohesion)}</span>
           </span>
           <span className="text-zinc-500">
             silhouette <span className="tabular-nums">{fmt(run.silhouette)}</span>
@@ -348,6 +352,9 @@ function RunCard({
         </div>
       )}
 
+      {open && loading && (
+        <p className="animate-pulse pl-6 text-xs text-zinc-400">Loading buckets…</p>
+      )}
       {open && detail && (
         <ul className="flex flex-col gap-1 pl-6">
           {detail.buckets.map((b) => (
@@ -359,39 +366,41 @@ function RunCard({
   );
 }
 
-// One bucket: tightness + size + representative chunk, expandable to its members.
+// One bucket: cohesion + size + representative chunk, expandable to its members.
 function BucketRow({ runId, bucket }: { runId: string; bucket: ClusterBucket }) {
   const [open, setOpen] = useState(false);
   const [chunks, setChunks] = useState<BucketChunk[] | null>(null);
+  const [loading, setLoading] = useState(false);
 
   async function expand() {
     const next = !open;
     setOpen(next);
     if (next && !chunks) {
+      setLoading(true);
       try {
         const res = await fetch(`/api/clusters/${runId}/buckets/${bucket.id}`);
         const data = await res.json();
         if (data.chunks) setChunks(data.chunks as BucketChunk[]);
       } catch {
         // leave null
+      } finally {
+        setLoading(false);
       }
     }
   }
 
   return (
     <li className="flex flex-col gap-0.5 border-t border-zinc-100 pt-1 dark:border-zinc-900">
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <button
-          type="button"
-          onClick={expand}
-          className="flex cursor-pointer items-center gap-1 text-zinc-500 hover:underline"
-        >
-          <span className="text-zinc-400">{open ? "▾" : "▸"}</span>
-          <span className="font-mono">#{bucket.ordinal}</span>
-        </button>
+      <button
+        type="button"
+        onClick={expand}
+        className="-mx-1 flex w-full cursor-pointer flex-wrap items-center gap-2 rounded px-1 py-0.5 text-left text-xs transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800/50"
+      >
+        <span className="text-zinc-400">{open ? "▾" : "▸"}</span>
+        <span className="font-mono text-zinc-500">#{bucket.ordinal}</span>
         <span className="text-zinc-400">{bucket.size} chunks</span>
         <span className="text-zinc-500">
-          tightness <span className="tabular-nums">{fmt(bucket.cohesion)}</span>
+          cohesion <span className="tabular-nums">{fmt(bucket.cohesion)}</span>
         </span>
         <CohesionBar value={bucket.cohesion} />
         {bucket.label ? (
@@ -404,19 +413,14 @@ function BucketRow({ runId, bucket }: { runId: string; bucket: ClusterBucket }) 
             </span>
           )
         )}
-      </div>
+      </button>
+      {open && loading && (
+        <p className="animate-pulse pl-5 pt-0.5 text-xs text-zinc-400">Loading chunks…</p>
+      )}
       {open && chunks && (
         <ol className="flex flex-col gap-0.5 pl-5 pt-0.5">
           {chunks.map((c) => (
-            <li key={c.chunkId} className="flex items-center gap-2 text-xs text-zinc-500">
-              <span className="shrink-0 tabular-nums text-zinc-400">{fmt(c.similarity)}</span>
-              <span className="truncate">
-                <span className="font-mono text-zinc-400">
-                  {c.fileName} #{c.position ?? "?"}
-                </span>{" "}
-                {c.text.slice(0, 120)}
-              </span>
-            </li>
+            <ChunkRow key={c.chunkId} chunk={c} />
           ))}
         </ol>
       )}
@@ -424,8 +428,38 @@ function BucketRow({ runId, bucket }: { runId: string; bucket: ClusterBucket }) 
   );
 }
 
+// One chunk in a bucket: similarity + source, expandable to its full text so you
+// can read exactly what landed in the bucket. The text is already loaded with the
+// bucket, so expanding is instant — no extra fetch.
+function ChunkRow({ chunk }: { chunk: BucketChunk }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <li className="flex flex-col gap-1 text-xs text-zinc-500">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="-mx-1 flex w-full cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-left transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800/50"
+      >
+        <span className="shrink-0 text-zinc-400">{open ? "▾" : "▸"}</span>
+        <span className="shrink-0 tabular-nums text-zinc-400">{fmt(chunk.similarity)}</span>
+        <span className={open ? "min-w-0" : "truncate"}>
+          <span className="font-mono text-zinc-400">
+            {chunk.fileName} #{chunk.position ?? "?"}
+          </span>
+          {!open && ` ${chunk.text.slice(0, 120)}`}
+        </span>
+      </button>
+      {open && (
+        <p className="whitespace-pre-wrap break-words pl-5 text-zinc-600 dark:text-zinc-400">
+          {chunk.text}
+        </p>
+      )}
+    </li>
+  );
+}
+
 // Side-by-side compare of up to 5 runs: headline metrics + each run's sorted
-// tightness profile and size distribution. Buckets are NOT aligned across runs.
+// cohesion profile and size distribution. Buckets are NOT aligned across runs.
 function CompareModal({
   runs,
   onClose,
@@ -466,10 +500,10 @@ function CompareModal({
                 {r.name ?? `k=${r.k}`}
               </div>
               <Metric label="k" value={String(r.k)} />
-              <Metric label="avg tightness" value={fmt(r.avgCohesion)} />
+              <Metric label="avg cohesion" value={fmt(r.avgCohesion)} />
               <Metric label="silhouette" value={fmt(r.silhouette)} />
               <div className="flex flex-col gap-1">
-                <span className="text-zinc-400">tightness profile</span>
+                <span className="text-zinc-400">cohesion profile</span>
                 <Bars
                   values={[...r.cohesions].sort((a, b) => b - a)}
                   max={1}
@@ -486,7 +520,7 @@ function CompareModal({
 
         <p className="text-xs text-zinc-400">
           Buckets aren&apos;t aligned across runs (numbering is arbitrary and k differs), so
-          this compares headline metrics and each run&apos;s sorted tightness profile — not
+          this compares headline metrics and each run&apos;s sorted cohesion profile — not
           bucket-to-bucket.
         </p>
       </div>
@@ -504,7 +538,7 @@ function Metric({ label, value }: { label: string; value: string }) {
 }
 
 // A row of thin vertical bars (heights ∝ value / max). Used for size
-// distributions and the sorted tightness profile.
+// distributions and the sorted cohesion profile.
 function Bars({
   values,
   max,
