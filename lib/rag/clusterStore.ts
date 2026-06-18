@@ -411,38 +411,58 @@ export async function getBucketChunks(clusterId: string): Promise<BucketChunk[]>
   }));
 }
 
-// Top-N nearest-to-centroid chunk snippets per bucket, for LLM labeling. One
-// window-function query rather than k bucket lookups; snippets are truncated
-// server-side to keep the labeling prompt bounded.
+// Representative (nearest-to-centroid) chunks per bucket, for LLM labeling. We
+// pass FULL chunk text, never a head-truncation: the embedding that placed a
+// chunk in its bucket is computed over the whole chunk, so cutting off the tail
+// would hide exactly what made it representative. Chunks are already token-
+// bounded by the chunker, so the only size lever is COUNT — we scale chunks-per-
+// bucket down as k grows (floor of 2 to keep some breadth) so the labeling
+// prompt stays bounded without ever slicing into a chunk's meaning. One window-
+// function query rather than k bucket lookups.
 export async function representativeChunksForRun(
   runId: string,
-  perBucket = 6,
-): Promise<{ ordinal: number; snippets: string[] }[]> {
+): Promise<{ ordinal: number; chunks: string[] }[]> {
   const table = await activeChunksTable();
   if (!table) return [];
-  const rows = await sql<{ ordinal: number; snippet: string }[]>`
-    select ordinal, snippet
+
+  const [counts] = await sql<{ k: number }[]>`
+    select count(*)::int as k from clusters where cluster_run_id = ${runId}
+  `;
+  const k = counts?.k ?? 0;
+  if (k === 0) return [];
+
+  const rows = await sql<{ ordinal: number; text: string }[]>`
+    select ordinal, text
     from (
       select cl.ordinal,
-             left(c.text, 240) as snippet,
+             c.text,
              row_number() over (partition by cc.cluster_id order by cc.similarity desc) as rn
       from chunk_clusters cc
       join clusters cl on cl.id = cc.cluster_id
       join ${sql(table)} c on c.id = cc.chunk_id
       where cc.cluster_run_id = ${runId}
     ) t
-    where rn <= ${perBucket}
+    where rn <= ${chunksPerBucket(k)}
     order by ordinal, rn
   `;
   const byOrdinal = new Map<number, string[]>();
   for (const r of rows) {
     const list = byOrdinal.get(r.ordinal) ?? [];
-    list.push(r.snippet);
+    list.push(r.text);
     byOrdinal.set(r.ordinal, list);
   }
   return [...byOrdinal.entries()]
     .sort((a, b) => a[0] - b[0])
-    .map(([ordinal, snippets]) => ({ ordinal, snippets }));
+    .map(([ordinal, chunks]) => ({ ordinal, chunks }));
+}
+
+// Full chunks, so bound the labeling prompt by count, not by truncation:
+// ~TARGET_TOKENS / (k buckets × avg chunk tokens), clamped to [2, 5]. Normal k
+// gets 5 full chunks; large k trades breadth down to a floor of 2.
+function chunksPerBucket(k: number): number {
+  const TARGET_TOKENS = 50_000;
+  const est = Math.round(TARGET_TOKENS / (k * config.chunkSize));
+  return Math.max(2, Math.min(5, est));
 }
 
 // Persist Claude-generated bucket labels (by ordinal) for a run.

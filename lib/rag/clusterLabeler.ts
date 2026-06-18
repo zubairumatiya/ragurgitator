@@ -14,15 +14,15 @@ import { z } from "zod";
 import { anthropicClient } from "@/lib/llm/client";
 import { config } from "@/lib/config";
 
-export type BucketSnippets = { ordinal: number; snippets: string[] };
+export type BucketSamples = { ordinal: number; chunks: string[] };
 export type BucketLabel = { ordinal: number; label: string };
 
 const SYSTEM_PROMPT = `You name clusters of related document chunks.
 
-You'll get several numbered buckets, each with a few representative excerpts.
-Give each bucket a short topic label (at most 4 words, Title Case) capturing what
-its excerpts have in common. Keep the labels distinct from one another and ground
-them ONLY in the excerpts shown — do not invent topics.
+You'll get several numbered buckets, each with a few representative chunks (full
+text). Give each bucket a short topic label (at most 6 words, Title Case)
+capturing what its chunks have in common. Keep the labels distinct from one
+another and ground them ONLY in the chunks shown — do not invent topics.
 
 Respond with ONLY a JSON array, no prose and no code fences:
 [{"ordinal": <number>, "label": "<short label>"}]`;
@@ -31,15 +31,15 @@ const LabelArray = z.array(
   z.object({ ordinal: z.number().int(), label: z.string().trim().min(1) }),
 );
 
-export async function labelBuckets(buckets: BucketSnippets[]): Promise<BucketLabel[]> {
+export async function labelBuckets(buckets: BucketSamples[]): Promise<BucketLabel[]> {
   if (buckets.length === 0) return [];
 
   const userMessage = buckets
     .map((b) => {
-      const excerpts = b.snippets
+      const chunks = b.chunks
         .map((s, i) => `  ${i + 1}. ${s.replace(/\s+/g, " ").trim()}`)
         .join("\n");
-      return `Bucket ${b.ordinal}:\n${excerpts || "  (no excerpts)"}`;
+      return `Bucket ${b.ordinal}:\n${chunks || "  (no chunks)"}`;
     })
     .join("\n\n");
 
@@ -62,7 +62,7 @@ export async function labelBuckets(buckets: BucketSnippets[]): Promise<BucketLab
   for (const { ordinal, label } of parsed) {
     if (!asked.has(ordinal) || seen.has(ordinal)) continue;
     seen.add(ordinal);
-    out.push({ ordinal, label: label.slice(0, 60) });
+    out.push({ ordinal, label: label.slice(0, 100) });
   }
   return out;
 }
