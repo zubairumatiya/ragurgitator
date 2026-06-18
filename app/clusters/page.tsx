@@ -12,19 +12,17 @@ export default function ClustersPage() {
               Corpus clusters
             </h1>
             <p className="text-sm text-zinc-600 dark:text-zinc-400">
-              k-means over the corpus embeddings. Each run makes 3 candidates (random
-              restarts) — keep the ones you like.{" "}
+              k-means over the corpus embeddings — each run makes 3 candidates, so
+              keep the ones you like.{" "}
               <strong className="font-medium text-zinc-700 dark:text-zinc-300">
                 Cohesion
               </strong>{" "}
-              (0–1) is how close a bucket&apos;s chunks sit to its center — higher means a
-              tighter, more on-topic bucket.{" "}
+              (0–1) measures how tight each bucket is;{" "}
               <strong className="font-medium text-zinc-700 dark:text-zinc-300">
-                Silhouette
+                silhouette
               </strong>{" "}
-              (−1 to 1) also rewards buckets being well separated, so unlike cohesion it
-              doesn&apos;t simply rise as k grows — which is what makes it the fair score
-              for comparing different k.
+              (−1 to 1) also rewards buckets being well separated. Higher is better for
+              both, but use silhouette to compare different k.
             </p>
           </div>
         </header>

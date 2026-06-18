@@ -1,0 +1,336 @@
+// ---------------------------------------------------------------------------
+// GRADED-nDCG RANKING BUILDER (/eval).
+//
+// A question's nDCG is only meaningful against a GRADED ideal ranking of several
+// chunks (a single ground-truth chunk makes IDCG=1, see evalMetrics). We build
+// that ranking synthetically and let the user pick which one is ground truth:
+//
+//   1. embed the question, find the cluster centroids nearest it (a saved preset)
+//   2. pull a bounded candidate pool — the chunks in those buckets nearest the
+//      question (rankingStore.poolFromBuckets)
+//   3. AGGREGATE: rank the pool under several embedding models, average the
+//      per-model ranks -> one ideal order (the cross-model consensus)
+//   4. optional LLM rankings as a comparison: rank the pool ('llm_pool'), or
+//      re-order the aggregate's top-k ('llm_rerank')
+//   5. optional MANUAL order the user hand-edits
+//
+// Each is stored as an eval_rankings row (one per kind per question/config). The
+// user promotes ONE to is_truth via setOfficialRanking; that's what nDCG scores
+// the active model's retrieval against. Pool re-embedding is in-memory only
+// (embedCache) — nothing here touches the chunks_<model>_<dim> tables.
+// ---------------------------------------------------------------------------
+import { z } from "zod";
+import { config, rankingAggregateModels } from "@/lib/config";
+import { anthropicClient } from "@/lib/llm/client";
+import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
+import { listRuns } from "@/lib/rag/clusterStore";
+import {
+  getQuestionScope,
+  getRankingChunks,
+  listRankings,
+  nearestBuckets,
+  poolFromBuckets,
+  setTruth,
+  upsertRanking,
+  type RankingKind,
+  type StoredRanking,
+} from "@/lib/rag/rankingStore";
+
+// One chunk in a ranking, resolved for display in ideal order.
+export type RankingItem = {
+  chunkId: string;
+  fileName: string;
+  position: number | null;
+  preview: string;
+  // Aggregate provenance: this chunk's 1-based rank under each embedding model.
+  perModelRanks?: Record<string, number>;
+};
+
+// A stored ranking resolved to its chunks + provenance, for the panel.
+export type RankingCandidate = {
+  id: string;
+  kind: RankingKind;
+  isTruth: boolean;
+  createdAt: number;
+  items: RankingItem[];
+  models?: string[]; // aggregate: the models averaged
+  llmModel?: string; // llm_*: the model that ranked
+  clusterRunId?: string | null; // which preset seeded the pool
+};
+
+export type RankingPreset = { id: string; name: string | null; k: number };
+
+// Everything the panel needs on open: the question, the saved cluster presets to
+// seed a pool, and the rankings built so far (with which is ground truth).
+export type RankingContext = {
+  questionId: string;
+  question: string;
+  k: number;
+  presets: RankingPreset[];
+  candidates: RankingCandidate[];
+  hasAggregate: boolean; // gates the LLM/manual steps, which reuse the aggregate pool
+};
+
+const PREVIEW_CHARS = 160;
+
+// Resolve a stored ranking's chunk ids (ideal order) to display items, pulling
+// text in one query. Stale ids (config changed since build) resolve to a "?".
+async function resolve(stored: StoredRanking): Promise<RankingCandidate> {
+  const chunks = await getRankingChunks(stored.chunkIds);
+  const perModelRanks = stored.details.perModelRanks as
+    | Record<string, Record<string, number>>
+    | undefined;
+  const items: RankingItem[] = stored.chunkIds.map((id) => {
+    const c = chunks.get(id);
+    return {
+      chunkId: id,
+      fileName: c?.fileName ?? "?",
+      position: c?.position ?? null,
+      preview: (c?.text ?? "").replace(/\s+/g, " ").trim().slice(0, PREVIEW_CHARS),
+      perModelRanks: perModelRanks?.[id],
+    };
+  });
+  return {
+    id: stored.id,
+    kind: stored.kind,
+    isTruth: stored.isTruth,
+    createdAt: stored.createdAt,
+    items,
+    models: stored.details.models as string[] | undefined,
+    llmModel: stored.details.llmModel as string | undefined,
+    clusterRunId: (stored.details.clusterRunId as string | undefined) ?? null,
+  };
+}
+
+// Panel context. Null when the question has no label under the active config.
+export async function getRankingContext(
+  questionId: string,
+): Promise<RankingContext | null> {
+  const scope = await getQuestionScope(questionId);
+  if (!scope) return null;
+
+  const [runs, stored] = await Promise.all([listRuns(), listRankings(questionId)]);
+  const presets: RankingPreset[] = runs
+    .filter((r) => r.saved)
+    .map((r) => ({ id: r.id, name: r.name, k: r.k }));
+  const candidates = await Promise.all(stored.map(resolve));
+
+  return {
+    questionId,
+    question: scope.question,
+    k: config.topK,
+    presets,
+    candidates,
+    hasAggregate: candidates.some((c) => c.kind === "aggregate"),
+  };
+}
+
+// Step 3: build the cross-model aggregate ranking from a saved preset. Throws on
+// a stale question / empty pool / unknown preset so the route can surface it.
+export async function buildAggregateRanking(
+  questionId: string,
+  clusterRunId: string,
+): Promise<RankingCandidate> {
+  const t0 = performance.now();
+  const scope = await getQuestionScope(questionId);
+  if (!scope) throw new Error("Question has no label under the active config.");
+
+  // The active-model question vector drives both the centroid search and the
+  // pool's nearest-to-question ordering (centroids + chunk vectors are active-model).
+  const activeVec = await embedQueryCached(scope.question, config.embeddingModel);
+  const buckets = await nearestBuckets(
+    clusterRunId,
+    activeVec,
+    config.rankingNearestBuckets,
+  );
+  if (buckets.length === 0) {
+    throw new Error("That preset has no buckets — pick another or re-run clustering.");
+  }
+  const pool = await poolFromBuckets(
+    buckets.map((b) => b.clusterId),
+    activeVec,
+    config.rankingPoolSize,
+  );
+  if (pool.length === 0) {
+    throw new Error("No candidate chunks found near this question in that preset.");
+  }
+
+  // Rank the pool under each model; accumulate per-chunk rank sums + provenance.
+  const perModelRanks: Record<string, Record<string, number>> = {};
+  const rankSum = new Map<string, number>();
+  const activeSim = new Map(pool.map((p) => [p.chunkId, p.similarity]));
+  for (const p of pool) perModelRanks[p.chunkId] = {};
+
+  for (const model of rankingAggregateModels) {
+    let scored: { chunkId: string; sim: number }[];
+    if (model === config.embeddingModel) {
+      // Already have these similarities from poolFromBuckets — no re-embed.
+      scored = pool.map((p) => ({ chunkId: p.chunkId, sim: p.similarity }));
+    } else {
+      const [qVec, docVecs] = await Promise.all([
+        embedQueryCached(scope.question, model),
+        embedDocsCached(
+          pool.map((p) => p.text),
+          model,
+        ),
+      ]);
+      scored = pool.map((p, i) => ({ chunkId: p.chunkId, sim: cosine(qVec, docVecs[i]) }));
+    }
+    scored.sort((a, b) => b.sim - a.sim);
+    scored.forEach((s, idx) => {
+      const rank = idx + 1;
+      perModelRanks[s.chunkId][model] = rank;
+      rankSum.set(s.chunkId, (rankSum.get(s.chunkId) ?? 0) + rank);
+    });
+  }
+
+  // Ideal order = ascending average rank; ties broken by active-model similarity.
+  const order = pool
+    .map((p) => p.chunkId)
+    .sort((a, b) => {
+      const ra = rankSum.get(a)! - rankSum.get(b)!;
+      return ra !== 0 ? ra : (activeSim.get(b) ?? 0) - (activeSim.get(a) ?? 0);
+    });
+
+  const id = await upsertRanking({
+    questionId,
+    documentEmbeddingId: scope.documentEmbeddingId,
+    kind: "aggregate",
+    chunkIds: order,
+    details: {
+      clusterRunId,
+      bucketOrdinals: buckets.map((b) => b.ordinal),
+      models: rankingAggregateModels,
+      perModelRanks,
+    },
+  });
+
+  console.log(
+    `[rag:ranking] aggregate q=${questionId.slice(0, 8)} pool=${pool.length} ` +
+      `models=${rankingAggregateModels.length} in ${Math.round(performance.now() - t0)}ms`,
+  );
+  return resolve(await pickStored(questionId, id));
+}
+
+const LlmOrder = z.array(z.number().int().positive());
+
+const LLM_SYSTEM_PROMPT = `You rank document chunks by how well each ANSWERS a question.
+
+You'll get a question and a numbered list of chunks. Order the chunk numbers from
+MOST to LEAST relevant to the question. Judge only by the text shown; a chunk that
+doesn't help the question should go last. Include every chunk number exactly once.
+
+Respond with ONLY a JSON array of the chunk numbers in your ranked order, no prose
+and no code fences, e.g. [3,1,5,2,4]`;
+
+// Step 4: an LLM ranking of the aggregate's pool, as a comparison to the
+// embedding consensus. 'pool' ranks a cost-bounded subset of the pool; 'rerank'
+// re-orders just the aggregate's top-k. Requires an existing aggregate.
+export async function buildLlmRanking(
+  questionId: string,
+  variant: "pool" | "rerank",
+): Promise<RankingCandidate> {
+  const scope = await getQuestionScope(questionId);
+  if (!scope) throw new Error("Question has no label under the active config.");
+
+  const aggregate = (await listRankings(questionId)).find((r) => r.kind === "aggregate");
+  if (!aggregate) throw new Error("Build the aggregate ranking first.");
+
+  const poolIds =
+    variant === "pool"
+      ? aggregate.chunkIds.slice(0, config.rankingLlmPoolSize)
+      : aggregate.chunkIds.slice(0, config.topK);
+  const chunks = await getRankingChunks(poolIds);
+
+  const numbered = poolIds.map((id, i) => {
+    const c = chunks.get(id);
+    const text = (c?.text ?? "").replace(/\s+/g, " ").trim();
+    return `${i + 1}. (${c?.fileName ?? "?"}#${c?.position ?? "?"}) ${text}`;
+  });
+
+  const response = await anthropicClient.messages.create({
+    model: config.llmModel,
+    max_tokens: 512,
+    system: LLM_SYSTEM_PROMPT,
+    messages: [
+      {
+        role: "user",
+        content: `Question: ${scope.question}\n\nChunks:\n${numbered.join("\n")}`,
+      },
+    ],
+  });
+  const block = response.content.find((b) => b.type === "text");
+  if (!block) throw new Error("LLM ranker returned no text content.");
+  const parsed = LlmOrder.parse(JSON.parse(stripFences(block.text)));
+
+  // Map 1-based chunk numbers back to ids, keeping the LLM's order; dedupe and
+  // drop out-of-range numbers. Chunks the LLM omits are simply absent from the
+  // ideal ranking (gain 0) — that's the LLM judging them irrelevant.
+  const seen = new Set<number>();
+  const order: string[] = [];
+  for (const n of parsed) {
+    if (n < 1 || n > poolIds.length || seen.has(n)) continue;
+    seen.add(n);
+    order.push(poolIds[n - 1]);
+  }
+  if (order.length === 0) throw new Error("LLM ranking did not reference any chunk.");
+
+  const id = await upsertRanking({
+    questionId,
+    documentEmbeddingId: scope.documentEmbeddingId,
+    kind: variant === "pool" ? "llm_pool" : "llm_rerank",
+    chunkIds: order,
+    details: { llmModel: config.llmModel, variant, basedOnAggregateId: aggregate.id },
+  });
+  return resolve(await pickStored(questionId, id));
+}
+
+// Step 5: persist a hand-edited order. Drops ids not in the active corpus so a
+// stale selection just yields a shorter ranking rather than an error.
+export async function setManualRanking(
+  questionId: string,
+  orderedChunkIds: string[],
+): Promise<RankingCandidate> {
+  const scope = await getQuestionScope(questionId);
+  if (!scope) throw new Error("Question has no label under the active config.");
+  const known = await getRankingChunks(orderedChunkIds);
+  const order = orderedChunkIds.filter((id) => known.has(id));
+  if (order.length === 0) throw new Error("None of those chunks are in the active corpus.");
+
+  const id = await upsertRanking({
+    questionId,
+    documentEmbeddingId: scope.documentEmbeddingId,
+    kind: "manual",
+    chunkIds: order,
+    details: { source: "manual" },
+  });
+  return resolve(await pickStored(questionId, id));
+}
+
+// Promote one ranking to ground truth (clears any previous truth for the
+// question/config). Returns false when the ranking id doesn't resolve.
+export async function setOfficialRanking(
+  questionId: string,
+  rankingId: string,
+): Promise<boolean> {
+  const scope = await getQuestionScope(questionId);
+  if (!scope) return false;
+  return setTruth(questionId, scope.documentEmbeddingId, rankingId);
+}
+
+// Re-read a freshly upserted ranking by id (the store returns lists, not single
+// rows). Throws if it vanished — only possible under a concurrent delete.
+async function pickStored(questionId: string, id: string): Promise<StoredRanking> {
+  const row = (await listRankings(questionId)).find((r) => r.id === id);
+  if (!row) throw new Error("Ranking disappeared after save.");
+  return row;
+}
+
+// Models occasionally wrap JSON in ```json fences despite instructions; strip them.
+function stripFences(text: string): string {
+  return text
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+}

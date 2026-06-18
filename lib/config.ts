@@ -21,6 +21,10 @@ export const config = {
   topK: 5,
   maxAnswerTokens: 1024,
   evalQuestionsPerChunk: 1, // target eval questions per chunk; generation tops up the difference
+  // --- Graded-nDCG ranking builder (/eval; see lib/rag/ranking.ts) ----------
+  rankingNearestBuckets: 3, // cluster centroids nearest the question that seed the pool
+  rankingPoolSize: 15, // candidate chunks ranked for the embedding aggregate
+  rankingLlmPoolSize: 8, // smaller subset sent to the LLM ranker (cost control)
   // Max total upload size per ingest request, summed across files. Kept under
   // Vercel's 4.5 MB serverless body cap to leave room for multipart overhead;
   // raise it if you self-host behind your own limit.
@@ -42,4 +46,15 @@ export const altEmbeddingModels: { id: string; label: string }[] = [
   { id: "voyage-code-2", label: "voyage-code-2" },
   { id: "voyage-finance-2", label: "voyage-finance-2" },
   { id: "voyage-law-2", label: "voyage-law-2" },
+];
+
+// Embedding models whose per-model rankings are averaged into the synthetic
+// "aggregate" ideal ranking for graded nDCG (lib/rag/ranking.ts). The active
+// model is the baseline; a few general-purpose alts add cross-model consensus.
+// Like altEmbeddingModels these are re-embedded in memory, never ingested.
+export const rankingAggregateModels: string[] = [
+  config.embeddingModel,
+  "voyage-4-large",
+  "voyage-4",
+  "voyage-code-3",
 ];

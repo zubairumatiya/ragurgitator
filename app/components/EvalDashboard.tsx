@@ -30,7 +30,7 @@ import type {
   ModelTrialResult,
   RechunkResult,
 } from "@/lib/rag/eval";
-import { ndcgAtRank } from "@/lib/rag/evalMetrics";
+import { NdcgRankingPanel } from "@/app/components/NdcgRankingPanel";
 
 function pct(n: number | null): string {
   return n === null ? "—" : `${(n * 100).toFixed(1)}%`;
@@ -120,6 +120,9 @@ export function EvalDashboard() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [explains, setExplains] = useState<Record<string, ExplainState>>({});
 
+  // Which question's nDCG ranking builder is open (independent of the top-k drill-down).
+  const [rankingOpenId, setRankingOpenId] = useState<string | null>(null);
+
   // Inline "add a question" form: which chunk group it's open for, the synthetic
   // vs. manual tab, the manual text, and which difficulty (if any) is generating.
   const [addingChunkId, setAddingChunkId] = useState<string | null>(null);
@@ -133,6 +136,7 @@ export function EvalDashboard() {
   const reload = () => {
     setExplains({});
     setExpandedId(null);
+    setRankingOpenId(null);
     setAddingChunkId(null);
     setAddText("");
     setReloadKey((k) => k + 1);
@@ -180,6 +184,19 @@ export function EvalDashboard() {
       alive = false;
     };
   }, [reloadKey]);
+
+  // Re-fetch the summary in place (no transient-UI reset), so promoting/editing a
+  // ground-truth ranking updates the nDCG chip + headline without collapsing the
+  // open ranking panel. Used as the NdcgRankingPanel's onChange.
+  async function refreshSummary() {
+    try {
+      const res = await fetch("/api/eval");
+      const data = (await res.json()) as EvalSummary | { error: string };
+      if (res.ok && !("error" in data)) setSummary(data);
+    } catch {
+      // best-effort; the panel surfaces its own action errors
+    }
+  }
 
   // Flip a question's badge in place as its score lands. Only patches rows that
   // are already in the table; brand-new generated questions appear on reload().
@@ -427,7 +444,7 @@ export function EvalDashboard() {
               label={`nDCG@${summary.k}`}
               value={fmtScore(summary.ndcg)}
               big
-              score={summary.ndcg}
+              sub={`${summary.ndcgCovered}/${summary.total} graded`}
             />
             <Stat label="Questions" value={String(summary.total)} />
             <Stat label="Scored" value={String(summary.scored)} />
@@ -538,14 +555,7 @@ export function EvalDashboard() {
                               )}
                               <span className="flex shrink-0 items-center gap-1.5">
                                 <Badge hit={q.hit} rank={q.foundRank} stale={q.stale} />
-                                <MetricChip
-                                  label="nDCG"
-                                  value={
-                                    q.hit === null || q.stale
-                                      ? null
-                                      : ndcgAtRank(q.foundRank)
-                                  }
-                                />
+                                <MetricChip label="nDCG" value={q.ndcg} />
                               </span>
                             </div>
                             <div className="flex items-center justify-between gap-3 text-xs text-zinc-500">
@@ -600,6 +610,22 @@ export function EvalDashboard() {
                                       </button>
                                     )}
                                     <button
+                                      type="button"
+                                      onClick={() =>
+                                        setRankingOpenId((id) =>
+                                          id === q.questionId ? null : q.questionId,
+                                        )
+                                      }
+                                      title={
+                                        rankingOpenId === q.questionId
+                                          ? "Hide the nDCG ranking builder"
+                                          : "Build the graded ideal ranking this question's nDCG scores against"
+                                      }
+                                      className="cursor-pointer underline decoration-dotted underline-offset-2 hover:text-zinc-700 dark:hover:text-zinc-300"
+                                    >
+                                      nDCG
+                                    </button>
+                                    <button
                                       onClick={() => {
                                         setEditingId(q.questionId);
                                         setEditText(q.question);
@@ -624,6 +650,12 @@ export function EvalDashboard() {
                                 questionId={q.questionId}
                                 state={explains[q.questionId]}
                                 k={summary.k}
+                              />
+                            )}
+                            {rankingOpenId === q.questionId && (
+                              <NdcgRankingPanel
+                                questionId={q.questionId}
+                                onChange={refreshSummary}
                               />
                             )}
                           </li>
@@ -724,10 +756,10 @@ export function EvalDashboard() {
   );
 }
 
-// The per-run metrics selector next to "Re-score all". Every current metric
-// derives from the same retrieval pass (found_rank), so they're always computed
-// together and shown locked; this is the slot where future per-run selectable
-// metrics (e.g. LLM-judged graded relevance) become real toggles.
+// The per-run metrics selector next to "Re-score all". Recall@k comes straight
+// from the retrieval pass; nDCG@k is graded against the per-question ideal
+// rankings set up below (only questions that have one are scored). Shown locked;
+// this is the slot where these become real toggles.
 function MetricsDropdown({ k }: { k: number | null }) {
   const [open, setOpen] = useState(false);
   const metrics = [`Recall@${k ?? "k"}`, `nDCG@${k ?? "k"}`];
@@ -757,7 +789,8 @@ function MetricsDropdown({ k }: { k: number | null }) {
               ))}
             </ul>
             <p className="mt-2 border-t border-zinc-200 pt-2 text-xs text-zinc-500 dark:border-zinc-800">
-              Computed together from one retrieval pass — no extra cost.
+              Recall@k runs with retrieval; nDCG@k grades against the per-question
+              rankings you set up below.
             </p>
           </div>
         </>
@@ -766,31 +799,25 @@ function MetricsDropdown({ k }: { k: number | null }) {
   );
 }
 
-// `score` (a metric value in [0, 1]) tints the card background red→green; null
-// or omitted keeps the plain bordered card.
+// A plain bordered headline card. `sub` is an optional small line under the
+// value — e.g. the nDCG card's "graded" coverage count. (Metric cards are no
+// longer tinted; the per-question MetricChip still carries the red→green tint.)
 function Stat({
   label,
   value,
   big,
-  score,
+  sub,
 }: {
   label: string;
   value: string;
   big?: boolean;
-  score?: number | null;
+  sub?: string;
 }) {
-  const tinted = score !== undefined && score !== null;
   return (
-    <div
-      style={tinted ? scoreTint(score) : undefined}
-      className={`flex flex-col gap-0.5 rounded-lg border px-4 py-3 ${
-        tinted
-          ? `border-transparent ${tintBgClass}`
-          : "border-zinc-200 dark:border-zinc-800"
-      }`}
-    >
+    <div className="flex flex-col gap-0.5 rounded-lg border border-zinc-200 px-4 py-3 dark:border-zinc-800">
       <span className="text-xs uppercase tracking-wide text-zinc-500">{label}</span>
       <span className={big ? "text-2xl font-semibold" : "text-lg font-medium"}>{value}</span>
+      {sub && <span className="text-xs text-zinc-400">{sub}</span>}
     </div>
   );
 }

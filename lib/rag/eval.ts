@@ -17,6 +17,7 @@
 import { altEmbeddingModels, config } from "@/lib/config";
 import { anthropicClient } from "@/lib/llm/client";
 import { splitText, tokenizeWithOffsets } from "@/lib/rag/chunker";
+import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
 import { embedQuery, embedTexts } from "@/lib/rag/embeddings";
 import { stitchChunks } from "@/lib/rag/reconstruct";
 import { retrieveWithVector } from "@/lib/rag/retriever";
@@ -672,48 +673,8 @@ export type ModelTrialResult = {
 
 const uniq = (ids: string[]): string[] => [...new Set(ids)];
 
-// Cosine similarity. Voyage vectors are already unit-length (so this reduces to
-// a dot product), but normalize defensively so a non-unit vector can't skew a
-// ranking. Pool + query are always the SAME model here, so dimensions match.
-function cosine(a: number[], b: number[]): number {
-  let dot = 0;
-  let na = 0;
-  let nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
-  const denom = Math.sqrt(na) * Math.sqrt(nb);
-  return denom === 0 ? 0 : dot / denom;
-}
-
-// Session-scoped embedding cache for trials, keyed by (model, role, text). The
-// pool is tiny so re-embedding is cheap, but this makes a repeat run of the same
-// model (e.g. after toggling one pool chunk) or a "Save" re-run effectively free.
-// In-memory only — it dies with the server process and never persists.
-const trialEmbedCache = new Map<string, number[]>();
-const cacheKey = (model: string, role: "document" | "query", text: string) =>
-  `${model} ${role} ${text}`;
-
-async function embedDocsCached(texts: string[], model: string): Promise<number[][]> {
-  const missing = uniq(texts.filter((t) => !trialEmbedCache.has(cacheKey(model, "document", t))));
-  if (missing.length > 0) {
-    const vecs = await embedTexts(missing, model);
-    missing.forEach((t, i) => trialEmbedCache.set(cacheKey(model, "document", t), vecs[i]));
-  }
-  return texts.map((t) => trialEmbedCache.get(cacheKey(model, "document", t))!);
-}
-
-async function embedQueryCached(text: string, model: string): Promise<number[]> {
-  const key = cacheKey(model, "query", text);
-  let vec = trialEmbedCache.get(key);
-  if (!vec) {
-    vec = await embedQuery(text, model);
-    trialEmbedCache.set(key, vec);
-  }
-  return vec;
-}
+// (cosine + the session embedding cache now live in lib/rag/embedCache.ts,
+// shared with the graded-nDCG ranking builder.)
 
 // Assemble the context the trial UI renders. Null when the chunk isn't part of
 // the active config's corpus (stale id / wrong config).

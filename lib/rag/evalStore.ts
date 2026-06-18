@@ -11,7 +11,8 @@
 import { sql } from "@/lib/db";
 import { config } from "@/lib/config";
 import { chunksTable } from "@/lib/rag/vectorStore";
-import { reciprocalRank, ndcgAtRank } from "@/lib/rag/evalMetrics";
+import { reciprocalRank, ndcg } from "@/lib/rag/evalMetrics";
+import { getTruthOrder } from "@/lib/rag/rankingStore";
 
 export type ChunkNeedingQuestions = {
   chunkId: string;
@@ -52,6 +53,9 @@ export type QuestionDetail = {
   retrievedIds: string[] | null;
   scoredAt: number | null;
   stale: boolean; // true = edited since its last score; result shown is for the old text
+  // Graded nDCG@k against this question's official ideal ranking; null when it
+  // has no ranking yet or no fresh score (ungraded → grey chip on /eval).
+  ndcg: number | null;
 };
 
 export type DocumentBreakdown = {
@@ -77,10 +81,15 @@ export type EvalSummary = {
   scored: number; // of those, how many have a result
   hits: number;
   recall: number | null; // hits / scored
-  // Mean reciprocal rank / mean nDCG@k over the same fresh-scored set as recall
-  // (see lib/rag/evalMetrics.ts); null when nothing is scored, like recall.
+  // Mean reciprocal rank over the same fresh-scored set as recall; null when
+  // nothing is scored, like recall.
   mrr: number | null;
+  // Mean graded nDCG@k (see lib/rag/evalMetrics.ndcg) over only the questions
+  // that have an official ideal ranking AND a fresh score; null when none do.
   ndcg: number | null;
+  // How many questions feed that nDCG average — the "5" in the dashboard's 5/n
+  // (n = total). Questions without a ground-truth ranking aren't graded.
+  ndcgCovered: number;
   perDocument: DocumentBreakdown[];
   questions: QuestionDetail[];
   runs: RunSnapshot[];
@@ -1153,6 +1162,7 @@ export async function getSummary(): Promise<EvalSummary> {
     recall: null,
     mrr: null,
     ndcg: null,
+    ndcgCovered: 0,
     perDocument: [],
     questions: [],
     runs: [],
@@ -1255,36 +1265,56 @@ export async function getSummary(): Promise<EvalSummary> {
     `,
   ]);
 
-  const questions: QuestionDetail[] = detail.map((r) => ({
-    questionId: r.question_id,
-    question: r.question,
-    source: r.source,
-    difficulty: r.difficulty,
-    documentId: r.document_id,
-    fileName: r.file_name,
-    sourceChunkId: r.source_chunk_id,
-    expectedPosition: r.expected_position,
-    hit: r.hit,
-    foundRank: r.found_rank,
-    retrievedIds: r.retrieved_ids,
-    scoredAt: r.scored_at ? r.scored_at.getTime() : null,
+  // Each question's official (is_truth) ideal ranking, if any — what its graded
+  // nDCG scores against. One query for all questions.
+  const truthOrders = await getTruthOrder(detail.map((r) => r.question_id));
+
+  const questions: QuestionDetail[] = detail.map((r) => {
     // Edited after its last score -> the shown hit/miss is for the old text. Treat
     // as pending (it will be re-scored next run, see questionsNeedingScoring).
-    stale: r.scored_at !== null && r.updated_at.getTime() > r.scored_at.getTime(),
-  }));
+    const stale = r.scored_at !== null && r.updated_at.getTime() > r.scored_at.getTime();
+    const fresh = r.hit !== null && !stale;
+    // Graded nDCG needs an ideal ranking AND a fresh retrieval order; otherwise
+    // it's ungraded (null) and the UI shows the grey placeholder.
+    const ideal = truthOrders.get(r.question_id);
+    const qNdcg =
+      fresh && ideal ? ndcg(ideal, r.retrieved_ids ?? [], config.topK) : null;
+    return {
+      questionId: r.question_id,
+      question: r.question,
+      source: r.source,
+      difficulty: r.difficulty,
+      documentId: r.document_id,
+      fileName: r.file_name,
+      sourceChunkId: r.source_chunk_id,
+      expectedPosition: r.expected_position,
+      hit: r.hit,
+      foundRank: r.found_rank,
+      retrievedIds: r.retrieved_ids,
+      scoredAt: r.scored_at ? r.scored_at.getTime() : null,
+      stale,
+      ndcg: qNdcg,
+    };
+  });
 
   // Only fresh scores count toward recall; unscored and stale are pending.
   const scoredRows = questions.filter((q) => q.hit !== null && !q.stale);
   const hits = scoredRows.filter((q) => q.hit === true).length;
 
-  // MRR / nDCG over the same fresh-scored set, straight from found_rank — no
-  // extra retrieval, so already-scored questions are covered retroactively.
-  const mean = (f: (rank: number | null) => number): number | null =>
+  // MRR over the fresh-scored set, straight from found_rank (single-relevant) —
+  // no extra retrieval, so already-scored questions are covered retroactively.
+  const mrr =
     scoredRows.length > 0
-      ? scoredRows.reduce((sum, q) => sum + f(q.foundRank), 0) / scoredRows.length
+      ? scoredRows.reduce((sum, q) => sum + reciprocalRank(q.foundRank), 0) /
+        scoredRows.length
       : null;
-  const mrr = mean(reciprocalRank);
-  const ndcg = mean(ndcgAtRank);
+
+  // Mean graded nDCG over exactly the questions that have one (ranked + freshly
+  // scored). ndcgCovered is that set's size — the "5" in the dashboard's 5/n.
+  const graded = questions.map((q) => q.ndcg).filter((v): v is number => v !== null);
+  const ndcgValue =
+    graded.length > 0 ? graded.reduce((sum, v) => sum + v, 0) / graded.length : null;
+  const ndcgCovered = graded.length;
 
   // Questions "Process new chunks" would score: never scored, or edited since.
   // Matches questionsNeedingScoring() — no extra query needed.
@@ -1310,7 +1340,8 @@ export async function getSummary(): Promise<EvalSummary> {
     hits,
     recall: scoredRows.length > 0 ? hits / scoredRows.length : null,
     mrr,
-    ndcg,
+    ndcg: ndcgValue,
+    ndcgCovered,
     perDocument: [...byDoc.values()],
     questions,
     runs: runRows.map((r) => ({
