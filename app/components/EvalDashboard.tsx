@@ -123,6 +123,10 @@ export function EvalDashboard() {
   // Which question's nDCG ranking builder is open (independent of the top-k drill-down).
   const [rankingOpenId, setRankingOpenId] = useState<string | null>(null);
 
+  // Run history is collapsed by default — it grows over time and sits above the
+  // questions table, so keep it out of the way until asked for.
+  const [runsOpen, setRunsOpen] = useState(false);
+
   // Inline "add a question" form: which chunk group it's open for, the synthetic
   // vs. manual tab, the manual text, and which difficulty (if any) is generating.
   const [addingChunkId, setAddingChunkId] = useState<string | null>(null);
@@ -479,12 +483,21 @@ export function EvalDashboard() {
             </section>
           )}
 
-          {/* Run history */}
+          {/* Run history — collapsible; grows over time so it folds away by default. */}
           {summary.runs.length > 0 && (
             <section className="flex flex-col gap-2">
-              <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
+              <button
+                type="button"
+                onClick={() => setRunsOpen((o) => !o)}
+                className="flex cursor-pointer items-center gap-2 self-start text-sm font-medium uppercase tracking-wide text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+              >
+                <span className="text-zinc-400">{runsOpen ? "▾" : "▸"}</span>
                 Runs
-              </h2>
+                <span className="text-xs font-normal normal-case tracking-normal text-zinc-400">
+                  ({summary.runs.length})
+                </span>
+              </button>
+              {runsOpen && (
               <ul className="flex flex-col divide-y divide-zinc-200 rounded-lg border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800">
                 {summary.runs.map((r) => (
                   <li
@@ -504,6 +517,7 @@ export function EvalDashboard() {
                   </li>
                 ))}
               </ul>
+              )}
             </section>
           )}
 
