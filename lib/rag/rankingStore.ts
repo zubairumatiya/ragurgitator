@@ -166,6 +166,26 @@ export async function getRankingChunks(
   );
 }
 
+// The active model's latest retrieved order (top-k chunk ids, in rank order) for
+// a question under the active config — the order graded nDCG scores against an
+// ideal ranking. Empty when the question hasn't been scored under this config, so
+// callers can tell "unscored" (no order) from "scored but missed" (order, no hit).
+export async function getRetrievedOrder(questionId: string): Promise<string[]> {
+  const rows = await sql<{ retrieved_ids: string[] }[]>`
+    select res.retrieved_ids
+    from eval_results res
+    join eval_labels l on l.id = res.eval_label_id
+    join document_embeddings de on de.id = l.document_embedding_id
+    where l.eval_question_id = ${questionId}
+      and de.model = ${config.embeddingModel}
+      and de.chunk_size = ${config.chunkSize}
+      and de.chunk_overlap = ${config.chunkOverlap}
+    order by res.scored_at desc
+    limit 1
+  `;
+  return rows[0]?.retrieved_ids ?? [];
+}
+
 // Every stored ranking for a question under the active config, newest first.
 export async function listRankings(questionId: string): Promise<StoredRanking[]> {
   const rows = await sql<

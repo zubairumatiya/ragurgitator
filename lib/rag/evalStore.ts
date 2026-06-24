@@ -331,6 +331,34 @@ export async function allLabeledQuestions(): Promise<QuestionToScore[]> {
   }));
 }
 
+// One question's scoring inputs by id, under the active config; null when it has
+// no label here. The single-question counterpart to questionsNeedingScoring /
+// allLabeledQuestions, for scoring one question on demand (the nDCG panel).
+export async function getQuestionToScore(
+  questionId: string,
+): Promise<QuestionToScore | null> {
+  const [row] = await sql<
+    { question_id: string; question: string; label_id: string; source_chunk_id: string }[]
+  >`
+    select q.id as question_id, q.question, l.id as label_id, l.source_chunk_id
+    from eval_questions q
+    join eval_labels l on l.eval_question_id = q.id
+    join document_embeddings de on de.id = l.document_embedding_id
+    where q.id = ${questionId}
+      and de.model = ${config.embeddingModel}
+      and de.chunk_size = ${config.chunkSize}
+      and de.chunk_overlap = ${config.chunkOverlap}
+    limit 1
+  `;
+  if (!row) return null;
+  return {
+    questionId: row.question_id,
+    question: row.question,
+    labelId: row.label_id,
+    sourceChunkId: row.source_chunk_id,
+  };
+}
+
 // --- Query-embedding cache (see migrations/0003) -------------------------
 // A question's query vector depends only on (text, model), so it's cached and
 // reused across runs instead of re-embedded every "Re-score all". Keyed by

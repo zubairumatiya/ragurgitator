@@ -19,14 +19,18 @@
 // the active model's retrieval against. Pool re-embedding is in-memory only
 // (embedCache) — nothing here touches the chunks_<model>_<dim> tables.
 // ---------------------------------------------------------------------------
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { config, rankingAggregateModels } from "@/lib/config";
 import { anthropicClient } from "@/lib/llm/client";
 import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
 import { listRuns } from "@/lib/rag/clusterStore";
+import { scoreQuestionNow } from "@/lib/rag/eval";
+import { ndcg } from "@/lib/rag/evalMetrics";
 import {
   getQuestionScope,
   getRankingChunks,
+  getRetrievedOrder,
   listRankings,
   nearestBuckets,
   poolFromBuckets,
@@ -56,9 +60,29 @@ export type RankingCandidate = {
   models?: string[]; // aggregate: the models averaged
   llmModel?: string; // llm_*: the model that ranked
   clusterRunId?: string | null; // which preset seeded the pool
+  // nDCG@k the active model's retrieval would score if THIS ranking were ground
+  // truth — a preview of promoting it. Null when the question is unscored.
+  ndcg?: number | null;
+  // manual only: the ranking kind this hand-edit was derived from, so the panel
+  // can render it in that ranking's place and fold the original away.
+  derivedFromKind?: RankingKind;
 };
 
-export type RankingPreset = { id: string; name: string | null; k: number };
+export type RankingPreset = {
+  id: string;
+  name: string | null;
+  k: number;
+  chunkCount: number;
+  silhouette: number; // run-level, in [-1, 1] — higher = better-separated buckets
+  avgCohesion: number; // mean member-to-centroid cosine across all points
+  sizes: number[]; // by ordinal — the per-bucket detail shown when expanded
+  cohesions: number[]; // by ordinal
+};
+
+// Whether an LLM ranking of a given kind exists and is still current. 'fresh' = a
+// cached row whose inputs are unchanged (re-requesting is a no-op, so the panel
+// disables it); 'stale' = inputs changed since it was built (offer a rebuild).
+export type LlmStatus = "none" | "fresh" | "stale";
 
 // Everything the panel needs on open: the question, the saved cluster presets to
 // seed a pool, and the rankings built so far (with which is ground truth).
@@ -69,13 +93,19 @@ export type RankingContext = {
   presets: RankingPreset[];
   candidates: RankingCandidate[];
   hasAggregate: boolean; // gates the LLM/manual steps, which reuse the aggregate pool
+  llmStatus: { pool: LlmStatus; rerank: LlmStatus };
 };
 
 const PREVIEW_CHARS = 160;
 
 // Resolve a stored ranking's chunk ids (ideal order) to display items, pulling
 // text in one query. Stale ids (config changed since build) resolve to a "?".
-async function resolve(stored: StoredRanking): Promise<RankingCandidate> {
+// `retrievedOrder` (the active model's retrieval) lets us preview the nDCG this
+// ranking would score as ground truth; pass [] (unscored) for a null score.
+async function resolve(
+  stored: StoredRanking,
+  retrievedOrder: string[] = [],
+): Promise<RankingCandidate> {
   const chunks = await getRankingChunks(stored.chunkIds);
   const perModelRanks = stored.details.perModelRanks as
     | Record<string, Record<string, number>>
@@ -99,7 +129,45 @@ async function resolve(stored: StoredRanking): Promise<RankingCandidate> {
     models: stored.details.models as string[] | undefined,
     llmModel: stored.details.llmModel as string | undefined,
     clusterRunId: (stored.details.clusterRunId as string | undefined) ?? null,
+    ndcg: retrievedOrder.length > 0 ? ndcg(stored.chunkIds, retrievedOrder, config.topK) : null,
+    derivedFromKind: stored.details.derivedFromKind as RankingKind | undefined,
   };
+}
+
+// --- LLM-ranking cache key -------------------------------------------------
+// Bump when LLM_SYSTEM_PROMPT changes meaningfully: it's part of the signature,
+// so a bump makes existing cached LLM rankings read 'stale' and rebuild against
+// the new prompt instead of silently serving an answer from the old one.
+const LLM_PROMPT_VERSION = 1;
+
+// The candidate chunk ids an LLM variant ranks: 'pool' ranks the aggregate's top
+// rankingLlmPoolSize; 'rerank' re-orders just its top-k. One place so the cache
+// signature and the actual LLM call always slice the aggregate identically.
+function llmPoolIds(aggregateChunkIds: string[], variant: "pool" | "rerank"): string[] {
+  return variant === "pool"
+    ? aggregateChunkIds.slice(0, config.rankingLlmPoolSize)
+    : aggregateChunkIds.slice(0, config.topK);
+}
+
+// Fingerprint of an LLM ranking's inputs, so a repeat request serves the cached
+// row (no spend) when nothing that affects the answer changed, and recomputes
+// when it did. Chunk *ids* capture the text too — chunks are immutable per id
+// under a config (re-chunking mints new ids, and a config change re-scopes the
+// row). Covers: llm model, prompt version, variant, question text, and the exact
+// ordered candidate set sent to the model.
+function llmSignature(
+  variant: "pool" | "rerank",
+  question: string,
+  poolIds: string[],
+): string {
+  const payload = JSON.stringify({
+    llmModel: config.llmModel,
+    promptVersion: LLM_PROMPT_VERSION,
+    variant,
+    question,
+    poolIds,
+  });
+  return createHash("sha256").update(payload).digest("hex");
 }
 
 // Panel context. Null when the question has no label under the active config.
@@ -109,11 +177,51 @@ export async function getRankingContext(
   const scope = await getQuestionScope(questionId);
   if (!scope) return null;
 
-  const [runs, stored] = await Promise.all([listRuns(), listRankings(questionId)]);
+  const [runs, stored, scored] = await Promise.all([
+    listRuns(),
+    listRankings(questionId),
+    getRetrievedOrder(questionId),
+  ]);
+
+  // Populate the per-candidate nDCG on demand: once the question has a ground
+  // truth (which implies it has a ranking) but no score yet, score it now so the
+  // numbers fill in immediately rather than waiting for a bulk "Re-score all".
+  let retrievedOrder = scored;
+  if (retrievedOrder.length === 0 && stored.some((r) => r.isTruth)) {
+    await scoreQuestionNow(questionId);
+    retrievedOrder = await getRetrievedOrder(questionId);
+  }
+
   const presets: RankingPreset[] = runs
     .filter((r) => r.saved)
-    .map((r) => ({ id: r.id, name: r.name, k: r.k }));
-  const candidates = await Promise.all(stored.map(resolve));
+    .map((r) => ({
+      id: r.id,
+      name: r.name,
+      k: r.k,
+      chunkCount: r.chunkCount,
+      silhouette: r.silhouette,
+      avgCohesion: r.avgCohesion,
+      sizes: r.sizes,
+      cohesions: r.cohesions,
+    }));
+  const candidates = await Promise.all(stored.map((s) => resolve(s, retrievedOrder)));
+
+  // Per-LLM-kind freshness, by re-deriving the signature from the CURRENT aggregate
+  // (no LLM/embeds) and comparing it to the stored one. Drives the panel's
+  // Rank/Cached/Rebuild button state. 'stale' for pre-signature rows (undefined).
+  const aggregate = stored.find((r) => r.kind === "aggregate");
+  const llmStatusFor = (variant: "pool" | "rerank"): LlmStatus => {
+    const kind: RankingKind = variant === "pool" ? "llm_pool" : "llm_rerank";
+    const row = stored.find((r) => r.kind === kind);
+    if (!row) return "none";
+    if (!aggregate) return "stale";
+    const expected = llmSignature(
+      variant,
+      scope.question,
+      llmPoolIds(aggregate.chunkIds, variant),
+    );
+    return row.details.signature === expected ? "fresh" : "stale";
+  };
 
   return {
     questionId,
@@ -122,6 +230,7 @@ export async function getRankingContext(
     presets,
     candidates,
     hasAggregate: candidates.some((c) => c.kind === "aggregate"),
+    llmStatus: { pool: llmStatusFor("pool"), rerank: llmStatusFor("rerank") },
   };
 }
 
@@ -233,13 +342,22 @@ export async function buildLlmRanking(
   const scope = await getQuestionScope(questionId);
   if (!scope) throw new Error("Question has no label under the active config.");
 
-  const aggregate = (await listRankings(questionId)).find((r) => r.kind === "aggregate");
+  const rankings = await listRankings(questionId);
+  const aggregate = rankings.find((r) => r.kind === "aggregate");
   if (!aggregate) throw new Error("Build the aggregate ranking first.");
 
-  const poolIds =
-    variant === "pool"
-      ? aggregate.chunkIds.slice(0, config.rankingLlmPoolSize)
-      : aggregate.chunkIds.slice(0, config.topK);
+  const kind: RankingKind = variant === "pool" ? "llm_pool" : "llm_rerank";
+  const poolIds = llmPoolIds(aggregate.chunkIds, variant);
+  const signature = llmSignature(variant, scope.question, poolIds);
+
+  // Cache hit: a ranking of this kind whose inputs are unchanged. Serve it without
+  // calling the LLM — this is what stops a repeat click from spending again.
+  const cached = rankings.find((r) => r.kind === kind);
+  if (cached && cached.details.signature === signature) {
+    console.log(`[rag:ranking] llm ${variant} q=${questionId.slice(0, 8)} cache hit`);
+    return resolve(cached);
+  }
+
   const chunks = await getRankingChunks(poolIds);
 
   const numbered = poolIds.map((id, i) => {
@@ -278,9 +396,14 @@ export async function buildLlmRanking(
   const id = await upsertRanking({
     questionId,
     documentEmbeddingId: scope.documentEmbeddingId,
-    kind: variant === "pool" ? "llm_pool" : "llm_rerank",
+    kind,
     chunkIds: order,
-    details: { llmModel: config.llmModel, variant, basedOnAggregateId: aggregate.id },
+    details: {
+      llmModel: config.llmModel,
+      variant,
+      basedOnAggregateId: aggregate.id,
+      signature,
+    },
   });
   return resolve(await pickStored(questionId, id));
 }
@@ -290,6 +413,7 @@ export async function buildLlmRanking(
 export async function setManualRanking(
   questionId: string,
   orderedChunkIds: string[],
+  derivedFromKind?: RankingKind,
 ): Promise<RankingCandidate> {
   const scope = await getQuestionScope(questionId);
   if (!scope) throw new Error("Question has no label under the active config.");
@@ -302,7 +426,10 @@ export async function setManualRanking(
     documentEmbeddingId: scope.documentEmbeddingId,
     kind: "manual",
     chunkIds: order,
-    details: { source: "manual" },
+    // derivedFromKind lets the panel render this edit in the source's slot and
+    // fold the original; omitted (undefined drops from JSON) for an edit of the
+    // manual itself, which folds nothing.
+    details: { source: "manual", derivedFromKind },
   });
   return resolve(await pickStored(questionId, id));
 }

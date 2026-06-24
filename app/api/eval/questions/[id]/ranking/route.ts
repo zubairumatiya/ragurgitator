@@ -39,6 +39,8 @@ const Body = z.discriminatedUnion("action", [
         error: "`chunkIds` must be an array of chunk id strings.",
       })
       .min(1, { error: "`chunkIds` must list at least one chunk." }),
+    // Which ranking this edit came from, so the panel folds the original in place.
+    derivedFromKind: z.enum(["aggregate", "llm_pool", "llm_rerank", "manual"]).optional(),
   }),
   z.object({
     action: z.literal("truth"),
@@ -88,7 +90,7 @@ export async function POST(
         await buildLlmRanking(id, "rerank");
         break;
       case "manual":
-        await setManualRanking(id, data.chunkIds);
+        await setManualRanking(id, data.chunkIds, data.derivedFromKind);
         break;
       case "truth": {
         const ok = await setOfficialRanking(id, data.rankingId);

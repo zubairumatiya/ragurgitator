@@ -33,6 +33,7 @@ import {
   getExperimentContext,
   getModelTrialChunk,
   getModelTrialQuestions,
+  getQuestionToScore,
   getSummary,
   insertModelTrial,
   insertQuestionWithLabel,
@@ -319,6 +320,17 @@ async function scoreQuestions(
 
   await insertResults(results);
   return results.length;
+}
+
+// Score ONE question on demand (embed → retrieve → persist a result) so its graded
+// metrics populate immediately instead of waiting for a bulk run — used by the nDCG
+// ranking panel once a question has a ground truth. No-op (returns false) when the
+// question has no label under the active config.
+export async function scoreQuestionNow(questionId: string): Promise<boolean> {
+  const q = await getQuestionToScore(questionId);
+  if (!q) return false;
+  await scoreQuestions([q]);
+  return true;
 }
 
 // Score every question that has no fresh result (new or edited since last score).
