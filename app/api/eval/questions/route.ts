@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody, requiredTrimmedString } from "@/lib/http/body";
+import { withRequestConfig } from "@/lib/http/configScope";
 import { addManualQuestion } from "@/lib/rag/evalStore";
 
 const Body = z.object({
@@ -19,17 +20,19 @@ export async function POST(request: Request) {
   const body = await parseBody(request, Body);
   if (body.response) return body.response;
 
-  try {
-    const ok = await addManualQuestion(body.data.chunkId, body.data.question);
-    if (!ok) {
-      return Response.json(
-        { error: "Chunk not found under the active config." },
-        { status: 404 },
-      );
+  return withRequestConfig(request, async () => {
+    try {
+      const ok = await addManualQuestion(body.data.chunkId, body.data.question);
+      if (!ok) {
+        return Response.json(
+          { error: "Chunk not found under the active config." },
+          { status: 404 },
+        );
+      }
+      return Response.json({ ok: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to add question.";
+      return Response.json({ error: message }, { status: 500 });
     }
-    return Response.json({ ok: true });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to add question.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  });
 }

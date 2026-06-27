@@ -6,8 +6,14 @@
 // different models stay in their own geometric spaces; see migrations/.
 // ---------------------------------------------------------------------------
 import { sql } from "@/lib/db";
-import { config } from "@/lib/config";
+import { activeConfig } from "@/lib/rag/activeConfig";
+import { modelSpec } from "@/lib/rag/embeddingModels";
 import type { RetrievedChunk } from "@/types/rag";
+
+// Filtered HNSW search needs a larger candidate list so enough rows survive the
+// config_id predicate to fill the top-k once several configs share a chunk table
+// (see docs/multi-config-plan.md §5.3). Harmless with a single config.
+const EF_SEARCH = 100;
 
 export type IngestedDocument = {
   id: string;
@@ -18,16 +24,31 @@ export type IngestedDocument = {
 
 export type FoundDocument = { id: string; fileName: string };
 
-// Add a case here (and a corresponding migration) when introducing a new
-// embedding model or dimension. Refusing unknown combos here makes the
-// missing migration obvious at runtime.
+// Dimension of a model's embeddings, from the registry (lib/rag/embeddingModels).
+export function modelDimension(model: string): number {
+  return modelSpec(model).dimension;
+}
+
+// The physical chunks_<model>_<dim> table a config's vectors live in. Resolved
+// from the registry, but only for INGESTABLE models — a model without
+// `ingestable: true` (and thus no chunks_* migration) fails here, making the
+// missing migration obvious at runtime. The derived name follows the migration
+// convention: id dashes → underscores, then the dimension.
+//   voyage-4-lite, 1024 -> chunks_voyage_4_lite_1024
 export function chunksTable(model: string, dimension: number): string {
-  if (model === "voyage-4-lite" && dimension === 1024) {
-    return "chunks_voyage_4_lite_1024";
+  const spec = modelSpec(model);
+  if (!spec.ingestable) {
+    throw new Error(
+      `Model "${model}" is not ingestable — no chunks table. Set ingestable:true ` +
+        `in EMBEDDING_MODELS and add a chunks_<model>_<dim> migration.`,
+    );
   }
-  throw new Error(
-    `No chunks table for model="${model}" dim=${dimension}. Add a migration and update chunksTable().`,
-  );
+  if (dimension !== spec.dimension) {
+    throw new Error(
+      `Dimension mismatch for "${model}": asked for ${dimension}, registry says ${spec.dimension}.`,
+    );
+  }
+  return `chunks_${model.replace(/-/g, "_")}_${dimension}`;
 }
 
 // pgvector parses the "[x,y,z]" text format and casts to vector via the
@@ -52,10 +73,11 @@ export async function findDocumentByHash(
 export async function insertDocument(
   fileName: string,
   contentHash: string,
+  content: string,
 ): Promise<string> {
   const rows = await sql<{ id: string }[]>`
-    insert into documents (file_name, content_hash)
-    values (${fileName}, ${contentHash})
+    insert into documents (file_name, content_hash, content)
+    values (${fileName}, ${contentHash}, ${content})
     returning id
   `;
   return rows[0].id;
@@ -76,19 +98,15 @@ export async function deleteDocument(id: string): Promise<boolean> {
   return rows.length > 0;
 }
 
-export async function hasEmbeddingRun(
-  documentId: string,
-  model: string,
-  chunkSize: number,
-  chunkOverlap: number,
-): Promise<boolean> {
+// Has this document already been embedded under the ACTIVE config? (config_id +
+// document_id uniquely identify a run, given the config fixes model/size/overlap.)
+export async function hasEmbeddingRun(documentId: string): Promise<boolean> {
+  const cfg = activeConfig();
   const rows = await sql`
     select 1
     from document_embeddings
-    where document_id = ${documentId}
-      and model = ${model}
-      and chunk_size = ${chunkSize}
-      and chunk_overlap = ${chunkOverlap}
+    where config_id = ${cfg.id}
+      and document_id = ${documentId}
     limit 1
   `;
   return rows.length > 0;
@@ -100,29 +118,29 @@ export type ChunkInsert = {
   embedding: number[];
 };
 
+// Persist one embedding run + its chunks under the ACTIVE config. Model,
+// dimension, chunk size/overlap and the physical table all come from the config,
+// so the caller only supplies the document and its chunks.
 export async function insertEmbeddingRunWithChunks(args: {
   documentId: string;
-  model: string;
-  dimension: number;
-  chunkSize: number;
-  chunkOverlap: number;
   chunks: ChunkInsert[];
 }): Promise<void> {
-  const table = chunksTable(args.model, args.dimension);
+  const cfg = activeConfig();
 
   await sql.begin(async (tx) => {
     const [run] = await tx<{ id: string }[]>`
       insert into document_embeddings
-        (document_id, model, dimension, chunk_size, chunk_overlap, chunk_count)
+        (config_id, document_id, model, dimension, chunk_size, chunk_overlap, chunk_count)
       values
-        (${args.documentId}, ${args.model}, ${args.dimension},
-         ${args.chunkSize}, ${args.chunkOverlap}, ${args.chunks.length})
+        (${cfg.id}, ${args.documentId}, ${cfg.embeddingModel}, ${cfg.dimension},
+         ${cfg.chunkSize}, ${cfg.chunkOverlap}, ${args.chunks.length})
       returning id
     `;
 
     if (args.chunks.length === 0) return;
 
     const rows = args.chunks.map((c) => ({
+      config_id: cfg.id,
       document_id: args.documentId,
       document_embedding_id: run.id,
       position: c.position,
@@ -130,7 +148,7 @@ export async function insertEmbeddingRunWithChunks(args: {
       embedding: vectorLiteral(c.embedding),
     }));
 
-    await tx`insert into ${tx(table)} ${tx(rows)}`;
+    await tx`insert into ${tx(cfg.chunksTable)} ${tx(rows)}`;
   });
 }
 
@@ -138,28 +156,35 @@ export async function query(
   vector: number[],
   topK: number,
 ): Promise<RetrievedChunk[]> {
-  const table = chunksTable(config.embeddingModel, vector.length);
+  const cfg = activeConfig();
   const queryVec = vectorLiteral(vector);
 
-  const rows = await sql<
-    {
-      id: string;
-      document_id: string;
-      position: number;
-      text: string;
-      score: number;
-    }[]
-  >`
-    select
-      id,
-      document_id,
-      position,
-      text,
-      1 - (embedding <=> ${queryVec}::vector) as score
-    from ${sql(table)}
-    order by embedding <=> ${queryVec}::vector
-    limit ${topK}
-  `;
+  // Config-filtered ANN: only this config's chunks compete. Raise ef_search
+  // inside the txn so the filter doesn't starve the top-k once multiple configs
+  // share the table (§5.3). EF_SEARCH is a trusted constant, hence unsafe().
+  const rows = await sql.begin(async (tx) => {
+    await tx.unsafe(`set local hnsw.ef_search = ${EF_SEARCH}`);
+    return tx<
+      {
+        id: string;
+        document_id: string;
+        position: number;
+        text: string;
+        score: number;
+      }[]
+    >`
+      select
+        id,
+        document_id,
+        position,
+        text,
+        1 - (embedding <=> ${queryVec}::vector) as score
+      from ${tx(cfg.chunksTable)}
+      where config_id = ${cfg.id}
+      order by embedding <=> ${queryVec}::vector
+      limit ${topK}
+    `;
+  });
 
   return rows.map((r) => ({
     score: Number(r.score),
@@ -191,9 +216,7 @@ export async function listDocuments(): Promise<IngestedDocument[]> {
       de.created_at
     from document_embeddings de
     join documents d on d.id = de.document_id
-    where de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+    where de.config_id = ${activeConfig().id}
     order by de.created_at desc
   `;
 

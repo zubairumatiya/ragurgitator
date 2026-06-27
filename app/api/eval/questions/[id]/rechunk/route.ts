@@ -11,6 +11,7 @@
 // ---------------------------------------------------------------------------
 import { z } from "zod";
 import { invalidBody, readJsonBody } from "@/lib/http/body";
+import { withRequestConfig } from "@/lib/http/configScope";
 import {
   runCustomChunkExperiment,
   runRechunkExperiment,
@@ -73,16 +74,18 @@ export async function POST(
   const raw = await readJsonBody(request);
   if (raw.response) return raw.response;
 
-  // The presence of `sections` picks the mode, so a malformed Mode B payload
-  // gets a sections error rather than complaints about a missing size/overlap.
-  if (typeof raw.data === "object" && raw.data !== null && "sections" in raw.data) {
-    const body = SectionsBody.safeParse(raw.data);
-    if (!body.success) return invalidBody(body.error);
-    return respond(() => runCustomChunkExperiment(id, body.data.sections));
-  }
+  return withRequestConfig(request, async () => {
+    // The presence of `sections` picks the mode, so a malformed Mode B payload
+    // gets a sections error rather than complaints about a missing size/overlap.
+    if (typeof raw.data === "object" && raw.data !== null && "sections" in raw.data) {
+      const body = SectionsBody.safeParse(raw.data);
+      if (!body.success) return invalidBody(body.error);
+      return respond(() => runCustomChunkExperiment(id, body.data.sections));
+    }
 
-  const body = UniformBody.safeParse(raw.data);
-  if (!body.success) return invalidBody(body.error);
-  const { size, overlap } = body.data;
-  return respond(() => runRechunkExperiment(id, size, overlap));
+    const body = UniformBody.safeParse(raw.data);
+    if (!body.success) return invalidBody(body.error);
+    const { size, overlap } = body.data;
+    return respond(() => runRechunkExperiment(id, size, overlap));
+  });
 }

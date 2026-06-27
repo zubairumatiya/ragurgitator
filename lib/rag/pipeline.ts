@@ -13,8 +13,9 @@
 // ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
 
-import { config } from "@/lib/config";
+import { activeConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";
+import { addDocumentToCorpus } from "@/lib/rag/corpusStore";
 import { embedTexts } from "@/lib/rag/embeddings";
 import { labelFor, loadDocument, type LoadInput } from "@/lib/rag/loader";
 import { retrieve } from "@/lib/rag/retriever";
@@ -37,12 +38,13 @@ async function ingestOne(
   doc: SourceDocument,
   onStep: (step: IngestStep) => void = () => {},
 ): Promise<number> {
+  const cfg = activeConfig();
   const contentHash = sha256(doc.text);
 
   const existing = await findDocumentByHash(contentHash);
   const documentId = existing
     ? existing.id
-    : await insertDocument(doc.metadata.fileName, contentHash);
+    : await insertDocument(doc.metadata.fileName, contentHash, doc.text);
 
   if (existing) {
     console.log(
@@ -50,18 +52,15 @@ async function ingestOne(
     );
   }
 
-  // Already embedded under the current config? Nothing to do.
-  if (
-    await hasEmbeddingRun(
-      documentId,
-      config.embeddingModel,
-      config.chunkSize,
-      config.chunkOverlap,
-    )
-  ) {
+  // Ensure the document belongs to this config's corpus (idempotent) — it may
+  // have first been ingested under a different config sharing the corpus.
+  await addDocumentToCorpus(cfg.corpusId, documentId);
+
+  // Already embedded under the active config? Nothing to do.
+  if (await hasEmbeddingRun(documentId)) {
     console.log(
       `[rag:pipeline] skip embed: ${doc.metadata.fileName} already embedded under ` +
-        `model=${config.embeddingModel} size=${config.chunkSize} overlap=${config.chunkOverlap}`,
+        `config=${cfg.id.slice(0, 8)} (${cfg.embeddingModel} size=${cfg.chunkSize} overlap=${cfg.chunkOverlap})`,
     );
     return 0;
   }
@@ -72,15 +71,10 @@ async function ingestOne(
 
   onStep("embed");
   const vectors = await embedTexts(chunks.map((c) => c.text));
-  const dimension = vectors[0]?.length ?? 0;
 
   onStep("store");
   await insertEmbeddingRunWithChunks({
     documentId,
-    model: config.embeddingModel,
-    dimension,
-    chunkSize: config.chunkSize,
-    chunkOverlap: config.chunkOverlap,
     chunks: chunks.map((c, i) => ({
       position: c.position,
       text: c.text,

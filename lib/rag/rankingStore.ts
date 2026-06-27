@@ -2,14 +2,14 @@
 // DB layer for per-question graded nDCG rankings (migrations/0009). Raw SQL via
 // the shared `sql` client, no business logic — orchestration lives in ranking.ts.
 //
-// Everything is scoped to the ACTIVE config (config.embeddingModel + chunkSize +
-// chunkOverlap), like evalStore.ts / clusterStore.ts. A ranking is tied to the
+// Everything is scoped to the ACTIVE config via de.config_id (from
+// activeConfig()), like evalStore.ts / clusterStore.ts. A ranking is tied to the
 // question's active-config embedding run (document_embedding_id), so changing the
 // config makes a question's rankings stop matching and it reads ungraded again.
 // ---------------------------------------------------------------------------
 import { sql } from "@/lib/db";
-import { config } from "@/lib/config";
-import { chunksTable, vectorLiteral } from "@/lib/rag/vectorStore";
+import { activeConfig } from "@/lib/rag/activeConfig";
+import { vectorLiteral } from "@/lib/rag/vectorStore";
 
 export type RankingKind = "aggregate" | "llm_pool" | "llm_rerank" | "manual";
 
@@ -39,16 +39,11 @@ export type PoolCandidate = {
 // Resolve the chunks table for the active config. Null when nothing is ingested
 // under this config yet. (Same probe as evalStore/clusterStore.)
 async function activeChunksTable(): Promise<string | null> {
-  const rows = await sql<{ dimension: number }[]>`
-    select dimension
-    from document_embeddings
-    where model = ${config.embeddingModel}
-      and chunk_size = ${config.chunkSize}
-      and chunk_overlap = ${config.chunkOverlap}
-    limit 1
+  const cfg = activeConfig();
+  const rows = await sql`
+    select 1 from document_embeddings where config_id = ${cfg.id} limit 1
   `;
-  if (rows.length === 0) return null;
-  return chunksTable(config.embeddingModel, rows[0].dimension);
+  return rows.length > 0 ? cfg.chunksTable : null;
 }
 
 export type QuestionScope = {
@@ -68,9 +63,7 @@ export async function getQuestionScope(
     join eval_questions q on q.id = l.eval_question_id
     join document_embeddings de on de.id = l.document_embedding_id
     where l.eval_question_id = ${questionId}
-      and de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+      and de.config_id = ${activeConfig().id}
     limit 1
   `;
   if (!row) return null;
@@ -126,9 +119,7 @@ export async function poolFromBuckets(
     join documents d on d.id = c.document_id
     join document_embeddings de on de.id = c.document_embedding_id
     where cc.cluster_id = any(${clusterIds}::uuid[])
-      and de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+      and de.config_id = ${activeConfig().id}
     order by c.embedding <=> ${qlit}::vector
     limit ${limit}
   `;
@@ -157,9 +148,7 @@ export async function getRankingChunks(
     join documents d on d.id = c.document_id
     join document_embeddings de on de.id = c.document_embedding_id
     where c.id = any(${ids}::uuid[])
-      and de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+      and de.config_id = ${activeConfig().id}
   `;
   return new Map(
     rows.map((r) => [r.id, { fileName: r.file_name, position: r.position, text: r.text }]),
@@ -177,9 +166,7 @@ export async function getRetrievedOrder(questionId: string): Promise<string[]> {
     join eval_labels l on l.id = res.eval_label_id
     join document_embeddings de on de.id = l.document_embedding_id
     where l.eval_question_id = ${questionId}
-      and de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+      and de.config_id = ${activeConfig().id}
     order by res.scored_at desc
     limit 1
   `;
@@ -202,9 +189,7 @@ export async function listRankings(questionId: string): Promise<StoredRanking[]>
     from eval_rankings r
     join document_embeddings de on de.id = r.document_embedding_id
     where r.eval_question_id = ${questionId}
-      and de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+      and de.config_id = ${activeConfig().id}
     order by r.created_at desc
   `;
   return rows.map((r) => ({
@@ -281,9 +266,7 @@ export async function getTruthOrder(
     join document_embeddings de on de.id = r.document_embedding_id
     where r.is_truth
       and r.eval_question_id = any(${questionIds}::uuid[])
-      and de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+      and de.config_id = ${activeConfig().id}
   `;
   return new Map(rows.map((r) => [r.eval_question_id, r.chunk_ids]));
 }

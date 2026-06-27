@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody, requiredTrimmedString } from "@/lib/http/body";
+import { withRequestConfig } from "@/lib/http/configScope";
 import { ask } from "@/lib/rag/pipeline";
 
 const Body = z.object({
@@ -18,11 +19,13 @@ export async function POST(request: Request) {
   const body = await parseBody(request, Body);
   if (body.response) return body.response;
 
-  try {
-    const result = await ask(body.data.question);
-    return Response.json(result);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Chat failed.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  return withRequestConfig(request, async () => {
+    try {
+      const result = await ask(body.data.question);
+      return Response.json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Chat failed.";
+      return Response.json({ error: message }, { status: 500 });
+    }
+  });
 }

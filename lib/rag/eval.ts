@@ -15,6 +15,7 @@
 //     share it); fine with today's single fixed config.
 // ---------------------------------------------------------------------------
 import { altEmbeddingModels, config } from "@/lib/config";
+import { activeConfig } from "@/lib/rag/activeConfig";
 import { anthropicClient } from "@/lib/llm/client";
 import { splitText, tokenizeWithOffsets } from "@/lib/rag/chunker";
 import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
@@ -161,7 +162,7 @@ async function authorQuestions(
   // The difficulty steer (when set) leads the user turn; the passage follows.
   const steer = difficulty ? `${difficultyInstruction(difficulty)}\n\n` : "";
   const response = await anthropicClient.messages.create({
-    model: config.llmModel,
+    model: activeConfig().llmModel,
     // Scale headroom with the ask so a larger target can't truncate the JSON.
     max_tokens: Math.min(1024 + (count - 1) * 512, 4096),
     thinking: { type: "disabled" },
@@ -223,7 +224,7 @@ export async function generateMissingQuestions(emit: Emit = () => {}): Promise<n
         sourceChunkId: chunk.chunkId,
         question: q.question.trim(),
         expectedAnswer: q.expected_answer?.trim() || null,
-        generatorModel: config.llmModel,
+        generatorModel: activeConfig().llmModel,
       });
       generated += 1;
     }
@@ -256,7 +257,7 @@ export async function generateQuestionForChunk(
     sourceChunkId: chunkId,
     question: q.question.trim(),
     expectedAnswer: q.expected_answer?.trim() || null,
-    generatorModel: config.llmModel,
+    generatorModel: activeConfig().llmModel,
     difficulty,
   });
   return "ok";
@@ -281,7 +282,7 @@ async function scoreQuestions(
 
   const cached = await getCachedQueryEmbeddings(
     questions.map((q) => q.questionId),
-    config.embeddingModel,
+    activeConfig().embeddingModel,
   );
 
   const results: ResultInsert[] = [];
@@ -290,7 +291,7 @@ async function scoreQuestions(
     let vector = cached.get(q.questionId);
     if (!vector) {
       vector = await embedQuery(q.question);
-      await putCachedQueryEmbedding(q.questionId, config.embeddingModel, vector);
+      await putCachedQueryEmbedding(q.questionId, activeConfig().embeddingModel, vector);
     }
     const retrieved = await retrieveWithVector(vector);
     const ids = retrieved.map((r) => r.chunk.chunk.id);
@@ -301,7 +302,7 @@ async function scoreQuestions(
     results.push({
       questionId: q.questionId,
       labelId: q.labelId,
-      k: config.topK,
+      k: activeConfig().topK,
       hit,
       foundRank,
       retrievedIds: ids,
@@ -337,7 +338,7 @@ export async function scoreQuestionNow(questionId: string): Promise<boolean> {
 export async function scoreUnscoredQuestions(emit: Emit = () => {}): Promise<number> {
   const pending = await questionsNeedingScoring();
   if (pending.length === 0) return 0;
-  console.log(`[rag:eval] scoring ${pending.length} question(s) @ k=${config.topK}`);
+  console.log(`[rag:eval] scoring ${pending.length} question(s) @ k=${activeConfig().topK}`);
   return scoreQuestions(pending, emit);
 }
 
@@ -392,7 +393,7 @@ export async function rescoreAllQuestions(emit: Emit = () => {}): Promise<{
   const t0 = performance.now();
   const questions = await allLabeledQuestions();
   console.log(
-    `[rag:eval] re-scoring all ${questions.length} question(s) @ k=${config.topK}`,
+    `[rag:eval] re-scoring all ${questions.length} question(s) @ k=${activeConfig().topK}`,
   );
   const scored = await scoreQuestions(questions, emit);
 
@@ -478,7 +479,7 @@ async function rankExperiment(
   const queryVector = ctx.queryVector ?? (await embedQuery(ctx.question));
   const subVectors = await embedTexts(subTexts);
 
-  const k = config.topK;
+  const k = activeConfig().topK;
   const ranked = await rankWithSubstitutedChunk({
     queryVector,
     sourceChunkId: ctx.chunkId,
@@ -709,8 +710,8 @@ export async function getModelTrialContext(
 
   return {
     models: altEmbeddingModels,
-    baselineModel: config.embeddingModel,
-    k: config.topK,
+    baselineModel: activeConfig().embeddingModel,
+    k: activeConfig().topK,
     chunk: {
       chunkId: chunk.chunkId,
       fileName: chunk.fileName,
@@ -758,7 +759,7 @@ export async function runModelTrial(
   const testVec = vecById.get(chunkId);
   if (!testVec) return null; // chunk dropped out of the active corpus mid-run
 
-  const k = config.topK;
+  const k = activeConfig().topK;
   const questionsOut: TrialQuestionOutcome[] = [];
   for (const q of questions) {
     const qVec = await embedQueryCached(q.question, model);
@@ -790,7 +791,7 @@ export async function runModelTrial(
   const storedHitCount = questionsOut.filter((o) => o.storedHit === true).length;
   const result: ModelTrialResult = {
     model,
-    baselineModel: config.embeddingModel,
+    baselineModel: activeConfig().embeddingModel,
     k,
     poolSize: poolChunks.length,
     pool: poolChunks,
@@ -806,7 +807,7 @@ export async function runModelTrial(
     const ins = await insertModelTrial({
       sourceChunkId: chunkId,
       documentEmbeddingId: chunk.documentEmbeddingId,
-      baselineModel: config.embeddingModel,
+      baselineModel: activeConfig().embeddingModel,
       trialModel: model,
       k,
       poolChunkIds: poolIds,
@@ -817,7 +818,7 @@ export async function runModelTrial(
     });
     savedTrial = {
       id: ins.id,
-      baselineModel: config.embeddingModel,
+      baselineModel: activeConfig().embeddingModel,
       trialModel: model,
       k,
       poolSize: poolIds.length,

@@ -15,6 +15,7 @@ import { config } from "@/lib/config";
 import { ingest, type IngestEvent } from "@/lib/rag/pipeline";
 import type { LoadInput } from "@/lib/rag/loader";
 import { ndjsonStream } from "@/lib/http/ndjson";
+import { withRequestConfig } from "@/lib/http/configScope";
 
 function formatMB(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -63,12 +64,16 @@ export async function POST(request: Request) {
   }
 
   // Stream progress as NDJSON so the client's progress bar advances in real time.
-  return ndjsonStream<IngestEvent>(async (send) => {
-    try {
-      await ingest(inputs, send);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Ingestion failed.";
-      send({ type: "error", message });
-    }
-  });
+  // Enter the config scope here so it's active when ndjsonStream captures the
+  // async context for the deferred stream producer (see lib/http/ndjson.ts).
+  return withRequestConfig(request, async () =>
+    ndjsonStream<IngestEvent>(async (send) => {
+      try {
+        await ingest(inputs, send);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Ingestion failed.";
+        send({ type: "error", message });
+      }
+    }),
+  );
 }

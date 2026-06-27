@@ -9,6 +9,7 @@
 // ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
+import { withRequestConfig } from "@/lib/http/configScope";
 import { generateQuestionForChunk, type Difficulty } from "@/lib/rag/eval";
 
 // `satisfies` rejects any entry that isn't a real Difficulty while keeping the
@@ -27,24 +28,26 @@ export async function POST(request: Request) {
   const body = await parseBody(request, Body);
   if (body.response) return body.response;
 
-  try {
-    const result = await generateQuestionForChunk(body.data.chunkId, body.data.difficulty);
-    if (result === "not-found") {
-      return Response.json(
-        { error: "Chunk not found under the active config." },
-        { status: 404 },
-      );
+  return withRequestConfig(request, async () => {
+    try {
+      const result = await generateQuestionForChunk(body.data.chunkId, body.data.difficulty);
+      if (result === "not-found") {
+        return Response.json(
+          { error: "Chunk not found under the active config." },
+          { status: 404 },
+        );
+      }
+      if (result === "empty") {
+        return Response.json(
+          { error: "The model didn't return a usable question — try again." },
+          { status: 502 },
+        );
+      }
+      return Response.json({ ok: true });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to generate question.";
+      return Response.json({ error: message }, { status: 500 });
     }
-    if (result === "empty") {
-      return Response.json(
-        { error: "The model didn't return a usable question — try again." },
-        { status: 502 },
-      );
-    }
-    return Response.json({ ok: true });
-  } catch (err) {
-    const message =
-      err instanceof Error ? err.message : "Failed to generate question.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  });
 }

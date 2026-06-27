@@ -8,14 +8,17 @@
 // ---------------------------------------------------------------------------
 import { processNewChunks, type EvalEvent } from "@/lib/rag/eval";
 import { ndjsonStream } from "@/lib/http/ndjson";
+import { withRequestConfig } from "@/lib/http/configScope";
 
-export async function POST() {
-  return ndjsonStream<EvalEvent>(async (send) => {
-    try {
-      await processNewChunks(send);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Eval processing failed.";
-      send({ type: "error", message });
-    }
-  });
+export async function POST(request: Request) {
+  return withRequestConfig(request, async () =>
+    ndjsonStream<EvalEvent>(async (send) => {
+      try {
+        await processNewChunks(send);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Eval processing failed.";
+        send({ type: "error", message });
+      }
+    }),
+  );
 }

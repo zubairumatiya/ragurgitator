@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody, requiredTrimmedString } from "@/lib/http/body";
+import { withRequestConfig } from "@/lib/http/configScope";
 import { deleteQuestion, updateQuestion } from "@/lib/rag/evalStore";
 
 const Body = z.object({
@@ -22,25 +23,29 @@ export async function PATCH(
   const body = await parseBody(request, Body);
   if (body.response) return body.response;
 
-  try {
-    await updateQuestion(id, body.data.question);
-    return Response.json({ ok: true });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Update failed.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  return withRequestConfig(request, async () => {
+    try {
+      await updateQuestion(id, body.data.question);
+      return Response.json({ ok: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Update failed.";
+      return Response.json({ error: message }, { status: 500 });
+    }
+  });
 }
 
 export async function DELETE(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  try {
-    await deleteQuestion(id);
-    return Response.json({ ok: true });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Delete failed.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  return withRequestConfig(request, async () => {
+    try {
+      await deleteQuestion(id);
+      return Response.json({ ok: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Delete failed.";
+      return Response.json({ error: message }, { status: 500 });
+    }
+  });
 }

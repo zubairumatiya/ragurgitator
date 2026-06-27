@@ -6,6 +6,7 @@
 // offsets and each chunk's token span (see lib/rag/eval.buildChunkWindow). Read-
 // only; nothing is persisted. `params` is a Promise in this Next.js version.
 // ---------------------------------------------------------------------------
+import { withRequestConfig } from "@/lib/http/configScope";
 import { buildChunkWindow } from "@/lib/rag/eval";
 
 export async function GET(
@@ -33,18 +34,20 @@ export async function GET(
     );
   }
 
-  try {
-    const window = await buildChunkWindow(id, from, to);
-    if (!window) {
-      return Response.json(
-        { error: "Question not found under the active config." },
-        { status: 404 },
-      );
+  return withRequestConfig(request, async () => {
+    try {
+      const window = await buildChunkWindow(id, from, to);
+      if (!window) {
+        return Response.json(
+          { error: "Question not found under the active config." },
+          { status: 404 },
+        );
+      }
+      return Response.json(window);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to build chunk window.";
+      return Response.json({ error: message }, { status: 500 });
     }
-    return Response.json(window);
-  } catch (err) {
-    const message =
-      err instanceof Error ? err.message : "Failed to build chunk window.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  });
 }

@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 import { anthropicClient } from "@/lib/llm/client";
 import { config } from "@/lib/config";
+import { activeConfig } from "@/lib/rag/activeConfig";
 import type { RetrievedChunk } from "@/types/rag";
 
 const SYSTEM_PROMPT = `You are a helpful assistant answering questions about a user-provided document set.
@@ -29,7 +30,7 @@ export async function generateAnswer(
   const userMessage = buildUserMessage(question, chunks);
 
   const response = await anthropicClient.messages.create({
-    model: config.llmModel,
+    model: activeConfig().llmModel,
     max_tokens: config.maxAnswerTokens,
     system: SYSTEM_PROMPT,
     messages: [{ role: "user", content: userMessage }],

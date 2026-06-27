@@ -15,6 +15,7 @@
 // ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
+import { withRequestConfig } from "@/lib/http/configScope";
 import {
   buildAggregateRanking,
   buildLlmRanking,
@@ -54,18 +55,20 @@ const notFound = () =>
   Response.json({ error: "Question not found under the active config." }, { status: 404 });
 
 export async function GET(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  try {
-    const context = await getRankingContext(id);
-    if (!context) return notFound();
-    return Response.json(context);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to load ranking context.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  return withRequestConfig(request, async () => {
+    try {
+      const context = await getRankingContext(id);
+      if (!context) return notFound();
+      return Response.json(context);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load ranking context.";
+      return Response.json({ error: message }, { status: 500 });
+    }
+  });
 }
 
 export async function POST(
@@ -78,32 +81,34 @@ export async function POST(
   if (body.response) return body.response;
   const data = body.data;
 
-  try {
-    switch (data.action) {
-      case "aggregate":
-        await buildAggregateRanking(id, data.clusterRunId);
-        break;
-      case "llm_pool":
-        await buildLlmRanking(id, "pool");
-        break;
-      case "llm_rerank":
-        await buildLlmRanking(id, "rerank");
-        break;
-      case "manual":
-        await setManualRanking(id, data.chunkIds, data.derivedFromKind);
-        break;
-      case "truth": {
-        const ok = await setOfficialRanking(id, data.rankingId);
-        if (!ok) return Response.json({ error: "Ranking not found." }, { status: 404 });
-        break;
+  return withRequestConfig(request, async () => {
+    try {
+      switch (data.action) {
+        case "aggregate":
+          await buildAggregateRanking(id, data.clusterRunId);
+          break;
+        case "llm_pool":
+          await buildLlmRanking(id, "pool");
+          break;
+        case "llm_rerank":
+          await buildLlmRanking(id, "rerank");
+          break;
+        case "manual":
+          await setManualRanking(id, data.chunkIds, data.derivedFromKind);
+          break;
+        case "truth": {
+          const ok = await setOfficialRanking(id, data.rankingId);
+          if (!ok) return Response.json({ error: "Ranking not found." }, { status: 404 });
+          break;
+        }
       }
+      // Hand back the refreshed panel state after any mutation.
+      const context = await getRankingContext(id);
+      if (!context) return notFound();
+      return Response.json(context);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Ranking action failed.";
+      return Response.json({ error: message }, { status: 500 });
     }
-    // Hand back the refreshed panel state after any mutation.
-    const context = await getRankingContext(id);
-    if (!context) return notFound();
-    return Response.json(context);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Ranking action failed.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  });
 }

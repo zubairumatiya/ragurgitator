@@ -6,19 +6,22 @@
 // it miss?" panel on /eval — fetched lazily on expand so the main summary stays
 // lean. `params` is a Promise in this Next.js version — await it.
 // ---------------------------------------------------------------------------
+import { withRequestConfig } from "@/lib/http/configScope";
 import { getQuestionExplain } from "@/lib/rag/evalStore";
 
 export async function GET(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  try {
-    const explain = await getQuestionExplain(id);
-    return Response.json(explain);
-  } catch (err) {
-    const message =
-      err instanceof Error ? err.message : "Failed to load chunk detail.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  return withRequestConfig(request, async () => {
+    try {
+      const explain = await getQuestionExplain(id);
+      return Response.json(explain);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to load chunk detail.";
+      return Response.json({ error: message }, { status: 500 });
+    }
+  });
 }

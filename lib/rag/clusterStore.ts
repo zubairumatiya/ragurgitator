@@ -7,8 +7,8 @@
 // starts. Mirrors the run/snapshot conventions in lib/rag/evalStore.ts.
 // ---------------------------------------------------------------------------
 import { sql } from "@/lib/db";
-import { config } from "@/lib/config";
-import { chunksTable, vectorLiteral } from "@/lib/rag/vectorStore";
+import { activeConfig } from "@/lib/rag/activeConfig";
+import { vectorLiteral } from "@/lib/rag/vectorStore";
 import { computeCandidate, seedForRestart, type Candidate } from "@/lib/rag/cluster";
 
 const RESTARTS = 3;
@@ -74,16 +74,11 @@ type Emit = (event: ClusterEvent) => void;
 
 // The chunks table for the active config, or null when nothing is ingested.
 async function activeChunksTable(): Promise<string | null> {
-  const rows = await sql<{ dimension: number }[]>`
-    select dimension
-    from document_embeddings
-    where model = ${config.embeddingModel}
-      and chunk_size = ${config.chunkSize}
-      and chunk_overlap = ${config.chunkOverlap}
-    limit 1
+  const cfg = activeConfig();
+  const rows = await sql`
+    select 1 from document_embeddings where config_id = ${cfg.id} limit 1
   `;
-  if (rows.length === 0) return null;
-  return chunksTable(config.embeddingModel, rows[0].dimension);
+  return rows.length > 0 ? cfg.chunksTable : null;
 }
 
 // pgvector's text form is "[a,b,c]"; strip the brackets and parse.
@@ -98,9 +93,7 @@ export async function corpusSize(): Promise<number> {
     select count(*)::int as n
     from ${sql(table)} c
     join document_embeddings de on de.id = c.document_embedding_id
-    where de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+    where de.config_id = ${activeConfig().id}
   `;
   return row?.n ?? 0;
 }
@@ -113,9 +106,7 @@ export async function loadCorpusVectors(): Promise<{ id: string; vec: number[] }
     select c.id, c.embedding::text as embedding
     from ${sql(table)} c
     join document_embeddings de on de.id = c.document_embedding_id
-    where de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+    where de.config_id = ${activeConfig().id}
   `;
   return rows.map((r) => ({ id: r.id, vec: parseVector(r.embedding) }));
 }
@@ -129,12 +120,13 @@ async function persistCandidate(
   const dimension = cand.centroids[0]?.length ?? 0;
 
   return await sql.begin(async (tx) => {
+    const cfg = activeConfig();
     const [run] = await tx<{ id: string; created_at: Date }[]>`
       insert into cluster_runs
-        (model, dimension, k, seed, chunk_count, inertia, avg_cohesion,
+        (config_id, model, dimension, k, seed, chunk_count, inertia, avg_cohesion,
          silhouette, saved, name)
       values
-        (${config.embeddingModel}, ${dimension}, ${cand.k}, ${cand.seed},
+        (${cfg.id}, ${cfg.embeddingModel}, ${dimension}, ${cand.k}, ${cand.seed},
          ${ids.length}, ${cand.inertia}, ${cand.avgCohesion}, ${cand.silhouette},
          ${opts.saved}, ${opts.name})
       returning id, created_at
@@ -175,7 +167,7 @@ async function persistCandidate(
 export async function deleteUnsavedRuns(): Promise<void> {
   await sql`
     delete from cluster_runs
-    where saved = false and model = ${config.embeddingModel}
+    where saved = false and config_id = ${activeConfig().id}
   `;
 }
 
@@ -273,7 +265,7 @@ export async function listRuns(): Promise<ClusterRunSummary[]> {
   >`
     select id, k, saved, name, chunk_count, avg_cohesion, silhouette, created_at
     from cluster_runs
-    where model = ${config.embeddingModel}
+    where config_id = ${activeConfig().id}
     order by saved desc, created_at desc
   `;
 
@@ -311,7 +303,7 @@ export async function getRun(id: string): Promise<ClusterRunDetail | null> {
   >`
     select id, k, saved, name, chunk_count, avg_cohesion, silhouette, created_at
     from cluster_runs
-    where id = ${id} and model = ${config.embeddingModel}
+    where id = ${id} and config_id = ${activeConfig().id}
   `;
   if (!run) return null;
 
@@ -461,7 +453,7 @@ export async function representativeChunksForRun(
 // gets 5 full chunks; large k trades breadth down to a floor of 2.
 function chunksPerBucket(k: number): number {
   const TARGET_TOKENS = 50_000;
-  const est = Math.round(TARGET_TOKENS / (k * config.chunkSize));
+  const est = Math.round(TARGET_TOKENS / (k * activeConfig().chunkSize));
   return Math.max(2, Math.min(5, est));
 }
 
@@ -485,7 +477,7 @@ export async function saveClusterLabels(
 export async function saveRun(id: string, name: string): Promise<boolean> {
   const rows = await sql`
     update cluster_runs set saved = true, name = ${name}
-    where id = ${id} and model = ${config.embeddingModel}
+    where id = ${id} and config_id = ${activeConfig().id}
     returning id
   `;
   return rows.length > 0;

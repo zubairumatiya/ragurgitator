@@ -9,6 +9,7 @@
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { ndjsonStream } from "@/lib/http/ndjson";
+import { withRequestConfig } from "@/lib/http/configScope";
 import { corpusSize, runClustering, type ClusterEvent } from "@/lib/rag/clusterStore";
 
 const Body = z.object({
@@ -24,28 +25,30 @@ export async function POST(request: Request) {
   if (body.response) return body.response;
   const { k } = body.data;
 
-  // The chunk-count-dependent bound can't live in the schema; check it here so a
-  // too-large k is a clean 400 rather than a stream error.
-  const size = await corpusSize();
-  if (size === 0) {
-    return Response.json(
-      { error: "No corpus yet — ingest and process a document first." },
-      { status: 400 },
-    );
-  }
-  if (k > size) {
-    return Response.json(
-      { error: `k=${k} exceeds the ${size} chunks in the corpus.` },
-      { status: 400 },
-    );
-  }
-
-  return ndjsonStream<ClusterEvent>(async (send) => {
-    try {
-      await runClustering(k, send);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Clustering failed.";
-      send({ type: "error", message });
+  return withRequestConfig(request, async () => {
+    // The chunk-count-dependent bound can't live in the schema; check it here so a
+    // too-large k is a clean 400 rather than a stream error.
+    const size = await corpusSize();
+    if (size === 0) {
+      return Response.json(
+        { error: "No corpus yet — ingest and process a document first." },
+        { status: 400 },
+      );
     }
+    if (k > size) {
+      return Response.json(
+        { error: `k=${k} exceeds the ${size} chunks in the corpus.` },
+        { status: 400 },
+      );
+    }
+
+    return ndjsonStream<ClusterEvent>(async (send) => {
+      try {
+        await runClustering(k, send);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Clustering failed.";
+        send({ type: "error", message });
+      }
+    });
   });
 }

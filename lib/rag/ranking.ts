@@ -22,6 +22,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { config, rankingAggregateModels } from "@/lib/config";
+import { activeConfig } from "@/lib/rag/activeConfig";
 import { anthropicClient } from "@/lib/llm/client";
 import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
 import { listRuns } from "@/lib/rag/clusterStore";
@@ -129,7 +130,7 @@ async function resolve(
     models: stored.details.models as string[] | undefined,
     llmModel: stored.details.llmModel as string | undefined,
     clusterRunId: (stored.details.clusterRunId as string | undefined) ?? null,
-    ndcg: retrievedOrder.length > 0 ? ndcg(stored.chunkIds, retrievedOrder, config.topK) : null,
+    ndcg: retrievedOrder.length > 0 ? ndcg(stored.chunkIds, retrievedOrder, activeConfig().topK) : null,
     derivedFromKind: stored.details.derivedFromKind as RankingKind | undefined,
   };
 }
@@ -146,7 +147,7 @@ const LLM_PROMPT_VERSION = 1;
 function llmPoolIds(aggregateChunkIds: string[], variant: "pool" | "rerank"): string[] {
   return variant === "pool"
     ? aggregateChunkIds.slice(0, config.rankingLlmPoolSize)
-    : aggregateChunkIds.slice(0, config.topK);
+    : aggregateChunkIds.slice(0, activeConfig().topK);
 }
 
 // Fingerprint of an LLM ranking's inputs, so a repeat request serves the cached
@@ -161,7 +162,7 @@ function llmSignature(
   poolIds: string[],
 ): string {
   const payload = JSON.stringify({
-    llmModel: config.llmModel,
+    llmModel: activeConfig().llmModel,
     promptVersion: LLM_PROMPT_VERSION,
     variant,
     question,
@@ -226,7 +227,7 @@ export async function getRankingContext(
   return {
     questionId,
     question: scope.question,
-    k: config.topK,
+    k: activeConfig().topK,
     presets,
     candidates,
     hasAggregate: candidates.some((c) => c.kind === "aggregate"),
@@ -246,7 +247,7 @@ export async function buildAggregateRanking(
 
   // The active-model question vector drives both the centroid search and the
   // pool's nearest-to-question ordering (centroids + chunk vectors are active-model).
-  const activeVec = await embedQueryCached(scope.question, config.embeddingModel);
+  const activeVec = await embedQueryCached(scope.question, activeConfig().embeddingModel);
   const buckets = await nearestBuckets(
     clusterRunId,
     activeVec,
@@ -272,7 +273,7 @@ export async function buildAggregateRanking(
 
   for (const model of rankingAggregateModels) {
     let scored: { chunkId: string; sim: number }[];
-    if (model === config.embeddingModel) {
+    if (model === activeConfig().embeddingModel) {
       // Already have these similarities from poolFromBuckets — no re-embed.
       scored = pool.map((p) => ({ chunkId: p.chunkId, sim: p.similarity }));
     } else {
@@ -367,7 +368,7 @@ export async function buildLlmRanking(
   });
 
   const response = await anthropicClient.messages.create({
-    model: config.llmModel,
+    model: activeConfig().llmModel,
     max_tokens: 512,
     system: LLM_SYSTEM_PROMPT,
     messages: [
@@ -399,7 +400,7 @@ export async function buildLlmRanking(
     kind,
     chunkIds: order,
     details: {
-      llmModel: config.llmModel,
+      llmModel: activeConfig().llmModel,
       variant,
       basedOnAggregateId: aggregate.id,
       signature,

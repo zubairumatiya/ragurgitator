@@ -3,14 +3,15 @@
 // the shared `sql` client, no business logic. The orchestration lives in
 // eval.ts.
 //
-// Everything here is scoped to the ACTIVE config (config.embeddingModel +
-// chunkSize + chunkOverlap). Questions are document-scoped; their ground-truth
-// chunk for a given config lives in eval_labels, so the same question can later
-// be scored against other configs without re-authoring.
+// Everything here is scoped to the ACTIVE config via de.config_id (resolved from
+// activeConfig()). Questions are document-scoped; their ground-truth chunk for a
+// given config lives in eval_labels, so the same question can later be scored
+// against other configs without re-authoring. (config is still imported for the
+// global evalQuestionsPerChunk target.)
 // ---------------------------------------------------------------------------
 import { sql } from "@/lib/db";
 import { config } from "@/lib/config";
-import { chunksTable } from "@/lib/rag/vectorStore";
+import { activeConfig } from "@/lib/rag/activeConfig";
 import { reciprocalRank, ndcg } from "@/lib/rag/evalMetrics";
 import { getTruthOrder } from "@/lib/rag/rankingStore";
 
@@ -103,16 +104,11 @@ export type EvalSummary = {
 // Resolve the chunks table for the active config. Returns null when nothing has
 // been ingested under this config yet (so callers can no-op cleanly).
 async function activeChunksTable(): Promise<string | null> {
-  const rows = await sql<{ dimension: number }[]>`
-    select dimension
-    from document_embeddings
-    where model = ${config.embeddingModel}
-      and chunk_size = ${config.chunkSize}
-      and chunk_overlap = ${config.chunkOverlap}
-    limit 1
+  const cfg = activeConfig();
+  const rows = await sql`
+    select 1 from document_embeddings where config_id = ${cfg.id} limit 1
   `;
-  if (rows.length === 0) return null;
-  return chunksTable(config.embeddingModel, rows[0].dimension);
+  return rows.length > 0 ? cfg.chunksTable : null;
 }
 
 // Chunks (under the active config) that have fewer than `target` questions.
@@ -142,9 +138,7 @@ export async function chunksNeedingQuestions(
     left join eval_labels l
       on l.source_chunk_id = c.id
      and l.document_embedding_id = c.document_embedding_id
-    where de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+    where de.config_id = ${activeConfig().id}
     group by c.id, c.text, c.document_id, c.document_embedding_id
     having count(l.id) < ${target}
   `;
@@ -209,9 +203,7 @@ export async function addManualQuestion(
     from ${sql(table)} c
     join document_embeddings de on de.id = c.document_embedding_id
     where c.id = ${chunkId}
-      and de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+      and de.config_id = ${activeConfig().id}
     limit 1
   `;
   if (!chunk) return false;
@@ -245,9 +237,7 @@ export async function getChunkForGeneration(
     from ${sql(table)} c
     join document_embeddings de on de.id = c.document_embedding_id
     where c.id = ${chunkId}
-      and de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+      and de.config_id = ${activeConfig().id}
     limit 1
   `;
   if (!chunk) return null;
@@ -278,9 +268,7 @@ export async function questionsNeedingScoring(): Promise<QuestionToScore[]> {
     from eval_questions q
     join eval_labels l on l.eval_question_id = q.id
     join document_embeddings de on de.id = l.document_embedding_id
-    where de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+    where de.config_id = ${activeConfig().id}
       and not exists (
         select 1 from eval_results r
         where r.eval_label_id = l.id
@@ -318,9 +306,7 @@ export async function allLabeledQuestions(): Promise<QuestionToScore[]> {
     from eval_questions q
     join eval_labels l on l.eval_question_id = q.id
     join document_embeddings de on de.id = l.document_embedding_id
-    where de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+    where de.config_id = ${activeConfig().id}
   `;
 
   return rows.map((r) => ({
@@ -345,9 +331,7 @@ export async function getQuestionToScore(
     join eval_labels l on l.eval_question_id = q.id
     join document_embeddings de on de.id = l.document_embedding_id
     where q.id = ${questionId}
-      and de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+      and de.config_id = ${activeConfig().id}
     limit 1
   `;
   if (!row) return null;
@@ -453,9 +437,7 @@ export async function getQuestionExplain(
     from eval_labels l
     join document_embeddings de on de.id = l.document_embedding_id
     where l.eval_question_id = ${questionId}
-      and de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+      and de.config_id = ${activeConfig().id}
     limit 1
   `;
   if (!label) return empty;
@@ -499,7 +481,7 @@ export async function getQuestionExplain(
   // drill-down never breaks over it. Exact ranking means rank <= k here would mean
   // HNSW dropped a chunk it should have surfaced.
   const expectedInRetrieved = retrievedIds.includes(label.source_chunk_id);
-  const kForRank = result?.k ?? config.topK;
+  const kForRank = result?.k ?? activeConfig().topK;
   let expectedScore: number | null = null;
   let expectedRank: number | null = null;
   let between: ExplainChunk[] = [];
@@ -522,7 +504,7 @@ export async function getQuestionExplain(
           select embedding::vector as vec
           from eval_question_embeddings
           where eval_question_id = ${questionId}
-            and model = ${config.embeddingModel}
+            and model = ${activeConfig().embeddingModel}
           limit 1
         ),
         ranked as (
@@ -646,11 +628,9 @@ export async function getExperimentContext(
     join ${sql(table)} c on c.id = l.source_chunk_id
     join documents d on d.id = q.document_id
     left join eval_question_embeddings qe
-      on qe.eval_question_id = q.id and qe.model = ${config.embeddingModel}
+      on qe.eval_question_id = q.id and qe.model = ${activeConfig().embeddingModel}
     where q.id = ${questionId}
-      and de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+      and de.config_id = ${activeConfig().id}
     limit 1
   `;
   if (!row) return null;
@@ -691,9 +671,7 @@ export async function getChunkWindow(
     join document_embeddings de on de.id = l.document_embedding_id
     join ${sql(table)} c on c.id = l.source_chunk_id
     where q.id = ${questionId}
-      and de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+      and de.config_id = ${activeConfig().id}
     limit 1
   `;
   if (!test) return null;
@@ -703,9 +681,7 @@ export async function getChunkWindow(
     from ${sql(table)} c
     join document_embeddings de on de.id = c.document_embedding_id
     where c.document_id = ${test.document_id}
-      and de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+      and de.config_id = ${activeConfig().id}
   `;
 
   const rows = await sql<{ position: number; text: string }[]>`
@@ -713,9 +689,7 @@ export async function getChunkWindow(
     from ${sql(table)} c
     join document_embeddings de on de.id = c.document_embedding_id
     where c.document_id = ${test.document_id}
-      and de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+      and de.config_id = ${activeConfig().id}
       and c.position between ${fromPos} and ${toPos}
     order by c.position
   `;
@@ -786,9 +760,7 @@ export async function rankWithSubstitutedChunk(args: {
       from ${sql(table)} c
       join documents d on d.id = c.document_id
       join document_embeddings de on de.id = c.document_embedding_id
-      where de.model = ${config.embeddingModel}
-        and de.chunk_size = ${config.chunkSize}
-        and de.chunk_overlap = ${config.chunkOverlap}
+      where de.config_id = ${activeConfig().id}
         and c.id <> ${args.sourceChunkId}
       union all
       select
@@ -926,9 +898,7 @@ export async function getModelTrialChunk(
     join documents d on d.id = c.document_id
     join document_embeddings de on de.id = c.document_embedding_id
     where c.id = ${chunkId}
-      and de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+      and de.config_id = ${activeConfig().id}
     limit 1
   `;
   if (!row) return null;
@@ -960,9 +930,7 @@ export async function getModelTrialQuestions(
       from eval_labels l
       join document_embeddings de on de.id = l.document_embedding_id
       where l.source_chunk_id = ${chunkId}
-        and de.model = ${config.embeddingModel}
-        and de.chunk_size = ${config.chunkSize}
-        and de.chunk_overlap = ${config.chunkOverlap}
+        and de.config_id = ${activeConfig().id}
     ),
     latest as (
       select distinct on (r.eval_question_id)
@@ -1008,9 +976,7 @@ export async function getChunksByIds(ids: string[]): Promise<PoolChunk[]> {
     join documents d on d.id = c.document_id
     join document_embeddings de on de.id = c.document_embedding_id
     where c.id = any(${ids}::uuid[])
-      and de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+      and de.config_id = ${activeConfig().id}
   `;
   return rows.map((r) => ({
     chunkId: r.id,
@@ -1036,9 +1002,7 @@ export async function getCorpusChunkList(
     from ${sql(table)} c
     join documents d on d.id = c.document_id
     join document_embeddings de on de.id = c.document_embedding_id
-    where de.model = ${config.embeddingModel}
-      and de.chunk_size = ${config.chunkSize}
-      and de.chunk_overlap = ${config.chunkOverlap}
+    where de.config_id = ${activeConfig().id}
       and not (c.id = any(${excludeIds}::uuid[]))
     order by d.file_name, c.position
   `;
@@ -1147,19 +1111,22 @@ export async function insertResults(rows: ResultInsert[]): Promise<void> {
   });
 }
 
-// Freeze the current aggregate as a comparison point.
+// Freeze the current aggregate as a comparison point. config_id scopes the
+// snapshot to the active config; the settings columns stay as a denormalized
+// record of what produced it.
 export async function createRunSnapshot(args: {
   questionCount: number;
   hitCount: number;
   mrr: number | null;
   ndcg: number | null;
 }): Promise<void> {
+  const cfg = activeConfig();
   await sql`
     insert into eval_runs
-      (model, chunk_size, chunk_overlap, k, question_count, hit_count, mrr, ndcg)
+      (config_id, model, chunk_size, chunk_overlap, k, question_count, hit_count, mrr, ndcg)
     values
-      (${config.embeddingModel}, ${config.chunkSize}, ${config.chunkOverlap},
-       ${config.topK}, ${args.questionCount}, ${args.hitCount}, ${args.mrr},
+      (${cfg.id}, ${cfg.embeddingModel}, ${cfg.chunkSize}, ${cfg.chunkOverlap},
+       ${cfg.topK}, ${args.questionCount}, ${args.hitCount}, ${args.mrr},
        ${args.ndcg})
   `;
 }
@@ -1183,7 +1150,7 @@ export async function deleteQuestion(id: string): Promise<void> {
 
 export async function getSummary(): Promise<EvalSummary> {
   const empty: EvalSummary = {
-    k: config.topK,
+    k: activeConfig().topK,
     total: 0,
     scored: 0,
     hits: 0,
@@ -1223,9 +1190,7 @@ export async function getSummary(): Promise<EvalSummary> {
         select l.id as label_id, l.eval_question_id, l.source_chunk_id
         from eval_labels l
         join document_embeddings de on de.id = l.document_embedding_id
-        where de.model = ${config.embeddingModel}
-          and de.chunk_size = ${config.chunkSize}
-          and de.chunk_overlap = ${config.chunkOverlap}
+        where de.config_id = ${activeConfig().id}
       ),
       latest as (
         select distinct on (r.eval_question_id)
@@ -1270,6 +1235,7 @@ export async function getSummary(): Promise<EvalSummary> {
     >`
       select id, k, question_count, hit_count, mrr, ndcg, created_at
       from eval_runs
+      where config_id = ${activeConfig().id}
       order by created_at desc
       limit 20
     `,
@@ -1284,9 +1250,7 @@ export async function getSummary(): Promise<EvalSummary> {
         left join eval_labels l
           on l.source_chunk_id = c.id
          and l.document_embedding_id = c.document_embedding_id
-        where de.model = ${config.embeddingModel}
-          and de.chunk_size = ${config.chunkSize}
-          and de.chunk_overlap = ${config.chunkOverlap}
+        where de.config_id = ${activeConfig().id}
         group by c.id
         having count(l.id) < ${config.evalQuestionsPerChunk}
       ) t
@@ -1306,7 +1270,7 @@ export async function getSummary(): Promise<EvalSummary> {
     // it's ungraded (null) and the UI shows the grey placeholder.
     const ideal = truthOrders.get(r.question_id);
     const qNdcg =
-      fresh && ideal ? ndcg(ideal, r.retrieved_ids ?? [], config.topK) : null;
+      fresh && ideal ? ndcg(ideal, r.retrieved_ids ?? [], activeConfig().topK) : null;
     return {
       questionId: r.question_id,
       question: r.question,
@@ -1362,7 +1326,7 @@ export async function getSummary(): Promise<EvalSummary> {
   }
 
   return {
-    k: config.topK,
+    k: activeConfig().topK,
     total: questions.length,
     scored: scoredRows.length,
     hits,

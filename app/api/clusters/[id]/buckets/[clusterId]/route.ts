@@ -6,18 +6,21 @@
 // in this Next.js version — await it. (id is part of the path for nesting; the
 // lookup is by clusterId.)
 // ---------------------------------------------------------------------------
+import { withRequestConfig } from "@/lib/http/configScope";
 import { getBucketChunks } from "@/lib/rag/clusterStore";
 
 export async function GET(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string; clusterId: string }> },
 ) {
   const { clusterId } = await params;
-  try {
-    const chunks = await getBucketChunks(clusterId);
-    return Response.json({ chunks });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to load bucket.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  return withRequestConfig(request, async () => {
+    try {
+      const chunks = await getBucketChunks(clusterId);
+      return Response.json({ chunks });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load bucket.";
+      return Response.json({ error: message }, { status: 500 });
+    }
+  });
 }

@@ -16,6 +16,7 @@
 import { z } from "zod";
 import { altEmbeddingModels } from "@/lib/config";
 import { parseBody } from "@/lib/http/body";
+import { withRequestConfig } from "@/lib/http/configScope";
 import { getModelTrialContext, runModelTrial } from "@/lib/rag/eval";
 import { deleteModelTrial } from "@/lib/rag/evalStore";
 
@@ -34,23 +35,25 @@ const Body = z.object({
 });
 
 export async function GET(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ chunkId: string }> },
 ) {
   const { chunkId } = await params;
-  try {
-    const context = await getModelTrialContext(chunkId);
-    if (!context) {
-      return Response.json(
-        { error: "Chunk not found under the active config." },
-        { status: 404 },
-      );
+  return withRequestConfig(request, async () => {
+    try {
+      const context = await getModelTrialContext(chunkId);
+      if (!context) {
+        return Response.json(
+          { error: "Chunk not found under the active config." },
+          { status: 404 },
+        );
+      }
+      return Response.json(context);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load trial context.";
+      return Response.json({ error: message }, { status: 500 });
     }
-    return Response.json(context);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to load trial context.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  });
 }
 
 export async function POST(
@@ -63,19 +66,21 @@ export async function POST(
   if (body.response) return body.response;
   const { model, poolChunkIds, save } = body.data;
 
-  try {
-    const out = await runModelTrial(chunkId, model, poolChunkIds, save);
-    if (!out) {
-      return Response.json(
-        { error: "Chunk not found, or it has no questions to evaluate." },
-        { status: 404 },
-      );
+  return withRequestConfig(request, async () => {
+    try {
+      const out = await runModelTrial(chunkId, model, poolChunkIds, save);
+      if (!out) {
+        return Response.json(
+          { error: "Chunk not found, or it has no questions to evaluate." },
+          { status: 404 },
+        );
+      }
+      return Response.json(out);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Model trial failed.";
+      return Response.json({ error: message }, { status: 500 });
     }
-    return Response.json(out);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Model trial failed.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  });
 }
 
 export async function DELETE(
@@ -87,12 +92,14 @@ export async function DELETE(
   if (!trialId) {
     return Response.json({ error: "Provide a `trialId` query param." }, { status: 400 });
   }
-  try {
-    const ok = await deleteModelTrial(trialId);
-    if (!ok) return Response.json({ error: "Trial not found." }, { status: 404 });
-    return Response.json({ ok: true });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to delete trial.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  return withRequestConfig(request, async () => {
+    try {
+      const ok = await deleteModelTrial(trialId);
+      if (!ok) return Response.json({ error: "Trial not found." }, { status: 404 });
+      return Response.json({ ok: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to delete trial.";
+      return Response.json({ error: message }, { status: 500 });
+    }
+  });
 }

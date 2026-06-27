@@ -6,18 +6,21 @@
 // context (pool/corpus/models) the runner needs. `params` is a Promise in this
 // Next.js version — await it.
 // ---------------------------------------------------------------------------
+import { withRequestConfig } from "@/lib/http/configScope";
 import { listModelTrials } from "@/lib/rag/evalStore";
 
 export async function GET(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ chunkId: string }> },
 ) {
   const { chunkId } = await params;
-  try {
-    const trials = await listModelTrials(chunkId);
-    return Response.json({ trials });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to load saved trials.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  return withRequestConfig(request, async () => {
+    try {
+      const trials = await listModelTrials(chunkId);
+      return Response.json({ trials });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load saved trials.";
+      return Response.json({ error: message }, { status: 500 });
+    }
+  });
 }

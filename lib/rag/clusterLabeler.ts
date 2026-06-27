@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 import { z } from "zod";
 import { anthropicClient } from "@/lib/llm/client";
-import { config } from "@/lib/config";
+import { activeConfig } from "@/lib/rag/activeConfig";
 
 export type BucketSamples = { ordinal: number; chunks: string[] };
 export type BucketLabel = { ordinal: number; label: string };
@@ -44,7 +44,7 @@ export async function labelBuckets(buckets: BucketSamples[]): Promise<BucketLabe
     .join("\n\n");
 
   const response = await anthropicClient.messages.create({
-    model: config.llmModel,
+    model: activeConfig().llmModel,
     max_tokens: 2048,
     system: SYSTEM_PROMPT,
     messages: [{ role: "user", content: userMessage }],

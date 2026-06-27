@@ -11,7 +11,7 @@
 // This module is the "R" in RAG. Keep it thin — it orchestrates embeddings +
 // vectorStore, it doesn't reimplement them.
 // ---------------------------------------------------------------------------
-import { config } from "@/lib/config";
+import { activeConfig } from "@/lib/rag/activeConfig";
 import { embedQuery } from "@/lib/rag/embeddings";
 import { query } from "@/lib/rag/vectorStore";
 import type { RetrievedChunk } from "@/types/rag";
@@ -28,5 +28,5 @@ export async function retrieve(question: string): Promise<RetrievedChunk[]> {
 // embedding — e.g. eval scoring, which reuses cached question vectors instead of
 // re-embedding (see lib/rag/eval.ts). Same top-k search, no embedding call.
 export function retrieveWithVector(vector: number[]): Promise<RetrievedChunk[]> {
-  return query(vector, config.topK);
+  return query(vector, activeConfig().topK);
 }
