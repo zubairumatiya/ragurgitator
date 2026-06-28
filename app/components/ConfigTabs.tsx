@@ -17,6 +17,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { ConfigCreateDialog } from "@/app/components/ConfigCreateDialog";
 import { apiFetch } from "@/lib/http/client";
 import type { ConfigSummary } from "@/lib/rag/configStore";
 
@@ -36,6 +37,7 @@ export function ConfigTabs({
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
   const [savedOpen, setSavedOpen] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
 
   // Run a mutation, surface its error, then refresh the server-provided lists.
   // `after` optionally navigates (e.g. to a freshly created/duplicated tab).
@@ -64,16 +66,6 @@ export function ConfigTabs({
 
   function gotoConfig(id: string) {
     router.push(`/c/${id}`);
-  }
-
-  async function createConfig() {
-    await mutate(
-      () => apiFetch("/api/configs", { method: "POST" }),
-      (data) => {
-        const created = (data as { config?: ConfigSummary } | null)?.config;
-        if (created) gotoConfig(created.id);
-      },
-    );
   }
 
   async function duplicate(id: string) {
@@ -211,9 +203,9 @@ export function ConfigTabs({
 
           <button
             type="button"
-            onClick={createConfig}
+            onClick={() => setShowCreate(true)}
             disabled={busy}
-            title="New config (empty corpus, default settings)"
+            title="New config (pick corpus, model & chunk settings)"
             className="cursor-pointer rounded-md px-2 py-1.5 text-sm text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-50 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
           >
             +
@@ -267,6 +259,17 @@ export function ConfigTabs({
       </div>
 
       {error && <p className="pb-1 text-xs text-red-600 dark:text-red-400">{error}</p>}
+
+      {showCreate && (
+        <ConfigCreateDialog
+          onClose={() => setShowCreate(false)}
+          onCreated={(id) => {
+            setShowCreate(false);
+            router.refresh();
+            gotoConfig(id);
+          }}
+        />
+      )}
     </div>
   );
 }

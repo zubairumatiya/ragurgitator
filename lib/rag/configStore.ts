@@ -186,6 +186,39 @@ export async function createEmptyConfig(name?: string | null): Promise<ConfigSum
   });
 }
 
+export type CreateConfigOptions = {
+  name?: string | null;
+  // A fresh empty corpus, or an existing one to spawn over (re-embed its docs).
+  corpus: { kind: "new"; name?: string | null } | { kind: "existing"; id: string };
+  baseModel: string;
+  chunkSize: number;
+  chunkOverlap: number;
+  topK: number;
+};
+
+// The Phase 3 "+ New" with custom settings: create a config over a new or
+// existing corpus with a chosen base model + chunk size/overlap/top-k. For an
+// existing corpus the caller then streams populateConfigFromCorpus (the route's
+// `populate` step) to embed its stored docs under the new settings. llm_model
+// stays the lib/config.ts default — these knobs are the retrieval-side A/B.
+export async function createConfigWithSettings(
+  opts: CreateConfigOptions,
+): Promise<ConfigSummary> {
+  const corpusId =
+    opts.corpus.kind === "existing"
+      ? opts.corpus.id
+      : await createCorpus(opts.corpus.name?.trim() || opts.name?.trim() || "New corpus");
+  return createConfig({
+    corpusId,
+    name: opts.name?.trim() || null,
+    baseModel: opts.baseModel,
+    chunkSize: opts.chunkSize,
+    chunkOverlap: opts.chunkOverlap,
+    topK: opts.topK,
+    llmModel: config.llmModel,
+  });
+}
+
 export async function renameConfig(id: string, name: string): Promise<ConfigSummary | null> {
   const trimmed = name.trim();
   const rows = await sql`

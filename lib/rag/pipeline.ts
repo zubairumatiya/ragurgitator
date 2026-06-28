@@ -15,7 +15,7 @@ import { createHash } from "node:crypto";
 
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";
-import { addDocumentToCorpus } from "@/lib/rag/corpusStore";
+import { addDocumentToCorpus, corpusDocumentsForEmbedding } from "@/lib/rag/corpusStore";
 import { embedTexts } from "@/lib/rag/embeddings";
 import { labelFor, loadDocument, type LoadInput } from "@/lib/rag/loader";
 import { retrieve } from "@/lib/rag/retriever";
@@ -140,6 +140,69 @@ export async function ingest(
   console.log(
     `[rag:pipeline] ingest done: ${chunksAdded} chunks from ${results.length} source(s) in ` +
       `${Math.round(performance.now() - t0)}ms`,
+  );
+  onEvent({ type: "done", results });
+  return { results };
+}
+
+// Embed an existing corpus's stored documents into the ACTIVE config — the
+// "spawn a config from a corpus, no re-upload" flow (Phase 3). Reuses the chunk →
+// embed → store stages on the raw text persisted at first ingest (migration
+// 0010), so a corpus can be A/B'd under new settings without re-uploading.
+// Documents without stored text (ingested before 0010) are skipped and reported;
+// any already embedded under this config are no-ops. Must run inside
+// withConfig(...) so activeConfig() resolves to the target config. Streams the
+// same IngestEvents as ingest() so the client can reuse the progress UI.
+export async function embedExistingCorpus(
+  onEvent: Emit = () => {},
+): Promise<{ results: IngestResult[] }> {
+  const cfg = activeConfig();
+  const t0 = performance.now();
+  const docs = await corpusDocumentsForEmbedding(cfg.corpusId);
+  console.log(
+    `[rag:pipeline] spawn-embed corpus=${cfg.corpusId.slice(0, 8)} into config=${cfg.id.slice(0, 8)}: ${docs.length} doc(s) with stored text`,
+  );
+  onEvent({ type: "start", total: docs.length });
+
+  const results: IngestResult[] = [];
+  for (let index = 0; index < docs.length; index++) {
+    const d = docs[index];
+    let result: IngestResult;
+    try {
+      if (await hasEmbeddingRun(d.id)) {
+        result = { fileName: d.fileName, chunksAdded: 0 };
+      } else {
+        const doc: SourceDocument = {
+          id: d.id,
+          text: d.content,
+          metadata: { fileName: d.fileName },
+        };
+        onEvent({ type: "step", index, fileName: d.fileName, step: "chunk" });
+        const chunks = await chunkDocument(doc);
+        onEvent({ type: "step", index, fileName: d.fileName, step: "embed" });
+        const vectors = await embedTexts(chunks.map((c) => c.text));
+        onEvent({ type: "step", index, fileName: d.fileName, step: "store" });
+        await insertEmbeddingRunWithChunks({
+          documentId: d.id,
+          chunks: chunks.map((c, i) => ({
+            position: c.position,
+            text: c.text,
+            embedding: vectors[i],
+          })),
+        });
+        result = { fileName: d.fileName, chunksAdded: chunks.length };
+      }
+    } catch (err) {
+      const error = err instanceof Error ? err.message : "Embedding failed.";
+      console.error(`[rag:pipeline] spawn-embed failed for "${d.fileName}": ${error}`);
+      result = { fileName: d.fileName, error };
+    }
+    results.push(result);
+    onEvent({ type: "file-done", index, result });
+  }
+
+  console.log(
+    `[rag:pipeline] spawn-embed done: ${results.length} doc(s) in ${Math.round(performance.now() - t0)}ms`,
   );
   onEvent({ type: "done", results });
   return { results };
