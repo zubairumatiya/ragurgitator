@@ -10,6 +10,7 @@
 
 import { useState } from "react";
 import { RAG_INGESTED_EVENT } from "@/app/components/DocumentList";
+import { apiFetch } from "@/lib/http/client";
 import { config } from "@/lib/config";
 import type { IngestEvent, IngestResult, IngestStep } from "@/lib/rag/pipeline";
 
@@ -84,7 +85,7 @@ export function FileUpload() {
 
     setStatus({ kind: "loading", progress: null });
     try {
-      const res = await fetch("/api/ingest", { method: "POST", body: form });
+      const res = await apiFetch("/api/ingest", { method: "POST", body: form });
 
       // Validation failures (400/413/500) come back as plain JSON, not a stream.
       if (!res.ok || !res.body) {

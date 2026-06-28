@@ -10,6 +10,18 @@
 // ---------------------------------------------------------------------------
 import { sql } from "@/lib/db";
 
+// Create a new, empty corpus and return its id. Phase 2's "+ New config" makes a
+// fresh corpus per config so the new tab starts blank; the rest of corpus CRUD
+// (rename/list/membership management) lands with the corpus UI in Phase 3.
+export async function createCorpus(name: string): Promise<string> {
+  const rows = await sql<{ id: string }[]>`
+    insert into corpora (name)
+    values (${name})
+    returning id
+  `;
+  return rows[0].id;
+}
+
 // Add a document to a corpus. Idempotent: re-adding the same document is a no-op,
 // so re-ingesting a file that's already a member doesn't error.
 export async function addDocumentToCorpus(

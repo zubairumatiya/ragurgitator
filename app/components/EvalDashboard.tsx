@@ -13,6 +13,7 @@
 "use client";
 
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { apiFetch } from "@/lib/http/client";
 import type {
   EvalSummary,
   ExplainChunk,
@@ -152,7 +153,7 @@ export function EvalDashboard() {
     setExpandedId(opening ? id : null);
     if (!opening || explains[id]) return;
     setExplains((m) => ({ ...m, [id]: { status: "loading" } }));
-    fetch(`/api/eval/questions/${id}/explain`)
+    apiFetch(`/api/eval/questions/${id}/explain`)
       .then(async (res) => {
         const data = (await res.json()) as QuestionExplain | { error: string };
         if (!res.ok || "error" in data) {
@@ -170,7 +171,7 @@ export function EvalDashboard() {
     let alive = true;
     async function load() {
       try {
-        const res = await fetch("/api/eval");
+        const res = await apiFetch("/api/eval");
         const data = (await res.json()) as EvalSummary | { error: string };
         if (!alive) return;
         if (!res.ok || "error" in data) {
@@ -194,7 +195,7 @@ export function EvalDashboard() {
   // open ranking panel. Used as the NdcgRankingPanel's onChange.
   async function refreshSummary() {
     try {
-      const res = await fetch("/api/eval");
+      const res = await apiFetch("/api/eval");
       const data = (await res.json()) as EvalSummary | { error: string };
       if (res.ok && !("error" in data)) setSummary(data);
     } catch {
@@ -227,7 +228,7 @@ export function EvalDashboard() {
     setError(null);
     setProgress(null);
     try {
-      const res = await fetch(url, { method: "POST" });
+      const res = await apiFetch(url, { method: "POST" });
       if (!res.ok || !res.body) {
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
         setError(data?.error ?? `Request failed (${res.status}).`);
@@ -312,7 +313,7 @@ export function EvalDashboard() {
     if (!text) return;
     setBusy(true);
     try {
-      const res = await fetch(`/api/eval/questions/${id}`, {
+      const res = await apiFetch(`/api/eval/questions/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: text }),
@@ -332,7 +333,7 @@ export function EvalDashboard() {
   async function remove(id: string) {
     setBusy(true);
     try {
-      const res = await fetch(`/api/eval/questions/${id}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/eval/questions/${id}`, { method: "DELETE" });
       if (!res.ok) {
         const data = (await res.json()) as { error?: string };
         setError(data.error ?? `Request failed (${res.status}).`);
@@ -352,7 +353,7 @@ export function EvalDashboard() {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/eval/questions", {
+      const res = await apiFetch("/api/eval/questions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ chunkId, question: text }),
@@ -376,7 +377,7 @@ export function EvalDashboard() {
     setError(null);
     setGenDifficulty(difficulty);
     try {
-      const res = await fetch("/api/eval/questions/generate", {
+      const res = await apiFetch("/api/eval/questions/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ chunkId, difficulty }),
@@ -1241,7 +1242,7 @@ function RechunkLab({
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(`/api/eval/questions/${questionId}/rechunk`, {
+      const res = await apiFetch(`/api/eval/questions/${questionId}/rechunk`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ size, overlap }),
@@ -1352,7 +1353,7 @@ function ChunkBoundaryLab({
     let alive = true;
     async function load() {
       try {
-        const res = await fetch(
+        const res = await apiFetch(
           `/api/eval/questions/${questionId}/window?from=${range.from}&to=${range.to}`,
         );
         const data = (await res.json()) as ChunkWindow | { error: string };
@@ -1474,7 +1475,7 @@ function ChunkBoundaryLab({
     setBusy(true);
     setRunError(null);
     try {
-      const res = await fetch(`/api/eval/questions/${questionId}/rechunk`, {
+      const res = await apiFetch(`/api/eval/questions/${questionId}/rechunk`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sections: [text.slice(off(clampedStart), off(clampedEnd))] }),
@@ -1806,7 +1807,7 @@ function ModelTrial({
     setOpen(opening);
     if (!opening || state) return;
     setState({ status: "loading" });
-    fetch(`/api/eval/chunks/${chunkId}/try-model`)
+    apiFetch(`/api/eval/chunks/${chunkId}/try-model`)
       .then(async (res) => {
         const data = (await res.json()) as ModelTrialContext | { error: string };
         if (!res.ok || "error" in data) {
@@ -1839,7 +1840,7 @@ function ModelTrial({
     else setRunning(true);
     setRunError(null);
     try {
-      const res = await fetch(`/api/eval/chunks/${chunkId}/try-model`, {
+      const res = await apiFetch(`/api/eval/chunks/${chunkId}/try-model`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model, poolChunkIds: [...selected], save }),
@@ -2030,7 +2031,7 @@ function ChunkExperiments({
   // Load the chunk's saved trials once on mount (lightweight — no embeddings).
   useEffect(() => {
     let alive = true;
-    fetch(`/api/eval/chunks/${chunkId}/trials`)
+    apiFetch(`/api/eval/chunks/${chunkId}/trials`)
       .then((res) => res.json())
       .then((data: { trials?: SavedModelTrial[] }) => {
         if (alive && data.trials) setSaved(data.trials);
@@ -2043,7 +2044,7 @@ function ChunkExperiments({
 
   async function removeSaved(id: string) {
     setSaved((s) => s.filter((t) => t.id !== id)); // optimistic
-    await fetch(`/api/eval/chunks/${chunkId}/try-model?trialId=${id}`, {
+    await apiFetch(`/api/eval/chunks/${chunkId}/try-model?trialId=${id}`, {
       method: "DELETE",
     }).catch(() => {});
   }

@@ -14,6 +14,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { apiFetch } from "@/lib/http/client";
 import type {
   BucketChunk,
   ClusterBucket,
@@ -44,7 +45,7 @@ export function ClusterDashboard() {
     let alive = true;
     async function load() {
       try {
-        const res = await fetch("/api/clusters");
+        const res = await apiFetch("/api/clusters");
         const data = (await res.json()) as { runs?: ClusterRunSummary[] };
         if (alive && data.runs) setRuns(data.runs);
       } catch {
@@ -62,7 +63,7 @@ export function ClusterDashboard() {
     setError(null);
     setProgress({ phase: "load" });
     try {
-      const res = await fetch("/api/clusters/run", {
+      const res = await apiFetch("/api/clusters/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ k }),
@@ -264,7 +265,7 @@ function RunCard({
     if (next && !detail) {
       setLoading(true);
       try {
-        const res = await fetch(`/api/clusters/${run.id}`);
+        const res = await apiFetch(`/api/clusters/${run.id}`);
         const data = await res.json();
         if (!data.error) setDetail(data as ClusterRunDetail);
       } catch {
@@ -278,7 +279,7 @@ function RunCard({
   async function save() {
     if (!name.trim()) return;
     setBusy(true);
-    await fetch(`/api/clusters/${run.id}/save`, {
+    await apiFetch(`/api/clusters/${run.id}/save`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: name.trim() }),
@@ -289,7 +290,7 @@ function RunCard({
 
   async function remove() {
     setBusy(true);
-    await fetch(`/api/clusters/${run.id}`, { method: "DELETE" }).catch(() => {});
+    await apiFetch(`/api/clusters/${run.id}`, { method: "DELETE" }).catch(() => {});
     setBusy(false);
     onChanged();
   }
@@ -299,7 +300,7 @@ function RunCard({
   async function label() {
     setLabeling(true);
     try {
-      const res = await fetch(`/api/clusters/${run.id}/label`, { method: "POST" });
+      const res = await apiFetch(`/api/clusters/${run.id}/label`, { method: "POST" });
       const data = await res.json();
       if (!data.error) {
         setDetail(data as ClusterRunDetail);
@@ -408,7 +409,7 @@ function BucketRow({ runId, bucket }: { runId: string; bucket: ClusterBucket }) 
     if (next && !chunks) {
       setLoading(true);
       try {
-        const res = await fetch(`/api/clusters/${runId}/buckets/${bucket.id}`);
+        const res = await apiFetch(`/api/clusters/${runId}/buckets/${bucket.id}`);
         const data = await res.json();
         if (data.chunks) setChunks(data.chunks as BucketChunk[]);
       } catch {

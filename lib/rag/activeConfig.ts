@@ -73,8 +73,18 @@ type ConfigRow = {
   llm_model: string;
 };
 
-// Resolve a specific config by id; null when it doesn't exist.
+// Config ids always come from our DB (uuids). Guard string lookups with this so
+// a malformed id from a hand-typed URL or query param resolves to a clean
+// not-found instead of crashing on a Postgres uuid cast (500).
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function isUuid(s: string): boolean {
+  return UUID_RE.test(s);
+}
+
+// Resolve a specific config by id; null when malformed or it doesn't exist.
 export async function resolveConfig(configId: string): Promise<ResolvedConfig | null> {
+  if (!isUuid(configId)) return null;
   const rows = await sql<ConfigRow[]>`
     select id, corpus_id, base_model, chunk_size, chunk_overlap, top_k, llm_model
     from configs

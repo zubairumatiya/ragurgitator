@@ -1,27 +1,33 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { useParams, usePathname } from "next/navigation";
 
-// The app's three peer destinations. Order = display order.
+// The nested sub-nav inside a config tab: the three peer views, scoped to the
+// active config (/c/[configId], …/eval, …/clusters). Order = display order.
+// (The cross-config tab bar lives above this in ConfigTabs.) The hrefs are built
+// per-config so switching tabs keeps you on the same view.
 const LINKS = [
-  { href: "/", label: "Playground" },
-  { href: "/clusters", label: "Clusters" },
-  { href: "/eval", label: "Evals" },
+  { segment: "", label: "Playground" },
+  { segment: "clusters", label: "Clusters" },
+  { segment: "eval", label: "Evals" },
 ] as const;
 
-// Segmented tab switcher shared by every page. Replaces the old ←/→ links,
-// which implied a back/forward sequence between what are really sibling pages
-// and never showed which page you were on.
+// Segmented tab switcher shared by every config page. Reads the active configId
+// from the route so it works under any tab without prop threading.
 export function Nav() {
   const pathname = usePathname();
+  const { configId } = useParams<{ configId: string }>();
+  const base = `/c/${configId}`;
+
   return (
     <nav className="inline-flex items-center gap-1 self-start rounded-lg bg-zinc-100 p-1 dark:bg-zinc-900">
-      {LINKS.map(({ href, label }) => {
-        const active = href === "/" ? pathname === "/" : pathname.startsWith(href);
+      {LINKS.map(({ segment, label }) => {
+        const href = segment ? `${base}/${segment}` : base;
+        const active = segment ? pathname.startsWith(href) : pathname === base;
         return (
           <Link
-            key={href}
+            key={label}
             href={href}
             aria-current={active ? "page" : undefined}
             className={

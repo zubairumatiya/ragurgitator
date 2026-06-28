@@ -37,6 +37,13 @@ export const config = {
 // experiment re-embeds a small candidate pool in memory and ranks by cosine, so
 // any output dimension works and no migration is needed to add one here.
 //
+// Cross-provider entries (OpenAI/Cohere/local) route through the embedding
+// dispatcher (lib/rag/embeddingProviders.ts). They're OPT-IN: selecting one
+// without its key (OpenAI/Cohere) or before its weights download (local) just
+// fails that one trial with an error — it never touches the live index. This is
+// why they live here and NOT in rankingAggregateModels (which embeds eagerly for
+// every aggregate build — see below).
+//
 // Excludes the active embeddingModel (it's the baseline) and voyage-context-3
 // (a different, contextualized embedding API that can't drop into embed()).
 export const altEmbeddingModels: { id: string; label: string }[] = [
@@ -46,12 +53,22 @@ export const altEmbeddingModels: { id: string; label: string }[] = [
   { id: "voyage-code-2", label: "voyage-code-2" },
   { id: "voyage-finance-2", label: "voyage-finance-2" },
   { id: "voyage-law-2", label: "voyage-law-2" },
+  // --- other providers (need a key / local weights; see embeddingModels.ts) ---
+  { id: "text-embedding-3-large", label: "text-embedding-3-large (OpenAI)" },
+  { id: "embed-v4", label: "embed-v4 (Cohere)" },
+  { id: "mxbai-embed-large", label: "mxbai-embed-large (local)" },
+  { id: "bge-m3", label: "bge-m3 (local)" },
 ];
 
 // Embedding models whose per-model rankings are averaged into the synthetic
 // "aggregate" ideal ranking for graded nDCG (lib/rag/ranking.ts). The active
 // model is the baseline; a few general-purpose alts add cross-model consensus.
 // Like altEmbeddingModels these are re-embedded in memory, never ingested.
+//
+// Kept Voyage-only on purpose: every aggregate build embeds the pool under ALL of
+// these eagerly, so adding a model that needs a key (OpenAI/Cohere) or a big
+// weights download (local) would break or stall the aggregate for everyone.
+// Expose those through altEmbeddingModels (opt-in) instead.
 export const rankingAggregateModels: string[] = [
   config.embeddingModel,
   "voyage-4-large",

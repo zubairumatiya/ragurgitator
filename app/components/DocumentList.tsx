@@ -9,6 +9,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { apiFetch } from "@/lib/http/client";
 import type { IngestedDocument } from "@/lib/rag/vectorStore";
 
 export const RAG_INGESTED_EVENT = "rag:ingested";
@@ -26,7 +27,7 @@ export function DocumentList() {
 
     async function load() {
       try {
-        const res = await fetch("/api/documents");
+        const res = await apiFetch("/api/documents");
         const data = (await res.json()) as
           | { documents: IngestedDocument[] }
           | { error: string };
@@ -63,7 +64,7 @@ export function DocumentList() {
     setDeletingId(doc.id);
     setError(null);
     try {
-      const res = await fetch(`/api/documents/${doc.id}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/documents/${doc.id}`, { method: "DELETE" });
       if (!res.ok) {
         const data = (await res.json()) as { error?: string };
         setError(data.error ?? `Request failed (${res.status}).`);

@@ -11,6 +11,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { apiFetch } from "@/lib/http/client";
 import type {
   LlmStatus,
   RankingCandidate,
@@ -55,7 +56,7 @@ export function NdcgRankingPanel({
     let alive = true;
     (async () => {
       try {
-        const res = await fetch(`/api/eval/questions/${questionId}/ranking`);
+        const res = await apiFetch(`/api/eval/questions/${questionId}/ranking`);
         const data = (await res.json()) as RankingContext | { error: string };
         if (!alive) return;
         if (!res.ok || "error" in data) {
@@ -78,7 +79,7 @@ export function NdcgRankingPanel({
     setBusy(body.action);
     setError(null);
     try {
-      const res = await fetch(`/api/eval/questions/${questionId}/ranking`, {
+      const res = await apiFetch(`/api/eval/questions/${questionId}/ranking`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

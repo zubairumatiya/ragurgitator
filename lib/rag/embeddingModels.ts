@@ -41,8 +41,8 @@ export const EMBEDDING_MODELS: Record<string, EmbeddingModelSpec> = {
 
   // --- Staged plumbing: usable in experiments once a key/weights are present;
   //     flip `ingestable` + add a 0012+ migration to index under them ----------
-  "mxbai-embed-large": { id: "mxbai-embed-large", provider: "local", apiModel: "Xenova/mxbai-embed-large-v1", dimension: 1024, ingestable: false },
-  "bge-m3": { id: "bge-m3", provider: "local", apiModel: "Xenova/bge-m3", dimension: 1024, ingestable: false },
+  "mxbai-embed-large": { id: "mxbai-embed-large", provider: "local", apiModel: "Xenova/mxbai-embed-large-v1", dimension: 1024, ingestable: true },
+  "bge-m3": { id: "bge-m3", provider: "local", apiModel: "Xenova/bge-m3", dimension: 1024, ingestable: true },
   // native 3072; shrunk to 1024 via the `dimensions` param (Matryoshka, E7) so it
   // stays under pgvector's HNSW cap and is ingestable later without re-deciding.
   "text-embedding-3-large": { id: "text-embedding-3-large", provider: "openai", apiModel: "text-embedding-3-large", dimension: 1024, ingestable: false },
@@ -57,4 +57,59 @@ export function modelSpec(id: string): EmbeddingModelSpec {
     throw new Error(`Unknown embedding model "${id}". Add it to EMBEDDING_MODELS.`);
   }
   return spec;
+}
+
+// --- Provider availability (drives the base-model picker's grey-out) ---------
+// Which env var holds each provider's credential. Local models run in-process
+// and need no key (only a one-time weights download), so they're always usable.
+const PROVIDER_KEY_ENV: Record<EmbeddingProviderId, string | null> = {
+  voyage: "VOYAGE_API_KEY",
+  openai: "OPENAI_API_KEY",
+  cohere: "COHERE_API_KEY",
+  local: null,
+};
+
+// Is this provider usable right now? Local: always. API providers: key present.
+// Server-only (reads process.env) — call it from a route/server component.
+export function isProviderAvailable(provider: EmbeddingProviderId): boolean {
+  const env = PROVIDER_KEY_ENV[provider];
+  return env === null ? true : Boolean(process.env[env]);
+}
+
+export type BaseModelOption = {
+  id: string;
+  label: string;
+  provider: EmbeddingProviderId;
+  dimension: number;
+  // selectable = has a chunks table (ingestable) AND its provider is available.
+  selectable: boolean;
+  // Why it's NOT selectable, for the greyed-out tooltip; null when selectable.
+  reason: string | null;
+};
+
+// Base-model options for the config picker: each candidate model with whether it
+// can be picked for real ingestion right now. The picker greys out the ones that
+// aren't `selectable`, showing `reason` (missing key, or no vector table yet).
+//
+// "Candidate" excludes the extra Voyage entries (voyage-4-large, etc.) — those
+// exist only for the in-memory try-a-model experiment (altEmbeddingModels), not
+// as ingestion targets. The rule: any ingestable model, plus any non-Voyage
+// provider (local/OpenAI/Cohere) we'd set up to ingest under.
+export function listBaseModelOptions(): BaseModelOption[] {
+  return Object.values(EMBEDDING_MODELS)
+    .filter((spec) => spec.ingestable || spec.provider !== "voyage")
+    .map((spec) => {
+    const available = isProviderAvailable(spec.provider);
+    const reasons: string[] = [];
+    if (!available) reasons.push(`set ${PROVIDER_KEY_ENV[spec.provider]} to enable`);
+    if (!spec.ingestable) reasons.push("no vector table yet (add a migration)");
+    return {
+      id: spec.id,
+      label: spec.id,
+      provider: spec.provider,
+      dimension: spec.dimension,
+      selectable: spec.ingestable && available,
+      reason: reasons.length > 0 ? reasons.join("; ") : null,
+    };
+  });
 }

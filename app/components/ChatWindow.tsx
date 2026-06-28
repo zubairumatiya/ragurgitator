@@ -8,6 +8,7 @@
 
 import { useState } from "react";
 import { MessageList, type DisplayMessage } from "@/app/components/MessageList";
+import { apiFetch } from "@/lib/http/client";
 import type { RetrievedChunk } from "@/types/rag";
 
 type ChatResponse =
@@ -34,7 +35,7 @@ export function ChatWindow() {
     setLoading(true);
 
     try {
-      const res = await fetch("/api/chat", {
+      const res = await apiFetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question }),
