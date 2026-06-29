@@ -16,12 +16,14 @@
 // ---------------------------------------------------------------------------
 import { altEmbeddingModels, config } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
+import { isProviderAvailable, modelSpec } from "@/lib/rag/embeddingModels";
+import { listOverrides, setChunkOverride } from "@/lib/rag/overrideStore";
 import { anthropicClient } from "@/lib/llm/client";
 import { splitText, tokenizeWithOffsets } from "@/lib/rag/chunker";
 import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
 import { embedQuery, embedTexts } from "@/lib/rag/embeddings";
 import { stitchChunks } from "@/lib/rag/reconstruct";
-import { retrieveWithVector } from "@/lib/rag/retriever";
+import { retrieveForQuery } from "@/lib/rag/retriever";
 import {
   allLabeledQuestions,
   chunksNeedingQuestions,
@@ -293,7 +295,9 @@ async function scoreQuestions(
       vector = await embedQuery(q.question);
       await putCachedQueryEmbedding(q.questionId, activeConfig().embeddingModel, vector);
     }
-    const retrieved = await retrieveWithVector(vector);
+    // Pass the question text too: override configs embed it under the override
+    // models for the RRF fusion; non-override configs ignore it (base vector only).
+    const retrieved = await retrieveForQuery(q.question, vector);
     const ids = retrieved.map((r) => r.chunk.chunk.id);
     const scores = retrieved.map((r) => r.score);
     const rank = ids.indexOf(q.sourceChunkId);
@@ -668,6 +672,9 @@ export type ModelTrialContext = {
   autoPool: PoolChunk[]; // top-k union across the chunk's questions, minus the chunk
   restCorpus: CorpusChunkListItem[]; // everything else, for the manual picker
   savedTrials: SavedModelTrial[];
+  // The model this chunk is currently overridden to in the active config (Phase
+  // 5), or null. When set, retrieval ranks this chunk in that model's space.
+  currentOverride: string | null;
 };
 
 // Result of one trial run, returned to the client (ephemeral until saved).
@@ -702,10 +709,11 @@ export async function getModelTrialContext(
   // itself is always added at run time, so drop it here to avoid a duplicate).
   const autoIds = uniq(questions.flatMap((q) => q.retrievedIds)).filter((id) => id !== chunkId);
 
-  const [autoPool, restCorpus, savedTrials] = await Promise.all([
+  const [autoPool, restCorpus, savedTrials, overrides] = await Promise.all([
     getChunksByIds(autoIds),
     getCorpusChunkList([chunkId, ...autoIds]),
     listModelTrials(chunkId),
+    listOverrides(),
   ]);
 
   return {
@@ -727,7 +735,34 @@ export async function getModelTrialContext(
     autoPool,
     restCorpus,
     savedTrials,
+    currentOverride: overrides.find((o) => o.sourceChunkId === chunkId)?.model ?? null,
   };
+}
+
+// Promote the ephemeral "try a different model" result into a PERSISTED per-chunk
+// override (Phase 5): re-embed the chunk's text under `model` and store it, so
+// retrieval ranks this chunk in that model's space (RRF-fused — see retriever).
+// Returns a status the route maps to an HTTP code. Overriding to the config's own
+// base model is rejected (clear the override to use base instead).
+export async function setChunkModelOverride(
+  chunkId: string,
+  model: string,
+): Promise<"ok" | "not-found" | "unknown-model" | "unavailable" | "is-base"> {
+  let spec;
+  try {
+    spec = modelSpec(model);
+  } catch {
+    return "unknown-model";
+  }
+  if (model === activeConfig().embeddingModel) return "is-base";
+  if (!isProviderAvailable(spec.provider)) return "unavailable";
+
+  const chunk = await getModelTrialChunk(chunkId);
+  if (!chunk) return "not-found";
+
+  const [vector] = await embedTexts([chunk.text], model);
+  await setChunkOverride(chunkId, model, vector.length, vector);
+  return "ok";
 }
 
 // Run the trial: embed the pool + each question under `model`, cosine-rank the

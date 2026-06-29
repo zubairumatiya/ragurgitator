@@ -1800,6 +1800,11 @@ function ModelTrial({
   // Whether the currently-shown result has been persisted — keeps "Save result"
   // disabled so the same snapshot can't be saved twice. A fresh Run clears it.
   const [savedResult, setSavedResult] = useState(false);
+  // Phase 5: this chunk's persisted model override for the active config (null =
+  // none). Setting it re-embeds the chunk under that model so retrieval ranks it
+  // there (RRF-fused). Re-score to see the effect on recall.
+  const [override, setOverride] = useState<string | null>(null);
+  const [ovBusy, setOvBusy] = useState(false);
 
   // Lazy-load the trial context the first time the panel opens.
   function toggleOpen() {
@@ -1816,6 +1821,7 @@ function ModelTrial({
         setState({ status: "ready", ctx: data });
         setModel(data.models[0]?.id ?? "");
         setSelected(new Set(data.autoPool.map((c) => c.chunkId)));
+        setOverride(data.currentOverride);
       })
       .catch((err: unknown) => {
         setState({
@@ -1864,6 +1870,31 @@ function ModelTrial({
     } finally {
       setSaving(false);
       setRunning(false);
+    }
+  }
+
+  // Persist (toModel) or clear (null) this chunk's override for the active config.
+  async function applyOverride(toModel: string | null) {
+    setOvBusy(true);
+    setRunError(null);
+    try {
+      const res = toModel
+        ? await apiFetch(`/api/eval/chunks/${chunkId}/override`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model: toModel }),
+          })
+        : await apiFetch(`/api/eval/chunks/${chunkId}/override`, { method: "DELETE" });
+      const data = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok) {
+        setRunError(data?.error ?? `Request failed (${res.status}).`);
+        return;
+      }
+      setOverride(toModel);
+    } catch (err) {
+      setRunError(err instanceof Error ? err.message : "Network error.");
+    } finally {
+      setOvBusy(false);
     }
   }
 
@@ -1925,7 +1956,35 @@ function ModelTrial({
             >
               {running ? "Running…" : "Run"}
             </button>
+            <button
+              onClick={() => applyOverride(model)}
+              disabled={ovBusy || running || saving || !model || model === state.ctx.baselineModel}
+              title={
+                model === state.ctx.baselineModel
+                  ? "Can't override to the base model"
+                  : "Persist this model as this chunk's embedding for retrieval (RRF-fused)"
+              }
+              className="rounded-md border border-indigo-300 px-3 py-1 font-medium text-indigo-700 cursor-pointer hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-indigo-800 dark:text-indigo-300 dark:hover:bg-indigo-900/20"
+            >
+              {ovBusy ? "Saving…" : "Set as override"}
+            </button>
           </div>
+
+          {override && (
+            <div className="flex items-center gap-2 rounded border border-indigo-300 bg-indigo-50 px-2 py-1 text-indigo-700 dark:border-indigo-800 dark:bg-indigo-900/20 dark:text-indigo-300">
+              <span>
+                Chunk overridden to <span className="font-mono">{override}</span> for
+                retrieval — re-score to see its effect.
+              </span>
+              <button
+                onClick={() => applyOverride(null)}
+                disabled={ovBusy}
+                className="cursor-pointer underline hover:no-underline disabled:opacity-50"
+              >
+                Clear
+              </button>
+            </div>
+          )}
 
           {/* Candidate pool: the chunk (always), its questions' top-k, + corpus */}
           <div className="flex flex-col gap-1">

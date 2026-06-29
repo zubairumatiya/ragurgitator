@@ -200,6 +200,65 @@ export async function query(
   }));
 }
 
+// Like query(), but excludes a set of chunk ids from the active config's base
+// ANN — the chunks that have been overridden to a different model (Phase 5).
+// Those are ranked separately in their override model's space and RRF-fused with
+// this list (see retriever.retrieveForQuery). An empty exclude list behaves like
+// query(). Pulls `limit` candidates (callers pass a generous N for fusion).
+export async function queryExcluding(
+  vector: number[],
+  limit: number,
+  excludeIds: string[],
+): Promise<RetrievedChunk[]> {
+  const cfg = activeConfig();
+  const queryVec = vectorLiteral(vector);
+
+  const rows = await sql.begin(async (tx) => {
+    await tx.unsafe(`set local hnsw.ef_search = ${EF_SEARCH}`);
+    return tx<
+      { id: string; document_id: string; position: number; text: string; score: number }[]
+    >`
+      select
+        id, document_id, position, text,
+        1 - (embedding <=> ${queryVec}::vector) as score
+      from ${tx(cfg.chunksTable)}
+      where config_id = ${cfg.id}
+        and not (id = any(${excludeIds}::uuid[]))
+      order by embedding <=> ${queryVec}::vector
+      limit ${limit}
+    `;
+  });
+
+  return rows.map((r) => ({
+    score: Number(r.score),
+    chunk: {
+      embedding: [],
+      chunk: { id: r.id, documentId: r.document_id, text: r.text, position: r.position },
+    },
+  }));
+}
+
+// Resolve a set of chunk ids (in the active config's base table) to their text +
+// position + document. Used to flesh out override chunks that won RRF but weren't
+// in the base ANN result (they were excluded from it).
+export async function resolveChunks(
+  ids: string[],
+): Promise<Map<string, { documentId: string; position: number; text: string }>> {
+  if (ids.length === 0) return new Map();
+  const cfg = activeConfig();
+  const rows = await sql<
+    { id: string; document_id: string; position: number; text: string }[]
+  >`
+    select id, document_id, position, text
+    from ${sql(cfg.chunksTable)}
+    where config_id = ${cfg.id}
+      and id = any(${ids}::uuid[])
+  `;
+  return new Map(
+    rows.map((r) => [r.id, { documentId: r.document_id, position: r.position, text: r.text }]),
+  );
+}
+
 export async function listDocuments(): Promise<IngestedDocument[]> {
   const rows = await sql<
     {
