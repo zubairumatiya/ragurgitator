@@ -8,29 +8,64 @@
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 
-export type ChunkOverride = { sourceChunkId: string; model: string };
+export type OverrideKind = "model" | "size" | "size+model";
+export type ChunkOverride = { sourceChunkId: string; model: string; kind: OverrideKind };
 export type OverrideEmbedding = { chunkId: string; embedding: number[] };
 
-// Persist (or replace) the override for one chunk under the active config. The
-// embedding is the chunk's text re-embedded under `model` (caller computes it).
+// One piece of a chunk override (migration 0015). For a model-only override
+// there's a single piece (text null => the whole base chunk); a size / size+model
+// override stores N re-split pieces, each with its own text + vector and optional
+// token span within the source chunk (Phase D gap detection).
+export type OverridePiece = {
+  text: string | null;
+  dimension: number;
+  embedding: number[];
+  tokenStart?: number | null;
+  tokenEnd?: number | null;
+};
+
+// Persist (or replace) a chunk's override as a set of PIECES under the active
+// config, atomically — clears any existing override for the chunk first (any
+// kind), then inserts the new pieces at piece_index 0..n-1.
+export async function setChunkOverridePieces(
+  sourceChunkId: string,
+  model: string,
+  kind: OverrideKind,
+  pieces: OverridePiece[],
+): Promise<void> {
+  const cfg = activeConfig();
+  await sql.begin(async (tx) => {
+    await tx`
+      delete from config_chunk_overrides
+      where config_id = ${cfg.id} and source_chunk_id = ${sourceChunkId}
+    `;
+    for (let i = 0; i < pieces.length; i++) {
+      const p = pieces[i];
+      await tx`
+        insert into config_chunk_overrides
+          (config_id, source_chunk_id, piece_index, model, dimension, kind,
+           text, token_start, token_end, embedding)
+        values
+          (${cfg.id}, ${sourceChunkId}, ${i}, ${model}, ${p.dimension}, ${kind},
+           ${p.text ?? null}, ${p.tokenStart ?? null}, ${p.tokenEnd ?? null},
+           ${p.embedding}::real[])
+      `;
+    }
+  });
+}
+
+// Model-only override: one whole-chunk piece under `model` (the chunk's text
+// re-embedded under it — caller computes the vector). Thin wrapper kept for the
+// "try a different model → Set as override" path.
 export async function setChunkOverride(
   sourceChunkId: string,
   model: string,
   dimension: number,
   embedding: number[],
 ): Promise<void> {
-  const cfg = activeConfig();
-  await sql`
-    insert into config_chunk_overrides
-      (config_id, source_chunk_id, model, dimension, embedding)
-    values
-      (${cfg.id}, ${sourceChunkId}, ${model}, ${dimension}, ${embedding}::real[])
-    on conflict (config_id, source_chunk_id)
-      do update set model = excluded.model,
-                    dimension = excluded.dimension,
-                    embedding = excluded.embedding,
-                    created_at = now()
-  `;
+  await setChunkOverridePieces(sourceChunkId, model, "model", [
+    { text: null, dimension, embedding },
+  ]);
 }
 
 // Remove a chunk's override under the active config. Returns false when none.
@@ -52,20 +87,27 @@ export async function clearChunkOverride(sourceChunkId: string): Promise<boolean
 export async function listOverrides(): Promise<ChunkOverride[]> {
   const cfg = activeConfig();
   try {
-    const rows = await sql<{ source_chunk_id: string; model: string }[]>`
-      select source_chunk_id, model
+    // DISTINCT: a chunk now has several piece rows, but one model + kind.
+    const rows = await sql<{ source_chunk_id: string; model: string; kind: string }[]>`
+      select distinct source_chunk_id, model, kind
       from config_chunk_overrides
       where config_id = ${cfg.id}
     `;
-    return rows.map((r) => ({ sourceChunkId: r.source_chunk_id, model: r.model }));
+    return rows.map((r) => ({
+      sourceChunkId: r.source_chunk_id,
+      model: r.model,
+      kind: r.kind as OverrideKind,
+    }));
   } catch (err) {
     if ((err as { code?: string }).code === "42P01") return [];
     throw err;
   }
 }
 
-// The override vectors for one model under the active config — the candidate set
-// RRF ranks against the query embedded under that same model.
+// Every override PIECE under one model for the active config — the candidate set
+// RRF ranks against the query embedded under that model. Returns one row per
+// piece (chunkId = the source chunk it belongs to); the retriever collapses to
+// the best piece per source chunk (hit = any piece in top-k).
 export async function overrideEmbeddings(model: string): Promise<OverrideEmbedding[]> {
   const cfg = activeConfig();
   const rows = await sql<{ source_chunk_id: string; embedding: number[] }[]>`

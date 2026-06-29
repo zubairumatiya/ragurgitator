@@ -33,17 +33,21 @@ export async function retrieve(question: string): Promise<RetrievedChunk[]> {
   return retrieveForQuery(trimmed, vector);
 }
 
-// Retrieve the active config's top-k for a query. `baseVector` is the query
+// Retrieve a query's top results in the active config. `baseVector` is the query
 // already embedded under the base model (eval reuses a cached one); override-
-// model query vectors are embedded on demand from `text`.
+// model query vectors are embedded on demand from `text`. `limit` defaults to the
+// config's top_k; eval passes a larger superset so one retrieved list can score
+// Recall@recall_k and nDCG@ndcg_k at once (A1, see lib/rag/evalSettingsStore).
 export async function retrieveForQuery(
   text: string,
   baseVector: number[],
+  limit?: number,
 ): Promise<RetrievedChunk[]> {
   const cfg = activeConfig();
+  const k = limit ?? cfg.topK;
   const overrides = await listOverrides();
   // No overrides → the original single-space ANN. Identical behaviour + cost.
-  if (overrides.length === 0) return query(baseVector, cfg.topK);
+  if (overrides.length === 0) return query(baseVector, k);
 
   const overriddenIds = overrides.map((o) => o.sourceChunkId);
   const models = [...new Set(overrides.map((o) => o.model))];
@@ -52,7 +56,7 @@ export async function retrieveForQuery(
   const meta = new Map<string, { documentId: string; position: number; text: string }>();
 
   // Base space: ANN over the non-overridden chunks; pull a generous N for fusion.
-  const baseN = Math.max(cfg.topK * FUSION_BASE_FACTOR, 50);
+  const baseN = Math.max(k * FUSION_BASE_FACTOR, 50);
   const baseChunks = await queryExcluding(baseVector, baseN, overriddenIds);
   baseChunks.forEach((rc) =>
     meta.set(rc.chunk.chunk.id, {
@@ -63,13 +67,22 @@ export async function retrieveForQuery(
   );
   lists.push(baseChunks.map((rc, i) => ({ id: rc.chunk.chunk.id, rank: i + 1 })));
 
-  // Override spaces: rank each override model's chunks against the query embedded
-  // under that model (a small full-scan — only a few overrides per model).
+  // Override spaces: rank each override model's PIECES against the query embedded
+  // under that model (a small full-scan), then collapse to the best (max-cosine)
+  // piece per source chunk so a chunk is represented by its strongest piece —
+  // hit = any piece in top-k (eval-autotuning-plan §6.3). Reuse the base vector
+  // when the override model IS the base (size-only overrides live in base space).
   for (const model of models) {
-    const qv = await embedQuery(text, model);
-    const embs = await overrideEmbeddings(model);
-    const scored = embs
-      .map((e) => ({ id: e.chunkId, sim: cosine(qv, e.embedding) }))
+    const qv = model === cfg.embeddingModel ? baseVector : await embedQuery(text, model);
+    const pieces = await overrideEmbeddings(model);
+    const bestByChunk = new Map<string, number>();
+    for (const p of pieces) {
+      const sim = cosine(qv, p.embedding);
+      const prev = bestByChunk.get(p.chunkId);
+      if (prev === undefined || sim > prev) bestByChunk.set(p.chunkId, sim);
+    }
+    const scored = [...bestByChunk.entries()]
+      .map(([id, sim]) => ({ id, sim }))
       .sort((a, b) => b.sim - a.sim);
     lists.push(scored.map((s, i) => ({ id: s.id, rank: i + 1 })));
   }
@@ -81,7 +94,7 @@ export async function retrieveForQuery(
       rrf.set(id, (rrf.get(id) ?? 0) + 1 / (RRF_K + rank));
     }
   }
-  const top = [...rrf.entries()].sort((a, b) => b[1] - a[1]).slice(0, cfg.topK);
+  const top = [...rrf.entries()].sort((a, b) => b[1] - a[1]).slice(0, k);
 
   // Override winners weren't in the base ANN (they were excluded) — resolve them.
   const unresolved = top.map(([id]) => id).filter((id) => !meta.has(id));

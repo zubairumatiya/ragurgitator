@@ -1,22 +1,30 @@
 // ---------------------------------------------------------------------------
 // API route: POST/DELETE /api/eval/chunks/[chunkId]/override
 //
-// Persist (POST { model }) or clear (DELETE) a per-chunk embedding-model override
-// for the ACTIVE config — promoting the ephemeral "try a different model" result
-// (Phase 5). POST re-embeds the chunk's text under `model` and stores it;
-// retrieval then ranks this chunk in that model's space, RRF-fused with the base
-// model (see lib/rag/retriever). Scoped to the active config, so wrapped in
-// withRequestConfig. `params` is a Promise in this Next.js version.
+// Persist or clear a per-chunk override for the ACTIVE config (Phase 5 / Phase B):
+//   POST { model }            — model override: re-embed the whole chunk under
+//                               `model` and rank it in that model's space.
+//   POST { size, overlap? }   — size override: re-split the chunk and rank it by
+//                               its best piece (hit = any piece in top-k).
+//   DELETE                    — clear whatever override the chunk has.
+// Both are RRF-fused with the base ANN (see lib/rag/retriever). Scoped to the
+// active config. `params` is a Promise in this Next.js version.
 // ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
-import { setChunkModelOverride } from "@/lib/rag/eval";
+import { setChunkModelOverride, setChunkSizeOverride } from "@/lib/rag/eval";
 import { clearChunkOverride } from "@/lib/rag/overrideStore";
 
-const Body = z.object({
-  model: z.string({ error: "Provide a `model`." }).min(1, { error: "Provide a `model`." }),
-});
+const Body = z
+  .object({
+    model: z.string().min(1).optional(),
+    size: z.number().int().positive().optional(),
+    overlap: z.number().int().min(0).optional(),
+  })
+  .refine((d) => d.model !== undefined || d.size !== undefined, {
+    error: "Provide a `model`, or a `size` (+ optional `overlap`) for a size override.",
+  });
 
 export async function POST(
   request: Request,
@@ -28,7 +36,30 @@ export async function POST(
 
   return withRequestConfig(request, async () => {
     try {
-      const status = await setChunkModelOverride(chunkId, body.data.model);
+      // Size override takes precedence when `size` is present.
+      if (body.data.size !== undefined) {
+        const status = await setChunkSizeOverride(
+          chunkId,
+          body.data.size,
+          body.data.overlap ?? 0,
+        );
+        switch (status) {
+          case "ok":
+            return Response.json({ ok: true });
+          case "not-found":
+            return Response.json(
+              { error: "Chunk not found under the active config." },
+              { status: 404 },
+            );
+          case "invalid":
+            return Response.json(
+              { error: "Invalid size/overlap (need size ≥ 1 and 0 ≤ overlap < size)." },
+              { status: 400 },
+            );
+        }
+      }
+
+      const status = await setChunkModelOverride(chunkId, body.data.model!);
       switch (status) {
         case "ok":
           return Response.json({ ok: true });

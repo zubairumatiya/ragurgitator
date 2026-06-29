@@ -13,6 +13,7 @@
 "use client";
 
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
 import { apiFetch } from "@/lib/http/client";
 import type {
   EvalSummary,
@@ -31,6 +32,11 @@ import type {
   ModelTrialResult,
   RechunkResult,
 } from "@/lib/rag/eval";
+import type {
+  AutotuneApply,
+  AutotuneSearch,
+} from "@/lib/rag/evalSettingsStore";
+import { ConfigCreateDialog } from "@/app/components/ConfigCreateDialog";
 import { NdcgRankingPanel } from "@/app/components/NdcgRankingPanel";
 
 function pct(n: number | null): string {
@@ -107,8 +113,13 @@ type ExplainState =
   | { status: "error"; message: string };
 
 export function EvalDashboard() {
+  const router = useRouter();
   const [summary, setSummary] = useState<EvalSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // "Bulk actions → Change base model / chunk size" opens the config-create
+  // dialog pre-targeted at this corpus (D2: spawns a new config so this one's
+  // eval history is preserved for Appraise).
+  const [createOpen, setCreateOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [progress, setProgress] = useState<EvalProgress | null>(null);
@@ -222,13 +233,26 @@ export function EvalDashboard() {
 
   // Drive a process/rescore run from its NDJSON event stream: advance the
   // progress bar, patch question badges live, and reconcile via reload() at the end.
-  async function runStream(url: string, label: (r: RunResult) => string) {
+  async function runStream(
+    url: string,
+    label: (r: RunResult) => string,
+    body?: unknown,
+  ) {
     setBusy(true);
     setNotice(null);
     setError(null);
     setProgress(null);
     try {
-      const res = await apiFetch(url, { method: "POST" });
+      const res = await apiFetch(
+        url,
+        body === undefined
+          ? { method: "POST" }
+          : {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body),
+            },
+      );
       if (!res.ok || !res.body) {
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
         setError(data?.error ?? `Request failed (${res.status}).`);
@@ -306,6 +330,17 @@ export function EvalDashboard() {
       (r) =>
         `Re-scored ${r.scored} question(s). ` +
         `Recall@k ${pct(r.recall)} · nDCG ${fmtScore(r.ndcg)}.`,
+    );
+
+  // Bulk actions → Add question → {difficulty}: corpus-wide generate at one
+  // difficulty, then score. Reuses the same NDJSON progress stream.
+  const onBulkAdd = (difficulty: Difficulty) =>
+    runStream(
+      "/api/eval/bulk-generate",
+      (r) =>
+        `Added ${r.generated} ${difficulty} question(s), scored ${r.scored}. ` +
+        `Recall@k ${pct(r.recall)} · nDCG ${fmtScore(r.ndcg)}.`,
+      { difficulty },
     );
 
   async function saveEdit(id: string) {
@@ -403,19 +438,24 @@ export function EvalDashboard() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <button
           onClick={onProcess}
           disabled={busy || !canProcess}
           title={
             canProcess
-              ? "Generate questions for new chunks and score anything unscored"
-              : "Nothing new to process — no new chunks or unscored questions"
+              ? "Generate the selected difficulties for new chunks and score anything unscored"
+              : "Nothing pending — pick a difficulty in Bulk actions, or there are no unscored questions"
           }
           className="rounded-md bg-black px-3 py-1.5 text-sm font-medium text-white cursor-pointer transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
         >
           {busy ? "Processing…" : "Process new chunks"}
         </button>
+        <BulkActions
+          busy={busy}
+          onAddDifficulty={onBulkAdd}
+          onChangeConfig={() => setCreateOpen(true)}
+        />
         <button
           onClick={onRescore}
           disabled={busy || !canRescore}
@@ -428,11 +468,37 @@ export function EvalDashboard() {
         >
           Re-score all
         </button>
-        <MetricsDropdown k={summary?.k ?? null} />
         {!progress && notice && (
           <span className="text-sm text-zinc-600 dark:text-zinc-400">{notice}</span>
         )}
+        {summary && (
+          <div className="ml-auto">
+            <EvalSettings summary={summary} busy={busy} onSaved={reload} />
+          </div>
+        )}
       </div>
+
+      {createOpen && (
+        <ConfigCreateDialog
+          initial={
+            summary
+              ? {
+                  corpusId: summary.config.corpusId,
+                  baseModel: summary.config.baseModel,
+                  chunkSize: summary.config.chunkSize,
+                  chunkOverlap: summary.config.chunkOverlap,
+                  topK: summary.config.topK,
+                }
+              : undefined
+          }
+          onClose={() => setCreateOpen(false)}
+          onCreated={(id) => {
+            setCreateOpen(false);
+            router.refresh();
+            router.push(`/c/${id}`);
+          }}
+        />
+      )}
 
       {progress && <RunProgress progress={progress} k={summary?.k ?? 0} />}
 
@@ -444,13 +510,31 @@ export function EvalDashboard() {
         <>
           {/* Headline metrics — one labeled card per eval */}
           <div className="flex flex-wrap gap-4">
-            <Stat label={`Recall@${summary.k}`} value={pct(summary.recall)} big />
-            <Stat
-              label={`nDCG@${summary.k}`}
-              value={fmtScore(summary.ndcg)}
-              big
-              sub={`${summary.ndcgCovered}/${summary.total} graded`}
-            />
+            {summary.criteria.recall.enabled && (
+              <Stat
+                label={`Recall@${summary.recallK}`}
+                value={pct(summary.recall)}
+                big
+                sub={
+                  summary.criteria.recall.minRate != null
+                    ? `min ${pct(summary.criteria.recall.minRate)}`
+                    : undefined
+                }
+              />
+            )}
+            {summary.criteria.ndcg.enabled && (
+              <Stat
+                label={`nDCG@${summary.ndcgK}`}
+                value={fmtScore(summary.ndcg)}
+                big
+                sub={
+                  `${summary.ndcgCovered}/${summary.total} graded` +
+                  (summary.criteria.ndcg.minRate != null
+                    ? ` · min ${summary.criteria.ndcg.minRate.toFixed(2)}`
+                    : "")
+                }
+              />
+            )}
             <Stat label="Questions" value={String(summary.total)} />
             <Stat label="Scored" value={String(summary.scored)} />
             <Stat label="Hits" value={String(summary.hits)} />
@@ -663,6 +747,7 @@ export function EvalDashboard() {
                             {expandedId === q.questionId && (
                               <ExplainPanel
                                 questionId={q.questionId}
+                                chunkId={q.sourceChunkId}
                                 state={explains[q.questionId]}
                                 k={summary.k}
                               />
@@ -771,46 +856,395 @@ export function EvalDashboard() {
   );
 }
 
-// The per-run metrics selector next to "Re-score all". Recall@k comes straight
-// from the retrieval pass; nDCG@k is graded against the per-question ideal
-// rankings set up below (only questions that have one are scored). Shown locked;
-// this is the slot where these become real toggles.
-function MetricsDropdown({ k }: { k: number | null }) {
+// Bulk actions: corpus-wide "add question at difficulty" (in place) and the
+// "change base model / chunk size" shortcuts that open the config-create dialog
+// (D2 — those spawn a NEW config so this one's eval history is preserved).
+function BulkActions({
+  busy,
+  onAddDifficulty,
+  onChangeConfig,
+}: {
+  busy: boolean;
+  onAddDifficulty: (d: Difficulty) => void;
+  onChangeConfig: () => void;
+}) {
   const [open, setOpen] = useState(false);
-  const metrics = [`Recall@${k ?? "k"}`, `nDCG@${k ?? "k"}`];
+  const [subOpen, setSubOpen] = useState(false);
+  const close = () => {
+    setOpen(false);
+    setSubOpen(false);
+  };
   return (
     <div className="relative">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        title="Which evals run with Process / Re-score"
-        className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium cursor-pointer transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+        disabled={busy}
+        title="Bulk changes across the whole corpus"
+        className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium cursor-pointer transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
       >
-        Metrics ▾
+        Bulk actions ▾
       </button>
       {open && (
         <>
-          {/* Click-away backdrop */}
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute left-0 top-full z-20 mt-1 w-64 rounded-md border border-zinc-200 bg-white p-2 shadow-lg dark:border-zinc-800 dark:bg-zinc-900">
-            <ul className="flex flex-col gap-1">
-              {metrics.map((m) => (
-                <li key={m}>
-                  <label className="flex cursor-not-allowed items-center gap-2 px-1 py-0.5 text-sm text-zinc-700 dark:text-zinc-300">
-                    <input type="checkbox" checked disabled readOnly />
-                    {m}
-                  </label>
-                </li>
-              ))}
-            </ul>
-            <p className="mt-2 border-t border-zinc-200 pt-2 text-xs text-zinc-500 dark:border-zinc-800">
-              Recall@k runs with retrieval; nDCG@k grades against the per-question
-              rankings you set up below.
-            </p>
+          <div className="fixed inset-0 z-10" onClick={close} />
+          <div className="absolute left-0 top-full z-20 mt-1 w-60 rounded-md border border-zinc-200 bg-white py-1 text-sm shadow-lg dark:border-zinc-800 dark:bg-zinc-900">
+            <button
+              type="button"
+              onClick={() => setSubOpen((s) => !s)}
+              className="flex w-full cursor-pointer items-center justify-between px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              Add question <span className="text-zinc-400">{subOpen ? "▾" : "▸"}</span>
+            </button>
+            {subOpen && (
+              <div className="flex gap-1 px-3 pb-1.5 pt-0.5">
+                {(["easy", "medium", "hard"] as const).map((d) => (
+                  <button
+                    key={d}
+                    type="button"
+                    onClick={() => {
+                      close();
+                      onAddDifficulty(d);
+                    }}
+                    className="cursor-pointer rounded border border-zinc-300 px-2 py-0.5 text-xs font-medium capitalize text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  >
+                    {d}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="my-1 border-t border-zinc-200 dark:border-zinc-800" />
+            <button
+              type="button"
+              onClick={() => {
+                close();
+                onChangeConfig();
+              }}
+              title="Spawns a new config over this corpus (keeps this one's history)"
+              className="block w-full cursor-pointer px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              Change base model…
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                close();
+                onChangeConfig();
+              }}
+              title="Spawns a new config over this corpus (keeps this one's history)"
+              className="block w-full cursor-pointer px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              Adjust chunk size / overlap…
+            </button>
           </div>
         </>
       )}
     </div>
+  );
+}
+
+// "" / invalid => null (the metric falls back to the config's top_k, A1).
+function parseKOrNull(s: string): number | null {
+  const t = s.trim();
+  if (t === "") return null;
+  const n = Math.floor(Number(t));
+  return Number.isFinite(n) && n >= 1 ? n : null;
+}
+
+// "" / invalid => null (metric runs but isn't an autotune target). Clamped 0..1.
+function parseRateOrNull(s: string): number | null {
+  const t = s.trim();
+  if (t === "") return null;
+  const n = Number(t);
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : null;
+}
+
+// The real Settings dropdown (replaces the locked Metrics placeholder): per-metric
+// enable + k + optional min-rate (A1), the autotuning settings (A5; saved now,
+// consumed by the Phase C engine), and a greyed "Long-term savings" stub. Saves
+// the changed fields to the config via PATCH /api/eval/criteria.
+function EvalSettings({
+  summary,
+  busy,
+  onSaved,
+}: {
+  summary: EvalSummary;
+  busy: boolean;
+  onSaved: () => void;
+}) {
+  const topK = summary.config.topK;
+  const [open, setOpen] = useState(false);
+  const [recallOn, setRecallOn] = useState(true);
+  const [recallK, setRecallK] = useState("");
+  const [recallMin, setRecallMin] = useState("");
+  const [ndcgOn, setNdcgOn] = useState(true);
+  const [ndcgK, setNdcgK] = useState("");
+  const [ndcgMin, setNdcgMin] = useState("");
+  const [ladder, setLadder] = useState("");
+  const [overlap, setOverlap] = useState("");
+  const [apply, setApply] = useState<AutotuneApply>("choose");
+  const [search, setSearch] = useState<AutotuneSearch>("first_success");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Seed the form from the saved criteria, then open — so it always reflects the
+  // latest saved state (incl. after a save → reload) without a render-cascading
+  // effect (react-hooks/set-state-in-effect).
+  function seedAndOpen() {
+    const c = summary.criteria;
+    setRecallOn(c.recall.enabled);
+    setRecallK(c.recall.k != null ? String(c.recall.k) : "");
+    setRecallMin(c.recall.minRate != null ? String(c.recall.minRate) : "");
+    setNdcgOn(c.ndcg.enabled);
+    setNdcgK(c.ndcg.k != null ? String(c.ndcg.k) : "");
+    setNdcgMin(c.ndcg.minRate != null ? String(c.ndcg.minRate) : "");
+    setLadder(c.autotune.sizeLadder.join(", "));
+    setOverlap(String(Math.round(c.autotune.overlapPct * 100)));
+    setApply(c.autotune.apply);
+    setSearch(c.autotune.search);
+    setErr(null);
+    setOpen(true);
+  }
+
+  async function save() {
+    const ladderArr = ladder
+      .split(/[\s,]+/)
+      .map((s) => Math.floor(Number(s)))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    const overlapNum = Number(overlap);
+    const patch = {
+      recall: { enabled: recallOn, k: parseKOrNull(recallK), minRate: parseRateOrNull(recallMin) },
+      ndcg: { enabled: ndcgOn, k: parseKOrNull(ndcgK), minRate: parseRateOrNull(ndcgMin) },
+      autotune: {
+        ...(ladderArr.length > 0 ? { sizeLadder: ladderArr } : {}),
+        ...(Number.isFinite(overlapNum)
+          ? { overlapPct: Math.min(0.9, Math.max(0, overlapNum / 100)) }
+          : {}),
+        apply,
+        search,
+      },
+    };
+    setSaving(true);
+    setErr(null);
+    try {
+      const res = await apiFetch("/api/eval/criteria", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      const data = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok) {
+        setErr(data?.error ?? `Request failed (${res.status}).`);
+        return;
+      }
+      setOpen(false);
+      onSaved();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Network error.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => (open ? setOpen(false) : seedAndOpen())}
+        title="Eval metrics, k, min-rate, and autotuning settings"
+        className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium cursor-pointer transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+      >
+        Settings ▾
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 top-full z-20 mt-1 w-80 rounded-md border border-zinc-200 bg-white p-3 text-sm shadow-lg dark:border-zinc-800 dark:bg-zinc-900">
+            {/* METRICS */}
+            <p className="mb-1 text-xs font-medium uppercase tracking-wide text-zinc-500">
+              Metrics
+            </p>
+            <MetricRow
+              label="Recall"
+              on={recallOn}
+              setOn={setRecallOn}
+              k={recallK}
+              setK={setRecallK}
+              min={recallMin}
+              setMin={setRecallMin}
+              topK={topK}
+            />
+            <MetricRow
+              label="nDCG"
+              on={ndcgOn}
+              setOn={setNdcgOn}
+              k={ndcgK}
+              setK={setNdcgK}
+              min={ndcgMin}
+              setMin={setNdcgMin}
+              topK={topK}
+            />
+
+            {/* AUTOTUNING */}
+            <p className="mb-1 mt-3 border-t border-zinc-200 pt-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:border-zinc-800">
+              Autotuning
+            </p>
+            <label className="flex items-center justify-between gap-2 py-0.5">
+              <span className="text-zinc-600 dark:text-zinc-400">Size ladder</span>
+              <input
+                value={ladder}
+                onChange={(e) => setLadder(e.target.value)}
+                placeholder="384, 256, 192, 128"
+                className="w-44 rounded border border-zinc-300 bg-transparent px-2 py-1 text-xs dark:border-zinc-700"
+              />
+            </label>
+            <label className="flex items-center justify-between gap-2 py-0.5">
+              <span className="text-zinc-600 dark:text-zinc-400">Overlap %</span>
+              <input
+                type="number"
+                min={0}
+                max={90}
+                value={overlap}
+                onChange={(e) => setOverlap(e.target.value)}
+                className="w-20 rounded border border-zinc-300 bg-transparent px-2 py-1 text-xs dark:border-zinc-700"
+              />
+            </label>
+            <div className="flex items-center justify-between gap-2 py-0.5">
+              <span className="text-zinc-600 dark:text-zinc-400">When 1+ pass</span>
+              <div className="flex gap-1">
+                <Seg active={apply === "choose"} onClick={() => setApply("choose")}>
+                  choose
+                </Seg>
+                <Seg active={apply === "auto_best"} onClick={() => setApply("auto_best")}>
+                  auto-best
+                </Seg>
+              </div>
+            </div>
+            <div className="flex items-center justify-between gap-2 py-0.5">
+              <span className="text-zinc-600 dark:text-zinc-400">Search</span>
+              <div className="flex gap-1">
+                <Seg
+                  active={search === "first_success"}
+                  onClick={() => setSearch("first_success")}
+                >
+                  first
+                </Seg>
+                <Seg
+                  active={search === "exhaustive"}
+                  onClick={() => setSearch("exhaustive")}
+                  title="Best-of-best: tries every size × model combo — slower / more costly"
+                >
+                  best-of-best
+                </Seg>
+              </div>
+            </div>
+
+            {/* LONG-TERM SAVINGS (deferred — Phase E stub) */}
+            <button
+              type="button"
+              disabled
+              title="Coming soon — cut ongoing cost without dropping below your min-rate"
+              className="mt-3 w-full cursor-not-allowed rounded border border-dashed border-zinc-300 px-2 py-1.5 text-xs text-zinc-400 dark:border-zinc-700 dark:text-zinc-500"
+            >
+              Long-term savings (coming soon)
+            </button>
+
+            {err && <p className="mt-2 text-xs text-red-600 dark:text-red-400">{err}</p>}
+
+            <div className="mt-3 flex justify-end border-t border-zinc-200 pt-2 dark:border-zinc-800">
+              <button
+                type="button"
+                onClick={save}
+                disabled={saving || busy}
+                className="rounded-md bg-black px-3 py-1 text-xs font-medium text-white cursor-pointer transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
+              >
+                {saving ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// One metric row in the Settings dropdown: enable checkbox + k + optional min-rate.
+function MetricRow({
+  label,
+  on,
+  setOn,
+  k,
+  setK,
+  min,
+  setMin,
+  topK,
+}: {
+  label: string;
+  on: boolean;
+  setOn: (v: boolean) => void;
+  k: string;
+  setK: (v: string) => void;
+  min: string;
+  setMin: (v: string) => void;
+  topK: number;
+}) {
+  return (
+    <div className="flex items-center gap-2 py-0.5">
+      <label className="flex w-20 cursor-pointer items-center gap-1.5">
+        <input type="checkbox" checked={on} onChange={(e) => setOn(e.target.checked)} />
+        <span className="text-zinc-700 dark:text-zinc-300">{label}</span>
+      </label>
+      <label className="flex items-center gap-1 text-xs text-zinc-500">
+        k
+        <input
+          type="number"
+          min={1}
+          value={k}
+          onChange={(e) => setK(e.target.value)}
+          placeholder={String(topK)}
+          disabled={!on}
+          className="w-14 rounded border border-zinc-300 bg-transparent px-1.5 py-1 text-xs disabled:opacity-50 dark:border-zinc-700"
+        />
+      </label>
+      <label className="flex items-center gap-1 text-xs text-zinc-500">
+        min
+        <input
+          value={min}
+          onChange={(e) => setMin(e.target.value)}
+          placeholder="–"
+          disabled={!on}
+          className="w-16 rounded border border-zinc-300 bg-transparent px-1.5 py-1 text-xs disabled:opacity-50 dark:border-zinc-700"
+        />
+      </label>
+    </div>
+  );
+}
+
+// A small segmented-control button used by the autotuning apply/search toggles.
+function Seg({
+  active,
+  onClick,
+  title,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  title?: string;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      className={`cursor-pointer rounded border px-2 py-0.5 text-xs font-medium ${
+        active
+          ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-black"
+          : "border-zinc-300 text-zinc-500 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+      }`}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -898,10 +1332,12 @@ function Badge({
 // Lazy-loaded, so it renders loading/error states too.
 function ExplainPanel({
   questionId,
+  chunkId,
   state,
   k,
 }: {
   questionId: string;
+  chunkId: string;
   state: ExplainState | undefined;
   k: number;
 }) {
@@ -993,9 +1429,11 @@ function ExplainPanel({
         </div>
       )}
 
-      {/* What-if: re-chunk this one chunk and re-rank (ephemeral, nothing saved) */}
+      {/* What-if: re-chunk this one chunk and re-rank (ephemeral until "Set as
+          size override"). */}
       <RechunkExperiment
         questionId={questionId}
+        chunkId={chunkId}
         baseline={baseline}
         k={k}
         positionHint={expected?.position ?? 0}
@@ -1009,11 +1447,13 @@ function ExplainPanel({
 // Nothing is persisted; the live index and the question's stored score are safe.
 function RechunkExperiment({
   questionId,
+  chunkId,
   baseline,
   k,
   positionHint,
 }: {
   questionId: string;
+  chunkId: string;
   baseline: { rank: number | null; score: number | null } | null;
   k: number;
   positionHint: number;
@@ -1069,7 +1509,9 @@ function RechunkExperiment({
       </div>
 
       <div className={mode === "uniform" ? "" : "hidden"}>
-        {mounted.uniform && <RechunkLab questionId={questionId} baseline={baseline} k={k} />}
+        {mounted.uniform && (
+          <RechunkLab questionId={questionId} chunkId={chunkId} baseline={baseline} k={k} />
+        )}
       </div>
       <div className={mode === "custom" ? "" : "hidden"}>
         {mounted.custom && (
@@ -1222,10 +1664,12 @@ function RechunkResultView({
 // for its sub-chunks.
 function RechunkLab({
   questionId,
+  chunkId,
   baseline,
   k,
 }: {
   questionId: string;
+  chunkId: string;
   baseline: { rank: number | null; score: number | null } | null;
   k: number;
 }) {
@@ -1234,6 +1678,11 @@ function RechunkLab({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<RechunkResult | null>(null);
+  // Persisting this trial as a size override (Phase B). `saved` ties to the
+  // (size, overlap) that produced the current result; a fresh Run clears it.
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [saveErr, setSaveErr] = useState<string | null>(null);
 
   const invalid = !Number.isInteger(size) || size < 1 || overlap < 0 || overlap >= size;
 
@@ -1241,6 +1690,8 @@ function RechunkLab({
     if (invalid) return;
     setBusy(true);
     setError(null);
+    setSaved(false);
+    setSaveErr(null);
     try {
       const res = await apiFetch(`/api/eval/questions/${questionId}/rechunk`, {
         method: "POST",
@@ -1258,6 +1709,30 @@ function RechunkLab({
       setError(err instanceof Error ? err.message : "Network error.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Persist this (size, overlap) as a size override for the chunk: retrieval then
+  // represents it by its best piece. Takes effect on the next Re-score.
+  async function saveOverride() {
+    setSaving(true);
+    setSaveErr(null);
+    try {
+      const res = await apiFetch(`/api/eval/chunks/${chunkId}/override`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ size, overlap }),
+      });
+      const data = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok) {
+        setSaveErr(data?.error ?? `Request failed (${res.status}).`);
+        return;
+      }
+      setSaved(true);
+    } catch (err) {
+      setSaveErr(err instanceof Error ? err.message : "Network error.");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -1301,12 +1776,29 @@ function RechunkLab({
       {error && <span className="text-red-600 dark:text-red-400">{error}</span>}
 
       {result && (
-        <RechunkResultView
-          result={result}
-          baseline={baseline}
-          k={k}
-          annotation={`${result.subChunkCount} piece${result.subChunkCount === 1 ? "" : "s"} @ size ${size} / overlap ${overlap}`}
-        />
+        <>
+          <RechunkResultView
+            result={result}
+            baseline={baseline}
+            k={k}
+            annotation={`${result.subChunkCount} piece${result.subChunkCount === 1 ? "" : "s"} @ size ${size} / overlap ${overlap}`}
+          />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={saveOverride}
+              disabled={saving || saved}
+              title="Persist this re-split as a size override for this chunk (RRF-fused; hit = any piece in top-k)"
+              className="cursor-pointer rounded border border-zinc-300 px-2 py-1 text-zinc-700 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-900/40"
+            >
+              {saving ? "Saving…" : saved ? "Saved ✓" : "Set as size override"}
+            </button>
+            {saved && (
+              <span className="text-zinc-500">Re-score to apply across this chunk’s questions.</span>
+            )}
+            {saveErr && <span className="text-red-600 dark:text-red-400">{saveErr}</span>}
+          </div>
+        </>
       )}
     </div>
   );

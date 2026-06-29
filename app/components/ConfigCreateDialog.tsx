@@ -34,20 +34,34 @@ type Phase =
 export function ConfigCreateDialog({
   onClose,
   onCreated,
+  initial,
 }: {
   onClose: () => void;
   onCreated: (configId: string) => void;
+  // Pre-fill for the "Bulk actions → Change base model / chunk size" shortcut
+  // (D2): defaults to spawning a new config over `corpusId` with these settings.
+  initial?: {
+    corpusId?: string;
+    baseModel?: string;
+    chunkSize?: number;
+    chunkOverlap?: number;
+    topK?: number;
+  };
 }) {
   const [models, setModels] = useState<BaseModelOption[] | null>(null);
   const [corpora, setCorpora] = useState<CorpusSummary[] | null>(null);
 
   const [name, setName] = useState("");
-  const [corpusKind, setCorpusKind] = useState<"new" | "existing">("new");
-  const [corpusId, setCorpusId] = useState("");
-  const [baseModel, setBaseModel] = useState(DEFAULTS.baseModel);
-  const [chunkSize, setChunkSize] = useState(DEFAULTS.chunkSize);
-  const [chunkOverlap, setChunkOverlap] = useState(DEFAULTS.chunkOverlap);
-  const [topK, setTopK] = useState(DEFAULTS.topK);
+  const [corpusKind, setCorpusKind] = useState<"new" | "existing">(
+    initial?.corpusId ? "existing" : "new",
+  );
+  const [corpusId, setCorpusId] = useState(initial?.corpusId ?? "");
+  const [baseModel, setBaseModel] = useState(initial?.baseModel ?? DEFAULTS.baseModel);
+  const [chunkSize, setChunkSize] = useState(initial?.chunkSize ?? DEFAULTS.chunkSize);
+  const [chunkOverlap, setChunkOverlap] = useState(
+    initial?.chunkOverlap ?? DEFAULTS.chunkOverlap,
+  );
+  const [topK, setTopK] = useState(initial?.topK ?? DEFAULTS.topK);
   const [phase, setPhase] = useState<Phase>({ kind: "form" });
 
   // Load the model availability list + corpora when the dialog opens.

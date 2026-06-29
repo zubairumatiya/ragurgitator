@@ -14,10 +14,20 @@
 //   - Retrieval searches the whole model+dim chunks table (all docs/configs that
 //     share it); fine with today's single fixed config.
 // ---------------------------------------------------------------------------
-import { altEmbeddingModels, config } from "@/lib/config";
+import { altEmbeddingModels } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
+import {
+  addDifficulty,
+  effectiveK,
+  getActiveCriteria,
+  retrievalDepth,
+} from "@/lib/rag/evalSettingsStore";
 import { isProviderAvailable, modelSpec } from "@/lib/rag/embeddingModels";
-import { listOverrides, setChunkOverride } from "@/lib/rag/overrideStore";
+import {
+  listOverrides,
+  setChunkOverride,
+  setChunkOverridePieces,
+} from "@/lib/rag/overrideStore";
 import { anthropicClient } from "@/lib/llm/client";
 import { splitText, tokenizeWithOffsets } from "@/lib/rag/chunker";
 import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
@@ -26,7 +36,7 @@ import { stitchChunks } from "@/lib/rag/reconstruct";
 import { retrieveForQuery } from "@/lib/rag/retriever";
 import {
   allLabeledQuestions,
-  chunksNeedingQuestions,
+  chunksNeedingQuestionsByDifficulty,
   createRunSnapshot,
   getCachedQueryEmbeddings,
   getChunkForGeneration,
@@ -203,35 +213,42 @@ async function authorQuestions(
   }
 }
 
-// Top up every under-target chunk to `evalQuestionsPerChunk` questions. Only
-// chunks below target are touched, so this is naturally incremental.
-export async function generateMissingQuestions(emit: Emit = () => {}): Promise<number> {
-  const chunks = await chunksNeedingQuestions(config.evalQuestionsPerChunk);
-  if (chunks.length === 0) return 0;
+// Generate one question per SELECTED difficulty for every chunk that's missing
+// one at that difficulty (Phase A — criteria-driven generation). An empty
+// difficulty set is a no-op, so a config that hasn't opted into a difficulty mix
+// never auto-synthesizes (the user picks via Settings / Bulk actions). Each gap
+// is its own progress step so the bar reflects per-(chunk,difficulty) work.
+export async function generateMissingQuestions(
+  difficulties: Difficulty[],
+  emit: Emit = () => {},
+): Promise<number> {
+  if (difficulties.length === 0) return 0;
+  const gaps = await chunksNeedingQuestionsByDifficulty(difficulties);
+  if (gaps.length === 0) return 0;
 
   console.log(
-    `[rag:eval] generating questions for ${chunks.length} chunk(s) under target=${config.evalQuestionsPerChunk}`,
+    `[rag:eval] generating ${gaps.length} question(s) across difficulties [${difficulties.join(", ")}]`,
   );
-  emit({ type: "generate-start", total: chunks.length });
+  emit({ type: "generate-start", total: gaps.length });
 
   let generated = 0;
   let done = 0;
-  for (const chunk of chunks) {
-    const questions = await authorQuestions(chunk.text, chunk.needed);
-    for (const q of questions) {
-      if (!q.question.trim()) continue;
+  for (const gap of gaps) {
+    const [q] = await authorQuestions(gap.text, 1, gap.difficulty as Difficulty);
+    if (q && q.question.trim()) {
       await insertQuestionWithLabel({
-        documentId: chunk.documentId,
-        documentEmbeddingId: chunk.documentEmbeddingId,
-        sourceChunkId: chunk.chunkId,
+        documentId: gap.documentId,
+        documentEmbeddingId: gap.documentEmbeddingId,
+        sourceChunkId: gap.chunkId,
         question: q.question.trim(),
         expectedAnswer: q.expected_answer?.trim() || null,
         generatorModel: activeConfig().llmModel,
+        difficulty: gap.difficulty,
       });
       generated += 1;
     }
     done += 1;
-    emit({ type: "generate-progress", done, total: chunks.length });
+    emit({ type: "generate-progress", done, total: gaps.length });
   }
 
   console.log(`[rag:eval] generated ${generated} question(s)`);
@@ -282,9 +299,16 @@ async function scoreQuestions(
 
   emit({ type: "score-start", total: questions.length });
 
+  const cfg = activeConfig();
+  // Retrieve a superset deep enough for every enabled metric, then judge recall
+  // at recall_k (A1). Loading criteria once per run (not per question) is cheap.
+  const criteria = await getActiveCriteria();
+  const depth = retrievalDepth(criteria, cfg.topK);
+  const recallK = effectiveK(criteria.recall, cfg.topK);
+
   const cached = await getCachedQueryEmbeddings(
     questions.map((q) => q.questionId),
-    activeConfig().embeddingModel,
+    cfg.embeddingModel,
   );
 
   const results: ResultInsert[] = [];
@@ -293,20 +317,21 @@ async function scoreQuestions(
     let vector = cached.get(q.questionId);
     if (!vector) {
       vector = await embedQuery(q.question);
-      await putCachedQueryEmbedding(q.questionId, activeConfig().embeddingModel, vector);
+      await putCachedQueryEmbedding(q.questionId, cfg.embeddingModel, vector);
     }
     // Pass the question text too: override configs embed it under the override
     // models for the RRF fusion; non-override configs ignore it (base vector only).
-    const retrieved = await retrieveForQuery(q.question, vector);
+    const retrieved = await retrieveForQuery(q.question, vector, depth);
     const ids = retrieved.map((r) => r.chunk.chunk.id);
     const scores = retrieved.map((r) => r.score);
     const rank = ids.indexOf(q.sourceChunkId);
-    const hit = rank !== -1;
     const foundRank = rank === -1 ? null : rank + 1;
+    // Hit = the ground truth landed within recall_k of the retrieved superset.
+    const hit = foundRank !== null && foundRank <= recallK;
     results.push({
       questionId: q.questionId,
       labelId: q.labelId,
-      k: activeConfig().topK,
+      k: recallK,
       hit,
       foundRank,
       retrievedIds: ids,
@@ -354,7 +379,8 @@ export async function processNewChunks(emit: Emit = () => {}): Promise<{
   recall: number | null;
 }> {
   const t0 = performance.now();
-  const generated = await generateMissingQuestions(emit);
+  const criteria = await getActiveCriteria();
+  const generated = await generateMissingQuestions(criteria.difficulties, emit);
   const scored = await scoreUnscoredQuestions(emit);
 
   const summary = await getSummary();
@@ -366,6 +392,7 @@ export async function processNewChunks(emit: Emit = () => {}): Promise<{
       hitCount: summary.hits,
       mrr: summary.mrr,
       ndcg: summary.ndcg,
+      k: summary.recallK,
     });
   }
 
@@ -373,6 +400,40 @@ export async function processNewChunks(emit: Emit = () => {}): Promise<{
     `[rag:eval] processNewChunks done: generated=${generated} scored=${scored} ` +
       `recall=${summary.recall ?? "n/a"} in ${Math.round(performance.now() - t0)}ms`,
   );
+  emit({
+    type: "done",
+    generated,
+    scored,
+    recall: summary.recall,
+    mrr: summary.mrr,
+    ndcg: summary.ndcg,
+  });
+  return { generated, scored, recall: summary.recall };
+}
+
+// "Bulk actions → Add question → {difficulty}": persist the difficulty into the
+// config's mix, then generate one question at that difficulty for every chunk
+// missing one, score the unscored, and freeze a snapshot. Streams EvalEvents like
+// processNewChunks so the dashboard reuses the same progress UI.
+export async function bulkAddDifficulty(
+  difficulty: Difficulty,
+  emit: Emit = () => {},
+): Promise<{ generated: number; scored: number; recall: number | null }> {
+  await addDifficulty(difficulty);
+  const generated = await generateMissingQuestions([difficulty], emit);
+  const scored = await scoreUnscoredQuestions(emit);
+
+  const summary = await getSummary();
+  if (generated > 0 || scored > 0) {
+    await createRunSnapshot({
+      questionCount: summary.scored,
+      hitCount: summary.hits,
+      mrr: summary.mrr,
+      ndcg: summary.ndcg,
+      k: summary.recallK,
+    });
+  }
+
   emit({
     type: "done",
     generated,
@@ -408,6 +469,7 @@ export async function rescoreAllQuestions(emit: Emit = () => {}): Promise<{
       hitCount: summary.hits,
       mrr: summary.mrr,
       ndcg: summary.ndcg,
+      k: summary.recallK,
     });
   }
 
@@ -762,6 +824,35 @@ export async function setChunkModelOverride(
 
   const [vector] = await embedTexts([chunk.text], model);
   await setChunkOverride(chunkId, model, vector.length, vector);
+  return "ok";
+}
+
+// Promote a re-chunk experiment into a PERSISTED per-chunk SIZE override (Phase B):
+// re-split the chunk at (size, overlap), embed the pieces under the config's BASE
+// model, and store them. Retrieval then represents this chunk by its best piece
+// (hit = any piece in top-k — see retriever). Token spans stay null: a uniform
+// sub-divide covers the whole chunk, so there's no document-coverage gap.
+export async function setChunkSizeOverride(
+  chunkId: string,
+  size: number,
+  overlap: number,
+): Promise<"ok" | "not-found" | "invalid"> {
+  if (!Number.isInteger(size) || size < 1 || overlap < 0 || overlap >= size) {
+    return "invalid";
+  }
+  const chunk = await getModelTrialChunk(chunkId);
+  if (!chunk) return "not-found";
+
+  const subTexts = await splitText(chunk.text, size, overlap);
+  if (subTexts.length === 0) return "invalid";
+
+  const vectors = await embedTexts(subTexts);
+  const pieces = vectors.map((v, i) => ({
+    text: subTexts[i],
+    dimension: v.length,
+    embedding: v,
+  }));
+  await setChunkOverridePieces(chunkId, activeConfig().embeddingModel, "size", pieces);
   return "ok";
 }
 

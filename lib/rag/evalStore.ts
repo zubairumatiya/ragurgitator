@@ -10,9 +10,13 @@
 // global evalQuestionsPerChunk target.)
 // ---------------------------------------------------------------------------
 import { sql } from "@/lib/db";
-import { config } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { reciprocalRank, ndcg } from "@/lib/rag/evalMetrics";
+import {
+  effectiveK,
+  getActiveCriteria,
+  type EvalCriteria,
+} from "@/lib/rag/evalSettingsStore";
 import { getTruthOrder } from "@/lib/rag/rankingStore";
 
 export type ChunkNeedingQuestions = {
@@ -76,8 +80,23 @@ export type RunSnapshot = {
   createdAt: number;
 };
 
+// The active config's basics, surfaced to the dashboard so the Settings UI can
+// show current settings and the Bulk-actions "new config" shortcut can pre-fill.
+export type EvalConfigInfo = {
+  id: string;
+  corpusId: string;
+  baseModel: string;
+  chunkSize: number;
+  chunkOverlap: number;
+  topK: number;
+};
+
 export type EvalSummary = {
+  // `k` stays = recallK for back-compat (run progress / explain). recallK and
+  // ndcgK are the effective per-metric depths (A1).
   k: number;
+  recallK: number;
+  ndcgK: number;
   total: number; // questions with a label under the active config
   scored: number; // of those, how many have a result
   hits: number;
@@ -99,6 +118,10 @@ export type EvalSummary = {
   // target; pendingScoring: questions never scored or edited since last score.
   pendingChunks: number;
   pendingScoring: number;
+  // The saved eval criteria (metrics/k/min-rate/difficulties/autotune) and the
+  // active config basics — for the Settings dropdown and Bulk-actions pre-fill.
+  criteria: EvalCriteria;
+  config: EvalConfigInfo;
 };
 
 // Resolve the chunks table for the active config. Returns null when nothing has
@@ -149,6 +172,61 @@ export async function chunksNeedingQuestions(
     documentId: r.document_id,
     documentEmbeddingId: r.document_embedding_id,
     needed: target - r.label_count,
+  }));
+}
+
+// One (chunk, difficulty) generation gap: a chunk under the active config that
+// has no question yet at `difficulty`. Drives the difficulty-driven generator
+// (Phase A) — generation is now "one question per selected difficulty per chunk"
+// instead of a fixed per-chunk count.
+export type ChunkDifficultyGap = {
+  chunkId: string;
+  text: string;
+  documentId: string;
+  documentEmbeddingId: string;
+  difficulty: string;
+};
+
+// For each requested difficulty, the chunks under the active config that lack a
+// question at that difficulty. The cross join fans every chunk out across the
+// requested difficulties; the NOT EXISTS keeps only the missing pairs.
+export async function chunksNeedingQuestionsByDifficulty(
+  difficulties: string[],
+): Promise<ChunkDifficultyGap[]> {
+  const table = await activeChunksTable();
+  if (!table || difficulties.length === 0) return [];
+
+  const rows = await sql<
+    {
+      id: string;
+      text: string;
+      document_id: string;
+      document_embedding_id: string;
+      difficulty: string;
+    }[]
+  >`
+    select c.id, c.text, c.document_id, c.document_embedding_id, d.difficulty
+    from ${sql(table)} c
+    join document_embeddings de on de.id = c.document_embedding_id
+    cross join unnest(${difficulties}::text[]) as d(difficulty)
+    where de.config_id = ${activeConfig().id}
+      and not exists (
+        select 1
+        from eval_labels l
+        join eval_questions q on q.id = l.eval_question_id
+        where l.source_chunk_id = c.id
+          and l.document_embedding_id = c.document_embedding_id
+          and q.difficulty = d.difficulty
+      )
+    order by c.position, d.difficulty
+  `;
+
+  return rows.map((r) => ({
+    chunkId: r.id,
+    text: r.text,
+    documentId: r.document_id,
+    documentEmbeddingId: r.document_embedding_id,
+    difficulty: r.difficulty,
   }));
 }
 
@@ -1119,6 +1197,7 @@ export async function createRunSnapshot(args: {
   hitCount: number;
   mrr: number | null;
   ndcg: number | null;
+  k?: number; // recall depth this run was scored at (A1); defaults to top_k
 }): Promise<void> {
   const cfg = activeConfig();
   await sql`
@@ -1126,7 +1205,7 @@ export async function createRunSnapshot(args: {
       (config_id, model, chunk_size, chunk_overlap, k, question_count, hit_count, mrr, ndcg)
     values
       (${cfg.id}, ${cfg.embeddingModel}, ${cfg.chunkSize}, ${cfg.chunkOverlap},
-       ${cfg.topK}, ${args.questionCount}, ${args.hitCount}, ${args.mrr},
+       ${args.k ?? cfg.topK}, ${args.questionCount}, ${args.hitCount}, ${args.mrr},
        ${args.ndcg})
   `;
 }
@@ -1149,8 +1228,23 @@ export async function deleteQuestion(id: string): Promise<void> {
 }
 
 export async function getSummary(): Promise<EvalSummary> {
+  const cfg = activeConfig();
+  const criteria = await getActiveCriteria();
+  const recallK = effectiveK(criteria.recall, cfg.topK);
+  const ndcgK = effectiveK(criteria.ndcg, cfg.topK);
+  const configInfo: EvalConfigInfo = {
+    id: cfg.id,
+    corpusId: cfg.corpusId,
+    baseModel: cfg.embeddingModel,
+    chunkSize: cfg.chunkSize,
+    chunkOverlap: cfg.chunkOverlap,
+    topK: cfg.topK,
+  };
+
   const empty: EvalSummary = {
-    k: activeConfig().topK,
+    k: recallK,
+    recallK,
+    ndcgK,
     total: 0,
     scored: 0,
     hits: 0,
@@ -1163,6 +1257,8 @@ export async function getSummary(): Promise<EvalSummary> {
     runs: [],
     pendingChunks: 0,
     pendingScoring: 0,
+    criteria,
+    config: configInfo,
   };
 
   const table = await activeChunksTable();
@@ -1239,21 +1335,24 @@ export async function getSummary(): Promise<EvalSummary> {
       order by created_at desc
       limit 20
     `,
-    // Count of chunks under the active config still below the question target —
-    // the generation half of "Process new chunks". Mirrors chunksNeedingQuestions.
+    // Count of chunks under the active config missing a question for at least one
+    // SELECTED difficulty — the generation half of "Process new chunks" (Phase A).
+    // Mirrors chunksNeedingQuestionsByDifficulty; 0 when no difficulty is selected
+    // (the cross join over an empty array yields no rows).
     sql<{ n: number }[]>`
-      select count(*)::int as n
-      from (
-        select c.id
-        from ${sql(table)} c
-        join document_embeddings de on de.id = c.document_embedding_id
-        left join eval_labels l
-          on l.source_chunk_id = c.id
-         and l.document_embedding_id = c.document_embedding_id
-        where de.config_id = ${activeConfig().id}
-        group by c.id
-        having count(l.id) < ${config.evalQuestionsPerChunk}
-      ) t
+      select count(distinct c.id)::int as n
+      from ${sql(table)} c
+      join document_embeddings de on de.id = c.document_embedding_id
+      cross join unnest(${criteria.difficulties}::text[]) as d(difficulty)
+      where de.config_id = ${activeConfig().id}
+        and not exists (
+          select 1
+          from eval_labels l
+          join eval_questions q on q.id = l.eval_question_id
+          where l.source_chunk_id = c.id
+            and l.document_embedding_id = c.document_embedding_id
+            and q.difficulty = d.difficulty
+        )
     `,
   ]);
 
@@ -1265,12 +1364,16 @@ export async function getSummary(): Promise<EvalSummary> {
     // Edited after its last score -> the shown hit/miss is for the old text. Treat
     // as pending (it will be re-scored next run, see questionsNeedingScoring).
     const stale = r.scored_at !== null && r.updated_at.getTime() > r.scored_at.getTime();
-    const fresh = r.hit !== null && !stale;
+    const scored = r.scored_at !== null;
+    // Recompute the hit at the CURRENT recall_k from the stored found_rank (the
+    // rank within the stored superset, A1) — so changing recall_k in Settings is
+    // reflected without a re-score, as long as it's within the retrieved depth.
+    const hit = scored ? r.found_rank !== null && r.found_rank <= recallK : null;
+    const fresh = scored && !stale;
     // Graded nDCG needs an ideal ranking AND a fresh retrieval order; otherwise
-    // it's ungraded (null) and the UI shows the grey placeholder.
+    // it's ungraded (null) and the UI shows the grey placeholder. Graded at ndcg_k.
     const ideal = truthOrders.get(r.question_id);
-    const qNdcg =
-      fresh && ideal ? ndcg(ideal, r.retrieved_ids ?? [], activeConfig().topK) : null;
+    const qNdcg = fresh && ideal ? ndcg(ideal, r.retrieved_ids ?? [], ndcgK) : null;
     return {
       questionId: r.question_id,
       question: r.question,
@@ -1280,7 +1383,7 @@ export async function getSummary(): Promise<EvalSummary> {
       fileName: r.file_name,
       sourceChunkId: r.source_chunk_id,
       expectedPosition: r.expected_position,
-      hit: r.hit,
+      hit,
       foundRank: r.found_rank,
       retrievedIds: r.retrieved_ids,
       scoredAt: r.scored_at ? r.scored_at.getTime() : null,
@@ -1326,7 +1429,9 @@ export async function getSummary(): Promise<EvalSummary> {
   }
 
   return {
-    k: activeConfig().topK,
+    k: recallK,
+    recallK,
+    ndcgK,
     total: questions.length,
     scored: scoredRows.length,
     hits,
@@ -1347,5 +1452,7 @@ export async function getSummary(): Promise<EvalSummary> {
     })),
     pendingChunks: pendingChunkRows[0]?.n ?? 0,
     pendingScoring,
+    criteria,
+    config: configInfo,
   };
 }
