@@ -60,6 +60,13 @@ export const altEmbeddingModels: { id: string; label: string }[] = [
   { id: "bge-m3", label: "bge-m3 (local)" },
 ];
 
+// False-positive detector threshold (eval-autotuning-plan §7): a question that
+// MISSED recall but whose graded nDCG is at least this high is likely a victim
+// of distractor crowding (the ground truth ranks well against its ideal, other
+// legitimately-relevant chunks pushed it out of top-k) — surfaced on /eval as a
+// "possible false positive" hint next to the miss badge.
+export const HIGH_NDCG = 0.7;
+
 // Model ladder for the autotune engine (eval-autotuning-plan §5.2, A4):
 // CHEAPEST FIRST, as an explicit ordered list (no cost field exists in the
 // registry to derive it from). Free local models lead (slower but $0), then

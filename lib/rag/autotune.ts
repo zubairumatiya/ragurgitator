@@ -132,7 +132,7 @@ type TargetQuestion = {
 // "must be a hit"; nDCG is graded against its own min-rate). Unscored, stale,
 // and ungraded-nDCG questions are not targetable.
 function failingMetrics(q: QuestionDetail, criteria: EvalCriteria): AutotuneMetric[] {
-  if (q.hit === null || q.stale) return [];
+  if (q.ignored || q.hit === null || q.stale) return [];
   const out: AutotuneMetric[] = [];
   const r = criteria.recall;
   if (r.enabled && r.minRate !== null && r.minRate > 0 && q.hit === false) {

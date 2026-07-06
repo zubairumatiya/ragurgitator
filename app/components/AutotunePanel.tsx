@@ -15,23 +15,13 @@
 import { useState } from "react";
 import { apiFetch } from "@/lib/http/client";
 import type { AutotuneCandidate, AutotuneEvent } from "@/lib/rag/autotune";
+import { failsBar } from "@/lib/rag/evalBar";
 import type { EvalSummary } from "@/lib/rag/evalStore";
 
-// Client-side mirror of the engine's targeting rule (autotune.failingMetrics),
-// for the confirm dialog's below-bar preview. Ignored questions (Phase D)
-// aren't in the summary payload yet, so this can slightly over-count.
+// Confirm-dialog preview of the engine's targeting: fresh below-bar questions,
+// ignored ones excluded (shared D1 rule — lib/rag/evalBar).
 function belowBarCount(summary: EvalSummary): number {
-  const { recall, ndcg } = summary.criteria;
-  let n = 0;
-  for (const q of summary.questions) {
-    if (q.hit === null || q.stale) continue;
-    const failsRecall =
-      recall.enabled && recall.minRate !== null && recall.minRate > 0 && q.hit === false;
-    const failsNdcg =
-      ndcg.enabled && ndcg.minRate !== null && q.ndcg !== null && q.ndcg < ndcg.minRate;
-    if (failsRecall || failsNdcg) n += 1;
-  }
-  return n;
+  return summary.questions.filter((q) => failsBar(q, summary.criteria)).length;
 }
 
 function candidateLabel(c: AutotuneCandidate): string {

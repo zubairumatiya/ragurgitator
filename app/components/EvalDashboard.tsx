@@ -14,10 +14,14 @@
 
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
+import { HIGH_NDCG } from "@/lib/config";
 import { apiFetch } from "@/lib/http/client";
+import { failsBar } from "@/lib/rag/evalBar";
 import type {
+  ChunkOverrideInfo,
   EvalSummary,
   ExplainChunk,
+  OverrideOutcome,
   PoolChunk,
   QuestionDetail,
   QuestionExplain,
@@ -381,6 +385,39 @@ export function EvalDashboard() {
     }
   }
 
+  // "Ignore in rates" (§7): config-scoped, reversible; ignoring warns first
+  // because it removes the question from Recall/nDCG rates + autotune targeting.
+  async function toggleIgnore(q: QuestionDetail) {
+    if (
+      !q.ignored &&
+      !window.confirm(
+        "Ignore this question in rates?\n\nManually verify it is genuinely a " +
+          "distractor artifact (e.g. answerable from other legitimate chunks) " +
+          "before ignoring — this removes it from your Recall/nDCG rates and " +
+          "from autotune targeting. You can un-ignore it any time.",
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/eval/questions/${q.questionId}/ignore`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ignored: !q.ignored }),
+      });
+      if (!res.ok) {
+        const data = (await res.json()) as { error?: string };
+        setError(data.error ?? `Request failed (${res.status}).`);
+        return;
+      }
+      reload();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   // Add a hand-written question to a chunk. It lands unscored; the next "Process
   // new chunks" / "Re-score all" scores it like any other.
   async function addQuestion(chunkId: string) {
@@ -624,9 +661,12 @@ export function EvalDashboard() {
               <div className="flex flex-col gap-3">
                 {groupByChunk(summary.questions).map((group) => {
                   const scored = group.questions.filter(
-                    (q) => q.hit !== null && !q.stale,
+                    (q) => q.hit !== null && !q.stale && !q.ignored,
                   );
                   const hits = scored.filter((q) => q.hit === true).length;
+                  const override = summary.overrides.find(
+                    (o) => o.chunkId === group.chunkId,
+                  );
                   return (
                     <div
                       key={group.chunkId}
@@ -634,8 +674,11 @@ export function EvalDashboard() {
                     >
                       {/* Which chunk these questions belong to */}
                       <div className="flex items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-50 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900/40">
-                        <span className="truncate font-mono text-xs text-zinc-600 dark:text-zinc-400">
-                          {group.fileName} · chunk #{group.position ?? "?"}
+                        <span className="flex min-w-0 items-center gap-1.5 font-mono text-xs text-zinc-600 dark:text-zinc-400">
+                          {override && <OverrideBadge info={override} />}
+                          <span className="truncate">
+                            {group.fileName} · chunk #{group.position ?? "?"}
+                          </span>
                         </span>
                         <span className="shrink-0 text-xs text-zinc-500">
                           {scored.length > 0
@@ -659,9 +702,36 @@ export function EvalDashboard() {
                                   autoFocus
                                 />
                               ) : (
-                                <span className="flex-1">{q.question}</span>
+                                <span
+                                  className={
+                                    q.ignored ? "flex-1 text-zinc-400" : "flex-1"
+                                  }
+                                >
+                                  {q.question}
+                                </span>
                               )}
                               <span className="flex shrink-0 items-center gap-1.5">
+                                {q.ignored && (
+                                  <span
+                                    title="Ignored in rates — excluded from Recall/nDCG and autotune targeting"
+                                    className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+                                  >
+                                    ignored
+                                  </span>
+                                )}
+                                {!q.ignored &&
+                                  q.hit === false &&
+                                  q.ndcg !== null &&
+                                  q.ndcg >= HIGH_NDCG && (
+                                    <span
+                                      title={
+                                        "Possible false positive: nDCG is high but recall missed — the ground-truth chunk ranks well against its ideal but was crowded out of the top-k by other relevant chunks. Verify, then consider 'Ignore'."
+                                      }
+                                      className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700 dark:bg-amber-900/40 dark:text-amber-400"
+                                    >
+                                      FP?
+                                    </span>
+                                  )}
                                 <Badge hit={q.hit} rank={q.foundRank} stale={q.stale} />
                                 <MetricChip label="nDCG" value={q.ndcg} />
                               </span>
@@ -733,6 +803,21 @@ export function EvalDashboard() {
                                     >
                                       nDCG
                                     </button>
+                                    {(q.ignored ||
+                                      failsBar(q, summary.criteria)) && (
+                                      <button
+                                        onClick={() => toggleIgnore(q)}
+                                        disabled={busy}
+                                        title={
+                                          q.ignored
+                                            ? "Count this question in rates again"
+                                            : "Exclude this question from rates and autotune targeting (manual false-positive mode)"
+                                        }
+                                        className="cursor-pointer hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+                                      >
+                                        {q.ignored ? "Unignore" : "Ignore"}
+                                      </button>
+                                    )}
                                     <button
                                       onClick={() => {
                                         setEditingId(q.questionId);
@@ -862,6 +947,62 @@ export function EvalDashboard() {
         </>
       )}
     </div>
+  );
+}
+
+// One hover row for the yellow-◷ tooltip, in the plan's §6.4 shape:
+// "easy · recall miss #14 → hit #3", "hard · nDCG 0.41 → 0.78".
+function fmtOutcome(o: OverrideOutcome): string {
+  const d = o.difficulty ?? "·";
+  if (o.metric === "recall") {
+    const side = (v: number | null, rank: number | null) =>
+      v === null ? "—" : v >= 1 ? `hit #${rank ?? "?"}` : `miss${rank ? ` #${rank}` : ""}`;
+    return `${d} · recall ${side(o.beforeValue, o.beforeRank)} → ${side(o.afterValue, o.afterRank)}`;
+  }
+  const val = (v: number | null) => (v === null ? "—" : v.toFixed(2));
+  return `${d} · nDCG ${val(o.beforeValue)} → ${val(o.afterValue)}`;
+}
+
+// Chunk-header badges for an active per-chunk override (Phase D, §6.4): yellow
+// ◷ = this chunk was re-shaped/re-modeled (hover shows the override and each
+// question's before → after from the autotune run); red ❗ = its pieces don't
+// cover the source chunk's full token span (part of the document dropped out of
+// retrieval — guards custom-boundary overrides).
+function OverrideBadge({ info }: { info: ChunkOverrideInfo }) {
+  const what =
+    info.kind === "model"
+      ? `re-embedded under ${info.model}`
+      : info.kind === "size"
+        ? `re-split into ${info.pieceCount} piece(s)`
+        : `re-split into ${info.pieceCount} piece(s) under ${info.model}`;
+  return (
+    <>
+      <span className="group relative shrink-0 cursor-default">
+        <span className="text-amber-500 dark:text-amber-400">◷</span>
+        <span className="pointer-events-none absolute left-0 top-full z-20 mt-1 hidden w-max max-w-xs flex-col gap-1 rounded-md border border-zinc-200 bg-white px-2.5 py-2 text-left font-sans text-xs normal-case text-zinc-700 shadow-lg group-hover:flex dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
+          <span className="font-medium">Override: {what}</span>
+          {info.outcomes.length > 0 ? (
+            info.outcomes.map((o, i) => (
+              <span key={i} title={o.question} className="font-mono text-zinc-500">
+                {fmtOutcome(o)}
+              </span>
+            ))
+          ) : (
+            <span className="text-zinc-400">
+              Applied manually (no autotune outcome recorded).
+            </span>
+          )}
+        </span>
+      </span>
+      {info.hasGap && (
+        <span
+          title="Coverage gap: this chunk's override pieces don't span its full text — part of the document is missing from retrieval."
+          className="shrink-0 text-red-600 dark:text-red-400"
+        >
+          ❗
+        </span>
+      )}
+    </>
   );
 }
 

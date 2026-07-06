@@ -67,6 +67,29 @@ export async function insertAutotuneRun(
   });
 }
 
+// Mark / unmark one question "ignore in rates" under the active config (§7 —
+// manual false-positive mode). Config-scoped: the same question can be a legit
+// miss in one config and distractor noise in another. Idempotent both ways.
+export async function setQuestionIgnored(
+  questionId: string,
+  ignored: boolean,
+  reason: string | null = null,
+): Promise<void> {
+  const cfg = activeConfig();
+  if (ignored) {
+    await sql`
+      insert into config_question_ignores (config_id, eval_question_id, reason)
+      values (${cfg.id}, ${questionId}, ${reason})
+      on conflict (config_id, eval_question_id) do nothing
+    `;
+  } else {
+    await sql`
+      delete from config_question_ignores
+      where config_id = ${cfg.id} and eval_question_id = ${questionId}
+    `;
+  }
+}
+
 // Question ids the active config has marked "ignore in rates" — excluded from
 // autotune targeting (§5.1). Tolerates the table not existing yet (0014
 // unapplied) the same way listOverrides tolerates a missing 0013 table.

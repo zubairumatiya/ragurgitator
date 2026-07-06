@@ -17,6 +17,8 @@ import {
   getActiveCriteria,
   type EvalCriteria,
 } from "@/lib/rag/evalSettingsStore";
+import { tokenizeWithOffsets } from "@/lib/rag/chunker";
+import type { OverrideKind } from "@/lib/rag/overrideStore";
 import { getTruthOrder } from "@/lib/rag/rankingStore";
 
 export type ChunkNeedingQuestions = {
@@ -61,6 +63,33 @@ export type QuestionDetail = {
   // Graded nDCG@k against this question's official ideal ranking; null when it
   // has no ranking yet or no fresh score (ungraded → grey chip on /eval).
   ndcg: number | null;
+  // "Ignore in rates" (§7): still rendered (greyed) but excluded from the
+  // Recall/nDCG aggregates, the min-rate pass/fail counts, and autotune targeting.
+  ignored: boolean;
+};
+
+// One autotune-run outcome row for the yellow ◷ hover (§6.4): a question's
+// per-metric before → after under the chunk's applied override.
+export type OverrideOutcome = {
+  question: string;
+  difficulty: string | null;
+  metric: string; // 'recall' | 'ndcg'
+  beforeValue: number | null;
+  beforeRank: number | null;
+  afterValue: number | null;
+  afterRank: number | null;
+};
+
+// A chunk's active override, for the /eval chunk-header badges: yellow ◷ (has
+// an override; hover shows `outcomes`) and red ❗ (`hasGap` — its pieces don't
+// cover the source chunk's full token span, §6.4).
+export type ChunkOverrideInfo = {
+  chunkId: string;
+  kind: OverrideKind;
+  model: string;
+  pieceCount: number;
+  hasGap: boolean;
+  outcomes: OverrideOutcome[];
 };
 
 export type DocumentBreakdown = {
@@ -122,6 +151,8 @@ export type EvalSummary = {
   // active config basics — for the Settings dropdown and Bulk-actions pre-fill.
   criteria: EvalCriteria;
   config: EvalConfigInfo;
+  // Active per-chunk overrides (Phase D badges) — empty when none.
+  overrides: ChunkOverrideInfo[];
 };
 
 // Resolve the chunks table for the active config. Returns null when nothing has
@@ -1227,6 +1258,124 @@ export async function deleteQuestion(id: string): Promise<void> {
   await sql`delete from eval_questions where id = ${id}`;
 }
 
+// Assemble the active config's per-chunk override info for the /eval badges:
+// one row per overridden chunk (kind/model/piece count), its hover outcomes
+// from the most recent autotune run that applied an override there, and the
+// red-❗ gap flag. Gap detection (§6.4): only pieces that carry token spans can
+// leave one (whole-chunk and uniform re-splits store NULL spans = full
+// coverage); for those we tokenize the source chunk and check the spans cover
+// [0, tokenCount) without holes. Both tables are tolerated missing (0013/0015
+// or 0016 unapplied) so /eval keeps working pre-migration.
+async function listChunkOverrideInfo(table: string): Promise<ChunkOverrideInfo[]> {
+  const cfg = activeConfig();
+  let pieces: {
+    source_chunk_id: string;
+    model: string;
+    kind: string;
+    token_start: number | null;
+    token_end: number | null;
+  }[];
+  try {
+    pieces = await sql<typeof pieces>`
+      select source_chunk_id, model, kind, token_start, token_end
+      from config_chunk_overrides
+      where config_id = ${cfg.id}
+      order by source_chunk_id, piece_index
+    `;
+  } catch (err) {
+    if ((err as { code?: string }).code === "42P01") return [];
+    throw err;
+  }
+  if (pieces.length === 0) return [];
+
+  const byChunk = new Map<string, typeof pieces>();
+  for (const p of pieces) {
+    const list = byChunk.get(p.source_chunk_id) ?? [];
+    list.push(p);
+    byChunk.set(p.source_chunk_id, list);
+  }
+
+  // Hover data: latest applied-override outcome per (question, metric) across
+  // this config's autotune runs, grouped under the question's chunk.
+  const outcomesByChunk = new Map<string, OverrideOutcome[]>();
+  try {
+    const rows = await sql<
+      {
+        source_chunk_id: string;
+        question: string;
+        difficulty: string | null;
+        metric: string;
+        before_value: number | null;
+        before_rank: number | null;
+        after_value: number | null;
+        after_rank: number | null;
+      }[]
+    >`
+      select distinct on (o.eval_question_id, o.metric)
+        o.source_chunk_id, q.question, q.difficulty, o.metric,
+        o.before_value, o.before_rank, o.after_value, o.after_rank
+      from autotune_question_outcomes o
+      join autotune_runs r on r.id = o.autotune_run_id
+      join eval_questions q on q.id = o.eval_question_id
+      where r.config_id = ${cfg.id} and o.override_kind is not null
+      order by o.eval_question_id, o.metric, r.created_at desc
+    `;
+    for (const r of rows) {
+      const list = outcomesByChunk.get(r.source_chunk_id) ?? [];
+      list.push({
+        question: r.question,
+        difficulty: r.difficulty,
+        metric: r.metric,
+        beforeValue: r.before_value,
+        beforeRank: r.before_rank,
+        afterValue: r.after_value,
+        afterRank: r.after_rank,
+      });
+      outcomesByChunk.set(r.source_chunk_id, list);
+    }
+  } catch (err) {
+    if ((err as { code?: string }).code !== "42P01") throw err;
+  }
+
+  const out: ChunkOverrideInfo[] = [];
+  for (const [chunkId, chunkPieces] of byChunk) {
+    const spanned = chunkPieces.filter(
+      (p) => p.token_start !== null && p.token_end !== null,
+    );
+    let hasGap = false;
+    if (spanned.length > 0) {
+      const [chunk] = await sql<{ text: string }[]>`
+        select text from ${sql(table)} where id = ${chunkId} limit 1
+      `;
+      if (chunk) {
+        const { tokenCount } = await tokenizeWithOffsets(chunk.text);
+        const spans = spanned
+          .map((p) => ({ start: p.token_start!, end: p.token_end! }))
+          .sort((a, b) => a.start - b.start);
+        let covered = 0; // end of the contiguous covered prefix
+        for (const s of spans) {
+          if (s.start > covered) break; // hole before this span
+          covered = Math.max(covered, s.end);
+        }
+        hasGap =
+          spans[0].start > 0 ||
+          covered < tokenCount ||
+          // Unspanned pieces alongside spanned ones can't prove coverage.
+          spanned.length < chunkPieces.length;
+      }
+    }
+    out.push({
+      chunkId,
+      kind: chunkPieces[0].kind as OverrideKind,
+      model: chunkPieces[0].model,
+      pieceCount: chunkPieces.length,
+      hasGap,
+      outcomes: outcomesByChunk.get(chunkId) ?? [],
+    });
+  }
+  return out;
+}
+
 export async function getSummary(): Promise<EvalSummary> {
   const cfg = activeConfig();
   const criteria = await getActiveCriteria();
@@ -1259,12 +1408,13 @@ export async function getSummary(): Promise<EvalSummary> {
     pendingScoring: 0,
     criteria,
     config: configInfo,
+    overrides: [],
   };
 
   const table = await activeChunksTable();
   if (!table) return empty;
 
-  const [detail, runRows, pendingChunkRows] = await Promise.all([
+  const [detail, runRows, pendingChunkRows, overrides] = await Promise.all([
     sql<
       {
         question_id: string;
@@ -1280,6 +1430,7 @@ export async function getSummary(): Promise<EvalSummary> {
         found_rank: number | null;
         retrieved_ids: string[] | null;
         scored_at: Date | null;
+        ignored: boolean;
       }[]
     >`
       with active_labels as (
@@ -1308,12 +1459,15 @@ export async function getSummary(): Promise<EvalSummary> {
         lt.hit,
         lt.found_rank,
         lt.retrieved_ids,
-        lt.scored_at
+        lt.scored_at,
+        (ig.eval_question_id is not null) as ignored
       from eval_questions q
       join active_labels al on al.eval_question_id = q.id
       join documents d on d.id = q.document_id
       left join ${sql(table)} c on c.id = al.source_chunk_id
       left join latest lt on lt.eval_question_id = q.id
+      left join config_question_ignores ig
+        on ig.eval_question_id = q.id and ig.config_id = ${activeConfig().id}
       -- Document order so questions group cleanly by chunk on /eval; within a
       -- chunk, oldest first (generated, then any manual additions).
       order by d.file_name, c.position, q.created_at
@@ -1354,6 +1508,7 @@ export async function getSummary(): Promise<EvalSummary> {
             and q.difficulty = d.difficulty
         )
     `,
+    listChunkOverrideInfo(table),
   ]);
 
   // Each question's official (is_truth) ideal ranking, if any — what its graded
@@ -1389,11 +1544,13 @@ export async function getSummary(): Promise<EvalSummary> {
       scoredAt: r.scored_at ? r.scored_at.getTime() : null,
       stale,
       ndcg: qNdcg,
+      ignored: r.ignored,
     };
   });
 
-  // Only fresh scores count toward recall; unscored and stale are pending.
-  const scoredRows = questions.filter((q) => q.hit !== null && !q.stale);
+  // Only fresh scores count toward recall; unscored and stale are pending, and
+  // ignored questions are excluded from every rate (§7) — they still render.
+  const scoredRows = questions.filter((q) => q.hit !== null && !q.stale && !q.ignored);
   const hits = scoredRows.filter((q) => q.hit === true).length;
 
   // MRR over the fresh-scored set, straight from found_rank (single-relevant) —
@@ -1405,8 +1562,11 @@ export async function getSummary(): Promise<EvalSummary> {
       : null;
 
   // Mean graded nDCG over exactly the questions that have one (ranked + freshly
-  // scored). ndcgCovered is that set's size — the "5" in the dashboard's 5/n.
-  const graded = questions.map((q) => q.ndcg).filter((v): v is number => v !== null);
+  // scored, not ignored). ndcgCovered is that set's size — the dashboard's 5/n.
+  const graded = questions
+    .filter((q) => !q.ignored)
+    .map((q) => q.ndcg)
+    .filter((v): v is number => v !== null);
   const ndcgValue =
     graded.length > 0 ? graded.reduce((sum, v) => sum + v, 0) / graded.length : null;
   const ndcgCovered = graded.length;
@@ -1422,7 +1582,7 @@ export async function getSummary(): Promise<EvalSummary> {
       d = { documentId: q.documentId, fileName: q.fileName, scored: 0, hits: 0 };
       byDoc.set(q.documentId, d);
     }
-    if (q.hit !== null && !q.stale) {
+    if (q.hit !== null && !q.stale && !q.ignored) {
       d.scored += 1;
       if (q.hit) d.hits += 1;
     }
@@ -1454,5 +1614,6 @@ export async function getSummary(): Promise<EvalSummary> {
     pendingScoring,
     criteria,
     config: configInfo,
+    overrides,
   };
 }
