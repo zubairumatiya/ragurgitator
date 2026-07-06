@@ -856,6 +856,45 @@ export async function setChunkSizeOverride(
   return "ok";
 }
 
+// Combo override (Phase C): re-split the chunk at (size, overlap) AND embed the
+// pieces under an ALTERNATE model — the 'size+model' family the autotune's
+// Stage-2/3 search can land on. With the base model this degenerates to a plain
+// size override (kind 'size'), so callers don't have to special-case it.
+export async function setChunkSizeModelOverride(
+  chunkId: string,
+  size: number,
+  overlap: number,
+  model: string,
+): Promise<"ok" | "not-found" | "invalid" | "unknown-model" | "unavailable"> {
+  if (model === activeConfig().embeddingModel) {
+    return setChunkSizeOverride(chunkId, size, overlap);
+  }
+  let spec;
+  try {
+    spec = modelSpec(model);
+  } catch {
+    return "unknown-model";
+  }
+  if (!isProviderAvailable(spec.provider)) return "unavailable";
+  if (!Number.isInteger(size) || size < 1 || overlap < 0 || overlap >= size) {
+    return "invalid";
+  }
+  const chunk = await getModelTrialChunk(chunkId);
+  if (!chunk) return "not-found";
+
+  const subTexts = await splitText(chunk.text, size, overlap);
+  if (subTexts.length === 0) return "invalid";
+
+  const vectors = await embedTexts(subTexts, model);
+  const pieces = vectors.map((v, i) => ({
+    text: subTexts[i],
+    dimension: v.length,
+    embedding: v,
+  }));
+  await setChunkOverridePieces(chunkId, model, "size+model", pieces);
+  return "ok";
+}
+
 // Run the trial: embed the pool + each question under `model`, cosine-rank the
 // chunk within the pool per question, and (optionally) persist the snapshot.
 // Returns null when the chunk has no questions / isn't under the active config;

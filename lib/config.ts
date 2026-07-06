@@ -60,6 +60,22 @@ export const altEmbeddingModels: { id: string; label: string }[] = [
   { id: "bge-m3", label: "bge-m3 (local)" },
 ];
 
+// Model ladder for the autotune engine (eval-autotuning-plan §5.2, A4):
+// CHEAPEST FIRST, as an explicit ordered list (no cost field exists in the
+// registry to derive it from). Free local models lead (slower but $0), then
+// Voyage from lite upward, then keyed providers last. The engine filters out
+// the config's base model and any provider without a key/weights at run time
+// (isProviderAvailable), so entries here are candidates, not guarantees.
+export const autotuneModelLadder: string[] = [
+  "mxbai-embed-large",
+  "bge-m3",
+  "voyage-4-lite",
+  "voyage-4",
+  "voyage-4-large",
+  "text-embedding-3-large",
+  "embed-v4",
+];
+
 // Embedding models whose per-model rankings are averaged into the synthetic
 // "aggregate" ideal ranking for graded nDCG (lib/rag/ranking.ts). The active
 // model is the baseline; a few general-purpose alts add cross-model consensus.

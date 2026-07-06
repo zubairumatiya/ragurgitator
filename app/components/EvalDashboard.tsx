@@ -36,6 +36,7 @@ import type {
   AutotuneApply,
   AutotuneSearch,
 } from "@/lib/rag/evalSettingsStore";
+import { AutotunePanel } from "@/app/components/AutotunePanel";
 import { ConfigCreateDialog } from "@/app/components/ConfigCreateDialog";
 import { NdcgRankingPanel } from "@/app/components/NdcgRankingPanel";
 
@@ -456,6 +457,14 @@ export function EvalDashboard() {
           onAddDifficulty={onBulkAdd}
           onChangeConfig={() => setCreateOpen(true)}
         />
+        {summary && (
+          <AutotunePanel
+            summary={summary}
+            busy={busy}
+            onBusyChange={setBusy}
+            onDone={reload}
+          />
+        )}
         <button
           onClick={onRescore}
           disabled={busy || !canRescore}
