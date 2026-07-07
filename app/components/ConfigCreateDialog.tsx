@@ -1,20 +1,24 @@
 // ---------------------------------------------------------------------------
-// UI: "New config" dialog (Client Component) — Phase 3's custom-settings creation
-// that makes real A/B testing possible. The user picks:
-//   - a corpus: a fresh empty one, or an EXISTING one to spawn over (its stored
-//     docs get re-embedded under the new settings — no re-upload)
+// UI: "New config" dialog (Client Component) — custom-settings creation for
+// real A/B testing. The user picks:
+//   - 0..n source CORPORA (multi-select; their docs are union'd and de-duped by
+//     content hash — the picker warns on duplicates). None = start blank.
+//   - optionally "save selection as new corpus" (a merged, reusable corpus) and
+//     "auto-sync" (corpus ↔ config membership flows both ways; needs a single
+//     target corpus — the one selected, or the newly saved one).
 //   - a base embedding model (greyed out when its provider key is missing / it
 //     has no vector table — data from GET /api/embedding-models)
 //   - chunk size / overlap / top-k
 //
-// On submit it POSTs /api/configs; for an existing corpus it then streams
-// /api/configs/[id]/populate to embed that corpus's docs under the new config,
-// showing progress. Then it routes to the new tab. Styling mirrors FileUpload /
-// EvalDashboard (zinc palette).
+// On submit it POSTs /api/configs; with source corpora it then streams
+// /api/configs/[id]/populate (body { corpusIds }) to embed the de-duped docs
+// under the new config, showing progress. Then it routes to the new tab.
+// Styling mirrors FileUpload / EvalDashboard (zinc palette).
 // ---------------------------------------------------------------------------
 "use client";
 
 import { useEffect, useState } from "react";
+import { CorpusPicker } from "@/app/components/CorpusPicker";
 import { apiFetch } from "@/lib/http/client";
 import type { ConfigSummary } from "@/lib/rag/configStore";
 import type { CorpusSummary } from "@/lib/rag/corpusStore";
@@ -52,10 +56,12 @@ export function ConfigCreateDialog({
   const [corpora, setCorpora] = useState<CorpusSummary[] | null>(null);
 
   const [name, setName] = useState("");
-  const [corpusKind, setCorpusKind] = useState<"new" | "existing">(
-    initial?.corpusId ? "existing" : "new",
+  const [corpusIds, setCorpusIds] = useState<string[]>(
+    initial?.corpusId ? [initial.corpusId] : [],
   );
-  const [corpusId, setCorpusId] = useState(initial?.corpusId ?? "");
+  const [saveAs, setSaveAs] = useState(false);
+  const [saveAsName, setSaveAsName] = useState("");
+  const [sync, setSync] = useState(false);
   const [baseModel, setBaseModel] = useState(initial?.baseModel ?? DEFAULTS.baseModel);
   const [chunkSize, setChunkSize] = useState(initial?.chunkSize ?? DEFAULTS.chunkSize);
   const [chunkOverlap, setChunkOverlap] = useState(
@@ -70,7 +76,9 @@ export function ConfigCreateDialog({
       .then((r) => r.json())
       .then((d) => setModels(d.models ?? []))
       .catch(() => setModels([]));
-    apiFetch("/api/corpora")
+    // includeEmpty: a corpus created on the corpora page starts doc-less on
+    // purpose — attaching a config to it here is how it gets its documents.
+    apiFetch("/api/corpora?includeEmpty=1")
       .then((r) => r.json())
       .then((d) => setCorpora(d.corpora ?? []))
       .catch(() => setCorpora([]));
@@ -78,27 +86,22 @@ export function ConfigCreateDialog({
 
   const busy = phase.kind === "creating" || phase.kind === "spawning";
   const selectedModel = models?.find((m) => m.id === baseModel);
-  const existingCorpus = corpora?.find((c) => c.id === corpusId);
 
-  // Client-side gate; the server re-validates. overlap<size, a selectable model,
-  // and (for an existing corpus) a chosen corpus.
+  // Auto-sync needs one unambiguous target corpus: the single selection, or
+  // the freshly saved merged one.
+  const syncPossible = corpusIds.length === 1 || saveAs;
+
+  // Client-side gate; the server re-validates. overlap<size + a selectable model.
   const formError =
     chunkOverlap >= chunkSize
       ? "Overlap must be smaller than chunk size."
       : selectedModel && !selectedModel.selectable
         ? selectedModel.reason
-        : corpusKind === "existing" && !corpusId
-          ? "Pick a corpus."
-          : null;
+        : null;
 
   async function submit() {
     if (formError) return;
     setPhase({ kind: "creating" });
-
-    const corpus =
-      corpusKind === "existing"
-        ? { kind: "existing" as const, id: corpusId }
-        : { kind: "new" as const, name: name.trim() || undefined };
 
     let created: ConfigSummary;
     let spawned: boolean;
@@ -106,7 +109,18 @@ export function ConfigCreateDialog({
       const res = await apiFetch("/api/configs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim() || undefined, corpus, baseModel, chunkSize, chunkOverlap, topK }),
+        body: JSON.stringify({
+          name: name.trim() || undefined,
+          corpusIds,
+          saveAsCorpus: saveAs
+            ? { name: saveAsName.trim() || name.trim() || "New corpus" }
+            : undefined,
+          sync: sync && syncPossible,
+          baseModel,
+          chunkSize,
+          chunkOverlap,
+          topK,
+        }),
       });
       const data = (await res.json().catch(() => null)) as
         | { config?: ConfigSummary; spawned?: boolean; error?: string }
@@ -122,15 +136,19 @@ export function ConfigCreateDialog({
       return;
     }
 
-    // New empty corpus → nothing to embed; go straight to the tab.
+    // No source corpora → nothing to embed; go straight to the tab.
     if (!spawned) {
       onCreated(created.id);
       return;
     }
 
-    // Existing corpus → stream the re-embed of its stored docs under this config.
+    // Stream the embed of the selection's de-duped docs under this config.
     try {
-      const res = await apiFetch(`/api/configs/${created.id}/populate`, { method: "POST" });
+      const res = await apiFetch(`/api/configs/${created.id}/populate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ corpusIds }),
+      });
       if (!res.ok || !res.body) {
         const d = (await res.json().catch(() => null)) as { error?: string } | null;
         setPhase({ kind: "error", message: d?.error ?? `Spawn failed (${res.status}).` });
@@ -186,46 +204,70 @@ export function ConfigCreateDialog({
           />
         </label>
 
-        {/* Corpus: new vs existing */}
-        <div className="flex flex-col gap-1 text-sm">
-          <span className="text-zinc-600 dark:text-zinc-400">Corpus</span>
-          <div className="flex gap-3 text-sm">
-            <label className="flex items-center gap-1.5">
-              <input type="radio" checked={corpusKind === "new"} onChange={() => setCorpusKind("new")} disabled={busy} />
-              New (empty)
-            </label>
-            <label className="flex items-center gap-1.5">
-              <input type="radio" checked={corpusKind === "existing"} onChange={() => setCorpusKind("existing")} disabled={busy} />
-              Existing
-            </label>
-          </div>
-          {corpusKind === "existing" && (
-            <>
-              <select
-                value={corpusId}
-                onChange={(e) => setCorpusId(e.target.value)}
-                disabled={busy || !corpora}
-                className="mt-1 rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700"
-              >
-                <option value="">{corpora ? "Select a corpus…" : "Loading…"}</option>
-                {corpora?.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name} ({c.docCount} doc{c.docCount === 1 ? "" : "s"}, {c.embeddableCount} with text)
-                  </option>
-                ))}
-              </select>
-              {existingCorpus && existingCorpus.embeddableCount === 0 && (
-                <span className="text-xs text-amber-600 dark:text-amber-500">
-                  No docs with stored text — this config would start empty. Re-ingest those docs first.
-                </span>
-              )}
-              {existingCorpus && existingCorpus.embeddableCount > 0 && (
-                <span className="text-xs text-zinc-400">
-                  {existingCorpus.embeddableCount} doc(s) will be re-embedded under these settings.
-                </span>
-              )}
-            </>
+        {/* Source corpora: multi-select with duplicate detection. */}
+        <div className="flex flex-col gap-1.5 text-sm">
+          <span className="text-zinc-600 dark:text-zinc-400">
+            Corpora <span className="text-xs text-zinc-400">(optional — none = start blank)</span>
+          </span>
+          {corpora === null ? (
+            <span className="text-xs text-zinc-400">Loading…</span>
+          ) : (
+            <CorpusPicker
+              corpora={corpora}
+              selected={corpusIds}
+              onChange={setCorpusIds}
+              disabled={busy}
+            />
           )}
+
+          <label className="flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
+            <input
+              type="checkbox"
+              checked={saveAs}
+              onChange={(e) => setSaveAs(e.target.checked)}
+              disabled={busy}
+            />
+            Save selection as new corpus
+          </label>
+          {saveAs && (
+            <input
+              value={saveAsName}
+              onChange={(e) => setSaveAsName(e.target.value)}
+              disabled={busy}
+              placeholder={name.trim() || "Corpus name (defaults to config name)"}
+              className="rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700"
+            />
+          )}
+
+          <label
+            className={`flex items-center gap-1.5 ${
+              syncPossible
+                ? "text-zinc-600 dark:text-zinc-400"
+                : "text-zinc-400 dark:text-zinc-600"
+            }`}
+          >
+            <input
+              type="checkbox"
+              checked={sync && syncPossible}
+              onChange={(e) => setSync(e.target.checked)}
+              disabled={busy || !syncPossible}
+            />
+            Auto-sync corpus
+            <span
+              className="cursor-help rounded-full border border-zinc-300 px-1.5 text-xs text-zinc-400 dark:border-zinc-700"
+              title={
+                "Changes to the corpus affect the config and vice versa: documents " +
+                "added to the corpus are embedded into the config, documents removed " +
+                "are removed, and documents uploaded in the config join the corpus. " +
+                "You can toggle this later from the config's banner."
+              }
+            >
+              ?
+            </span>
+            {!syncPossible && (
+              <span className="text-xs">(select exactly one corpus, or save as new)</span>
+            )}
+          </label>
         </div>
 
         {/* Base model (greyed when not selectable) */}

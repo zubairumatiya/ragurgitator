@@ -98,6 +98,34 @@ export async function deleteDocument(id: string): Promise<boolean> {
   return rows.length > 0;
 }
 
+// Remove ONE config's embedding of a document (corpus auto-sync removal): the
+// document itself — and every other config's embedding of it — stays. Deleting
+// the document_embeddings row cascades that config's chunk rows + eval_labels;
+// config_chunk_overrides is cleaned explicitly first because source_chunk_id
+// has no FK (chunks live in per-model tables). Returns false when the config
+// never embedded the document.
+export async function deleteEmbeddingRunFor(
+  cfg: { id: string; chunksTable: string },
+  documentId: string,
+): Promise<boolean> {
+  return sql.begin(async (tx) => {
+    await tx`
+      delete from config_chunk_overrides
+      where config_id = ${cfg.id}
+        and source_chunk_id in (
+          select id from ${tx(cfg.chunksTable)}
+          where config_id = ${cfg.id} and document_id = ${documentId}
+        )
+    `;
+    const rows = await tx`
+      delete from document_embeddings
+      where config_id = ${cfg.id} and document_id = ${documentId}
+      returning id
+    `;
+    return rows.length > 0;
+  });
+}
+
 // Has this document already been embedded under the ACTIVE config? (config_id +
 // document_id uniquely identify a run, given the config fixes model/size/overlap.)
 export async function hasEmbeddingRun(documentId: string): Promise<boolean> {

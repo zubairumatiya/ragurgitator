@@ -36,12 +36,9 @@ import type {
   ModelTrialResult,
   RechunkResult,
 } from "@/lib/rag/eval";
-import type {
-  AutotuneApply,
-  AutotuneSearch,
-} from "@/lib/rag/evalSettingsStore";
 import { AutotunePanel } from "@/app/components/AutotunePanel";
 import { ConfigCreateDialog } from "@/app/components/ConfigCreateDialog";
+import { EVAL_CRITERIA_CHANGED } from "@/app/components/EvalSettings";
 import { NdcgRankingPanel } from "@/app/components/NdcgRankingPanel";
 
 function pct(n: number | null): string {
@@ -162,6 +159,14 @@ export function EvalDashboard() {
     setAddText("");
     setReloadKey((k) => k + 1);
   };
+
+  // The Settings dropdown lives in the Nav now (EvalSettings.tsx); when it
+  // saves, re-pull the summary so criteria-dependent numbers refresh.
+  useEffect(() => {
+    const onChanged = () => setReloadKey((k) => k + 1);
+    window.addEventListener(EVAL_CRITERIA_CHANGED, onChanged);
+    return () => window.removeEventListener(EVAL_CRITERIA_CHANGED, onChanged);
+  }, []);
 
   // Toggle a question's drill-down, fetching its detail the first time it opens.
   function toggleExpand(id: string) {
@@ -493,6 +498,8 @@ export function EvalDashboard() {
           busy={busy}
           onAddDifficulty={onBulkAdd}
           onChangeConfig={() => setCreateOpen(true)}
+          onRescore={onRescore}
+          canRescore={canRescore}
         />
         {summary && (
           <AutotunePanel
@@ -502,25 +509,8 @@ export function EvalDashboard() {
             onDone={reload}
           />
         )}
-        <button
-          onClick={onRescore}
-          disabled={busy || !canRescore}
-          title={
-            canRescore
-              ? "Re-run retrieval scoring for every labeled question"
-              : "No labeled questions to re-score yet"
-          }
-          className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium cursor-pointer transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
-        >
-          Re-score all
-        </button>
         {!progress && notice && (
           <span className="text-sm text-zinc-600 dark:text-zinc-400">{notice}</span>
-        )}
-        {summary && (
-          <div className="ml-auto">
-            <EvalSettings summary={summary} busy={busy} onSaved={reload} />
-          </div>
         )}
       </div>
 
@@ -529,7 +519,7 @@ export function EvalDashboard() {
           initial={
             summary
               ? {
-                  corpusId: summary.config.corpusId,
+                  corpusId: summary.config.corpusId ?? undefined,
                   baseModel: summary.config.baseModel,
                   chunkSize: summary.config.chunkSize,
                   chunkOverlap: summary.config.chunkOverlap,
@@ -1006,17 +996,22 @@ function OverrideBadge({ info }: { info: ChunkOverrideInfo }) {
   );
 }
 
-// Bulk actions: corpus-wide "add question at difficulty" (in place) and the
-// "change base model / chunk size" shortcuts that open the config-create dialog
-// (D2 — those spawn a NEW config so this one's eval history is preserved).
+// Bulk actions: corpus-wide "add question at difficulty" (in place), "re-score
+// all" (re-runs retrieval for every labeled question), and the "change base
+// model / chunk size" shortcuts that open the config-create dialog (D2 — those
+// spawn a NEW config so this one's eval history is preserved).
 function BulkActions({
   busy,
   onAddDifficulty,
   onChangeConfig,
+  onRescore,
+  canRescore,
 }: {
   busy: boolean;
   onAddDifficulty: (d: Difficulty) => void;
   onChangeConfig: () => void;
+  onRescore: () => void;
+  canRescore: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [subOpen, setSubOpen] = useState(false);
@@ -1063,6 +1058,22 @@ function BulkActions({
                 ))}
               </div>
             )}
+            <button
+              type="button"
+              onClick={() => {
+                close();
+                onRescore();
+              }}
+              disabled={!canRescore}
+              title={
+                canRescore
+                  ? "Re-run retrieval scoring for every labeled question"
+                  : "No labeled questions to re-score yet"
+              }
+              className="block w-full cursor-pointer px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              Re-score all
+            </button>
             <div className="my-1 border-t border-zinc-200 dark:border-zinc-800" />
             <button
               type="button"
@@ -1090,311 +1101,6 @@ function BulkActions({
         </>
       )}
     </div>
-  );
-}
-
-// "" / invalid => null (the metric falls back to the config's top_k, A1).
-function parseKOrNull(s: string): number | null {
-  const t = s.trim();
-  if (t === "") return null;
-  const n = Math.floor(Number(t));
-  return Number.isFinite(n) && n >= 1 ? n : null;
-}
-
-// "" / invalid => null (metric runs but isn't an autotune target). Clamped 0..1.
-function parseRateOrNull(s: string): number | null {
-  const t = s.trim();
-  if (t === "") return null;
-  const n = Number(t);
-  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : null;
-}
-
-// The real Settings dropdown (replaces the locked Metrics placeholder): per-metric
-// enable + k + optional min-rate (A1), the autotuning settings (A5; saved now,
-// consumed by the Phase C engine), and a greyed "Long-term savings" stub. Saves
-// the changed fields to the config via PATCH /api/eval/criteria.
-function EvalSettings({
-  summary,
-  busy,
-  onSaved,
-}: {
-  summary: EvalSummary;
-  busy: boolean;
-  onSaved: () => void;
-}) {
-  const topK = summary.config.topK;
-  const [open, setOpen] = useState(false);
-  const [recallOn, setRecallOn] = useState(true);
-  const [recallK, setRecallK] = useState("");
-  const [recallMin, setRecallMin] = useState("");
-  const [ndcgOn, setNdcgOn] = useState(true);
-  const [ndcgK, setNdcgK] = useState("");
-  const [ndcgMin, setNdcgMin] = useState("");
-  const [ladder, setLadder] = useState("");
-  const [overlap, setOverlap] = useState("");
-  const [apply, setApply] = useState<AutotuneApply>("choose");
-  const [search, setSearch] = useState<AutotuneSearch>("first_success");
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  // Seed the form from the saved criteria, then open — so it always reflects the
-  // latest saved state (incl. after a save → reload) without a render-cascading
-  // effect (react-hooks/set-state-in-effect).
-  function seedAndOpen() {
-    const c = summary.criteria;
-    setRecallOn(c.recall.enabled);
-    setRecallK(c.recall.k != null ? String(c.recall.k) : "");
-    setRecallMin(c.recall.minRate != null ? String(c.recall.minRate) : "");
-    setNdcgOn(c.ndcg.enabled);
-    setNdcgK(c.ndcg.k != null ? String(c.ndcg.k) : "");
-    setNdcgMin(c.ndcg.minRate != null ? String(c.ndcg.minRate) : "");
-    setLadder(c.autotune.sizeLadder.join(", "));
-    setOverlap(String(Math.round(c.autotune.overlapPct * 100)));
-    setApply(c.autotune.apply);
-    setSearch(c.autotune.search);
-    setErr(null);
-    setOpen(true);
-  }
-
-  async function save() {
-    const ladderArr = ladder
-      .split(/[\s,]+/)
-      .map((s) => Math.floor(Number(s)))
-      .filter((n) => Number.isFinite(n) && n > 0);
-    const overlapNum = Number(overlap);
-    const patch = {
-      recall: { enabled: recallOn, k: parseKOrNull(recallK), minRate: parseRateOrNull(recallMin) },
-      ndcg: { enabled: ndcgOn, k: parseKOrNull(ndcgK), minRate: parseRateOrNull(ndcgMin) },
-      autotune: {
-        ...(ladderArr.length > 0 ? { sizeLadder: ladderArr } : {}),
-        ...(Number.isFinite(overlapNum)
-          ? { overlapPct: Math.min(0.9, Math.max(0, overlapNum / 100)) }
-          : {}),
-        apply,
-        search,
-      },
-    };
-    setSaving(true);
-    setErr(null);
-    try {
-      const res = await apiFetch("/api/eval/criteria", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      });
-      const data = (await res.json().catch(() => null)) as { error?: string } | null;
-      if (!res.ok) {
-        setErr(data?.error ?? `Request failed (${res.status}).`);
-        return;
-      }
-      setOpen(false);
-      onSaved();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "Network error.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="relative">
-      <button
-        type="button"
-        onClick={() => (open ? setOpen(false) : seedAndOpen())}
-        title="Eval metrics, k, min-rate, and autotuning settings"
-        className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium cursor-pointer transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
-      >
-        Settings ▾
-      </button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full z-20 mt-1 w-80 rounded-md border border-zinc-200 bg-white p-3 text-sm shadow-lg dark:border-zinc-800 dark:bg-zinc-900">
-            {/* METRICS */}
-            <p className="mb-1 text-xs font-medium uppercase tracking-wide text-zinc-500">
-              Metrics
-            </p>
-            <MetricRow
-              label="Recall"
-              on={recallOn}
-              setOn={setRecallOn}
-              k={recallK}
-              setK={setRecallK}
-              min={recallMin}
-              setMin={setRecallMin}
-              topK={topK}
-            />
-            <MetricRow
-              label="nDCG"
-              on={ndcgOn}
-              setOn={setNdcgOn}
-              k={ndcgK}
-              setK={setNdcgK}
-              min={ndcgMin}
-              setMin={setNdcgMin}
-              topK={topK}
-            />
-
-            {/* AUTOTUNING */}
-            <p className="mb-1 mt-3 border-t border-zinc-200 pt-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:border-zinc-800">
-              Autotuning
-            </p>
-            <label className="flex items-center justify-between gap-2 py-0.5">
-              <span className="text-zinc-600 dark:text-zinc-400">Size ladder</span>
-              <input
-                value={ladder}
-                onChange={(e) => setLadder(e.target.value)}
-                placeholder="384, 256, 192, 128"
-                className="w-44 rounded border border-zinc-300 bg-transparent px-2 py-1 text-xs dark:border-zinc-700"
-              />
-            </label>
-            <label className="flex items-center justify-between gap-2 py-0.5">
-              <span className="text-zinc-600 dark:text-zinc-400">Overlap %</span>
-              <input
-                type="number"
-                min={0}
-                max={90}
-                value={overlap}
-                onChange={(e) => setOverlap(e.target.value)}
-                className="w-20 rounded border border-zinc-300 bg-transparent px-2 py-1 text-xs dark:border-zinc-700"
-              />
-            </label>
-            <div className="flex items-center justify-between gap-2 py-0.5">
-              <span className="text-zinc-600 dark:text-zinc-400">When 1+ pass</span>
-              <div className="flex gap-1">
-                <Seg active={apply === "choose"} onClick={() => setApply("choose")}>
-                  choose
-                </Seg>
-                <Seg active={apply === "auto_best"} onClick={() => setApply("auto_best")}>
-                  auto-best
-                </Seg>
-              </div>
-            </div>
-            <div className="flex items-center justify-between gap-2 py-0.5">
-              <span className="text-zinc-600 dark:text-zinc-400">Search</span>
-              <div className="flex gap-1">
-                <Seg
-                  active={search === "first_success"}
-                  onClick={() => setSearch("first_success")}
-                >
-                  first
-                </Seg>
-                <Seg
-                  active={search === "exhaustive"}
-                  onClick={() => setSearch("exhaustive")}
-                  title="Best-of-best: tries every size × model combo — slower / more costly"
-                >
-                  best-of-best
-                </Seg>
-              </div>
-            </div>
-
-            {/* LONG-TERM SAVINGS (deferred — Phase E stub) */}
-            <button
-              type="button"
-              disabled
-              title="Coming soon — cut ongoing cost without dropping below your min-rate"
-              className="mt-3 w-full cursor-not-allowed rounded border border-dashed border-zinc-300 px-2 py-1.5 text-xs text-zinc-400 dark:border-zinc-700 dark:text-zinc-500"
-            >
-              Long-term savings (coming soon)
-            </button>
-
-            {err && <p className="mt-2 text-xs text-red-600 dark:text-red-400">{err}</p>}
-
-            <div className="mt-3 flex justify-end border-t border-zinc-200 pt-2 dark:border-zinc-800">
-              <button
-                type="button"
-                onClick={save}
-                disabled={saving || busy}
-                className="rounded-md bg-black px-3 py-1 text-xs font-medium text-white cursor-pointer transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
-              >
-                {saving ? "Saving…" : "Save"}
-              </button>
-            </div>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-// One metric row in the Settings dropdown: enable checkbox + k + optional min-rate.
-function MetricRow({
-  label,
-  on,
-  setOn,
-  k,
-  setK,
-  min,
-  setMin,
-  topK,
-}: {
-  label: string;
-  on: boolean;
-  setOn: (v: boolean) => void;
-  k: string;
-  setK: (v: string) => void;
-  min: string;
-  setMin: (v: string) => void;
-  topK: number;
-}) {
-  return (
-    <div className="flex items-center gap-2 py-0.5">
-      <label className="flex w-20 cursor-pointer items-center gap-1.5">
-        <input type="checkbox" checked={on} onChange={(e) => setOn(e.target.checked)} />
-        <span className="text-zinc-700 dark:text-zinc-300">{label}</span>
-      </label>
-      <label className="flex items-center gap-1 text-xs text-zinc-500">
-        k
-        <input
-          type="number"
-          min={1}
-          value={k}
-          onChange={(e) => setK(e.target.value)}
-          placeholder={String(topK)}
-          disabled={!on}
-          className="w-14 rounded border border-zinc-300 bg-transparent px-1.5 py-1 text-xs disabled:opacity-50 dark:border-zinc-700"
-        />
-      </label>
-      <label className="flex items-center gap-1 text-xs text-zinc-500">
-        min
-        <input
-          value={min}
-          onChange={(e) => setMin(e.target.value)}
-          placeholder="–"
-          disabled={!on}
-          className="w-16 rounded border border-zinc-300 bg-transparent px-1.5 py-1 text-xs disabled:opacity-50 dark:border-zinc-700"
-        />
-      </label>
-    </div>
-  );
-}
-
-// A small segmented-control button used by the autotuning apply/search toggles.
-function Seg({
-  active,
-  onClick,
-  title,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  title?: string;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={title}
-      className={`cursor-pointer rounded border px-2 py-0.5 text-xs font-medium ${
-        active
-          ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-black"
-          : "border-zinc-300 text-zinc-500 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
-      }`}
-    >
-      {children}
-    </button>
   );
 }
 

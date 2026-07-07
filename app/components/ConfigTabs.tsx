@@ -155,7 +155,7 @@ export function ConfigTabs({
                   <button
                     type="button"
                     onClick={() => gotoConfig(cfg.id)}
-                    title={`${cfg.label} · ${cfg.baseModel} · ${cfg.chunkSize}/${cfg.chunkOverlap} · corpus: ${cfg.corpusName}`}
+                    title={`${cfg.label} · ${cfg.baseModel} · ${cfg.chunkSize}/${cfg.chunkOverlap} · corpus: ${cfg.corpusName ?? "none"}`}
                     className="cursor-pointer truncate max-w-[12rem]"
                   >
                     {cfg.label}
@@ -237,7 +237,7 @@ export function ConfigTabs({
                           {cfg.label}
                         </span>
                         <span className="truncate text-xs text-zinc-400">
-                          {cfg.baseModel} · {cfg.chunkSize}/{cfg.chunkOverlap} · {cfg.corpusName} ·{" "}
+                          {cfg.baseModel} · {cfg.chunkSize}/{cfg.chunkOverlap} · {cfg.corpusName ?? "no corpus"} ·{" "}
                           {new Date(cfg.createdAt).toLocaleDateString()}
                         </span>
                       </button>

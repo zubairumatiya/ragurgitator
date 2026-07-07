@@ -113,7 +113,7 @@ export type RunSnapshot = {
 // show current settings and the Bulk-actions "new config" shortcut can pre-fill.
 export type EvalConfigInfo = {
   id: string;
-  corpusId: string;
+  corpusId: string | null; // null = detached config (0017)
   baseModel: string;
   chunkSize: number;
   chunkOverlap: number;

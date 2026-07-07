@@ -14,8 +14,8 @@ export type ConfigComparison = {
   configId: string;
   label: string; // config name, or a default settings-based label
   isOpen: boolean;
-  corpusId: string;
-  corpusName: string;
+  corpusId: string | null; // null = detached config (corpus deleted)
+  corpusName: string | null;
   baseModel: string;
   chunkSize: number;
   chunkOverlap: number;
@@ -41,8 +41,8 @@ export async function listConfigComparisons(): Promise<ConfigComparison[]> {
       chunk_size: number;
       chunk_overlap: number;
       top_k: number;
-      corpus_id: string;
-      corpus_name: string;
+      corpus_id: string | null;
+      corpus_name: string | null;
       k: number | null;
       question_count: number | null;
       hit_count: number | null;
@@ -56,7 +56,7 @@ export async function listConfigComparisons(): Promise<ConfigComparison[]> {
       co.id as corpus_id, co.name as corpus_name,
       r.k, r.question_count, r.hit_count, r.mrr, r.ndcg, r.created_at as run_at
     from configs c
-    join corpora co on co.id = c.corpus_id
+    left join corpora co on co.id = c.corpus_id
     left join lateral (
       select k, question_count, hit_count, mrr, ndcg, created_at
       from eval_runs er
@@ -64,7 +64,7 @@ export async function listConfigComparisons(): Promise<ConfigComparison[]> {
       order by er.created_at desc
       limit 1
     ) r on true
-    order by co.created_at, co.id, c.tab_order, c.created_at
+    order by co.created_at nulls last, co.id, c.tab_order, c.created_at
   `;
 
   return rows.map((r) => ({

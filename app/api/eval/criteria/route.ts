@@ -1,20 +1,40 @@
 // ---------------------------------------------------------------------------
-// API route: PATCH /api/eval/criteria
+// API route: GET/PATCH /api/eval/criteria
 //
-// Save the active config's eval criteria from the Settings dropdown (Phase A):
-// the metric toggles + per-metric k (null => fall back to top_k) + optional
-// min-rate, the difficulty mix, and the autotuning settings (A5; saved now,
-// consumed by the Phase C engine). The body is a nested partial — only the
-// changed fields are sent; updateCriteria read-merge-writes the rest.
+// GET returns the active config's saved criteria + the config summary (top-k
+// placeholder, corpus link, auto-sync state) — what the nav-level Settings
+// dropdown seeds its form from (it lives outside the eval page, so it can't
+// lean on the eval summary).
 //
-// Config-scoped (withRequestConfig) so it acts on the tab the dashboard is on.
-// Reads come back through GET /api/eval (the summary now carries `criteria`).
+// PATCH saves the criteria from that dropdown (Phase A): the metric toggles +
+// per-metric k (null => fall back to top_k) + optional min-rate, the difficulty
+// mix, and the autotuning settings (A5). The body is a nested partial — only
+// the changed fields are sent; updateCriteria read-merge-writes the rest.
+//
+// Config-scoped (withRequestConfig) so it acts on the tab the dropdown is on.
 // ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
 import { activeConfig } from "@/lib/rag/activeConfig";
-import { updateCriteria } from "@/lib/rag/evalSettingsStore";
+import { getConfig } from "@/lib/rag/configStore";
+import { getActiveCriteria, updateCriteria } from "@/lib/rag/evalSettingsStore";
+
+export async function GET(request: Request) {
+  return withRequestConfig(request, async () => {
+    try {
+      const [criteria, config] = await Promise.all([
+        getActiveCriteria(),
+        getConfig(activeConfig().id),
+      ]);
+      if (!config) return Response.json({ error: "Config not found." }, { status: 404 });
+      return Response.json({ criteria, config });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load criteria.";
+      return Response.json({ error: message }, { status: 500 });
+    }
+  });
+}
 
 const Metric = z
   .object({

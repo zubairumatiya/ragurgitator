@@ -2,7 +2,8 @@
 // API route: PATCH/POST/DELETE /api/configs/[id]
 //
 //   PATCH  — mutate one tab: { name } rename, { isOpen } close/reopen,
-//            { tabOrder } move. Mixed bodies apply each field present.
+//            { tabOrder } move, { corpusSync } toggle corpus auto-sync (0017).
+//            Mixed bodies apply each field present.
 //   POST   — duplicate this config (copy-on-write, no embedding calls); returns
 //            the new config. POST-to-a-resource = "make a copy of it".
 //   DELETE — permanently delete this config and the data it owns.
@@ -20,6 +21,7 @@ import {
   duplicateConfig,
   renameConfig,
   reopenConfig,
+  setCorpusSync,
   setTabOrder,
 } from "@/lib/rag/configStore";
 
@@ -34,10 +36,18 @@ export async function PATCH(
     name?: unknown;
     isOpen?: unknown;
     tabOrder?: unknown;
+    corpusSync?: unknown;
   };
 
   try {
     let touched = false;
+
+    if (typeof body.corpusSync === "boolean") {
+      if (!(await setCorpusSync(id, body.corpusSync))) {
+        return Response.json({ error: "Config not found." }, { status: 404 });
+      }
+      touched = true;
+    }
 
     if (typeof body.name === "string") {
       if (!(await renameConfig(id, body.name))) {
@@ -75,7 +85,7 @@ export async function PATCH(
 
     if (!touched) {
       return Response.json(
-        { error: "Nothing to update — send name, isOpen, or tabOrder." },
+        { error: "Nothing to update — send name, isOpen, tabOrder, or corpusSync." },
         { status: 400 },
       );
     }

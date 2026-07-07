@@ -14,6 +14,7 @@
 // than rendering a bannerless shell. See node_modules/next/dist/docs for the
 // file-convention details.
 // ---------------------------------------------------------------------------
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ConfigTabs } from "@/app/components/ConfigTabs";
 import { Nav } from "@/app/components/Nav";
@@ -43,9 +44,18 @@ export default async function ConfigLayout({
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
           <span className="text-zinc-500">active:</span>
           <span className="font-medium text-zinc-900 dark:text-zinc-100">{active.label}</span>
+          {/* Auto-sync itself is toggled from the Nav's Settings dropdown. */}
           <span className="font-mono text-xs text-zinc-500">
             ({active.baseModel} · {active.chunkSize}/{active.chunkOverlap} · corpus:{" "}
-            {active.corpusName})
+            {active.corpusId ? (
+              <Link href={`/corpora/${active.corpusId}`} className="hover:underline">
+                {active.corpusName}
+                {active.corpusSync && " ⟳"}
+              </Link>
+            ) : (
+              "none"
+            )}
+            )
           </span>
         </div>
 

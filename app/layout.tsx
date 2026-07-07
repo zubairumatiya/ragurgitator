@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { Sidebar } from "@/app/components/Sidebar";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -27,7 +28,15 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full">
+        {/* App frame: the togglable corpora sidebar + the page column. The
+            sidebar is a self-fetching Client Component so this layout stays
+            DB-free (it also wraps build-time statics like the 404 page). */}
+        <div className="flex min-h-screen">
+          <Sidebar />
+          <div className="flex min-w-0 flex-1 flex-col">{children}</div>
+        </div>
+      </body>
     </html>
   );
 }

@@ -30,19 +30,18 @@ export async function GET() {
   }
 }
 
-// Phase 3 config creation. With a settings body, create a config over a new or
-// existing corpus with a chosen base model + chunk size/overlap/top-k. With no
-// settings (just an optional name, or nothing) fall back to the "+" empty config.
+// Config creation with settings: seed the config from 0..n source corpora
+// (their docs de-duped by content hash), optionally saving the selection as a
+// NEW corpus and/or enabling corpus auto-sync (0017). With no settings (just an
+// optional name, or nothing) fall back to the "+" empty, corpus-less config.
 const CreateBody = z
   .object({
     name: z.string().optional(),
-    corpus: z.discriminatedUnion("kind", [
-      z.object({ kind: z.literal("new"), name: z.string().optional() }),
-      z.object({
-        kind: z.literal("existing"),
-        id: z.string({ error: "Provide a corpus `id`." }).min(1, { error: "Provide a corpus `id`." }),
-      }),
-    ]),
+    corpusIds: z.array(z.string().min(1)).default([]),
+    saveAsCorpus: z
+      .object({ name: z.string({ error: "Provide a corpus `name`." }) })
+      .nullish(),
+    sync: z.boolean().optional(),
     baseModel: z.string({ error: "Provide a `baseModel`." }).min(1, { error: "Provide a `baseModel`." }),
     chunkSize: z.number().int().min(1, { error: "`chunkSize` must be ≥ 1." }),
     chunkOverlap: z.number().int().min(0, { error: "`chunkOverlap` must be ≥ 0." }),
@@ -51,6 +50,11 @@ const CreateBody = z
   .refine((b) => b.chunkOverlap < b.chunkSize, {
     error: "`chunkOverlap` must be smaller than `chunkSize`.",
     path: ["chunkOverlap"],
+  })
+  .refine((b) => !b.sync || b.corpusIds.length === 1 || Boolean(b.saveAsCorpus), {
+    error:
+      "Auto-sync needs one target corpus — select a single corpus or save the selection as a new one.",
+    path: ["sync"],
   });
 
 export async function POST(request: Request) {
@@ -88,16 +92,18 @@ export async function POST(request: Request) {
 
     const created = await createConfigWithSettings({
       name: body.name,
-      corpus: body.corpus,
+      corpusIds: body.corpusIds,
+      saveAsCorpus: body.saveAsCorpus,
+      sync: body.sync,
       baseModel: body.baseModel,
       chunkSize: body.chunkSize,
       chunkOverlap: body.chunkOverlap,
       topK: body.topK,
     });
-    // `spawned` tells the client whether to run the populate (stream) step: only
-    // an existing corpus has docs to re-embed; a new corpus starts empty.
+    // `spawned` tells the client whether to run the populate (stream) step —
+    // only a selection with source corpora has docs to embed.
     return Response.json(
-      { config: created, spawned: body.corpus.kind === "existing" },
+      { config: created, spawned: body.corpusIds.length > 0 },
       { status: 201 },
     );
   } catch (err) {

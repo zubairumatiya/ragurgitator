@@ -13,11 +13,13 @@ export default async function AppraisePage() {
   const rows = await listConfigComparisons();
 
   // Group by corpus, preserving the store's (corpus, tab) ordering.
+  // Detached configs (corpus deleted) group together under "No corpus".
   const groups: { corpusId: string; corpusName: string; configs: ConfigComparison[] }[] = [];
   for (const row of rows) {
-    let g = groups.find((x) => x.corpusId === row.corpusId);
+    const corpusId = row.corpusId ?? "none";
+    let g = groups.find((x) => x.corpusId === corpusId);
     if (!g) {
-      g = { corpusId: row.corpusId, corpusName: row.corpusName, configs: [] };
+      g = { corpusId, corpusName: row.corpusName ?? "No corpus", configs: [] };
       groups.push(g);
     }
     g.configs.push(row);

@@ -16,7 +16,11 @@
 import { sql } from "@/lib/db";
 import { config } from "@/lib/config";
 import { isUuid } from "@/lib/rag/activeConfig";
-import { createCorpus } from "@/lib/rag/corpusStore";
+import {
+  addDocumentToCorpus,
+  createCorpus,
+  dedupCorporaDocuments,
+} from "@/lib/rag/corpusStore";
 import { chunksTable, modelDimension } from "@/lib/rag/vectorStore";
 
 // Everything the tab bar / banner needs for one config. `label` is the display
@@ -30,8 +34,9 @@ export type ConfigSummary = {
   chunkOverlap: number;
   topK: number;
   llmModel: string;
-  corpusId: string;
-  corpusName: string;
+  corpusId: string | null;   // null = detached (corpus deleted, or created without one)
+  corpusName: string | null;
+  corpusSync: boolean;       // auto-sync membership with the corpus (0017)
   isOpen: boolean;
   tabOrder: number;
   createdAt: number;
@@ -45,8 +50,9 @@ type ConfigJoinRow = {
   chunk_overlap: number;
   top_k: number;
   llm_model: string;
-  corpus_id: string;
-  corpus_name: string;
+  corpus_id: string | null;
+  corpus_name: string | null;
+  corpus_sync: boolean;
   is_open: boolean;
   tab_order: number;
   created_at: Date;
@@ -70,6 +76,7 @@ function toSummary(row: ConfigJoinRow): ConfigSummary {
     llmModel: row.llm_model,
     corpusId: row.corpus_id,
     corpusName: row.corpus_name,
+    corpusSync: row.corpus_sync,
     isOpen: row.is_open,
     tabOrder: row.tab_order,
     createdAt: row.created_at.getTime(),
@@ -80,10 +87,10 @@ function toSummary(row: ConfigJoinRow): ConfigSummary {
 export async function listConfigs(): Promise<ConfigSummary[]> {
   const rows = await sql<ConfigJoinRow[]>`
     select c.id, c.name, c.base_model, c.chunk_size, c.chunk_overlap, c.top_k,
-           c.llm_model, c.corpus_id, co.name as corpus_name, c.is_open, c.tab_order,
-           c.created_at
+           c.llm_model, c.corpus_id, co.name as corpus_name, c.corpus_sync, c.is_open,
+           c.tab_order, c.created_at
     from configs c
-    join corpora co on co.id = c.corpus_id
+    left join corpora co on co.id = c.corpus_id
     where c.is_open = true
     order by c.tab_order, c.created_at
   `;
@@ -94,10 +101,10 @@ export async function listConfigs(): Promise<ConfigSummary[]> {
 export async function listClosedConfigs(): Promise<ConfigSummary[]> {
   const rows = await sql<ConfigJoinRow[]>`
     select c.id, c.name, c.base_model, c.chunk_size, c.chunk_overlap, c.top_k,
-           c.llm_model, c.corpus_id, co.name as corpus_name, c.is_open, c.tab_order,
-           c.created_at
+           c.llm_model, c.corpus_id, co.name as corpus_name, c.corpus_sync, c.is_open,
+           c.tab_order, c.created_at
     from configs c
-    join corpora co on co.id = c.corpus_id
+    left join corpora co on co.id = c.corpus_id
     where c.is_open = false
     order by c.created_at desc
   `;
@@ -108,10 +115,10 @@ export async function getConfig(id: string): Promise<ConfigSummary | null> {
   if (!isUuid(id)) return null;
   const rows = await sql<ConfigJoinRow[]>`
     select c.id, c.name, c.base_model, c.chunk_size, c.chunk_overlap, c.top_k,
-           c.llm_model, c.corpus_id, co.name as corpus_name, c.is_open, c.tab_order,
-           c.created_at
+           c.llm_model, c.corpus_id, co.name as corpus_name, c.corpus_sync, c.is_open,
+           c.tab_order, c.created_at
     from configs c
-    join corpora co on co.id = c.corpus_id
+    left join corpora co on co.id = c.corpus_id
     where c.id = ${id}
     limit 1
   `;
@@ -141,7 +148,8 @@ async function nextTabOrder(): Promise<number> {
 }
 
 export type NewConfigInput = {
-  corpusId: string;
+  corpusId: string | null;
+  corpusSync?: boolean;
   name?: string | null;
   baseModel: string;
   chunkSize: number;
@@ -150,18 +158,19 @@ export type NewConfigInput = {
   llmModel: string;
 };
 
-// Insert a config row over an existing corpus, opened at the end of the tab bar.
-// Low-level: the caller supplies the corpus and settings. (createEmptyConfig and
+// Insert a config row, opened at the end of the tab bar. Low-level: the caller
+// supplies the (optional) corpus and settings. (createEmptyConfig and
 // duplicateConfig build on this for the two real entry points.)
 export async function createConfig(input: NewConfigInput): Promise<ConfigSummary> {
   const tabOrder = await nextTabOrder();
   const rows = await sql<{ id: string }[]>`
     insert into configs
-      (corpus_id, name, base_model, chunk_size, chunk_overlap, top_k, llm_model,
-       is_open, tab_order)
+      (corpus_id, corpus_sync, name, base_model, chunk_size, chunk_overlap, top_k,
+       llm_model, is_open, tab_order)
     values
-      (${input.corpusId}, ${input.name ?? null}, ${input.baseModel}, ${input.chunkSize},
-       ${input.chunkOverlap}, ${input.topK}, ${input.llmModel}, true, ${tabOrder})
+      (${input.corpusId}, ${input.corpusSync ?? false}, ${input.name ?? null},
+       ${input.baseModel}, ${input.chunkSize}, ${input.chunkOverlap}, ${input.topK},
+       ${input.llmModel}, true, ${tabOrder})
     returning id
   `;
   const created = await getConfig(rows[0].id);
@@ -169,14 +178,13 @@ export async function createConfig(input: NewConfigInput): Promise<ConfigSummary
   return created;
 }
 
-// The "+ New" tab: a brand-new EMPTY corpus + a config seeded with the
-// lib/config.ts defaults. Starts with no documents — the user ingests into it
-// (ingestion targeting is Phase 3). `name` defaults to null so it renders the
-// settings-based label until renamed.
+// The "+ New" tab: a corpus-less config seeded with the lib/config.ts defaults.
+// Starts with no documents — the user ingests into it. Since 0017 no throwaway
+// corpus is auto-created (those used to pile up as empty orphans); the user
+// attaches/saves a corpus from the create dialog when they want one.
 export async function createEmptyConfig(name?: string | null): Promise<ConfigSummary> {
-  const corpusId = await createCorpus(name?.trim() || "New corpus");
   return createConfig({
-    corpusId,
+    corpusId: null,
     name: name?.trim() || null,
     baseModel: config.embeddingModel,
     chunkSize: config.chunkSize,
@@ -188,28 +196,43 @@ export async function createEmptyConfig(name?: string | null): Promise<ConfigSum
 
 export type CreateConfigOptions = {
   name?: string | null;
-  // A fresh empty corpus, or an existing one to spawn over (re-embed its docs).
-  corpus: { kind: "new"; name?: string | null } | { kind: "existing"; id: string };
+  // Source corpora whose (de-duplicated) documents seed the config. Empty =
+  // start blank.
+  corpusIds: string[];
+  // Save the de-duped selection as a NEW corpus and attach the config to it.
+  saveAsCorpus?: { name: string } | null;
+  // Auto-sync membership with the attached corpus. Only takes effect when the
+  // config ends up attached to a corpus (a single selection, or the freshly
+  // saved one).
+  sync?: boolean;
   baseModel: string;
   chunkSize: number;
   chunkOverlap: number;
   topK: number;
 };
 
-// The Phase 3 "+ New" with custom settings: create a config over a new or
-// existing corpus with a chosen base model + chunk size/overlap/top-k. For an
-// existing corpus the caller then streams populateConfigFromCorpus (the route's
-// `populate` step) to embed its stored docs under the new settings. llm_model
-// stays the lib/config.ts default — these knobs are the retrieval-side A/B.
+// Create a config from a multi-corpus selection (corpus decoupling, 0017). The
+// caller then streams the populate route (body `{ corpusIds }`) to embed the
+// de-duped union under the new settings. The config is ATTACHED to a corpus
+// only when the target is unambiguous: the saved-as corpus, or the single
+// selected one; with several corpora and no save-as it keeps its docs but
+// points at no corpus. llm_model stays the lib/config.ts default.
 export async function createConfigWithSettings(
   opts: CreateConfigOptions,
 ): Promise<ConfigSummary> {
-  const corpusId =
-    opts.corpus.kind === "existing"
-      ? opts.corpus.id
-      : await createCorpus(opts.corpus.name?.trim() || opts.name?.trim() || "New corpus");
+  let corpusId: string | null = null;
+  if (opts.saveAsCorpus) {
+    corpusId = await createCorpus(
+      opts.saveAsCorpus.name.trim() || opts.name?.trim() || "New corpus",
+    );
+    const { docs } = await dedupCorporaDocuments(opts.corpusIds);
+    for (const d of docs) await addDocumentToCorpus(corpusId, d.id);
+  } else if (opts.corpusIds.length === 1) {
+    corpusId = opts.corpusIds[0];
+  }
   return createConfig({
     corpusId,
+    corpusSync: Boolean(opts.sync && corpusId),
     name: opts.name?.trim() || null,
     baseModel: opts.baseModel,
     chunkSize: opts.chunkSize,
@@ -217,6 +240,32 @@ export async function createConfigWithSettings(
     topK: opts.topK,
     llmModel: config.llmModel,
   });
+}
+
+// Configs auto-synced to a corpus (pointer set AND sync on) — the set the
+// pipeline propagates corpus membership changes into.
+export async function listSyncedConfigIds(corpusId: string): Promise<string[]> {
+  const rows = await sql<{ id: string }[]>`
+    select id from configs
+    where corpus_id = ${corpusId} and corpus_sync = true
+    order by created_at
+  `;
+  return rows.map((r) => r.id);
+}
+
+// Toggle a config's corpus auto-sync (the banner toggle). Returns null when the
+// config doesn't exist. Toggling a detached config (corpus_id null) is a no-op
+// in effect until a corpus is attached.
+export async function setCorpusSync(
+  id: string,
+  sync: boolean,
+): Promise<ConfigSummary | null> {
+  const rows = await sql`
+    update configs set corpus_sync = ${sync}, updated_at = now()
+    where id = ${id}
+    returning id
+  `;
+  return rows.length > 0 ? getConfig(id) : null;
 }
 
 export async function renameConfig(id: string, name: string): Promise<ConfigSummary | null> {
@@ -296,11 +345,12 @@ export async function duplicateConfig(id: string): Promise<ConfigSummary | null>
   const newId = await sql.begin(async (tx) => {
     const [created] = await tx<{ id: string }[]>`
       insert into configs
-        (corpus_id, name, base_model, chunk_size, chunk_overlap, top_k, llm_model,
-         is_open, tab_order)
+        (corpus_id, corpus_sync, name, base_model, chunk_size, chunk_overlap, top_k,
+         llm_model, is_open, tab_order)
       values
-        (${source.corpusId}, ${copyName}, ${source.baseModel}, ${source.chunkSize},
-         ${source.chunkOverlap}, ${source.topK}, ${source.llmModel}, true, ${tabOrder})
+        (${source.corpusId}, ${source.corpusSync}, ${copyName}, ${source.baseModel},
+         ${source.chunkSize}, ${source.chunkOverlap}, ${source.topK}, ${source.llmModel},
+         true, ${tabOrder})
       returning id
     `;
 

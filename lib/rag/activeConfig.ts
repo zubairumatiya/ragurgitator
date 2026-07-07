@@ -26,7 +26,8 @@ import { chunksTable, modelDimension } from "@/lib/rag/vectorStore";
 // sites change from `config.x` to `activeConfig().x`.
 export type ResolvedConfig = {
   id: string;
-  corpusId: string;
+  corpusId: string | null; // null = detached from any corpus (0017)
+  corpusSync: boolean;     // auto-sync membership with the corpus (0017)
   embeddingModel: string;
   chunkSize: number;
   chunkOverlap: number;
@@ -42,7 +43,8 @@ const store = new AsyncLocalStorage<ResolvedConfig>();
 // and physical chunk table from the base model.
 function toResolved(row: {
   id: string;
-  corpus_id: string;
+  corpus_id: string | null;
+  corpus_sync: boolean;
   base_model: string;
   chunk_size: number;
   chunk_overlap: number;
@@ -53,6 +55,7 @@ function toResolved(row: {
   return {
     id: row.id,
     corpusId: row.corpus_id,
+    corpusSync: row.corpus_sync,
     embeddingModel: row.base_model,
     chunkSize: row.chunk_size,
     chunkOverlap: row.chunk_overlap,
@@ -65,7 +68,8 @@ function toResolved(row: {
 
 type ConfigRow = {
   id: string;
-  corpus_id: string;
+  corpus_id: string | null;
+  corpus_sync: boolean;
   base_model: string;
   chunk_size: number;
   chunk_overlap: number;
@@ -86,7 +90,7 @@ export function isUuid(s: string): boolean {
 export async function resolveConfig(configId: string): Promise<ResolvedConfig | null> {
   if (!isUuid(configId)) return null;
   const rows = await sql<ConfigRow[]>`
-    select id, corpus_id, base_model, chunk_size, chunk_overlap, top_k, llm_model
+    select id, corpus_id, corpus_sync, base_model, chunk_size, chunk_overlap, top_k, llm_model
     from configs
     where id = ${configId}
     limit 1
@@ -99,7 +103,7 @@ export async function resolveConfig(configId: string): Promise<ResolvedConfig | 
 // earliest as a stable default.
 export async function resolveDefaultConfig(): Promise<ResolvedConfig> {
   const rows = await sql<ConfigRow[]>`
-    select id, corpus_id, base_model, chunk_size, chunk_overlap, top_k, llm_model
+    select id, corpus_id, corpus_sync, base_model, chunk_size, chunk_overlap, top_k, llm_model
     from configs
     order by created_at
     limit 1
