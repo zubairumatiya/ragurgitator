@@ -5,8 +5,9 @@
 //   - GET    : context for the trial UI — the chunk, its questions + stored
 //              baseline, the auto candidate pool, the rest of the corpus to pick
 //              from, the models on offer, and any saved trials.
-//   - POST   : run a trial { model, poolChunkIds, save? } — re-rank the chunk's
-//              questions within the re-embedded pool under `model`. With
+//   - POST   : run a trial { model?, size?, overlap?, sections?, poolChunkIds,
+//              save? } — re-rank the chunk's questions within the re-embedded
+//              pool under the variation (model, chunk shape, or both). With
 //              save:true the snapshot is persisted (eval_model_trials).
 //   - DELETE : remove a saved trial (?trialId=...).
 //
@@ -17,22 +18,52 @@ import { z } from "zod";
 import { altEmbeddingModels } from "@/lib/config";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
-import { getModelTrialContext, runModelTrial } from "@/lib/rag/eval";
+import {
+  getModelTrialContext,
+  runModelTrial,
+  type TrialVariation,
+} from "@/lib/rag/eval";
 import { deleteModelTrial } from "@/lib/rag/evalStore";
 
 const MODEL_ERROR = "`model` must be one of the offered alternate models.";
 
-const Body = z.object({
-  model: z
-    .string({ error: MODEL_ERROR })
-    .refine((m) => altEmbeddingModels.some((alt) => alt.id === m), { error: MODEL_ERROR }),
-  poolChunkIds: z
-    .array(z.string({ error: "`poolChunkIds` must be an array of chunk id strings." }), {
-      error: "`poolChunkIds` must be an array of chunk id strings.",
-    })
-    .default([]),
-  save: z.boolean({ error: "`save` must be a boolean." }).default(false),
-});
+// "Try a different configuration": vary the model, the chunk's shape (uniform
+// size/overlap or custom sections), or both. At least one knob must be present;
+// a shape-only body runs under the config's baseline model.
+const Body = z
+  .object({
+    model: z
+      .string({ error: MODEL_ERROR })
+      .refine((m) => altEmbeddingModels.some((alt) => alt.id === m), {
+        error: MODEL_ERROR,
+      })
+      .optional(),
+    size: z.number({ error: "`size` must be a positive integer." }).int().positive().optional(),
+    overlap: z.number({ error: "`overlap` must be a non-negative integer." }).int().min(0).optional(),
+    sections: z
+      .array(z.string().min(1), { error: "`sections` must be an array of non-empty strings." })
+      .min(1)
+      .optional(),
+    poolChunkIds: z
+      .array(z.string({ error: "`poolChunkIds` must be an array of chunk id strings." }), {
+        error: "`poolChunkIds` must be an array of chunk id strings.",
+      })
+      .default([]),
+    save: z.boolean({ error: "`save` must be a boolean." }).default(false),
+  })
+  .refine((d) => d.model !== undefined || d.size !== undefined || d.sections !== undefined, {
+    error: "Provide a `model`, a `size` (+ optional `overlap`), and/or `sections`.",
+  });
+
+// Map the flat body to the engine's variation union.
+function toVariation(d: z.infer<typeof Body>): TrialVariation {
+  const hasShape = d.size !== undefined || d.sections !== undefined;
+  if (d.model !== undefined && hasShape) {
+    return { kind: "size+model", model: d.model, size: d.size, overlap: d.overlap, sections: d.sections };
+  }
+  if (d.model !== undefined) return { kind: "model", model: d.model };
+  return { kind: "size", size: d.size, overlap: d.overlap, sections: d.sections };
+}
 
 export async function GET(
   request: Request,
@@ -64,11 +95,11 @@ export async function POST(
 
   const body = await parseBody(request, Body);
   if (body.response) return body.response;
-  const { model, poolChunkIds, save } = body.data;
+  const { poolChunkIds, save } = body.data;
 
   return withRequestConfig(request, async () => {
     try {
-      const out = await runModelTrial(chunkId, model, poolChunkIds, save);
+      const out = await runModelTrial(chunkId, toVariation(body.data), poolChunkIds, save);
       if (!out) {
         return Response.json(
           { error: "Chunk not found, or it has no questions to evaluate." },

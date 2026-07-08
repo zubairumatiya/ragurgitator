@@ -1,8 +1,9 @@
 // ---------------------------------------------------------------------------
 // UI: "New config" dialog (Client Component) — custom-settings creation for
 // real A/B testing. The user picks:
-//   - 0..n source CORPORA (multi-select; their docs are union'd and de-duped by
-//     content hash — the picker warns on duplicates). None = start blank.
+//   - a document SOURCE: "New (start blank)", or "From existing corpora" which
+//     reveals a multi-select of corpora (their docs are union'd and de-duped by
+//     content hash — the picker warns on duplicates).
 //   - optionally "save selection as new corpus" (a merged, reusable corpus) and
 //     "auto-sync" (corpus ↔ config membership flows both ways; needs a single
 //     target corpus — the one selected, or the newly saved one).
@@ -56,6 +57,10 @@ export function ConfigCreateDialog({
   const [corpora, setCorpora] = useState<CorpusSummary[] | null>(null);
 
   const [name, setName] = useState("");
+  // "New" starts blank; "From existing" reveals the corpora picker below.
+  const [source, setSource] = useState<"new" | "existing">(
+    initial?.corpusId ? "existing" : "new",
+  );
   const [corpusIds, setCorpusIds] = useState<string[]>(
     initial?.corpusId ? [initial.corpusId] : [],
   );
@@ -87,9 +92,12 @@ export function ConfigCreateDialog({
   const busy = phase.kind === "creating" || phase.kind === "spawning";
   const selectedModel = models?.find((m) => m.id === baseModel);
 
+  // "New" ignores any picker selection left over from toggling the source.
+  const effectiveCorpusIds = source === "existing" ? corpusIds : [];
+
   // Auto-sync needs one unambiguous target corpus: the single selection, or
   // the freshly saved merged one.
-  const syncPossible = corpusIds.length === 1 || saveAs;
+  const syncPossible = effectiveCorpusIds.length === 1 || (source === "existing" && saveAs);
 
   // Client-side gate; the server re-validates. overlap<size + a selectable model.
   const formError =
@@ -111,8 +119,8 @@ export function ConfigCreateDialog({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: name.trim() || undefined,
-          corpusIds,
-          saveAsCorpus: saveAs
+          corpusIds: effectiveCorpusIds,
+          saveAsCorpus: source === "existing" && saveAs
             ? { name: saveAsName.trim() || name.trim() || "New corpus" }
             : undefined,
           sync: sync && syncPossible,
@@ -147,7 +155,7 @@ export function ConfigCreateDialog({
       const res = await apiFetch(`/api/configs/${created.id}/populate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ corpusIds }),
+        body: JSON.stringify({ corpusIds: effectiveCorpusIds }),
       });
       if (!res.ok || !res.body) {
         const d = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -204,70 +212,89 @@ export function ConfigCreateDialog({
           />
         </label>
 
-        {/* Source corpora: multi-select with duplicate detection. */}
+        {/* Where the config's documents come from: blank, or existing corpora. */}
         <div className="flex flex-col gap-1.5 text-sm">
-          <span className="text-zinc-600 dark:text-zinc-400">
-            Corpora <span className="text-xs text-zinc-400">(optional — none = start blank)</span>
-          </span>
-          {corpora === null ? (
-            <span className="text-xs text-zinc-400">Loading…</span>
-          ) : (
-            <CorpusPicker
-              corpora={corpora}
-              selected={corpusIds}
-              onChange={setCorpusIds}
+          <span className="text-zinc-600 dark:text-zinc-400">Documents</span>
+          <div className="flex gap-1.5">
+            <SourceTab
+              active={source === "new"}
               disabled={busy}
-            />
-          )}
-
-          <label className="flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
-            <input
-              type="checkbox"
-              checked={saveAs}
-              onChange={(e) => setSaveAs(e.target.checked)}
-              disabled={busy}
-            />
-            Save selection as new corpus
-          </label>
-          {saveAs && (
-            <input
-              value={saveAsName}
-              onChange={(e) => setSaveAsName(e.target.value)}
-              disabled={busy}
-              placeholder={name.trim() || "Corpus name (defaults to config name)"}
-              className="rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700"
-            />
-          )}
-
-          <label
-            className={`flex items-center gap-1.5 ${
-              syncPossible
-                ? "text-zinc-600 dark:text-zinc-400"
-                : "text-zinc-400 dark:text-zinc-600"
-            }`}
-          >
-            <input
-              type="checkbox"
-              checked={sync && syncPossible}
-              onChange={(e) => setSync(e.target.checked)}
-              disabled={busy || !syncPossible}
-            />
-            Auto-sync corpus
-            <span
-              className="cursor-help rounded-full border border-zinc-300 px-1.5 text-xs text-zinc-400 dark:border-zinc-700"
-              title={
-                "Changes to the corpus affect the config and vice versa: documents " +
-                "added to the corpus are embedded into the config, documents removed " +
-                "are removed, and documents uploaded in the config join the corpus. " +
-                "You can toggle this later from the config's banner."
-              }
+              onClick={() => setSource("new")}
             >
-              ?
-            </span>
-            {!syncPossible && (
-              <span className="text-xs">(select exactly one corpus, or save as new)</span>
-            )}
-          </label>
+              New (start blank)
+            </SourceTab>
+            <SourceTab
+              active={source === "existing"}
+              disabled={busy || (corpora !== null && corpora.length === 0)}
+              onClick={() => setSource("existing")}
+            >
+              From existing corpora
+            </SourceTab>
+          </div>
+
+          {source === "existing" && (
+            <>
+              {corpora === null ? (
+                <span className="text-xs text-zinc-400">Loading…</span>
+              ) : (
+                <CorpusPicker
+                  corpora={corpora}
+                  selected={corpusIds}
+                  onChange={setCorpusIds}
+                  disabled={busy}
+                />
+              )}
+
+              <label className="flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
+                <input
+                  type="checkbox"
+                  checked={saveAs}
+                  onChange={(e) => setSaveAs(e.target.checked)}
+                  disabled={busy}
+                />
+                Save selection as new corpus
+              </label>
+              {saveAs && (
+                <input
+                  value={saveAsName}
+                  onChange={(e) => setSaveAsName(e.target.value)}
+                  disabled={busy}
+                  placeholder={name.trim() || "Corpus name (defaults to config name)"}
+                  className="rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700"
+                />
+              )}
+
+              <label
+                className={`flex items-center gap-1.5 ${
+                  syncPossible
+                    ? "text-zinc-600 dark:text-zinc-400"
+                    : "text-zinc-400 dark:text-zinc-600"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={sync && syncPossible}
+                  onChange={(e) => setSync(e.target.checked)}
+                  disabled={busy || !syncPossible}
+                />
+                Auto-sync corpus
+                <span
+                  className="cursor-help rounded-full border border-zinc-300 px-1.5 text-xs text-zinc-400 dark:border-zinc-700"
+                  title={
+                    "Changes to the corpus affect the config and vice versa: documents " +
+                    "added to the corpus are embedded into the config, documents removed " +
+                    "are removed, and documents uploaded in the config join the corpus. " +
+                    "You can toggle this later from the config's banner."
+                  }
+                >
+                  ?
+                </span>
+                {!syncPossible && (
+                  <span className="text-xs">(select exactly one corpus, or save as new)</span>
+                )}
+              </label>
+            </>
+          )}
         </div>
 
         {/* Base model (greyed when not selectable) */}
@@ -324,6 +351,35 @@ export function ConfigCreateDialog({
         </div>
       </div>
     </div>
+  );
+}
+
+// One of the "New / From existing" source choices — selected = filled + ✓.
+function SourceTab({
+  active,
+  disabled,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  children: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`cursor-pointer rounded-md border px-2.5 py-1 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+        active
+          ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-black"
+          : "border-zinc-300 text-zinc-500 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+      }`}
+    >
+      {active && <span className="mr-1">✓</span>}
+      {children}
+    </button>
   );
 }
 

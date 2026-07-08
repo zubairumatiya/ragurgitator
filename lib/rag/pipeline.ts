@@ -234,6 +234,29 @@ export async function embedCorpora(
   return { results };
 }
 
+// Embed a hand-picked set of already-stored documents into the ACTIVE config —
+// the workbench's "user library" flow (re-use an upload, no re-upload). Mirrors
+// ingest(): a synced config's additions also join its corpus. Docs without
+// stored text are silently filtered by documentsForEmbedding. Must run inside
+// withConfig(...); streams the same IngestEvents as ingest().
+export async function embedDocumentsById(
+  docIds: string[],
+  onEvent: Emit = () => {},
+): Promise<{ results: IngestResult[] }> {
+  const cfg = activeConfig();
+  const docs = await documentsForEmbedding(docIds);
+  console.log(
+    `[rag:pipeline] library-embed ${docs.length}/${docIds.length} doc(s) into config=${cfg.id.slice(0, 8)}`,
+  );
+  if (cfg.corpusId && cfg.corpusSync) {
+    for (const d of docs) await addDocumentToCorpus(cfg.corpusId, d.id);
+  }
+  onEvent({ type: "start", total: docs.length });
+  const results = await embedStoredDocs(docs, onEvent);
+  onEvent({ type: "done", results });
+  return { results };
+}
+
 // Back-compat entry for the populate route's no-body default: embed the active
 // config's OWN corpus. A detached config (corpus_id null) has nothing to spawn.
 export async function embedExistingCorpus(

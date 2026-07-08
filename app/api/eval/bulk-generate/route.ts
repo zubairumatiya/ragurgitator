@@ -19,6 +19,8 @@ const Body = z.object({
   difficulty: z.enum(DIFFICULTIES, {
     error: "Provide a `difficulty` of 'easy', 'medium', or 'hard'.",
   }),
+  // Bulk-actions document scope: generate only for this document's chunks.
+  documentId: z.uuid({ error: "`documentId` must be a uuid." }).optional(),
 });
 
 export async function POST(request: Request) {
@@ -28,7 +30,7 @@ export async function POST(request: Request) {
   return withRequestConfig(request, async () =>
     ndjsonStream<EvalEvent>(async (send) => {
       try {
-        await bulkAddDifficulty(body.data.difficulty, send);
+        await bulkAddDifficulty(body.data.difficulty, send, body.data.documentId);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Bulk generation failed.";
         send({ type: "error", message });

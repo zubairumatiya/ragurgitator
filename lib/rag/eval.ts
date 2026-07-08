@@ -61,6 +61,7 @@ import {
   type QuestionToScore,
   type ResultInsert,
   type SavedModelTrial,
+  type TrialKind,
   type TrialPoolHit,
   type TrialQuestionOutcome,
 } from "@/lib/rag/evalStore";
@@ -221,9 +222,10 @@ async function authorQuestions(
 export async function generateMissingQuestions(
   difficulties: Difficulty[],
   emit: Emit = () => {},
+  documentId?: string,
 ): Promise<number> {
   if (difficulties.length === 0) return 0;
-  const gaps = await chunksNeedingQuestionsByDifficulty(difficulties);
+  const gaps = await chunksNeedingQuestionsByDifficulty(difficulties, documentId);
   if (gaps.length === 0) return 0;
 
   console.log(
@@ -418,9 +420,10 @@ export async function processNewChunks(emit: Emit = () => {}): Promise<{
 export async function bulkAddDifficulty(
   difficulty: Difficulty,
   emit: Emit = () => {},
+  documentId?: string,
 ): Promise<{ generated: number; scored: number; recall: number | null }> {
   await addDifficulty(difficulty);
-  const generated = await generateMissingQuestions([difficulty], emit);
+  const generated = await generateMissingQuestions([difficulty], emit, documentId);
   const scored = await scoreUnscoredQuestions(emit);
 
   const summary = await getSummary();
@@ -451,12 +454,15 @@ export async function bulkAddDifficulty(
 // preserved), so recall stays apples-to-apples after the corpus changes — e.g. a newly
 // added doc introduces distractors that can push a previously-hit chunk out of the
 // top-k. Generation is untouched; this only scores.
-export async function rescoreAllQuestions(emit: Emit = () => {}): Promise<{
+export async function rescoreAllQuestions(
+  emit: Emit = () => {},
+  documentId?: string,
+): Promise<{
   scored: number;
   recall: number | null;
 }> {
   const t0 = performance.now();
-  const questions = await allLabeledQuestions();
+  const questions = await allLabeledQuestions(documentId);
   console.log(
     `[rag:eval] re-scoring all ${questions.length} question(s) @ k=${activeConfig().topK}`,
   );
@@ -739,15 +745,35 @@ export type ModelTrialContext = {
   currentOverride: string | null;
 };
 
+// Which knobs one trial run turns ("try a different configuration"):
+//   model      — re-embed the whole chunk under an alternate model (original behavior)
+//   size       — re-split the chunk (uniform size/overlap, or custom drag-border
+//                sections) under the BASELINE model; it competes as pieces
+//   size+model — both: re-split AND embed the pieces under an alternate model
+export type TrialVariation =
+  | { kind: "model"; model: string }
+  | { kind: "size"; size?: number; overlap?: number; sections?: string[] }
+  | {
+      kind: "size+model";
+      model: string;
+      size?: number;
+      overlap?: number;
+      sections?: string[];
+    };
+
 // Result of one trial run, returned to the client (ephemeral until saved).
 export type ModelTrialResult = {
   model: string;
   baselineModel: string;
+  kind: TrialKind;
+  chunkSize: number | null; // uniform re-split knobs; null for custom/model-only
+  chunkOverlap: number | null;
+  pieceCount: number | null; // pieces the chunk competed as (null for model-only)
   k: number;
   poolSize: number;
   pool: PoolChunk[]; // the candidate pool, resolved — for the tooltip + top-k labels
   questionCount: number;
-  hitCount: number; // hits under the trial model (in-pool)
+  hitCount: number; // hits under the trial variation (in-pool)
   storedHitCount: number; // baseline hits (stored full-corpus result)
   recall: number | null;
   questions: TrialQuestionOutcome[];
@@ -895,17 +921,25 @@ export async function setChunkSizeModelOverride(
   return "ok";
 }
 
-// Run the trial: embed the pool + each question under `model`, cosine-rank the
-// chunk within the pool per question, and (optionally) persist the snapshot.
-// Returns null when the chunk has no questions / isn't under the active config;
-// throws on an unknown model.
+// Run the trial: embed the pool (with the test chunk replaced by its variation
+// pieces) + each question under the variation's model, cosine-rank the chunk
+// within the pool per question, and (optionally) persist the snapshot. For size
+// variations the chunk competes as its pieces — its standing per question is the
+// BEST piece (hit = any piece in top-k), matching the rechunk experiment and the
+// override retriever. Returns null when the chunk has no questions / isn't under
+// the active config; throws on an unknown model or invalid re-split.
 export async function runModelTrial(
   chunkId: string,
-  model: string,
+  variation: TrialVariation,
   poolChunkIds: string[],
   save: boolean,
 ): Promise<{ result: ModelTrialResult; savedTrial: SavedModelTrial | null } | null> {
-  if (!altEmbeddingModels.some((m) => m.id === model)) {
+  const baselineModel = activeConfig().embeddingModel;
+  const model = variation.kind === "size" ? baselineModel : variation.model;
+  if (
+    variation.kind !== "size" &&
+    !altEmbeddingModels.some((m) => m.id === model)
+  ) {
     throw new Error(`Unknown model "${model}".`);
   }
 
@@ -915,31 +949,73 @@ export async function runModelTrial(
   const questions = await getModelTrialQuestions(chunkId);
   if (questions.length === 0) return null;
 
+  // How the test chunk enters the pool: whole (model-only) or as pieces.
+  let pieceTexts = [chunk.text];
+  let chunkSize: number | null = null;
+  let chunkOverlap: number | null = null;
+  if (variation.kind !== "model") {
+    if (variation.sections && variation.sections.length > 0) {
+      pieceTexts = variation.sections;
+    } else if (variation.size !== undefined) {
+      const size = variation.size;
+      const overlap = variation.overlap ?? 0;
+      if (!Number.isInteger(size) || size < 1 || overlap < 0 || overlap >= size) {
+        throw new Error("Invalid size/overlap (need size ≥ 1 and 0 ≤ overlap < size).");
+      }
+      pieceTexts = await splitText(chunk.text, size, overlap);
+      if (pieceTexts.length === 0) {
+        throw new Error("Re-split produced no pieces.");
+      }
+      chunkSize = size;
+      chunkOverlap = overlap;
+    } else {
+      throw new Error("A size variation needs `size` (+ optional overlap) or `sections`.");
+    }
+  }
+  const pieceCount = variation.kind === "model" ? null : pieceTexts.length;
+
   // The chunk is always in the pool (it's the ground truth we're ranking).
   const poolIds = uniq([chunkId, ...poolChunkIds]);
   const poolChunks = await getChunksByIds(poolIds);
+  if (!poolChunks.some((c) => c.chunkId === chunkId)) return null; // dropped mid-run
+  const otherChunks = poolChunks.filter((c) => c.chunkId !== chunkId);
 
-  const poolVectors = await embedDocsCached(poolChunks.map((c) => c.text), model);
-  const vecById = new Map(poolChunks.map((c, i) => [c.chunkId, poolVectors[i]]));
-  const testVec = vecById.get(chunkId);
-  if (!testVec) return null; // chunk dropped out of the active corpus mid-run
+  const [pieceVectors, otherVectors] = await Promise.all([
+    embedDocsCached(pieceTexts, model),
+    embedDocsCached(otherChunks.map((c) => c.text), model),
+  ]);
+  const otherVecById = new Map(otherChunks.map((c, i) => [c.chunkId, otherVectors[i]]));
 
   const k = activeConfig().topK;
   const questionsOut: TrialQuestionOutcome[] = [];
   for (const q of questions) {
     const qVec = await embedQueryCached(q.question, model);
-    const scored = poolChunks.map((c) => ({
-      id: c.chunkId,
-      sim: cosine(qVec, vecById.get(c.chunkId)!),
-    }));
+    // One candidate row per piece + one per other pool chunk.
+    const scored: { id: string; subIndex: number | null; sim: number }[] = [
+      ...pieceVectors.map((v, i) => ({
+        id: chunkId,
+        subIndex: pieceCount === null ? null : i,
+        sim: cosine(qVec, v),
+      })),
+      ...otherChunks.map((c) => ({
+        id: c.chunkId,
+        subIndex: null,
+        sim: cosine(qVec, otherVecById.get(c.chunkId)!),
+      })),
+    ];
     scored.sort((a, b) => b.sim - a.sim);
-    const newRank = scored.findIndex((s) => s.id === chunkId) + 1; // 1-based
+    const newRank = scored.findIndex((s) => s.id === chunkId) + 1; // best piece, 1-based
     const topPool: TrialPoolHit[] = scored.slice(0, k).map((s, i) => ({
       chunkId: s.id,
       rank: i + 1,
       score: s.sim,
       isExpected: s.id === chunkId,
+      subIndex: s.subIndex,
     }));
+    // The chunk's own sim = its best piece's sim (max over pieces).
+    const newScore = Math.max(
+      ...scored.filter((s) => s.id === chunkId).map((s) => s.sim),
+    );
     questionsOut.push({
       questionId: q.questionId,
       question: q.question,
@@ -947,7 +1023,7 @@ export async function runModelTrial(
       storedRank: q.storedRank,
       newHit: newRank >= 1 && newRank <= k,
       newRank,
-      newScore: cosine(qVec, testVec),
+      newScore,
       topPool,
     });
   }
@@ -956,7 +1032,11 @@ export async function runModelTrial(
   const storedHitCount = questionsOut.filter((o) => o.storedHit === true).length;
   const result: ModelTrialResult = {
     model,
-    baselineModel: activeConfig().embeddingModel,
+    baselineModel,
+    kind: variation.kind,
+    chunkSize,
+    chunkOverlap,
+    pieceCount,
     k,
     poolSize: poolChunks.length,
     pool: poolChunks,
@@ -972,8 +1052,12 @@ export async function runModelTrial(
     const ins = await insertModelTrial({
       sourceChunkId: chunkId,
       documentEmbeddingId: chunk.documentEmbeddingId,
-      baselineModel: activeConfig().embeddingModel,
+      baselineModel,
       trialModel: model,
+      kind: variation.kind,
+      chunkSize,
+      chunkOverlap,
+      pieceCount,
       k,
       poolChunkIds: poolIds,
       questionCount: questionsOut.length,
@@ -983,8 +1067,12 @@ export async function runModelTrial(
     });
     savedTrial = {
       id: ins.id,
-      baselineModel: activeConfig().embeddingModel,
+      baselineModel,
       trialModel: model,
+      kind: variation.kind,
+      chunkSize,
+      chunkOverlap,
+      pieceCount,
       k,
       poolSize: poolIds.length,
       pool: poolChunks,
@@ -997,9 +1085,10 @@ export async function runModelTrial(
   }
 
   console.log(
-    `[rag:eval] model-trial chunk=${chunkId.slice(0, 8)} model=${model} ` +
-      `pool=${poolChunks.length} q=${questionsOut.length} hits=${hitCount}/${questionsOut.length} ` +
-      `${save ? "(saved) " : ""}in ${Math.round(performance.now() - t0)}ms`,
+    `[rag:eval] config-trial chunk=${chunkId.slice(0, 8)} kind=${variation.kind} model=${model} ` +
+      `pieces=${pieceCount ?? 1} pool=${poolChunks.length} q=${questionsOut.length} ` +
+      `hits=${hitCount}/${questionsOut.length} ${save ? "(saved) " : ""}` +
+      `in ${Math.round(performance.now() - t0)}ms`,
   );
   return { result, savedTrial };
 }

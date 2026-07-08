@@ -2,7 +2,7 @@
 // Layout for every config-scoped page (/c/[configId]/…). Renders the §6 shell:
 //   1. ConfigTabs    — the cross-config tab bar (open tabs + new + Appraise).
 //   2. active banner — "<name> · <model> · <size>/<overlap> · corpus: <name>".
-//   3. Nav           — the nested Playground / Eval / Clusters sub-nav.
+//   3. Nav           — the nested Workbench / Eval / Clusters sub-nav.
 //   4. {children}    — the page, scoped to this config.
 //
 // This is a Server Component so it can read the tab lists + active config straight
@@ -50,7 +50,6 @@ export default async function ConfigLayout({
             {active.corpusId ? (
               <Link href={`/corpora/${active.corpusId}`} className="hover:underline">
                 {active.corpusName}
-                {active.corpusSync && " ⟳"}
               </Link>
             ) : (
               "none"

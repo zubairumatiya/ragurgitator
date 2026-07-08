@@ -268,6 +268,32 @@ export async function setCorpusSync(
   return rows.length > 0 ? getConfig(id) : null;
 }
 
+// Update a config's processing settings IN PLACE (the bulk-actions "change this
+// config" flow). Pure row update — the caller (lib/rag/reconfigure) owns the
+// re-embed + eval-label remap that a model/size change requires.
+export async function updateConfigSettings(
+  id: string,
+  changes: {
+    baseModel?: string;
+    chunkSize?: number;
+    chunkOverlap?: number;
+    topK?: number;
+  },
+): Promise<ConfigSummary | null> {
+  const current = await getConfig(id);
+  if (!current) return null;
+  await sql`
+    update configs
+    set base_model = ${changes.baseModel ?? current.baseModel},
+        chunk_size = ${changes.chunkSize ?? current.chunkSize},
+        chunk_overlap = ${changes.chunkOverlap ?? current.chunkOverlap},
+        top_k = ${changes.topK ?? current.topK},
+        updated_at = now()
+    where id = ${id}
+  `;
+  return getConfig(id);
+}
+
 export async function renameConfig(id: string, name: string): Promise<ConfigSummary | null> {
   const trimmed = name.trim();
   const rows = await sql`

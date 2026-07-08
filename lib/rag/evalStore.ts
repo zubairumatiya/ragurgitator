@@ -57,6 +57,10 @@ export type QuestionDetail = {
   expectedPosition: number | null;
   hit: boolean | null; // null = not scored yet
   foundRank: number | null;
+  // Cosine sim of the ground-truth chunk in the stored retrieval (null when
+  // unscored or the chunk wasn't in the retrieved superset) — feeds the chunk
+  // card's "avg sim".
+  storedSim: number | null;
   retrievedIds: string[] | null;
   scoredAt: number | null;
   stale: boolean; // true = edited since its last score; result shown is for the old text
@@ -147,6 +151,9 @@ export type EvalSummary = {
   // target; pendingScoring: questions never scored or edited since last score.
   pendingChunks: number;
   pendingScoring: number;
+  // Total chunks under the active config — gates bulk "Add question" (no chunks
+  // = nothing to generate against).
+  chunkCount: number;
   // The saved eval criteria (metrics/k/min-rate/difficulties/autotune) and the
   // active config basics — for the Settings dropdown and Bulk-actions pre-fill.
   criteria: EvalCriteria;
@@ -221,8 +228,10 @@ export type ChunkDifficultyGap = {
 // For each requested difficulty, the chunks under the active config that lack a
 // question at that difficulty. The cross join fans every chunk out across the
 // requested difficulties; the NOT EXISTS keeps only the missing pairs.
+// `documentId` (bulk-actions document scope) narrows to one document.
 export async function chunksNeedingQuestionsByDifficulty(
   difficulties: string[],
+  documentId?: string,
 ): Promise<ChunkDifficultyGap[]> {
   const table = await activeChunksTable();
   if (!table || difficulties.length === 0) return [];
@@ -241,6 +250,7 @@ export async function chunksNeedingQuestionsByDifficulty(
     join document_embeddings de on de.id = c.document_embedding_id
     cross join unnest(${difficulties}::text[]) as d(difficulty)
     where de.config_id = ${activeConfig().id}
+      and (${documentId ?? null}::uuid is null or c.document_id = ${documentId ?? null})
       and not exists (
         select 1
         from eval_labels l
@@ -398,7 +408,8 @@ export async function questionsNeedingScoring(): Promise<QuestionToScore[]> {
 // of these against the current corpus keeps recall apples-to-apples after the corpus
 // changes (e.g. a doc was added/removed and now competes in the top-k).
 // questionsNeedingScoring() is the incremental counterpart used by "Process new chunks".
-export async function allLabeledQuestions(): Promise<QuestionToScore[]> {
+// `documentId` (bulk-actions document scope) narrows to one document's questions.
+export async function allLabeledQuestions(documentId?: string): Promise<QuestionToScore[]> {
   const rows = await sql<
     {
       question_id: string;
@@ -416,6 +427,7 @@ export async function allLabeledQuestions(): Promise<QuestionToScore[]> {
     join eval_labels l on l.eval_question_id = q.id
     join document_embeddings de on de.id = l.document_embedding_id
     where de.config_id = ${activeConfig().id}
+      and (${documentId ?? null}::uuid is null or q.document_id = ${documentId ?? null})
   `;
 
   return rows.map((r) => ({
@@ -949,6 +961,10 @@ export type TrialPoolHit = {
   rank: number; // 1-based rank within the re-embedded pool
   score: number; // cosine similarity to the query under the trial model
   isExpected: boolean; // the chunk under test (ground truth)
+  // For size / size+model variations the test chunk competes as PIECES; each
+  // piece ranks separately and carries its 0-based index here. Null/absent for
+  // whole chunks (model-only trials and every other pool chunk).
+  subIndex?: number | null;
 };
 
 // One question's before/after in a model trial: its stored full-corpus result
@@ -968,10 +984,19 @@ export type TrialQuestionOutcome = {
   topPool?: TrialPoolHit[];
 };
 
+// Which knob a saved trial turned: the model, the chunk's shape, or both.
+export type TrialKind = "model" | "size" | "size+model";
+
 export type SavedModelTrial = {
   id: string;
   baselineModel: string;
   trialModel: string;
+  kind: TrialKind;
+  // Uniform re-split knobs; null for model-only trials and custom (drag-border)
+  // sections. pieceCount is set for every size / size+model trial.
+  chunkSize: number | null;
+  chunkOverlap: number | null;
+  pieceCount: number | null;
   k: number;
   poolSize: number;
   // The candidate pool resolved to labels + text (in stored order), for the pool
@@ -1130,6 +1155,10 @@ export async function insertModelTrial(args: {
   documentEmbeddingId: string;
   baselineModel: string;
   trialModel: string;
+  kind: TrialKind;
+  chunkSize: number | null;
+  chunkOverlap: number | null;
+  pieceCount: number | null;
   k: number;
   poolChunkIds: string[];
   questionCount: number;
@@ -1139,11 +1168,14 @@ export async function insertModelTrial(args: {
 }): Promise<{ id: string; createdAt: number }> {
   const [row] = await sql<{ id: string; created_at: Date }[]>`
     insert into eval_model_trials
-      (source_chunk_id, document_embedding_id, baseline_model, trial_model, k,
+      (source_chunk_id, document_embedding_id, baseline_model, trial_model, kind,
+       chunk_size, chunk_overlap, piece_count, k,
        pool_chunk_ids, question_count, hit_count, stored_hit_count, results)
     values
       (${args.sourceChunkId}, ${args.documentEmbeddingId}, ${args.baselineModel},
-       ${args.trialModel}, ${args.k}, ${args.poolChunkIds}::uuid[],
+       ${args.trialModel}, ${args.kind},
+       ${args.chunkSize}, ${args.chunkOverlap}, ${args.pieceCount}, ${args.k},
+       ${args.poolChunkIds}::uuid[],
        ${args.questionCount}, ${args.hitCount}, ${args.storedHitCount},
        ${sql.json(args.results)})
     returning id, created_at
@@ -1157,6 +1189,10 @@ export async function listModelTrials(chunkId: string): Promise<SavedModelTrial[
       id: string;
       baseline_model: string;
       trial_model: string;
+      kind: string;
+      chunk_size: number | null;
+      chunk_overlap: number | null;
+      piece_count: number | null;
       k: number;
       pool_chunk_ids: string[];
       question_count: number;
@@ -1166,7 +1202,8 @@ export async function listModelTrials(chunkId: string): Promise<SavedModelTrial[
       created_at: Date;
     }[]
   >`
-    select id, baseline_model, trial_model, k, pool_chunk_ids,
+    select id, baseline_model, trial_model, kind, chunk_size, chunk_overlap,
+           piece_count, k, pool_chunk_ids,
            question_count, hit_count, stored_hit_count, results, created_at
     from eval_model_trials
     where source_chunk_id = ${chunkId}
@@ -1188,6 +1225,10 @@ export async function listModelTrials(chunkId: string): Promise<SavedModelTrial[
     id: r.id,
     baselineModel: r.baseline_model,
     trialModel: r.trial_model,
+    kind: r.kind as TrialKind,
+    chunkSize: r.chunk_size,
+    chunkOverlap: r.chunk_overlap,
+    pieceCount: r.piece_count,
     k: r.k,
     poolSize: r.pool_chunk_ids.length,
     pool: resolvePool(r.pool_chunk_ids),
@@ -1406,6 +1447,7 @@ export async function getSummary(): Promise<EvalSummary> {
     runs: [],
     pendingChunks: 0,
     pendingScoring: 0,
+    chunkCount: 0,
     criteria,
     config: configInfo,
     overrides: [],
@@ -1414,7 +1456,7 @@ export async function getSummary(): Promise<EvalSummary> {
   const table = await activeChunksTable();
   if (!table) return empty;
 
-  const [detail, runRows, pendingChunkRows, overrides] = await Promise.all([
+  const [detail, runRows, pendingChunkRows, chunkCountRows, overrides] = await Promise.all([
     sql<
       {
         question_id: string;
@@ -1429,6 +1471,7 @@ export async function getSummary(): Promise<EvalSummary> {
         hit: boolean | null;
         found_rank: number | null;
         retrieved_ids: string[] | null;
+        retrieved_scores: number[] | null;
         scored_at: Date | null;
         ignored: boolean;
       }[]
@@ -1441,7 +1484,8 @@ export async function getSummary(): Promise<EvalSummary> {
       ),
       latest as (
         select distinct on (r.eval_question_id)
-          r.eval_question_id, r.hit, r.found_rank, r.retrieved_ids, r.scored_at
+          r.eval_question_id, r.hit, r.found_rank, r.retrieved_ids,
+          r.retrieved_scores, r.scored_at
         from eval_results r
         join active_labels al on al.label_id = r.eval_label_id
         order by r.eval_question_id, r.scored_at desc
@@ -1459,6 +1503,7 @@ export async function getSummary(): Promise<EvalSummary> {
         lt.hit,
         lt.found_rank,
         lt.retrieved_ids,
+        lt.retrieved_scores,
         lt.scored_at,
         (ig.eval_question_id is not null) as ignored
       from eval_questions q
@@ -1508,6 +1553,12 @@ export async function getSummary(): Promise<EvalSummary> {
             and q.difficulty = d.difficulty
         )
     `,
+    sql<{ n: number }[]>`
+      select count(c.id)::int as n
+      from ${sql(table)} c
+      join document_embeddings de on de.id = c.document_embedding_id
+      where de.config_id = ${activeConfig().id}
+    `,
     listChunkOverrideInfo(table),
   ]);
 
@@ -1529,6 +1580,12 @@ export async function getSummary(): Promise<EvalSummary> {
     // it's ungraded (null) and the UI shows the grey placeholder. Graded at ndcg_k.
     const ideal = truthOrders.get(r.question_id);
     const qNdcg = fresh && ideal ? ndcg(ideal, r.retrieved_ids ?? [], ndcgK) : null;
+    // The ground-truth chunk's cosine sim in the stored retrieval — found_rank is
+    // 1-based into retrieved_scores. Null on a full miss or pre-0004 results.
+    const storedSim =
+      fresh && r.found_rank !== null && r.retrieved_scores
+        ? (r.retrieved_scores[r.found_rank - 1] ?? null)
+        : null;
     return {
       questionId: r.question_id,
       question: r.question,
@@ -1540,6 +1597,7 @@ export async function getSummary(): Promise<EvalSummary> {
       expectedPosition: r.expected_position,
       hit,
       foundRank: r.found_rank,
+      storedSim,
       retrievedIds: r.retrieved_ids,
       scoredAt: r.scored_at ? r.scored_at.getTime() : null,
       stale,
@@ -1612,6 +1670,7 @@ export async function getSummary(): Promise<EvalSummary> {
     })),
     pendingChunks: pendingChunkRows[0]?.n ?? 0,
     pendingScoring,
+    chunkCount: chunkCountRows[0]?.n ?? 0,
     criteria,
     config: configInfo,
     overrides,

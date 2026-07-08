@@ -11,7 +11,7 @@ import { EvalSettings } from "@/app/components/EvalSettings";
 // dropdown sits on the right, apart from the tabs — it applies to the whole
 // config, not one view.
 const LINKS = [
-  { segment: "", label: "Playground" },
+  { segment: "", label: "Workbench" },
   { segment: "clusters", label: "Clusters" },
   { segment: "eval", label: "Evals" },
 ] as const;

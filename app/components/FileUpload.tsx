@@ -1,18 +1,21 @@
 // ---------------------------------------------------------------------------
-// UI: upload / paste documents to ingest (Client Component).
+// UI: upload / paste / pick-from-library documents to ingest (Client Component).
 //
-// Submits to /api/ingest as multipart/form-data and shows a per-source result.
-// Multiple files can be selected at once; each is reported independently so one
-// bad file doesn't hide the rest. Uses React 19's <form action={...}> pattern,
-// which hands us a FormData directly and avoids deprecated synthetic-event types.
+// File and Paste-text modes submit to /api/ingest as multipart/form-data; the
+// User-library mode POSTs previously-uploaded document ids to
+// /api/ingest/library so nothing is re-uploaded. All three stream the same
+// IngestEvents into one progress UI, with a per-source result line. Uses React
+// 19's <form action={...}> pattern, which hands us a FormData directly and
+// avoids deprecated synthetic-event types.
 // ---------------------------------------------------------------------------
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { RAG_INGESTED_EVENT } from "@/app/components/DocumentList";
 import { apiFetch } from "@/lib/http/client";
 import { config } from "@/lib/config";
 import type { IngestEvent, IngestResult, IngestStep } from "@/lib/rag/pipeline";
+import type { LibraryDocument } from "@/lib/rag/vectorStore";
 
 function formatMB(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -45,16 +48,136 @@ type Status =
   | { kind: "error"; message: string };
 
 export function FileUpload() {
-  const [mode, setMode] = useState<"file" | "text">("file");
+  const [mode, setMode] = useState<"file" | "text" | "library">("file");
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   const [picked, setPicked] = useState<Picked | null>(null);
+
+  // User library: previously-uploaded docs this config hasn't embedded yet.
+  const [library, setLibrary] = useState<LibraryDocument[] | null>(null);
+  const [pickedDocs, setPickedDocs] = useState<Set<string>>(new Set());
+
+  // (Re)load the library when the tab is opened; also after a successful
+  // library ingest, since embedded docs drop out of the list.
+  useEffect(() => {
+    if (mode !== "library") return;
+    let alive = true;
+    apiFetch("/api/documents/library")
+      .then((res) => res.json())
+      .then((data: { documents?: LibraryDocument[] }) => {
+        if (alive) setLibrary(data.documents ?? []);
+      })
+      .catch(() => {
+        if (alive) setLibrary([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [mode, status.kind]);
+
+  function toggleDoc(id: string) {
+    setPickedDocs((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   // Client-side pre-flight: block oversized batches before uploading, and grey
   // out the Ingest button so the limit is visible rather than a surprise 413.
   const oversize =
     mode === "file" && picked !== null && picked.totalBytes > config.maxUploadBytes;
 
+  // Read an ingest NDJSON stream (any mode) and drive the progress UI.
+  async function consumeStream(res: Response) {
+    // Validation failures (400/413/500) come back as plain JSON, not a stream.
+    if (!res.ok || !res.body) {
+      const data = (await res.json().catch(() => null)) as { error?: string } | null;
+      setStatus({
+        kind: "error",
+        message: data?.error ?? `Request failed (${res.status}).`,
+      });
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let total = 0;
+    let completedFiles = 0;
+    let results: IngestResult[] = [];
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? ""; // keep the trailing partial line
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const event = JSON.parse(line) as IngestEvent;
+        switch (event.type) {
+          case "start":
+            total = event.total;
+            break;
+          case "step":
+            setStatus({
+              kind: "loading",
+              progress: {
+                total,
+                completedFiles,
+                index: event.index,
+                fileName: event.fileName,
+                step: event.step,
+              },
+            });
+            break;
+          case "file-done":
+            completedFiles += 1;
+            break;
+          case "done":
+            results = event.results;
+            break;
+          case "error":
+            setStatus({ kind: "error", message: event.message });
+            return;
+        }
+      }
+    }
+
+    setStatus({ kind: "done", results });
+    setPicked(null);
+    setPickedDocs(new Set());
+    // Refresh the document list if at least one source landed without error.
+    if (results.some((r) => !("error" in r))) {
+      window.dispatchEvent(new Event(RAG_INGESTED_EVENT));
+    }
+  }
+
   async function action(form: FormData) {
+    if (mode === "library") {
+      if (pickedDocs.size === 0) {
+        setStatus({ kind: "error", message: "Pick at least one document first." });
+        return;
+      }
+      setStatus({ kind: "loading", progress: null });
+      try {
+        const res = await apiFetch("/api/ingest/library", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ documentIds: [...pickedDocs] }),
+        });
+        await consumeStream(res);
+      } catch (err) {
+        setStatus({
+          kind: "error",
+          message: err instanceof Error ? err.message : "Network error.",
+        });
+      }
+      return;
+    }
+
     if (mode === "file") {
       const files = form
         .getAll("file")
@@ -86,70 +209,7 @@ export function FileUpload() {
     setStatus({ kind: "loading", progress: null });
     try {
       const res = await apiFetch("/api/ingest", { method: "POST", body: form });
-
-      // Validation failures (400/413/500) come back as plain JSON, not a stream.
-      if (!res.ok || !res.body) {
-        const data = (await res.json().catch(() => null)) as { error?: string } | null;
-        setStatus({
-          kind: "error",
-          message: data?.error ?? `Request failed (${res.status}).`,
-        });
-        return;
-      }
-
-      // Success path: read the NDJSON event stream and drive the progress UI.
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let total = 0;
-      let completedFiles = 0;
-      let results: IngestResult[] = [];
-
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? ""; // keep the trailing partial line
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          const event = JSON.parse(line) as IngestEvent;
-          switch (event.type) {
-            case "start":
-              total = event.total;
-              break;
-            case "step":
-              setStatus({
-                kind: "loading",
-                progress: {
-                  total,
-                  completedFiles,
-                  index: event.index,
-                  fileName: event.fileName,
-                  step: event.step,
-                },
-              });
-              break;
-            case "file-done":
-              completedFiles += 1;
-              break;
-            case "done":
-              results = event.results;
-              break;
-            case "error":
-              setStatus({ kind: "error", message: event.message });
-              return;
-          }
-        }
-      }
-
-      setStatus({ kind: "done", results });
-      setPicked(null);
-      // Refresh the document list if at least one source landed without error.
-      if (results.some((r) => !("error" in r))) {
-        window.dispatchEvent(new Event(RAG_INGESTED_EVENT));
-      }
+      await consumeStream(res);
     } catch (err) {
       setStatus({
         kind: "error",
@@ -190,9 +250,105 @@ export function FileUpload() {
         >
           Paste text
         </button>
+        <button
+          type="button"
+          onClick={() => setMode("library")}
+          disabled={loading}
+          title="Re-ingest documents you've uploaded before — no re-upload needed"
+          className={`rounded px-3 py-1 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
+            mode === "library"
+              ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-black"
+              : "bg-zinc-100 dark:bg-zinc-800"
+          }`}
+        >
+          User library
+        </button>
       </div>
 
-      {mode === "file" ? (
+      {mode === "library" && (
+        <div className="flex flex-col gap-2">
+          {library === null ? (
+            <p className="text-sm text-zinc-400">Loading your uploads…</p>
+          ) : library.length === 0 ? (
+            <p className="rounded-lg border border-dashed border-zinc-300 p-6 text-center text-sm text-zinc-500 dark:border-zinc-700">
+              Nothing available — every stored upload is already ingested here.
+            </p>
+          ) : (
+            <>
+              <p className="text-xs text-zinc-500">
+                Previously uploaded documents this config hasn&apos;t ingested yet —
+                select any number, then Ingest.
+              </p>
+              {/* Selectable rows (tint + checkmark), deliberately not checkboxes. */}
+              <div className="flex max-h-56 flex-col gap-0.5 overflow-y-auto rounded-lg border border-zinc-200 p-1.5 dark:border-zinc-800">
+                {library.map((d) => {
+                  const isPicked = pickedDocs.has(d.id);
+                  return (
+                    <button
+                      key={d.id}
+                      type="button"
+                      onClick={() => toggleDoc(d.id)}
+                      disabled={loading}
+                      aria-pressed={isPicked}
+                      className={`flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                        isPicked
+                          ? "bg-indigo-100 text-indigo-800 dark:bg-indigo-900/40 dark:text-indigo-200"
+                          : "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                      }`}
+                    >
+                      <span
+                        className={`w-3 shrink-0 text-xs ${
+                          isPicked
+                            ? "text-indigo-600 dark:text-indigo-300"
+                            : "text-transparent"
+                        }`}
+                      >
+                        ✓
+                      </span>
+                      <span className="truncate">{d.fileName}</span>
+                      <span
+                        className={`ml-auto shrink-0 text-xs ${
+                          isPicked
+                            ? "text-indigo-500 dark:text-indigo-300/70"
+                            : "text-zinc-400"
+                        }`}
+                      >
+                        {new Date(d.uploadedAt).toLocaleDateString()}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              {pickedDocs.size > 0 && (
+                <p className="text-xs text-zinc-500">
+                  {pickedDocs.size} document{pickedDocs.size === 1 ? "" : "s"} selected
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {mode === "text" && (
+        <>
+          <input
+            type="text"
+            name="fileName"
+            placeholder="Optional source name (e.g. 'meeting-notes')"
+            disabled={loading}
+            className="rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 text-sm"
+          />
+          <textarea
+            name="text"
+            disabled={loading}
+            placeholder="Paste document text here..."
+            rows={8}
+            className="rounded border border-zinc-300 dark:border-zinc-700 bg-transparent p-2 text-sm font-mono"
+          />
+        </>
+      )}
+
+      {mode === "file" && (
         <label
           className={`flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed px-6 py-10 text-center text-sm transition-colors ${
             loading
@@ -244,23 +400,6 @@ export function FileUpload() {
             className="sr-only"
           />
         </label>
-      ) : (
-        <>
-          <input
-            type="text"
-            name="fileName"
-            placeholder="Optional source name (e.g. 'meeting-notes')"
-            disabled={loading}
-            className="rounded border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 text-sm"
-          />
-          <textarea
-            name="text"
-            disabled={loading}
-            placeholder="Paste document text here..."
-            rows={8}
-            className="rounded border border-zinc-300 dark:border-zinc-700 bg-transparent p-2 text-sm font-mono"
-          />
-        </>
       )}
 
       {oversize && picked && (
@@ -272,7 +411,7 @@ export function FileUpload() {
 
       <button
         type="submit"
-        disabled={loading || oversize}
+        disabled={loading || oversize || (mode === "library" && pickedDocs.size === 0)}
         className="inline-flex items-center gap-2 self-start rounded-full bg-zinc-900 px-4 py-2 text-sm font-medium text-white cursor-pointer transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-100 dark:text-black"
       >
         {loading && (

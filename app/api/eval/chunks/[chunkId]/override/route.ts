@@ -13,7 +13,11 @@
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
-import { setChunkModelOverride, setChunkSizeOverride } from "@/lib/rag/eval";
+import {
+  setChunkModelOverride,
+  setChunkSizeModelOverride,
+  setChunkSizeOverride,
+} from "@/lib/rag/eval";
 import { clearChunkOverride } from "@/lib/rag/overrideStore";
 
 const Body = z
@@ -36,13 +40,16 @@ export async function POST(
 
   return withRequestConfig(request, async () => {
     try {
-      // Size override takes precedence when `size` is present.
+      // Size (or size+model combo) override when `size` is present.
       if (body.data.size !== undefined) {
-        const status = await setChunkSizeOverride(
-          chunkId,
-          body.data.size,
-          body.data.overlap ?? 0,
-        );
+        const status = body.data.model
+          ? await setChunkSizeModelOverride(
+              chunkId,
+              body.data.size,
+              body.data.overlap ?? 0,
+              body.data.model,
+            )
+          : await setChunkSizeOverride(chunkId, body.data.size, body.data.overlap ?? 0);
         switch (status) {
           case "ok":
             return Response.json({ ok: true });
@@ -54,6 +61,16 @@ export async function POST(
           case "invalid":
             return Response.json(
               { error: "Invalid size/overlap (need size ≥ 1 and 0 ≤ overlap < size)." },
+              { status: 400 },
+            );
+          case "unknown-model":
+            return Response.json(
+              { error: `Unknown model "${body.data.model}".` },
+              { status: 400 },
+            );
+          case "unavailable":
+            return Response.json(
+              { error: `"${body.data.model}" isn't available — set its API key.` },
               { status: 400 },
             );
         }

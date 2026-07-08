@@ -287,6 +287,34 @@ export async function resolveChunks(
   );
 }
 
+// One row in the user's LIBRARY: a previously-uploaded document (with stored
+// raw text) that the ACTIVE config hasn't embedded yet — the pick-list for
+// "ingest without re-uploading".
+export type LibraryDocument = {
+  id: string;
+  fileName: string;
+  uploadedAt: number;
+};
+
+export async function listLibraryDocuments(): Promise<LibraryDocument[]> {
+  const cfg = activeConfig();
+  const rows = await sql<{ id: string; file_name: string; created_at: Date }[]>`
+    select d.id, d.file_name, d.created_at
+    from documents d
+    where d.content is not null
+      and not exists (
+        select 1 from document_embeddings de
+        where de.document_id = d.id and de.config_id = ${cfg.id}
+      )
+    order by d.created_at desc
+  `;
+  return rows.map((r) => ({
+    id: r.id,
+    fileName: r.file_name,
+    uploadedAt: r.created_at.getTime(),
+  }));
+}
+
 export async function listDocuments(): Promise<IngestedDocument[]> {
   const rows = await sql<
     {

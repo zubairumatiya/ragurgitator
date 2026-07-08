@@ -26,6 +26,7 @@ import type {
   QuestionDetail,
   QuestionExplain,
   SavedModelTrial,
+  TrialKind,
   TrialQuestionOutcome,
 } from "@/lib/rag/evalStore";
 import type {
@@ -37,9 +38,10 @@ import type {
   RechunkResult,
 } from "@/lib/rag/eval";
 import { AutotunePanel } from "@/app/components/AutotunePanel";
-import { ConfigCreateDialog } from "@/app/components/ConfigCreateDialog";
+import { ConfigChangeDialog } from "@/app/components/ConfigChangeDialog";
 import { EVAL_CRITERIA_CHANGED } from "@/app/components/EvalSettings";
 import { NdcgRankingPanel } from "@/app/components/NdcgRankingPanel";
+import type { IngestedDocument } from "@/lib/rag/vectorStore";
 
 function pct(n: number | null): string {
   return n === null ? "—" : `${(n * 100).toFixed(1)}%`;
@@ -118,10 +120,12 @@ export function EvalDashboard() {
   const router = useRouter();
   const [summary, setSummary] = useState<EvalSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // "Bulk actions → Change base model / chunk size" opens the config-create
-  // dialog pre-targeted at this corpus (D2: spawns a new config so this one's
-  // eval history is preserved for Appraise).
-  const [createOpen, setCreateOpen] = useState(false);
+  // "Bulk actions → Change base model / chunk size" edits THIS config in place
+  // (or one document via per-chunk overrides when a document scope is picked).
+  const [changeScope, setChangeScope] = useState<{
+    docId: string | null;
+    docName: string | null;
+  } | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [progress, setProgress] = useState<EvalProgress | null>(null);
@@ -178,7 +182,9 @@ export function EvalDashboard() {
       .then(async (res) => {
         const data = (await res.json()) as QuestionExplain | { error: string };
         if (!res.ok || "error" in data) {
-          throw new Error("error" in data ? data.error : `Request failed (${res.status}).`);
+          throw new Error(
+            "error" in data ? data.error : `Request failed (${res.status}).`,
+          );
         }
         setExplains((m) => ({ ...m, [id]: { status: "ready", data } }));
       })
@@ -196,13 +202,16 @@ export function EvalDashboard() {
         const data = (await res.json()) as EvalSummary | { error: string };
         if (!alive) return;
         if (!res.ok || "error" in data) {
-          setError("error" in data ? data.error : `Request failed (${res.status}).`);
+          setError(
+            "error" in data ? data.error : `Request failed (${res.status}).`,
+          );
           return;
         }
         setError(null);
         setSummary(data);
       } catch (err) {
-        if (alive) setError(err instanceof Error ? err.message : "Network error.");
+        if (alive)
+          setError(err instanceof Error ? err.message : "Network error.");
       }
     }
     load();
@@ -234,7 +243,14 @@ export function EvalDashboard() {
             ...prev,
             questions: prev.questions.map((q) =>
               q.questionId === id
-                ? { ...q, hit, foundRank, stale: false, scoredAt: Date.now() }
+                ? {
+                    ...q,
+                    hit,
+                    foundRank,
+                    storedSim: null,
+                    stale: false,
+                    scoredAt: Date.now(),
+                  }
                 : q,
             ),
           },
@@ -264,7 +280,9 @@ export function EvalDashboard() {
             },
       );
       if (!res.ok || !res.body) {
-        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        const data = (await res.json().catch(() => null)) as {
+          error?: string;
+        } | null;
         setError(data?.error ?? `Request failed (${res.status}).`);
         return;
       }
@@ -289,15 +307,29 @@ export function EvalDashboard() {
               setProgress({ phase: "generate", done: 0, total: event.total });
               break;
             case "generate-progress":
-              setProgress({ phase: "generate", done: event.done, total: event.total });
+              setProgress({
+                phase: "generate",
+                done: event.done,
+                total: event.total,
+              });
               break;
             case "score-start":
               hits = 0;
-              setProgress({ phase: "score", done: 0, total: event.total, hits: 0 });
+              setProgress({
+                phase: "score",
+                done: 0,
+                total: event.total,
+                hits: 0,
+              });
               break;
             case "score-result":
               if (event.hit) hits += 1;
-              setProgress({ phase: "score", done: event.done, total: event.total, hits });
+              setProgress({
+                phase: "score",
+                done: event.done,
+                total: event.total,
+                hits,
+              });
               patchQuestion(event.questionId, event.hit, event.foundRank);
               break;
             case "done":
@@ -334,23 +366,24 @@ export function EvalDashboard() {
         `Recall@k ${pct(r.recall)} · nDCG ${fmtScore(r.ndcg)}.`,
     );
 
-  const onRescore = () =>
+  const onRescore = (documentId: string | null) =>
     runStream(
       "/api/eval/rescore",
       (r) =>
         `Re-scored ${r.scored} question(s). ` +
         `Recall@k ${pct(r.recall)} · nDCG ${fmtScore(r.ndcg)}.`,
+      documentId ? { documentId } : undefined,
     );
 
-  // Bulk actions → Add question → {difficulty}: corpus-wide generate at one
-  // difficulty, then score. Reuses the same NDJSON progress stream.
-  const onBulkAdd = (difficulty: Difficulty) =>
+  // Bulk actions → Add question → {difficulty}: generate at one difficulty
+  // (corpus-wide, or one document when scoped), then score. Same NDJSON stream.
+  const onBulkAdd = (difficulty: Difficulty, documentId: string | null) =>
     runStream(
       "/api/eval/bulk-generate",
       (r) =>
         `Added ${r.generated} ${difficulty} question(s), scored ${r.scored}. ` +
         `Recall@k ${pct(r.recall)} · nDCG ${fmtScore(r.ndcg)}.`,
-      { difficulty },
+      { difficulty, documentId: documentId ?? undefined },
     );
 
   async function saveEdit(id: string) {
@@ -378,7 +411,9 @@ export function EvalDashboard() {
   async function remove(id: string) {
     setBusy(true);
     try {
-      const res = await apiFetch(`/api/eval/questions/${id}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/eval/questions/${id}`, {
+        method: "DELETE",
+      });
       if (!res.ok) {
         const data = (await res.json()) as { error?: string };
         setError(data.error ?? `Request failed (${res.status}).`);
@@ -497,9 +532,12 @@ export function EvalDashboard() {
         <BulkActions
           busy={busy}
           onAddDifficulty={onBulkAdd}
-          onChangeConfig={() => setCreateOpen(true)}
+          onChangeConfig={(docId, docName) =>
+            setChangeScope({ docId, docName })
+          }
           onRescore={onRescore}
           canRescore={canRescore}
+          canAddQuestion={summary === null || summary.chunkCount > 0}
         />
         {summary && (
           <AutotunePanel
@@ -510,35 +548,31 @@ export function EvalDashboard() {
           />
         )}
         {!progress && notice && (
-          <span className="text-sm text-zinc-600 dark:text-zinc-400">{notice}</span>
+          <span className="text-sm text-zinc-600 dark:text-zinc-400">
+            {notice}
+          </span>
         )}
       </div>
 
-      {createOpen && (
-        <ConfigCreateDialog
-          initial={
-            summary
-              ? {
-                  corpusId: summary.config.corpusId ?? undefined,
-                  baseModel: summary.config.baseModel,
-                  chunkSize: summary.config.chunkSize,
-                  chunkOverlap: summary.config.chunkOverlap,
-                  topK: summary.config.topK,
-                }
-              : undefined
-          }
-          onClose={() => setCreateOpen(false)}
-          onCreated={(id) => {
-            setCreateOpen(false);
+      {changeScope && summary && (
+        <ConfigChangeDialog
+          config={summary.config}
+          documentId={changeScope.docId}
+          documentName={changeScope.docName}
+          onClose={() => setChangeScope(null)}
+          onDone={() => {
+            // Settings/labels changed — refresh the banner and re-pull the summary.
             router.refresh();
-            router.push(`/c/${id}`);
+            reload();
           }}
         />
       )}
 
       {progress && <RunProgress progress={progress} k={summary?.k ?? 0} />}
 
-      {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+      {error && (
+        <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
+      )}
 
       {summary === null ? (
         <p className="text-sm text-zinc-500">Loading…</p>
@@ -578,7 +612,8 @@ export function EvalDashboard() {
 
           {summary.total === 0 && (
             <p className="text-sm text-zinc-500">
-              No eval questions yet. Ingest a document, then click “Process new chunks”.
+              No eval questions yet. Ingest a document, then click “Process new
+              chunks”.
             </p>
           )}
 
@@ -596,7 +631,8 @@ export function EvalDashboard() {
                   >
                     <span className="truncate font-mono">{d.fileName}</span>
                     <span className="shrink-0 text-xs text-zinc-500">
-                      {d.hits}/{d.scored} · {pct(d.scored > 0 ? d.hits / d.scored : null)}
+                      {d.hits}/{d.scored} ·{" "}
+                      {pct(d.scored > 0 ? d.hits / d.scored : null)}
                     </span>
                   </li>
                 ))}
@@ -619,25 +655,30 @@ export function EvalDashboard() {
                 </span>
               </button>
               {runsOpen && (
-              <ul className="flex flex-col divide-y divide-zinc-200 rounded-lg border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800">
-                {summary.runs.map((r) => (
-                  <li
-                    key={r.id}
-                    className="flex items-center justify-between gap-4 px-3 py-2 text-sm"
-                  >
-                    <span className="text-zinc-500">
-                      {new Date(r.createdAt).toLocaleString()}
-                    </span>
-                    <span className="shrink-0 font-medium">
-                      {pct(r.questionCount > 0 ? r.hitCount / r.questionCount : null)}
-                      <span className="ml-2 text-xs font-normal text-zinc-500">
-                        nDCG {fmtScore(r.ndcg)} · ({r.hitCount}/{r.questionCount} @ k=
-                        {r.k})
+                <ul className="flex flex-col divide-y divide-zinc-200 rounded-lg border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800">
+                  {summary.runs.map((r) => (
+                    <li
+                      key={r.id}
+                      className="flex items-center justify-between gap-4 px-3 py-2 text-sm"
+                    >
+                      <span className="text-zinc-500">
+                        {new Date(r.createdAt).toLocaleString()}
                       </span>
-                    </span>
-                  </li>
-                ))}
-              </ul>
+                      <span className="shrink-0 font-medium">
+                        {pct(
+                          r.questionCount > 0
+                            ? r.hitCount / r.questionCount
+                            : null,
+                        )}
+                        <span className="ml-2 text-xs font-normal text-zinc-500">
+                          nDCG {fmtScore(r.ndcg)} · ({r.hitCount}/
+                          {r.questionCount} @ k=
+                          {r.k})
+                        </span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
               )}
             </section>
           )}
@@ -654,9 +695,25 @@ export function EvalDashboard() {
                     (q) => q.hit !== null && !q.stale && !q.ignored,
                   );
                   const hits = scored.filter((q) => q.hit === true).length;
+                  // Mean stored sim of the ground-truth chunk across this chunk's
+                  // scored questions — same read as a trial's "avg sim", but for
+                  // the live (baseline/delegate) retrieval.
+                  const sims = scored
+                    .map((q) => q.storedSim)
+                    .filter((s): s is number => s !== null);
+                  const avgSim =
+                    sims.length > 0
+                      ? sims.reduce((sum, s) => sum + s, 0) / sims.length
+                      : null;
                   const override = summary.overrides.find(
                     (o) => o.chunkId === group.chunkId,
                   );
+                  // A model-kind override = this chunk's DELEGATE model: retrieval
+                  // ranks it there instead of the config's base model.
+                  const delegateModel =
+                    override && override.kind !== "size"
+                      ? override.model
+                      : null;
                   return (
                     <div
                       key={group.chunkId}
@@ -669,11 +726,25 @@ export function EvalDashboard() {
                           <span className="truncate">
                             {group.fileName} · chunk #{group.position ?? "?"}
                           </span>
+                          {delegateModel && (
+                            <span
+                              title="Delegate model: this chunk is embedded and ranked under this model (not the config's base model). Its questions count toward config metrics under it after a re-score."
+                              className="shrink-0 rounded bg-blue-100 px-1.5 py-0.5 font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-400"
+                            >
+                              {delegateModel}
+                            </span>
+                          )}
                         </span>
                         <span className="shrink-0 text-xs text-zinc-500">
                           {scored.length > 0
                             ? `${hits}/${scored.length} hit${scored.length === 1 ? "" : "s"}`
                             : "unscored"}
+                          {avgSim !== null && (
+                            <span className="text-zinc-400">
+                              {" "}
+                              · avg sim {avgSim.toFixed(3)}
+                            </span>
+                          )}
                         </span>
                       </div>
 
@@ -694,7 +765,9 @@ export function EvalDashboard() {
                               ) : (
                                 <span
                                   className={
-                                    q.ignored ? "flex-1 text-zinc-400" : "flex-1"
+                                    q.ignored
+                                      ? "flex-1 text-zinc-400"
+                                      : "flex-1"
                                   }
                                 >
                                   {q.question}
@@ -722,7 +795,11 @@ export function EvalDashboard() {
                                       FP?
                                     </span>
                                   )}
-                                <Badge hit={q.hit} rank={q.foundRank} stale={q.stale} />
+                                <Badge
+                                  hit={q.hit}
+                                  rank={q.foundRank}
+                                  stale={q.stale}
+                                />
                                 <MetricChip label="nDCG" value={q.ndcg} />
                               </span>
                             </div>
@@ -766,7 +843,9 @@ export function EvalDashboard() {
                                     {q.hit !== null && (
                                       <button
                                         type="button"
-                                        onClick={() => toggleExpand(q.questionId)}
+                                        onClick={() =>
+                                          toggleExpand(q.questionId)
+                                        }
                                         title={
                                           expandedId === q.questionId
                                             ? "Hide retrieval detail"
@@ -781,7 +860,9 @@ export function EvalDashboard() {
                                       type="button"
                                       onClick={() =>
                                         setRankingOpenId((id) =>
-                                          id === q.questionId ? null : q.questionId,
+                                          id === q.questionId
+                                            ? null
+                                            : q.questionId,
                                         )
                                       }
                                       title={
@@ -848,85 +929,98 @@ export function EvalDashboard() {
 
                       {/* Saved "Models tried" (above), add-question form, then the
                           ephemeral "Try a different model" runner. */}
-                      <ChunkExperiments chunkId={group.chunkId}>
-                      {/* Add a question — synthetic (LLM, graded) or hand-written */}
-                      <div className="border-t border-zinc-200 px-3 py-2 dark:border-zinc-800">
-                        {addingChunkId === group.chunkId ? (
-                          <div className="flex flex-col gap-2">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="flex gap-2 text-xs">
-                                <ModeTab
-                                  active={addMode === "synthetic"}
-                                  onClick={() => setAddMode("synthetic")}
-                                >
-                                  Synthetic
-                                </ModeTab>
-                                <ModeTab
-                                  active={addMode === "manual"}
-                                  onClick={() => setAddMode("manual")}
-                                >
-                                  Manual
-                                </ModeTab>
-                              </div>
-                              <button
-                                onClick={() => setAddingChunkId(null)}
-                                className="cursor-pointer text-xs text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
-                              >
-                                ✕
-                              </button>
-                            </div>
-
-                            {addMode === "synthetic" ? (
-                              <div className="flex flex-wrap items-center gap-2 text-xs">
-                                <span className="text-zinc-500">
-                                  Generate one question at:
-                                </span>
-                                {(["easy", "medium", "hard"] as const).map((d) => (
-                                  <button
-                                    key={d}
-                                    onClick={() => generateQuestion(group.chunkId, d)}
-                                    disabled={busy}
-                                    className="cursor-pointer rounded border border-zinc-300 px-2 py-0.5 font-medium capitalize text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                      <ChunkExperiments
+                        chunkId={group.chunkId}
+                        baselineModel={summary.config.baseModel}
+                        overrideInfo={override ?? null}
+                        onDelegateChange={reload}
+                      >
+                        {/* Add a question — synthetic (LLM, graded) or hand-written */}
+                        <div className="border-t border-zinc-200 px-3 py-2 dark:border-zinc-800">
+                          {addingChunkId === group.chunkId ? (
+                            <div className="flex flex-col gap-2">
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex gap-2 text-xs">
+                                  <ModeTab
+                                    active={addMode === "synthetic"}
+                                    onClick={() => setAddMode("synthetic")}
                                   >
-                                    {genDifficulty === d ? "Generating…" : d}
-                                  </button>
-                                ))}
-                              </div>
-                            ) : (
-                              <div className="flex items-center gap-2">
-                                <input
-                                  value={addText}
-                                  onChange={(e) => setAddText(e.target.value)}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") addQuestion(group.chunkId);
-                                    if (e.key === "Escape") setAddingChunkId(null);
-                                  }}
-                                  placeholder="A question this chunk should answer…"
-                                  className="flex-1 rounded border border-zinc-300 bg-transparent px-2 py-1 text-sm dark:border-zinc-700"
-                                  autoFocus
-                                />
+                                    Synthetic
+                                  </ModeTab>
+                                  <ModeTab
+                                    active={addMode === "manual"}
+                                    onClick={() => setAddMode("manual")}
+                                  >
+                                    Manual
+                                  </ModeTab>
+                                </div>
                                 <button
-                                  onClick={() => addQuestion(group.chunkId)}
-                                  disabled={busy || !addText.trim()}
-                                  className="cursor-pointer text-xs font-medium text-zinc-700 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300"
+                                  onClick={() => setAddingChunkId(null)}
+                                  className="cursor-pointer text-xs text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
                                 >
-                                  Add
+                                  ✕
                                 </button>
                               </div>
-                            )}
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() => {
-                              setAddingChunkId(group.chunkId);
-                              setAddText("");
-                            }}
-                            className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-700 hover:underline dark:hover:text-zinc-300"
-                          >
-                            + Add a question
-                          </button>
-                        )}
-                      </div>
+
+                              {addMode === "synthetic" ? (
+                                <div className="flex flex-wrap items-center gap-2 text-xs">
+                                  <span className="text-zinc-500">
+                                    Generate one question at:
+                                  </span>
+                                  {(["easy", "medium", "hard"] as const).map(
+                                    (d) => (
+                                      <button
+                                        key={d}
+                                        onClick={() =>
+                                          generateQuestion(group.chunkId, d)
+                                        }
+                                        disabled={busy}
+                                        className="cursor-pointer rounded border border-zinc-300 px-2 py-0.5 font-medium capitalize text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                                      >
+                                        {genDifficulty === d
+                                          ? "Generating…"
+                                          : d}
+                                      </button>
+                                    ),
+                                  )}
+                                </div>
+                              ) : (
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    value={addText}
+                                    onChange={(e) => setAddText(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter")
+                                        addQuestion(group.chunkId);
+                                      if (e.key === "Escape")
+                                        setAddingChunkId(null);
+                                    }}
+                                    placeholder="A question this chunk should answer…"
+                                    className="flex-1 rounded border border-zinc-300 bg-transparent px-2 py-1 text-sm dark:border-zinc-700"
+                                    autoFocus
+                                  />
+                                  <button
+                                    onClick={() => addQuestion(group.chunkId)}
+                                    disabled={busy || !addText.trim()}
+                                    className="cursor-pointer text-xs font-medium text-zinc-700 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300"
+                                  >
+                                    Add
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => {
+                                setAddingChunkId(group.chunkId);
+                                setAddText("");
+                              }}
+                              className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-700 hover:underline dark:hover:text-zinc-300"
+                            >
+                              + Add a question
+                            </button>
+                          )}
+                        </div>
                       </ChunkExperiments>
                     </div>
                   );
@@ -946,7 +1040,11 @@ function fmtOutcome(o: OverrideOutcome): string {
   const d = o.difficulty ?? "·";
   if (o.metric === "recall") {
     const side = (v: number | null, rank: number | null) =>
-      v === null ? "—" : v >= 1 ? `hit #${rank ?? "?"}` : `miss${rank ? ` #${rank}` : ""}`;
+      v === null
+        ? "—"
+        : v >= 1
+          ? `hit #${rank ?? "?"}`
+          : `miss${rank ? ` #${rank}` : ""}`;
     return `${d} · recall ${side(o.beforeValue, o.beforeRank)} → ${side(o.afterValue, o.afterRank)}`;
   }
   const val = (v: number | null) => (v === null ? "—" : v.toFixed(2));
@@ -973,7 +1071,11 @@ function OverrideBadge({ info }: { info: ChunkOverrideInfo }) {
           <span className="font-medium">Override: {what}</span>
           {info.outcomes.length > 0 ? (
             info.outcomes.map((o, i) => (
-              <span key={i} title={o.question} className="font-mono text-zinc-500">
+              <span
+                key={i}
+                title={o.question}
+                className="font-mono text-zinc-500"
+              >
                 {fmtOutcome(o)}
               </span>
             ))
@@ -996,36 +1098,63 @@ function OverrideBadge({ info }: { info: ChunkOverrideInfo }) {
   );
 }
 
-// Bulk actions: corpus-wide "add question at difficulty" (in place), "re-score
-// all" (re-runs retrieval for every labeled question), and the "change base
-// model / chunk size" shortcuts that open the config-create dialog (D2 — those
-// spawn a NEW config so this one's eval history is preserved).
+// Bulk actions: "add question at difficulty", "re-score all", and the "change
+// base model / chunk size" entries that edit THIS config in place. The scope
+// dropdown at the top targets everything at the whole corpus ("All documents",
+// the default) or one document — doc-scoped config changes apply as per-chunk
+// overrides.
 function BulkActions({
   busy,
   onAddDifficulty,
   onChangeConfig,
   onRescore,
   canRescore,
+  canAddQuestion,
 }: {
   busy: boolean;
-  onAddDifficulty: (d: Difficulty) => void;
-  onChangeConfig: () => void;
-  onRescore: () => void;
+  onAddDifficulty: (d: Difficulty, documentId: string | null) => void;
+  onChangeConfig: (
+    documentId: string | null,
+    documentName: string | null,
+  ) => void;
+  onRescore: (documentId: string | null) => void;
   canRescore: boolean;
+  canAddQuestion: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [subOpen, setSubOpen] = useState(false);
+  // Document scope. "" = all documents. The list is fetched once, on first open.
+  const [docs, setDocs] = useState<IngestedDocument[] | null>(null);
+  const [docId, setDocId] = useState("");
   const close = () => {
     setOpen(false);
     setSubOpen(false);
   };
+
+  function toggleMenu() {
+    const opening = !open;
+    setOpen(opening);
+    if (!opening || docs !== null) return;
+    apiFetch("/api/documents")
+      .then((res) => res.json())
+      .then((data: { documents?: IngestedDocument[] }) =>
+        setDocs(data.documents ?? []),
+      )
+      .catch(() => setDocs([]));
+  }
+
+  const scopeId = docId || null;
+  const scopeName = scopeId
+    ? (docs?.find((d) => d.id === scopeId)?.fileName ?? null)
+    : null;
+
   return (
     <div className="relative">
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={toggleMenu}
         disabled={busy}
-        title="Bulk changes across the whole corpus"
+        title="Bulk changes across the whole corpus, or one document via the scope picker"
         className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium cursor-pointer transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
       >
         Bulk actions ▾
@@ -1034,12 +1163,36 @@ function BulkActions({
         <>
           <div className="fixed inset-0 z-10" onClick={close} />
           <div className="absolute left-0 top-full z-20 mt-1 w-60 rounded-md border border-zinc-200 bg-white py-1 text-sm shadow-lg dark:border-zinc-800 dark:bg-zinc-900">
+            {/* Which documents the actions below apply to. */}
+            <label className="flex flex-col gap-1 px-3 pb-1.5 pt-1 text-xs text-zinc-500">
+              Apply to
+              <select
+                value={docId}
+                onChange={(e) => setDocId(e.target.value)}
+                className="w-full rounded border border-zinc-300 bg-transparent px-1.5 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+              >
+                <option value="">All documents</option>
+                {docs?.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.fileName}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="my-1 border-t border-zinc-200 dark:border-zinc-800" />
             <button
               type="button"
               onClick={() => setSubOpen((s) => !s)}
-              className="flex w-full cursor-pointer items-center justify-between px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              disabled={!canAddQuestion}
+              title={
+                canAddQuestion
+                  ? undefined
+                  : "No chunks yet — ingest a document first"
+              }
+              className="flex w-full cursor-pointer items-center justify-between px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
-              Add question <span className="text-zinc-400">{subOpen ? "▾" : "▸"}</span>
+              Add question{" "}
+              <span className="text-zinc-400">{subOpen ? "▾" : "▸"}</span>
             </button>
             {subOpen && (
               <div className="flex gap-1 px-3 pb-1.5 pt-0.5">
@@ -1049,7 +1202,7 @@ function BulkActions({
                     type="button"
                     onClick={() => {
                       close();
-                      onAddDifficulty(d);
+                      onAddDifficulty(d, scopeId);
                     }}
                     className="cursor-pointer rounded border border-zinc-300 px-2 py-0.5 text-xs font-medium capitalize text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
                   >
@@ -1062,12 +1215,12 @@ function BulkActions({
               type="button"
               onClick={() => {
                 close();
-                onRescore();
+                onRescore(scopeId);
               }}
               disabled={!canRescore}
               title={
                 canRescore
-                  ? "Re-run retrieval scoring for every labeled question"
+                  ? "Re-run retrieval scoring for every labeled question in scope"
                   : "No labeled questions to re-score yet"
               }
               className="block w-full cursor-pointer px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
@@ -1079,9 +1232,13 @@ function BulkActions({
               type="button"
               onClick={() => {
                 close();
-                onChangeConfig();
+                onChangeConfig(scopeId, scopeName);
               }}
-              title="Spawns a new config over this corpus (keeps this one's history)"
+              title={
+                scopeId
+                  ? "Overrides this document's chunks to another model (config unchanged)"
+                  : "Changes THIS config in place — re-embeds but keeps question(s)"
+              }
               className="block w-full cursor-pointer px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               Change base model…
@@ -1090,9 +1247,13 @@ function BulkActions({
               type="button"
               onClick={() => {
                 close();
-                onChangeConfig();
+                onChangeConfig(scopeId, scopeName);
               }}
-              title="Spawns a new config over this corpus (keeps this one's history)"
+              title={
+                scopeId
+                  ? "Re-splits this document's chunks via per-chunk overrides (config unchanged)"
+                  : "Changes THIS config in place — re-embeds but keeps question(s)"
+              }
               className="block w-full cursor-pointer px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               Adjust chunk size / overlap…
@@ -1120,8 +1281,12 @@ function Stat({
 }) {
   return (
     <div className="flex flex-col gap-0.5 rounded-lg border border-zinc-200 px-4 py-3 dark:border-zinc-800">
-      <span className="text-xs uppercase tracking-wide text-zinc-500">{label}</span>
-      <span className={big ? "text-2xl font-semibold" : "text-lg font-medium"}>{value}</span>
+      <span className="text-xs uppercase tracking-wide text-zinc-500">
+        {label}
+      </span>
+      <span className={big ? "text-2xl font-semibold" : "text-lg font-medium"}>
+        {value}
+      </span>
       {sub && <span className="text-xs text-zinc-400">{sub}</span>}
     </div>
   );
@@ -1205,7 +1370,11 @@ function ExplainPanel({
     return <p className="mt-1 text-xs text-zinc-400">Loading chunk detail…</p>;
   }
   if (state.status === "error") {
-    return <p className="mt-1 text-xs text-red-600 dark:text-red-400">{state.message}</p>;
+    return (
+      <p className="mt-1 text-xs text-red-600 dark:text-red-400">
+        {state.message}
+      </p>
+    );
   }
 
   const { expected, between, retrieved } = state.data;
@@ -1233,16 +1402,26 @@ function ExplainPanel({
       {!expectedInTopK && (
         <div className="flex flex-col gap-1">
           <span className="font-medium uppercase tracking-wide text-zinc-500">
-            Expected · <span className="font-mono normal-case">{expected?.fileName ?? "?"}</span> · chunk #{expected?.position ?? "?"}
+            Expected ·{" "}
+            <span className="font-mono normal-case">
+              {expected?.fileName ?? "?"}
+            </span>{" "}
+            · chunk #{expected?.position ?? "?"}
             {scored && ` · not in top ${k}`}
             {expected?.rank != null && (
               <span className="text-zinc-400"> · rank #{expected.rank}</span>
             )}
             {expected?.score != null && (
-              <span className="text-zinc-400"> · sim {expected.score.toFixed(3)}</span>
+              <span className="text-zinc-400">
+                {" "}
+                · sim {expected.score.toFixed(3)}
+              </span>
             )}
           </span>
-          <ChunkText text={expected?.text ?? "Chunk text unavailable."} expected />
+          <ChunkText
+            text={expected?.text ?? "Chunk text unavailable."}
+            expected
+          />
         </div>
       )}
 
@@ -1251,7 +1430,9 @@ function ExplainPanel({
           Retrieved · top {k}
         </span>
         {!scored ? (
-          <span className="text-zinc-400">Not scored yet — no retrieval recorded.</span>
+          <span className="text-zinc-400">
+            Not scored yet — no retrieval recorded.
+          </span>
         ) : (
           <ol className="flex flex-col gap-1">
             {retrieved.map((c) => (
@@ -1270,7 +1451,8 @@ function ExplainPanel({
       {between.length > 0 && (
         <div className="flex flex-col gap-1">
           <span className="font-medium uppercase tracking-wide text-zinc-500">
-            Between · {gapLo === gapHi ? `rank ${gapLo}` : `ranks ${gapLo}–${gapHi}`}
+            Between ·{" "}
+            {gapLo === gapHi ? `rank ${gapLo}` : `ranks ${gapLo}–${gapHi}`}
           </span>
           <ol className="flex flex-col gap-1">
             {between.map((c) => (
@@ -1366,7 +1548,12 @@ function RechunkExperiment({
 
       <div className={mode === "uniform" ? "" : "hidden"}>
         {mounted.uniform && (
-          <RechunkLab questionId={questionId} chunkId={chunkId} baseline={baseline} k={k} />
+          <RechunkLab
+            questionId={questionId}
+            chunkId={chunkId}
+            baseline={baseline}
+            k={k}
+          />
         )}
       </div>
       <div className={mode === "custom" ? "" : "hidden"}>
@@ -1452,7 +1639,9 @@ function RechunkResultView({
       </span>
 
       <div className="flex flex-col gap-1">
-        <span className="font-medium uppercase tracking-wide text-zinc-500">Pieces</span>
+        <span className="font-medium uppercase tracking-wide text-zinc-500">
+          Pieces
+        </span>
         <ol className="flex flex-col gap-1">
           {result.subChunks.map((s) => {
             const id = `sub-${s.subIndex}`;
@@ -1468,8 +1657,8 @@ function RechunkResultView({
                   }`}
                 >
                   <span className="text-zinc-400">{open[id] ? "▾" : "▸"}</span>
-                  piece {s.subIndex + 1}/{result.subChunkCount} · rank #{s.rank} · sim{" "}
-                  {s.score.toFixed(3)}
+                  piece {s.subIndex + 1}/{result.subChunkCount} · rank #{s.rank}{" "}
+                  · sim {s.score.toFixed(3)}
                   {s.inTopK && ` · in top ${k} ✓`}
                 </button>
                 {open[id] && <ChunkText text={s.text} expected={s.inTopK} />}
@@ -1500,12 +1689,14 @@ function RechunkResultView({
                       : "text-zinc-500"
                   }`}
                 >
-                  <span className="text-zinc-400">{open[id] ? "▾" : "▸"}</span>
-                  #{c.rank} · <span className="font-mono">{label}</span> · sim{" "}
+                  <span className="text-zinc-400">{open[id] ? "▾" : "▸"}</span>#
+                  {c.rank} · <span className="font-mono">{label}</span> · sim{" "}
                   {c.score.toFixed(3)}
                   {c.isSubChunk && " · this chunk ✓"}
                 </button>
-                {open[id] && <ChunkText text={c.text} expected={c.isSubChunk} />}
+                {open[id] && (
+                  <ChunkText text={c.text} expected={c.isSubChunk} />
+                )}
               </li>
             );
           })}
@@ -1540,7 +1731,8 @@ function RechunkLab({
   const [saved, setSaved] = useState(false);
   const [saveErr, setSaveErr] = useState<string | null>(null);
 
-  const invalid = !Number.isInteger(size) || size < 1 || overlap < 0 || overlap >= size;
+  const invalid =
+    !Number.isInteger(size) || size < 1 || overlap < 0 || overlap >= size;
 
   async function run() {
     if (invalid) return;
@@ -1556,7 +1748,9 @@ function RechunkLab({
       });
       const data = (await res.json()) as RechunkResult | { error: string };
       if (!res.ok || "error" in data) {
-        setError("error" in data ? data.error : `Request failed (${res.status}).`);
+        setError(
+          "error" in data ? data.error : `Request failed (${res.status}).`,
+        );
         setResult(null);
         return;
       }
@@ -1579,7 +1773,9 @@ function RechunkLab({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ size, overlap }),
       });
-      const data = (await res.json().catch(() => null)) as { error?: string } | null;
+      const data = (await res.json().catch(() => null)) as {
+        error?: string;
+      } | null;
       if (!res.ok) {
         setSaveErr(data?.error ?? `Request failed (${res.status}).`);
         return;
@@ -1650,9 +1846,13 @@ function RechunkLab({
               {saving ? "Saving…" : saved ? "Saved ✓" : "Set as size override"}
             </button>
             {saved && (
-              <span className="text-zinc-500">Re-score to apply across this chunk’s questions.</span>
+              <span className="text-zinc-500">
+                Re-score to apply across this chunk’s questions.
+              </span>
             )}
-            {saveErr && <span className="text-red-600 dark:text-red-400">{saveErr}</span>}
+            {saveErr && (
+              <span className="text-red-600 dark:text-red-400">{saveErr}</span>
+            )}
           </div>
         </>
       )}
@@ -1660,11 +1860,18 @@ function RechunkLab({
   );
 }
 
-// Mode B — resize one custom chunk. Stitches the labeled chunk + frozen neighbors
-// into contiguous text, lets the user set the chunk's [start, end) token borders
-// (numeric inputs, or by dragging the borders in the preview — each drag snaps to
-// the nearest token), warns when the borders leave document text uncovered (a
-// gap), then re-ranks with that one reshaped chunk. Ephemeral.
+// Selection reported by the border picker: the reshaped chunk's text plus the
+// stats callers need for annotations and warnings.
+type BorderSelection = {
+  text: string;
+  tokens: number;
+  gapTokens: number;
+  intoNeighbors: number;
+};
+
+// Mode B — resize one custom chunk: pick borders (drag or numeric), then re-rank
+// the question against the corpus with that one reshaped chunk substituted in.
+// Ephemeral; the picker itself is shared with "try a different configuration".
 function ChunkBoundaryLab({
   questionId,
   baseline,
@@ -1676,6 +1883,87 @@ function ChunkBoundaryLab({
   k: number;
   positionHint: number;
 }) {
+  const [sel, setSel] = useState<BorderSelection | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
+  const [result, setResult] = useState<RechunkResult | null>(null);
+
+  async function run() {
+    if (!sel) return;
+    setBusy(true);
+    setRunError(null);
+    try {
+      const res = await apiFetch(`/api/eval/questions/${questionId}/rechunk`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sections: [sel.text] }),
+      });
+      const data = (await res.json()) as RechunkResult | { error: string };
+      if (!res.ok || "error" in data) {
+        setRunError(
+          "error" in data ? data.error : `Request failed (${res.status}).`,
+        );
+        setResult(null);
+        return;
+      }
+      setResult(data);
+    } catch (err) {
+      setRunError(err instanceof Error ? err.message : "Network error.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <ChunkBorderPicker
+        questionId={questionId}
+        positionHint={positionHint}
+        onSelection={setSel}
+      >
+        <button
+          onClick={run}
+          disabled={busy || !sel}
+          className="rounded-md bg-black px-3 py-1.5 font-medium text-white cursor-pointer transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
+        >
+          {busy ? "Running…" : "Run"}
+        </button>
+      </ChunkBorderPicker>
+
+      {runError && (
+        <span className="text-red-600 dark:text-red-400">{runError}</span>
+      )}
+
+      {result && sel && (
+        <RechunkResultView
+          result={result}
+          baseline={baseline}
+          k={k}
+          annotation={`custom · ${sel.tokens} tokens${sel.gapTokens > 0 ? `, ${sel.gapTokens} uncovered` : ""}`}
+        />
+      )}
+    </div>
+  );
+}
+
+// The draggable-border picker (extracted from the boundary lab so the
+// "try a different configuration" runner reuses it). Stitches the labeled chunk
+// + frozen neighbors into contiguous text, lets the user set the chunk's
+// [start, end) token borders (numeric inputs, or by dragging the borders in the
+// preview — each drag snaps to the nearest token), warns when the borders leave
+// document text uncovered (a gap), and reports the selection upward. `children`
+// renders in the inputs row — the caller's action button(s). Read-only.
+function ChunkBorderPicker({
+  questionId,
+  positionHint,
+  onSelection,
+  children,
+}: {
+  questionId: string;
+  positionHint: number;
+  onSelection: (sel: BorderSelection | null) => void;
+  children?: ReactNode;
+}) {
   const [range, setRange] = useState<{ from: number; to: number }>(() => ({
     from: Math.max(0, positionHint - 2),
     to: positionHint + 2,
@@ -1686,10 +1974,6 @@ function ChunkBoundaryLab({
 
   const [start, setStart] = useState(0);
   const [end, setEnd] = useState(0);
-
-  const [busy, setBusy] = useState(false);
-  const [runError, setRunError] = useState<string | null>(null);
-  const [result, setResult] = useState<RechunkResult | null>(null);
 
   // Which border the user is currently dragging in the text preview, if any.
   const [dragging, setDragging] = useState<"start" | "end" | null>(null);
@@ -1707,7 +1991,9 @@ function ChunkBoundaryLab({
         const data = (await res.json()) as ChunkWindow | { error: string };
         if (!alive) return;
         if (!res.ok || "error" in data) {
-          setWinError("error" in data ? data.error : `Request failed (${res.status}).`);
+          setWinError(
+            "error" in data ? data.error : `Request failed (${res.status}).`,
+          );
           return;
         }
         setWinError(null);
@@ -1715,7 +2001,10 @@ function ChunkBoundaryLab({
         setStart(data.testDefault.tokenStart);
         setEnd(data.testDefault.tokenEnd);
       } catch (err) {
-        if (alive) setWinError(err instanceof Error ? err.message : "Failed to load window.");
+        if (alive)
+          setWinError(
+            err instanceof Error ? err.message : "Failed to load window.",
+          );
       } finally {
         if (alive) setLoading(false);
       }
@@ -1743,7 +2032,10 @@ function ChunkBoundaryLab({
         if (offsets[mid] < charIdx) lo = mid + 1;
         else hi = mid;
       }
-      if (lo > 0 && Math.abs(offsets[lo - 1] - charIdx) <= Math.abs(offsets[lo] - charIdx)) {
+      if (
+        lo > 0 &&
+        Math.abs(offsets[lo - 1] - charIdx) <= Math.abs(offsets[lo] - charIdx)
+      ) {
         return lo - 1;
       }
       return lo;
@@ -1753,7 +2045,10 @@ function ChunkBoundaryLab({
     // when the hit lands off the painted text (e.g. on the handle itself).
     const pointToToken = (x: number, y: number): number | null => {
       const doc = document as Document & {
-        caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+        caretPositionFromPoint?: (
+          x: number,
+          y: number,
+        ) => { offsetNode: Node; offset: number } | null;
         caretRangeFromPoint?: (x: number, y: number) => Range | null;
       };
       let node: Node | null = null;
@@ -1771,7 +2066,10 @@ function ChunkBoundaryLab({
       } else {
         return null;
       }
-      const host = node.nodeType === Node.TEXT_NODE ? node.parentElement : (node as Element);
+      const host =
+        node.nodeType === Node.TEXT_NODE
+          ? node.parentElement
+          : (node as Element);
       const span = host?.closest<HTMLElement>("[data-cs]");
       if (!span) return null;
       const base = Number(span.dataset.cs);
@@ -1796,8 +2094,40 @@ function ChunkBoundaryLab({
     };
   }, [dragging, win]);
 
-  if (loading && !win) return <span className="text-zinc-400">Loading window…</span>;
-  if (winError) return <span className="text-red-600 dark:text-red-400">{winError}</span>;
+  // Report the current selection upward whenever it changes (or turns invalid).
+  useEffect(() => {
+    if (!win) {
+      onSelection(null);
+      return;
+    }
+    const { offsets, tokenCount, exclusive, text } = win;
+    const s = Math.max(0, Math.min(start, tokenCount));
+    const e = Math.max(0, Math.min(end, tokenCount));
+    if (s >= e) {
+      onSelection(null);
+      return;
+    }
+    const exLen = Math.max(0, exclusive.tokenEnd - exclusive.tokenStart);
+    const exCovered = Math.max(
+      0,
+      Math.min(e, exclusive.tokenEnd) - Math.max(s, exclusive.tokenStart),
+    );
+    const intoNeighbors =
+      Math.max(0, exclusive.tokenStart - s) +
+      Math.max(0, e - exclusive.tokenEnd);
+    onSelection({
+      text: text.slice(offsets[s], offsets[e]),
+      tokens: e - s,
+      gapTokens: exLen - exCovered,
+      intoNeighbors,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- notify on selection change only
+  }, [win, start, end]);
+
+  if (loading && !win)
+    return <span className="text-zinc-400">Loading window…</span>;
+  if (winError)
+    return <span className="text-red-600 dark:text-red-400">{winError}</span>;
   if (!win) return null;
 
   const { offsets, tokenCount, exclusive, text } = win;
@@ -1811,36 +2141,13 @@ function ChunkBoundaryLab({
   const exLen = Math.max(0, exclusive.tokenEnd - exclusive.tokenStart);
   const exCovered = Math.max(
     0,
-    Math.min(clampedEnd, exclusive.tokenEnd) - Math.max(clampedStart, exclusive.tokenStart),
+    Math.min(clampedEnd, exclusive.tokenEnd) -
+      Math.max(clampedStart, exclusive.tokenStart),
   );
   const gapTokens = exLen - exCovered;
   const intoNeighbors =
     Math.max(0, exclusive.tokenStart - clampedStart) +
     Math.max(0, clampedEnd - exclusive.tokenEnd);
-
-  async function run() {
-    if (!validSel) return;
-    setBusy(true);
-    setRunError(null);
-    try {
-      const res = await apiFetch(`/api/eval/questions/${questionId}/rechunk`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sections: [text.slice(off(clampedStart), off(clampedEnd))] }),
-      });
-      const data = (await res.json()) as RechunkResult | { error: string };
-      if (!res.ok || "error" in data) {
-        setRunError("error" in data ? data.error : `Request failed (${res.status}).`);
-        setResult(null);
-        return;
-      }
-      setResult(data);
-    } catch (err) {
-      setRunError(err instanceof Error ? err.message : "Network error.");
-    } finally {
-      setBusy(false);
-    }
-  }
 
   // Char offsets of the selection and the exclusive zone — the breakpoints used
   // to paint the preview and to anchor the draggable borders.
@@ -1849,8 +2156,10 @@ function ChunkBoundaryLab({
   const exStartChar = off(exclusive.tokenStart);
   const exEndChar = off(exclusive.tokenEnd);
 
-  const selClass = "bg-indigo-200/70 text-zinc-900 dark:bg-indigo-500/30 dark:text-zinc-100";
-  const gapClass = "bg-red-200/70 text-zinc-900 dark:bg-red-500/30 dark:text-zinc-100";
+  const selClass =
+    "bg-indigo-200/70 text-zinc-900 dark:bg-indigo-500/30 dark:text-zinc-100";
+  const gapClass =
+    "bg-red-200/70 text-zinc-900 dark:bg-red-500/30 dark:text-zinc-100";
   const ctxClass = "text-zinc-400";
 
   // Paint a [from, to) char range as frozen-neighbor (ctx) or uncovered
@@ -1917,9 +2226,10 @@ function ChunkBoundaryLab({
   return (
     <div className="flex flex-col gap-2">
       <span className="text-zinc-500">
-        chunk #{win.testPosition} of {win.totalChunks} · viewing window #{win.rangeFrom}–#{win.rangeTo} ·{" "}
-        {tokenCount} tokens. Neighbors are frozen; this chunk’s exclusive zone is tokens{" "}
-        {exclusive.tokenStart}–{exclusive.tokenEnd}.
+        chunk #{win.testPosition} of {win.totalChunks} · viewing window #
+        {win.rangeFrom}–#{win.rangeTo} · {tokenCount} tokens. Neighbors are
+        frozen; this chunk’s exclusive zone is tokens {exclusive.tokenStart}–
+        {exclusive.tokenEnd}.
       </span>
 
       <div className="flex flex-wrap items-end gap-3">
@@ -1945,18 +2255,14 @@ function ChunkBoundaryLab({
             className="w-24 rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700"
           />
         </label>
-        <button
-          onClick={run}
-          disabled={busy || !validSel}
-          className="rounded-md bg-black px-3 py-1.5 font-medium text-white cursor-pointer transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
-        >
-          {busy ? "Running…" : "Run"}
-        </button>
+        {children}
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-zinc-400">
-          {validSel ? `${clampedEnd - clampedStart} tokens selected` : "start must be below end"}
+          {validSel
+            ? `${clampedEnd - clampedStart} tokens selected`
+            : "start must be below end"}
         </span>
         {gapTokens > 0 && (
           <span className="rounded bg-red-100 px-1.5 py-0.5 font-medium text-red-700 dark:bg-red-900/40 dark:text-red-400">
@@ -1992,11 +2298,17 @@ function ChunkBoundaryLab({
 
       <div className="flex items-center gap-3 text-zinc-500">
         <span>
-          <span className="rounded bg-indigo-200/70 px-1 dark:bg-indigo-500/30">selected</span>{" "}
-          <span className="rounded bg-red-200/70 px-1 dark:bg-red-500/30">gap</span>{" "}
+          <span className="rounded bg-indigo-200/70 px-1 dark:bg-indigo-500/30">
+            selected
+          </span>{" "}
+          <span className="rounded bg-red-200/70 px-1 dark:bg-red-500/30">
+            gap
+          </span>{" "}
           <span className="text-zinc-400">frozen neighbor</span>
         </span>
-        <span className="text-zinc-400">Drag the indigo borders to resize (snaps to tokens).</span>
+        <span className="text-zinc-400">
+          Drag the indigo borders to resize (snaps to tokens).
+        </span>
         {canLoadMore && (
           <button
             type="button"
@@ -2012,17 +2324,6 @@ function ChunkBoundaryLab({
           </button>
         )}
       </div>
-
-      {runError && <span className="text-red-600 dark:text-red-400">{runError}</span>}
-
-      {result && (
-        <RechunkResultView
-          result={result}
-          baseline={baseline}
-          k={k}
-          annotation={`custom · ${clampedEnd - clampedStart} tokens${gapTokens > 0 ? `, ${gapTokens} uncovered` : ""}`}
-        />
-      )}
     </div>
   );
 }
@@ -2049,8 +2350,9 @@ function ChunkRow({
             : "text-zinc-500"
         }`}
       >
-        <span className="text-zinc-400">{isOpen ? "▾" : "▸"}</span>
-        #{chunk.rank} · <span className="font-mono">{chunk.fileName ?? "?"}</span> · chunk #{chunk.position ?? "?"}
+        <span className="text-zinc-400">{isOpen ? "▾" : "▸"}</span>#{chunk.rank}{" "}
+        · <span className="font-mono">{chunk.fileName ?? "?"}</span> · chunk #
+        {chunk.position ?? "?"}
         {chunk.score !== null && (
           <span className="text-zinc-400"> · sim {chunk.score.toFixed(3)}</span>
         )}
@@ -2083,7 +2385,8 @@ function RunProgress({ progress, k }: { progress: EvalProgress; k: number }) {
   const fraction = progress.total > 0 ? progress.done / progress.total : 0;
   const percent = Math.round(fraction * 100);
   const scoring = progress.phase === "score";
-  const recall = scoring && progress.done > 0 ? progress.hits / progress.done : null;
+  const recall =
+    scoring && progress.done > 0 ? progress.hits / progress.done : null;
 
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
@@ -2114,16 +2417,68 @@ function RunProgress({ progress, k }: { progress: EvalProgress; k: number }) {
 }
 
 // ---------------------------------------------------------------------------
-// Per-chunk "try a different model" experiment. Re-ranks this chunk's questions
-// against a small candidate pool — the chunk (always in) + its questions' top-k
-// + any corpus chunks you add — re-embedded under an alternate model. Ephemeral
-// by default; "Save result" persists a snapshot rendered under "Models tried".
-// Each question's pool rank is shown against its stored full-corpus result.
+// Per-chunk "try a different configuration" experiment. Re-ranks this chunk's
+// questions against a small candidate pool — the chunk (always in) + its
+// questions' top-k + any corpus chunks you add — under a VARIATION: an alternate
+// model, a re-shaped chunk (uniform re-split or dragged borders), or both
+// (combination). Ephemeral by default; "Save result" persists a snapshot
+// rendered under the chunk's variations lists. Each question's pool rank is
+// shown against its stored full-corpus result.
 // ---------------------------------------------------------------------------
 type TrialState =
   | { status: "loading" }
   | { status: "error"; message: string }
   | { status: "ready"; ctx: ModelTrialContext };
+
+// Which knob(s) the trial turns. "combo" = model + chunk shape together.
+type VariationChoice = "model" | "size" | "combo";
+
+// Human label for a trial's shape variation, e.g. "re-split 256/25 tokens · 3
+// pieces" or "custom borders · 1 piece". Model-only trials need no shape label.
+function variationLabel(
+  kind: TrialKind,
+  chunkSize: number | null,
+  chunkOverlap: number | null,
+  pieceCount: number | null,
+): string | undefined {
+  if (kind === "model") return undefined;
+  const shape =
+    chunkSize != null
+      ? `${chunkSize}/${chunkOverlap ?? 0} tokens`
+      : "custom borders";
+  const pieces =
+    pieceCount != null
+      ? ` · ${pieceCount} piece${pieceCount === 1 ? "" : "s"}`
+      : "";
+  return `re-split ${shape}${pieces}`;
+}
+
+// A selectable variation option: colored when active, with a small checkmark —
+// deliberately not a checkbox.
+function VariationPill({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`cursor-pointer rounded-full border px-2.5 py-0.5 font-medium transition-colors ${
+        active
+          ? "border-indigo-400 bg-indigo-100 text-indigo-700 dark:border-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300"
+          : "border-zinc-300 text-zinc-500 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+      }`}
+    >
+      {active && <span className="mr-1">✓</span>}
+      {children}
+    </button>
+  );
+}
 
 function ModelTrial({
   chunkId,
@@ -2135,7 +2490,14 @@ function ModelTrial({
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<TrialState | null>(null);
 
+  const [variation, setVariation] = useState<VariationChoice>("model");
   const [model, setModel] = useState("");
+  // Chunk-shape knobs (size / combo): uniform re-split inputs, or the custom
+  // drag-border selection from the shared picker.
+  const [shapeMode, setShapeMode] = useState<"uniform" | "custom">("uniform");
+  const [size, setSize] = useState(256);
+  const [overlap, setOverlap] = useState(25);
+  const [customSel, setCustomSel] = useState<BorderSelection | null>(null);
   // Pool chunk ids the user has ticked (the chunk itself is always included
   // server-side). Seeded with the auto pool — the questions' top-k — on load.
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -2162,9 +2524,13 @@ function ModelTrial({
     setState({ status: "loading" });
     apiFetch(`/api/eval/chunks/${chunkId}/try-model`)
       .then(async (res) => {
-        const data = (await res.json()) as ModelTrialContext | { error: string };
+        const data = (await res.json()) as
+          | ModelTrialContext
+          | { error: string };
         if (!res.ok || "error" in data) {
-          throw new Error("error" in data ? data.error : `Request failed (${res.status}).`);
+          throw new Error(
+            "error" in data ? data.error : `Request failed (${res.status}).`,
+          );
         }
         setState({ status: "ready", ctx: data });
         setModel(data.models[0]?.id ?? "");
@@ -2188,8 +2554,30 @@ function ModelTrial({
     });
   }
 
+  // Client-side gate mirroring the server's variation validation.
+  const shapeInvalid =
+    variation !== "model" &&
+    (shapeMode === "custom"
+      ? customSel === null
+      : !Number.isInteger(size) || size < 1 || overlap < 0 || overlap >= size);
+  const cantRun = (variation !== "size" && !model) || shapeInvalid;
+
+  // The flat POST body for the current variation (kind is derived server-side).
+  function variationBody(): Record<string, unknown> {
+    const body: Record<string, unknown> = {};
+    if (variation !== "size") body.model = model;
+    if (variation !== "model") {
+      if (shapeMode === "custom" && customSel) body.sections = [customSel.text];
+      else {
+        body.size = size;
+        body.overlap = overlap;
+      }
+    }
+    return body;
+  }
+
   async function run(save: boolean) {
-    if (!model) return;
+    if (cantRun) return;
     if (save) setSaving(true);
     else setRunning(true);
     setRunError(null);
@@ -2197,13 +2585,19 @@ function ModelTrial({
       const res = await apiFetch(`/api/eval/chunks/${chunkId}/try-model`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model, poolChunkIds: [...selected], save }),
+        body: JSON.stringify({
+          ...variationBody(),
+          poolChunkIds: [...selected],
+          save,
+        }),
       });
       const data = (await res.json()) as
         | { result: ModelTrialResult; savedTrial: SavedModelTrial | null }
         | { error: string };
       if (!res.ok || "error" in data) {
-        setRunError("error" in data ? data.error : `Request failed (${res.status}).`);
+        setRunError(
+          "error" in data ? data.error : `Request failed (${res.status}).`,
+        );
         return;
       }
       setResult(data.result);
@@ -2221,24 +2615,32 @@ function ModelTrial({
     }
   }
 
-  // Persist (toModel) or clear (null) this chunk's override for the active config.
-  async function applyOverride(toModel: string | null) {
+  // Persist the current variation as this chunk's override for the active
+  // config (model / size / size+model), or clear it. Custom drag-border shapes
+  // can't be persisted (no override path for arbitrary sections yet).
+  async function applyOverride(clear: boolean) {
+    if (!clear && variation !== "model" && shapeMode === "custom") return;
     setOvBusy(true);
     setRunError(null);
     try {
-      const res = toModel
+      const res = clear
         ? await apiFetch(`/api/eval/chunks/${chunkId}/override`, {
+            method: "DELETE",
+          })
+        : await apiFetch(`/api/eval/chunks/${chunkId}/override`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ model: toModel }),
-          })
-        : await apiFetch(`/api/eval/chunks/${chunkId}/override`, { method: "DELETE" });
-      const data = (await res.json().catch(() => null)) as { error?: string } | null;
+            body: JSON.stringify(variationBody()),
+          });
+      const data = (await res.json().catch(() => null)) as {
+        error?: string;
+      } | null;
       if (!res.ok) {
         setRunError(data?.error ?? `Request failed (${res.status}).`);
         return;
       }
-      setOverride(toModel);
+      const baseline = state?.status === "ready" ? state.ctx.baselineModel : "";
+      setOverride(clear ? null : variation === "size" ? baseline : model);
     } catch (err) {
       setRunError(err instanceof Error ? err.message : "Network error.");
     } finally {
@@ -2253,7 +2655,7 @@ function ModelTrial({
           onClick={toggleOpen}
           className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-700 hover:underline dark:hover:text-zinc-300"
         >
-          Try a different model
+          Try a different configuration
         </button>
       </div>
     );
@@ -2263,7 +2665,7 @@ function ModelTrial({
     <div className="border-t border-zinc-200 px-3 py-2 dark:border-zinc-800">
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-          Try a different model
+          Try a different configuration
         </span>
         <button
           onClick={toggleOpen}
@@ -2277,40 +2679,85 @@ function ModelTrial({
         <p className="mt-2 text-xs text-zinc-400">Loading…</p>
       )}
       {state?.status === "error" && (
-        <p className="mt-2 text-xs text-red-600 dark:text-red-400">{state.message}</p>
+        <p className="mt-2 text-xs text-red-600 dark:text-red-400">
+          {state.message}
+        </p>
       )}
 
       {state?.status === "ready" && (
         <div className="mt-2 flex flex-col gap-3 text-xs">
-          <div className="flex flex-wrap items-center gap-2">
-            <select
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              className="rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
+          {/* What to vary: the model, the chunk's shape, or both. */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-zinc-500">Vary:</span>
+            <VariationPill
+              active={variation === "model"}
+              onClick={() => setVariation("model")}
             >
-              {state.ctx.models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-            <span className="text-zinc-400">
-              vs baseline <span className="font-mono">{state.ctx.baselineModel}</span>
-            </span>
+              Model
+            </VariationPill>
+            <VariationPill
+              active={variation === "size"}
+              onClick={() => setVariation("size")}
+            >
+              Chunk size
+            </VariationPill>
+            <VariationPill
+              active={variation === "combo"}
+              onClick={() => setVariation("combo")}
+            >
+              Combination
+            </VariationPill>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {variation !== "size" && (
+              <>
+                <select
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  className="rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
+                >
+                  {state.ctx.models.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+                <span className="text-zinc-400">
+                  vs baseline{" "}
+                  <span className="font-mono">{state.ctx.baselineModel}</span>
+                </span>
+              </>
+            )}
+            {variation === "size" && (
+              <span className="text-zinc-400">
+                under baseline{" "}
+                <span className="font-mono">{state.ctx.baselineModel}</span>
+              </span>
+            )}
             <button
               onClick={() => run(false)}
-              disabled={running || saving}
+              disabled={running || saving || cantRun}
               className="rounded-md bg-black px-3 py-1 font-medium text-white cursor-pointer transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
             >
               {running ? "Running…" : "Run"}
             </button>
             <button
-              onClick={() => applyOverride(model)}
-              disabled={ovBusy || running || saving || !model || model === state.ctx.baselineModel}
+              onClick={() => applyOverride(false)}
+              disabled={
+                ovBusy ||
+                running ||
+                saving ||
+                cantRun ||
+                (variation === "model" && model === state.ctx.baselineModel) ||
+                (variation !== "model" && shapeMode === "custom")
+              }
               title={
-                model === state.ctx.baselineModel
+                variation === "model" && model === state.ctx.baselineModel
                   ? "Can't override to the base model"
-                  : "Persist this model as this chunk's embedding for retrieval (RRF-fused)"
+                  : variation !== "model" && shapeMode === "custom"
+                    ? "Custom-border shapes can't be persisted as an override yet — use a uniform re-split"
+                    : "Persist this variation for this chunk's retrieval (RRF-fused)"
               }
               className="rounded-md border border-indigo-300 px-3 py-1 font-medium text-indigo-700 cursor-pointer hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-indigo-800 dark:text-indigo-300 dark:hover:bg-indigo-900/20"
             >
@@ -2318,14 +2765,74 @@ function ModelTrial({
             </button>
           </div>
 
+          {/* Chunk-shape controls: uniform re-split, or drag the chunk's borders. */}
+          {variation !== "model" && (
+            <div className="flex flex-col gap-2 rounded border border-dashed border-zinc-300 p-2 dark:border-zinc-700">
+              <div className="flex gap-2">
+                <ModeTab
+                  active={shapeMode === "uniform"}
+                  onClick={() => setShapeMode("uniform")}
+                >
+                  Uniform re-split
+                </ModeTab>
+                <ModeTab
+                  active={shapeMode === "custom"}
+                  onClick={() => setShapeMode("custom")}
+                >
+                  Drag borders
+                </ModeTab>
+              </div>
+              {shapeMode === "uniform" ? (
+                <div className="flex flex-wrap items-end gap-3">
+                  <label className="flex flex-col gap-0.5">
+                    <span className="text-zinc-500">size (tokens)</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={size}
+                      onChange={(e) =>
+                        setSize(Math.floor(Number(e.target.value)))
+                      }
+                      className="w-24 rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-0.5">
+                    <span className="text-zinc-500">overlap (tokens)</span>
+                    <input
+                      type="number"
+                      min={0}
+                      value={overlap}
+                      onChange={(e) =>
+                        setOverlap(Math.floor(Number(e.target.value)))
+                      }
+                      className="w-24 rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700"
+                    />
+                  </label>
+                </div>
+              ) : state.ctx.questions.length > 0 ? (
+                <ChunkBorderPicker
+                  questionId={state.ctx.questions[0].questionId}
+                  positionHint={state.ctx.chunk.position ?? 0}
+                  onSelection={setCustomSel}
+                />
+              ) : (
+                <span className="text-zinc-400">
+                  Needs at least one question on this chunk to load the border
+                  editor.
+                </span>
+              )}
+            </div>
+          )}
+
           {override && (
             <div className="flex items-center gap-2 rounded border border-indigo-300 bg-indigo-50 px-2 py-1 text-indigo-700 dark:border-indigo-800 dark:bg-indigo-900/20 dark:text-indigo-300">
               <span>
-                Chunk overridden to <span className="font-mono">{override}</span> for
-                retrieval — re-score to see its effect.
+                Chunk overridden to{" "}
+                <span className="font-mono">{override}</span> for retrieval —
+                re-score to see its effect.
               </span>
               <button
-                onClick={() => applyOverride(null)}
+                onClick={() => applyOverride(true)}
                 disabled={ovBusy}
                 className="cursor-pointer underline hover:no-underline disabled:opacity-50"
               >
@@ -2363,7 +2870,8 @@ function ModelTrial({
               </ul>
             ) : (
               <span className="text-zinc-400">
-                No top-k candidates yet (questions unscored) — add corpus chunks below.
+                No top-k candidates yet (questions unscored) — add corpus chunks
+                below.
               </span>
             )}
 
@@ -2373,7 +2881,8 @@ function ModelTrial({
                   onClick={() => setShowCorpus((v) => !v)}
                   className="cursor-pointer self-start text-zinc-500 hover:underline"
                 >
-                  {showCorpus ? "▾" : "▸"} Rest of corpus ({state.ctx.restCorpus.length})
+                  {showCorpus ? "▾" : "▸"} Rest of corpus (
+                  {state.ctx.restCorpus.length})
                 </button>
                 {showCorpus && (
                   <ul className="flex max-h-48 flex-col gap-0.5 overflow-auto rounded border border-zinc-200 p-1 dark:border-zinc-800">
@@ -2392,18 +2901,23 @@ function ModelTrial({
             )}
           </div>
 
-          {runError && <span className="text-red-600 dark:text-red-400">{runError}</span>}
+          {runError && (
+            <span className="text-red-600 dark:text-red-400">{runError}</span>
+          )}
 
           {result && (
             <div className="flex flex-col gap-2">
               <TrialOutcomes
                 model={result.model}
-                baselineModel={result.baselineModel}
+                variation={variationLabel(
+                  result.kind,
+                  result.chunkSize,
+                  result.chunkOverlap,
+                  result.pieceCount,
+                )}
                 poolSize={result.poolSize}
                 pool={result.pool}
-                questionCount={result.questionCount}
-                hitCount={result.hitCount}
-                storedHitCount={result.storedHitCount}
+                pieceCount={result.pieceCount}
                 questions={result.questions}
               />
               <button
@@ -2425,15 +2939,56 @@ function ModelTrial({
 // list (above the add-question form), the add-question form (passed in as
 // children so it keeps the dashboard's form state), then the "Try a different
 // model" runner. The saved list is the source of truth — the runner reports new
-// saves up via onSaved, and deletes happen here.
+// saves up via onSaved, and deletes happen here. A saved trial's model can be
+// promoted to the chunk's DELEGATE (a persisted model override); when one is
+// active the config's base model is listed here in yellow as "(baseline)".
 function ChunkExperiments({
   chunkId,
+  baselineModel,
+  overrideInfo,
+  onDelegateChange,
   children,
 }: {
   chunkId: string;
+  baselineModel: string;
+  overrideInfo: ChunkOverrideInfo | null;
+  onDelegateChange: () => void;
   children: ReactNode;
 }) {
   const [saved, setSaved] = useState<SavedModelTrial[]>([]);
+  const [delegating, setDelegating] = useState(false);
+  const [delegateErr, setDelegateErr] = useState<string | null>(null);
+
+  // A model-kind override = the chunk's delegate model.
+  const delegateModel =
+    overrideInfo && overrideInfo.kind !== "size" ? overrideInfo.model : null;
+
+  // The override POST body a saved trial maps to; null = not persistable
+  // (custom drag-border shapes have no override path yet).
+  function overrideBodyFor(t: SavedModelTrial): Record<string, unknown> | null {
+    if (t.kind === "model") return { model: t.trialModel };
+    if (t.chunkSize == null) return null;
+    const body: Record<string, unknown> = {
+      size: t.chunkSize,
+      overlap: t.chunkOverlap ?? 0,
+    };
+    if (t.kind === "size+model") body.model = t.trialModel;
+    return body;
+  }
+
+  // Is this saved trial the chunk's currently-applied override?
+  function isApplied(t: SavedModelTrial): boolean {
+    if (!overrideInfo) return false;
+    if (t.kind === "model") {
+      return (
+        overrideInfo.kind === "model" && overrideInfo.model === t.trialModel
+      );
+    }
+    if (t.kind === "size") return overrideInfo.kind === "size";
+    return (
+      overrideInfo.kind === "size+model" && overrideInfo.model === t.trialModel
+    );
+  }
 
   // Load the chunk's saved trials once on mount (lightweight — no embeddings).
   useEffect(() => {
@@ -2456,22 +3011,120 @@ function ChunkExperiments({
     }).catch(() => {});
   }
 
+  // Promote a saved trial to this chunk's persisted override (delegate model,
+  // size, or combo), or clear it (null) back to the config's base settings. The
+  // dashboard reloads so the blue header chip + metrics pick it up; a re-score
+  // applies it to the rates.
+  async function setDelegate(body: Record<string, unknown> | null) {
+    setDelegating(true);
+    setDelegateErr(null);
+    try {
+      const res = body
+        ? await apiFetch(`/api/eval/chunks/${chunkId}/override`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          })
+        : await apiFetch(`/api/eval/chunks/${chunkId}/override`, {
+            method: "DELETE",
+          });
+      const data = (await res.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+      if (!res.ok) {
+        setDelegateErr(data?.error ?? `Request failed (${res.status}).`);
+        return;
+      }
+      onDelegateChange();
+    } catch (err) {
+      setDelegateErr(err instanceof Error ? err.message : "Network error.");
+    } finally {
+      setDelegating(false);
+    }
+  }
+
+  const modelTrials = saved.filter((t) => t.kind === "model");
+  const sizeTrials = saved.filter((t) => t.kind === "size");
+  const comboTrials = saved.filter((t) => t.kind === "size+model");
+
+  const renderRows = (trials: SavedModelTrial[]) =>
+    trials.map((t) => {
+      const body = overrideBodyFor(t);
+      return (
+        <SavedTrialRow
+          key={t.id}
+          trial={t}
+          isApplied={isApplied(t)}
+          canApply={body !== null}
+          delegating={delegating}
+          onApply={() => body && setDelegate(body)}
+          onDelete={() => removeSaved(t.id)}
+        />
+      );
+    });
+
   return (
     <>
-      {saved.length > 0 && (
-        <div className="flex flex-col gap-1 border-t border-zinc-200 px-3 py-2 text-[11px] dark:border-zinc-800">
-          <span className="font-medium uppercase tracking-wide text-zinc-500">
-            Models tried
-          </span>
-          <ul className="flex flex-col gap-1">
-            {saved.map((t) => (
-              <SavedTrialRow key={t.id} trial={t} onDelete={() => removeSaved(t.id)} />
-            ))}
-          </ul>
+      {(saved.length > 0 || delegateModel) && (
+        <div className="flex flex-col gap-2 border-t border-zinc-200 px-3 py-2 text-[11px] dark:border-zinc-800">
+          {(modelTrials.length > 0 || delegateModel) && (
+            <div className="flex flex-col gap-1">
+              <span className="font-medium uppercase tracking-wide text-zinc-500">
+                Models tried
+              </span>
+              <ul className="flex flex-col gap-1">
+                {/* With a delegate active, the base model moves down here. */}
+                {delegateModel && (
+                  <li className="flex items-center gap-1.5 rounded border border-amber-200 bg-amber-50 p-2 dark:border-amber-900/50 dark:bg-amber-900/15">
+                    <span className="font-mono font-medium text-amber-700 dark:text-amber-400">
+                      {baselineModel}
+                    </span>
+                    <span className="text-amber-600 dark:text-amber-500">
+                      (baseline)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setDelegate(null)}
+                      disabled={delegating}
+                      title="Clear the delegate — rank this chunk under the base model again"
+                      className="ml-auto cursor-pointer text-amber-700 underline hover:no-underline disabled:opacity-50 dark:text-amber-400"
+                    >
+                      Restore as delegate
+                    </button>
+                  </li>
+                )}
+                {renderRows(modelTrials)}
+              </ul>
+            </div>
+          )}
+          {sizeTrials.length > 0 && (
+            <div className="flex flex-col gap-1">
+              <span className="font-medium uppercase tracking-wide text-zinc-500">
+                Chunk variations
+              </span>
+              <ul className="flex flex-col gap-1">{renderRows(sizeTrials)}</ul>
+            </div>
+          )}
+          {comboTrials.length > 0 && (
+            <div className="flex flex-col gap-1">
+              <span className="font-medium uppercase tracking-wide text-zinc-500">
+                Combination variations
+              </span>
+              <ul className="flex flex-col gap-1">{renderRows(comboTrials)}</ul>
+            </div>
+          )}
+          {delegateErr && (
+            <span className="text-red-600 dark:text-red-400">
+              {delegateErr}
+            </span>
+          )}
         </div>
       )}
       {children}
-      <ModelTrial chunkId={chunkId} onSaved={(t) => setSaved((s) => [t, ...s])} />
+      <ModelTrial
+        chunkId={chunkId}
+        onSaved={(t) => setSaved((s) => [t, ...s])}
+      />
     </>
   );
 }
@@ -2521,74 +3174,58 @@ function avgTrialSim(questions: TrialQuestionOutcome[]): number | null {
   return questions.reduce((sum, q) => sum + q.newScore, 0) / questions.length;
 }
 
-// Before→after for a trial: the chunk's baseline hits (stored full-corpus result)
-// vs. its in-pool hits under the trial model, then each question's stored result
-// next to its pool rank. Shared by the live result and a saved trial's expansion.
+// Per-question before→after for a trial: each question's stored full-corpus
+// result next to its in-pool rank under the trial model. Shared by the live
+// result and a saved trial's expansion. (The hits/avg-sim rollup lives in the
+// saved-trial header and the chunk card, so it isn't repeated here.)
 function TrialOutcomes({
   model,
-  baselineModel,
+  variation,
   poolSize,
   pool,
-  questionCount,
-  hitCount,
-  storedHitCount,
+  pieceCount,
   questions,
 }: {
   model: string;
-  baselineModel: string;
+  variation?: string; // shape annotation for size/combo trials
   poolSize: number;
   pool: PoolChunk[];
-  questionCount: number;
-  hitCount: number;
-  storedHitCount: number;
+  pieceCount?: number | null;
   questions: TrialQuestionOutcome[];
 }) {
   // Which question's top-k is expanded, and which chunk rows within are open.
   const [openQ, setOpenQ] = useState<Record<string, boolean>>({});
   const [openChunk, setOpenChunk] = useState<Record<string, boolean>>({});
   const byId = new Map(pool.map((c) => [c.chunkId, c]));
-  const sim = avgTrialSim(questions);
 
   return (
     // Font size is inherited: text-xs in the runner, smaller in "Models tried".
     <div className="flex flex-col gap-2">
-      <span className="text-zinc-600 dark:text-zinc-400">
-        <span className="font-mono font-medium">{model}</span>
-        <span className="ml-1 text-zinc-400">
-          ranked within test pool ({poolSize} chunks)
-        </span>
-      </span>
-      <span className="text-zinc-500">
-        baseline <span className="font-mono">{baselineModel}</span> (full corpus):{" "}
-        {storedHitCount}/{questionCount}
-        <span className="mx-1 text-zinc-400">→</span>
-        <span className="font-medium">
-          {model}: {hitCount}/{questionCount} hit{questionCount === 1 ? "" : "s"}
-        </span>
-        {sim !== null && (
-          <span className="ml-1 text-zinc-400">· avg sim {sim.toFixed(3)}</span>
-        )}
-      </span>
+      <span className="text-zinc-600 dark:text-zinc-400"></span>
       <ul className="flex flex-col gap-1.5">
         {questions.map((q) => {
           const top = q.topPool ?? [];
           const qOpen = openQ[q.questionId] ?? false;
           return (
             <li key={q.questionId} className="flex flex-col gap-0.5">
-              <span className="text-zinc-700 dark:text-zinc-300">{q.question}</span>
+              <span className="text-zinc-700 dark:text-zinc-300">
+                {q.question}
+              </span>
               <span className="flex flex-wrap items-center gap-1.5 text-zinc-500">
-                full corpus
-                <Badge hit={q.storedHit} rank={q.storedRank} stale={false} />
-                <span className="text-zinc-400">→ test pool</span>
                 <Badge hit={q.newHit} rank={q.newRank} stale={false} />
-                <span className="text-zinc-400">sim {q.newScore.toFixed(3)}</span>
+                <span className="text-zinc-400">
+                  sim {q.newScore.toFixed(3)}
+                </span>
                 {/* Drill into the re-ranked test pool, like the question top-k.
                     Absent on trials saved before topPool was recorded. */}
                 {top.length > 0 && (
                   <button
                     type="button"
                     onClick={() =>
-                      setOpenQ((o) => ({ ...o, [q.questionId]: !o[q.questionId] }))
+                      setOpenQ((o) => ({
+                        ...o,
+                        [q.questionId]: !o[q.questionId],
+                      }))
                     }
                     className="cursor-pointer underline decoration-dotted underline-offset-2 hover:text-zinc-700 dark:hover:text-zinc-300"
                   >
@@ -2600,13 +3237,19 @@ function TrialOutcomes({
                 <ol className="mt-0.5 flex flex-col gap-1">
                   {top.map((h) => {
                     const meta = byId.get(h.chunkId);
-                    const key = `${q.questionId}:${h.chunkId}`;
+                    const key = `${q.questionId}:${h.chunkId}:${h.subIndex ?? "w"}`;
+                    // Size/combo trials rank the test chunk as pieces — label
+                    // each with its piece index (text shown is the whole chunk).
+                    const pieceTag =
+                      h.subIndex != null && pieceCount != null
+                        ? ` · piece ${h.subIndex + 1}/${pieceCount}`
+                        : "";
                     return (
                       <ChunkRow
                         key={key}
                         chunk={{
                           chunkId: h.chunkId,
-                          fileName: meta?.fileName ?? "?",
+                          fileName: `${meta?.fileName ?? "?"}${pieceTag}`,
                           position: meta?.position ?? null,
                           text: meta?.text || "Chunk text unavailable.",
                           rank: h.rank,
@@ -2630,17 +3273,45 @@ function TrialOutcomes({
   );
 }
 
-// One saved trial under "Models tried": a collapsed headline that expands to the
-// per-question before→after, with a delete button.
+// One saved trial under the chunk's variations lists: a collapsed headline that
+// expands to the per-question before→after, with apply/delegate and delete
+// actions.
 function SavedTrialRow({
   trial,
+  isApplied,
+  canApply,
+  delegating,
+  onApply,
   onDelete,
 }: {
   trial: SavedModelTrial;
+  isApplied: boolean; // this trial is the chunk's active override/delegate
+  canApply: boolean; // false for custom drag-border shapes (not persistable)
+  delegating: boolean;
+  onApply: () => void;
   onDelete: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const sim = avgTrialSim(trial.results);
+  // "Strictly better than baseline": no question regressed and at least one
+  // improved — the green-title signal that this variation dominates the base
+  // config on everything this chunk was asked.
+  const beatsBaseline =
+    trial.results.length > 0 &&
+    trial.results.every((q) => q.newHit || q.storedHit !== true) &&
+    trial.hitCount > trial.storedHitCount;
+  const shape = variationLabel(
+    trial.kind,
+    trial.chunkSize,
+    trial.chunkOverlap,
+    trial.pieceCount,
+  );
+  // Headline: the model for model/combo trials, the shape for size trials.
+  const headline =
+    trial.kind === "size" ? (shape ?? "re-split") : trial.trialModel;
+  const subLabel = trial.kind === "size+model" ? shape : undefined;
+  const applyLabel =
+    trial.kind === "model" ? "Make delegate" : "Apply as override";
   return (
     <li className="flex flex-col gap-1 rounded border border-zinc-200 p-2 dark:border-zinc-800">
       {/* The whole header toggles the row; only the ✕ is a separate target. */}
@@ -2651,9 +3322,30 @@ function SavedTrialRow({
           className="flex flex-1 cursor-pointer flex-wrap items-center gap-1.5 text-left"
         >
           <span className="text-zinc-400">{open ? "▾" : "▸"}</span>
-          <span className="font-mono font-medium text-zinc-700 dark:text-zinc-300">
-            {trial.trialModel}
+          <span
+            title={
+              isApplied
+                ? "This variation is the chunk's current override"
+                : beatsBaseline
+                  ? "Beat the baseline config on every question in this trial"
+                  : undefined
+            }
+            className={`font-mono font-medium ${
+              isApplied
+                ? "text-blue-700 dark:text-blue-400"
+                : beatsBaseline
+                  ? "text-green-700 dark:text-green-400"
+                  : "text-zinc-700 dark:text-zinc-300"
+            }`}
+          >
+            {headline}
           </span>
+          {subLabel && <span className="text-zinc-500">{subLabel}</span>}
+          {isApplied && (
+            <span className="rounded bg-blue-100 px-1.5 py-0.5 font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-400">
+              {trial.kind === "model" ? "delegate ✓" : "applied ✓"}
+            </span>
+          )}
           <span className="text-zinc-500">
             {trial.hitCount}/{trial.questionCount} hit
             {trial.questionCount === 1 ? "" : "s"}
@@ -2675,6 +3367,21 @@ function SavedTrialRow({
             {new Date(trial.createdAt).toLocaleString()}
           </span>
         </button>
+        {!isApplied && (
+          <button
+            type="button"
+            onClick={onApply}
+            disabled={delegating || !canApply}
+            title={
+              canApply
+                ? "Persist this variation to represent this chunk in this config and for it's metrics after a re-score"
+                : "Custom-border shapes can't be persisted as an override yet"
+            }
+            className="shrink-0 cursor-pointer rounded border border-blue-300 px-1.5 py-0.5 font-medium text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-900/20"
+          >
+            {delegating ? "Applying…" : applyLabel}
+          </button>
+        )}
         <button
           type="button"
           onClick={onDelete}
@@ -2686,12 +3393,10 @@ function SavedTrialRow({
       {open && (
         <TrialOutcomes
           model={trial.trialModel}
-          baselineModel={trial.baselineModel}
+          variation={shape}
           poolSize={trial.poolSize}
           pool={trial.pool}
-          questionCount={trial.questionCount}
-          hitCount={trial.hitCount}
-          storedHitCount={trial.storedHitCount}
+          pieceCount={trial.pieceCount}
           questions={trial.results}
         />
       )}
@@ -2702,7 +3407,13 @@ function SavedTrialRow({
 // Hover card listing a trial's test-pool chunks (document · #position). The card
 // sits below the trigger inside the same hover group — a transparent pad bridges
 // the gap so the pointer can reach it — and scrolls when the pool is large.
-function PoolTooltip({ pool, children }: { pool: PoolChunk[]; children: ReactNode }) {
+function PoolTooltip({
+  pool,
+  children,
+}: {
+  pool: PoolChunk[];
+  children: ReactNode;
+}) {
   return (
     <span className="group relative inline-block">
       {children}
@@ -2718,7 +3429,9 @@ function PoolTooltip({ pool, children }: { pool: PoolChunk[]; children: ReactNod
                 className="flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400"
               >
                 <span className="truncate font-mono">{c.fileName}</span>
-                <span className="shrink-0 text-zinc-400">· #{c.position ?? "?"}</span>
+                <span className="shrink-0 text-zinc-400">
+                  · #{c.position ?? "?"}
+                </span>
               </span>
             ))}
           </span>

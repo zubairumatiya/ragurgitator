@@ -2,7 +2,8 @@
 // UI: corpus multi-select with duplicate detection (Client Component), shared
 // by the create-config dialog and the corpora page's create-from form.
 //
-// Renders a checkbox per corpus; as corpora are selected it lazily fetches each
+// Renders a selectable row per corpus (tint + checkmark, no checkboxes); as
+// corpora are selected it lazily fetches each
 // one's documents (GET /api/corpora/[id]) and reports the selection's de-duped
 // union: the same document in several corpora counts once, and distinct
 // document rows with the SAME content hash (the same file uploaded twice) are
@@ -117,27 +118,44 @@ export function CorpusPicker({
 
   return (
     <div className="flex flex-col gap-1">
+      {/* Selectable name rows (tint + checkmark), deliberately not checkboxes. */}
       <div className="flex max-h-40 flex-col gap-0.5 overflow-y-auto rounded border border-zinc-200 p-1.5 dark:border-zinc-800">
         {corpora.length === 0 && (
           <span className="px-1 py-0.5 text-xs text-zinc-400">No corpora yet.</span>
         )}
-        {corpora.map((c) => (
-          <label
-            key={c.id}
-            className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-zinc-100 dark:hover:bg-zinc-900"
-          >
-            <input
-              type="checkbox"
-              checked={selected.includes(c.id)}
-              onChange={() => toggle(c.id)}
+        {corpora.map((c) => {
+          const isSelected = selected.includes(c.id);
+          return (
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => toggle(c.id)}
               disabled={disabled}
-            />
-            <span className="truncate text-zinc-700 dark:text-zinc-300">{c.name}</span>
-            <span className="ml-auto shrink-0 text-xs text-zinc-400">
-              {c.docCount === 0 ? "empty" : `${c.docCount} doc${c.docCount === 1 ? "" : "s"}`}
-            </span>
-          </label>
-        ))}
+              aria-pressed={isSelected}
+              className={`flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                isSelected
+                  ? "bg-indigo-100 text-indigo-800 dark:bg-indigo-900/40 dark:text-indigo-200"
+                  : "text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-900"
+              }`}
+            >
+              <span
+                className={`w-3 shrink-0 text-xs ${
+                  isSelected ? "text-indigo-600 dark:text-indigo-300" : "text-transparent"
+                }`}
+              >
+                ✓
+              </span>
+              <span className="truncate">{c.name}</span>
+              <span
+                className={`ml-auto shrink-0 text-xs ${
+                  isSelected ? "text-indigo-500 dark:text-indigo-300/70" : "text-zinc-400"
+                }`}
+              >
+                {c.docCount === 0 ? "empty" : `${c.docCount} doc${c.docCount === 1 ? "" : "s"}`}
+              </span>
+            </button>
+          );
+        })}
       </div>
 
       {selected.length > 0 && !preview.loading && (

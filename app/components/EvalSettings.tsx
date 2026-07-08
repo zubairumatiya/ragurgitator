@@ -221,7 +221,17 @@ export function EvalSettings() {
               />
             </label>
             <div className="flex items-center justify-between gap-2 py-0.5">
-              <span className="text-zinc-600 dark:text-zinc-400">When 1+ pass</span>
+              <span
+                className="cursor-help text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400"
+                title={
+                  "During autotune, several candidate fixes (chunk sizes, models, combos) " +
+                  "can all clear your min-rate for the same chunk. 'choose' pauses so you " +
+                  "pick which fix to apply; 'auto-best' applies the highest-scoring one " +
+                  "automatically."
+                }
+              >
+                When 1+ pass
+              </span>
               <div className="flex gap-1">
                 <Seg active={apply === "choose"} onClick={() => setApply("choose")}>
                   choose

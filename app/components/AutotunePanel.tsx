@@ -254,14 +254,14 @@ export function AutotunePanel({
         }
         className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium cursor-pointer transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
       >
-        ⚙ Auto-resolve below min-rate
+        ⚙ Auto tune
       </button>
 
       {open && (
         <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/40 p-4">
           <div className="flex max-h-[85vh] w-full max-w-lg flex-col gap-3 overflow-y-auto rounded-lg border border-zinc-200 bg-white p-4 text-sm shadow-xl dark:border-zinc-800 dark:bg-zinc-900">
             <div className="flex items-center justify-between">
-              <h2 className="font-medium">Auto-resolve below min-rate</h2>
+              <h2 className="font-medium">Auto tune</h2>
               <button
                 type="button"
                 onClick={close}
