@@ -18,7 +18,7 @@ import {
   type EvalCriteria,
 } from "@/lib/rag/evalSettingsStore";
 import { tokenizeWithOffsets } from "@/lib/rag/chunker";
-import type { OverrideKind } from "@/lib/rag/overrideStore";
+import { getRetrievalChangedAt, type OverrideKind } from "@/lib/rag/overrideStore";
 import { getTruthOrder } from "@/lib/rag/rankingStore";
 
 export type ChunkNeedingQuestions = {
@@ -151,6 +151,10 @@ export type EvalSummary = {
   // target; pendingScoring: questions never scored or edited since last score.
   pendingChunks: number;
   pendingScoring: number;
+  // Of pendingScoring, how many are stale ONLY because retrieval changed shape
+  // after they were scored (an override/delegate set or cleared) — the dashboard
+  // explains the amber "stale" wave with a banner when this is non-zero.
+  retrievalStale: number;
   // Total chunks under the active config — gates bulk "Add question" (no chunks
   // = nothing to generate against).
   chunkCount: number;
@@ -369,8 +373,11 @@ export async function getChunkForGeneration(
 }
 
 // Questions (with a label under the active config) that have no fresh result —
-// either never scored, or edited since their last score (updated_at newer).
+// never scored, edited since their last score (updated_at newer), or scored
+// before the config's retrieval last changed shape (an override/delegate set or
+// cleared — see retrieval_changed_at, 0019).
 export async function questionsNeedingScoring(): Promise<QuestionToScore[]> {
+  const retrievalChangedAt = await getRetrievalChangedAt();
   const rows = await sql<
     {
       question_id: string;
@@ -392,6 +399,8 @@ export async function questionsNeedingScoring(): Promise<QuestionToScore[]> {
         select 1 from eval_results r
         where r.eval_label_id = l.id
           and r.scored_at >= q.updated_at
+          and (${retrievalChangedAt}::timestamptz is null
+               or r.scored_at >= ${retrievalChangedAt})
       )
   `;
 
@@ -1447,6 +1456,7 @@ export async function getSummary(): Promise<EvalSummary> {
     runs: [],
     pendingChunks: 0,
     pendingScoring: 0,
+    retrievalStale: 0,
     chunkCount: 0,
     criteria,
     config: configInfo,
@@ -1456,7 +1466,8 @@ export async function getSummary(): Promise<EvalSummary> {
   const table = await activeChunksTable();
   if (!table) return empty;
 
-  const [detail, runRows, pendingChunkRows, chunkCountRows, overrides] = await Promise.all([
+  const [detail, runRows, pendingChunkRows, chunkCountRows, overrides, retrievalChangedAt] =
+    await Promise.all([
     sql<
       {
         question_id: string;
@@ -1560,16 +1571,26 @@ export async function getSummary(): Promise<EvalSummary> {
       where de.config_id = ${activeConfig().id}
     `,
     listChunkOverrideInfo(table),
+    getRetrievalChangedAt(),
   ]);
 
   // Each question's official (is_truth) ideal ranking, if any — what its graded
   // nDCG scores against. One query for all questions.
   const truthOrders = await getTruthOrder(detail.map((r) => r.question_id));
 
+  // Results scored before the last retrieval-shape change (override/delegate set
+  // or cleared) were produced by a retrieval that no longer exists.
+  let retrievalStale = 0;
   const questions: QuestionDetail[] = detail.map((r) => {
     // Edited after its last score -> the shown hit/miss is for the old text. Treat
     // as pending (it will be re-scored next run, see questionsNeedingScoring).
-    const stale = r.scored_at !== null && r.updated_at.getTime() > r.scored_at.getTime();
+    const editStale = r.scored_at !== null && r.updated_at.getTime() > r.scored_at.getTime();
+    const retrStale =
+      r.scored_at !== null &&
+      retrievalChangedAt !== null &&
+      r.scored_at.getTime() < retrievalChangedAt.getTime();
+    if (retrStale && !editStale) retrievalStale += 1;
+    const stale = editStale || retrStale;
     const scored = r.scored_at !== null;
     // Recompute the hit at the CURRENT recall_k from the stored found_rank (the
     // rank within the stored superset, A1) — so changing recall_k in Settings is
@@ -1670,6 +1691,7 @@ export async function getSummary(): Promise<EvalSummary> {
     })),
     pendingChunks: pendingChunkRows[0]?.n ?? 0,
     pendingScoring,
+    retrievalStale,
     chunkCount: chunkCountRows[0]?.n ?? 0,
     criteria,
     config: configInfo,

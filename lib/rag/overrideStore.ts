@@ -26,7 +26,9 @@ export type OverridePiece = {
 
 // Persist (or replace) a chunk's override as a set of PIECES under the active
 // config, atomically — clears any existing override for the chunk first (any
-// kind), then inserts the new pieces at piece_index 0..n-1.
+// kind), then inserts the new pieces at piece_index 0..n-1. Stamps the config's
+// retrieval_changed_at (0019): an override changes RRF-fused retrieval for
+// EVERY query, so results scored before this moment are stale.
 export async function setChunkOverridePieces(
   sourceChunkId: string,
   model: string,
@@ -51,6 +53,9 @@ export async function setChunkOverridePieces(
            ${p.embedding}::real[])
       `;
     }
+    await tx`
+      update configs set retrieval_changed_at = now() where id = ${cfg.id}
+    `;
   });
 }
 
@@ -69,6 +74,8 @@ export async function setChunkOverride(
 }
 
 // Remove a chunk's override under the active config. Returns false when none.
+// Clearing changes retrieval just like setting does, so it also stamps
+// retrieval_changed_at — but only when a row was actually deleted.
 export async function clearChunkOverride(sourceChunkId: string): Promise<boolean> {
   const cfg = activeConfig();
   const rows = await sql`
@@ -76,7 +83,28 @@ export async function clearChunkOverride(sourceChunkId: string): Promise<boolean
     where config_id = ${cfg.id} and source_chunk_id = ${sourceChunkId}
     returning source_chunk_id
   `;
+  if (rows.length > 0) {
+    await sql`update configs set retrieval_changed_at = now() where id = ${cfg.id}`;
+  }
   return rows.length > 0;
+}
+
+// When the active config's retrieval last changed shape (an override set or
+// cleared), or null when it never has. Tolerates the column not existing yet
+// (migration 0019 unapplied, Postgres "undefined_column" 42703) → null, i.e.
+// nothing is retrieval-stale until 0019 lands — matching listOverrides' 42P01
+// tolerance below.
+export async function getRetrievalChangedAt(): Promise<Date | null> {
+  const cfg = activeConfig();
+  try {
+    const [row] = await sql<{ retrieval_changed_at: Date | null }[]>`
+      select retrieval_changed_at from configs where id = ${cfg.id}
+    `;
+    return row?.retrieval_changed_at ?? null;
+  } catch (err) {
+    if ((err as { code?: string }).code === "42703") return null;
+    throw err;
+  }
 }
 
 // Every override for the active config (chunk id + which model), for retrieval

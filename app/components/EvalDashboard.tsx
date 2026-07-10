@@ -568,6 +568,20 @@ export function EvalDashboard() {
         />
       )}
 
+      {/* Retrieval changed shape (a delegate/override was set or cleared) after
+          these results were scored — they're marked stale and excluded from the
+          rates until re-scored. Process new chunks re-scores exactly this set. */}
+      {!busy && summary !== null && summary.retrievalStale > 0 && (
+        <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+          A delegate/override change altered retrieval after{" "}
+          {summary.retrievalStale} result
+          {summary.retrievalStale === 1 ? " was" : "s were"} scored — those
+          results are stale and excluded from the rates. Run{" "}
+          <span className="font-medium">Process new chunks</span> (or Re-score
+          all) to refresh them.
+        </p>
+      )}
+
       {progress && <RunProgress progress={progress} k={summary?.k ?? 0} />}
 
       {error && (
