@@ -9,13 +9,22 @@
 // When the config has per-chunk model OVERRIDES (Phase 5), retrieval fuses
 // multiple embedding spaces by Reciprocal Rank Fusion (D7): the base-model ANN
 // over the NON-overridden chunks, plus — for each override model — that model's
-// overridden chunks ranked by cosine against the query embedded under that same
-// model. Raw cosine isn't comparable across embedding spaces, so we combine by
-// RANK, not score. Each chunk lives in exactly one space (its canonical model),
-// so the spaces interleave by rank position.
+// overridden chunks. Raw cosine isn't comparable across embedding spaces, so we
+// combine by RANK, not score. Each chunk contributes from exactly one list (its
+// canonical model), so the spaces interleave by rank position.
+//
+// An overridden chunk's rank is NOT its rank among the few other overridden
+// chunks (a near-empty list would hand it rank ~1 for every query — a
+// structural boost unrelated to relevance). Instead it's ranked against this
+// query's REAL competition: the base ANN's candidates re-embedded under the
+// override model (cached persistently — see embedCache/0020 — so steady-state
+// cost is one query embedding per override model). The candidates themselves
+// still score only from the base list; the delegate-space sims exist purely to
+// POSITION the overridden chunks honestly, mirroring the model-trial pool
+// methodology (lib/rag/eval.runModelTrial).
 // ---------------------------------------------------------------------------
 import { activeConfig } from "@/lib/rag/activeConfig";
-import { cosine } from "@/lib/rag/embedCache";
+import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
 import { embedQuery } from "@/lib/rag/embeddings";
 import { listOverrides, overrideEmbeddings } from "@/lib/rag/overrideStore";
 import { query, queryExcluding, resolveChunks } from "@/lib/rag/vectorStore";
@@ -67,13 +76,17 @@ export async function retrieveForQuery(
   );
   lists.push(baseChunks.map((rc, i) => ({ id: rc.chunk.chunk.id, rank: i + 1 })));
 
-  // Override spaces: rank each override model's PIECES against the query embedded
-  // under that model (a small full-scan), then collapse to the best (max-cosine)
-  // piece per source chunk so a chunk is represented by its strongest piece —
-  // hit = any piece in top-k (eval-autotuning-plan §6.3). Reuse the base vector
-  // when the override model IS the base (size-only overrides live in base space).
+  // Override spaces: score each override model's PIECES against the query
+  // embedded under that model, collapse to the best (max-cosine) piece per
+  // source chunk (a chunk is represented by its strongest piece — hit = any
+  // piece in top-k, eval-autotuning-plan §6.3), then rank each overridden chunk
+  // among the base candidates re-embedded under the same model. Only the
+  // overridden chunks enter the RRF list; the competitors just set the bar.
+  // Size-only overrides live in base space, so the base vector and the base
+  // candidates' ANN scores are reused as-is (no re-embedding).
   for (const model of models) {
-    const qv = model === cfg.embeddingModel ? baseVector : await embedQuery(text, model);
+    const isBase = model === cfg.embeddingModel;
+    const qv = isBase ? baseVector : await embedQueryCached(text, model);
     const pieces = await overrideEmbeddings(model);
     const bestByChunk = new Map<string, number>();
     for (const p of pieces) {
@@ -81,10 +94,31 @@ export async function retrieveForQuery(
       const prev = bestByChunk.get(p.chunkId);
       if (prev === undefined || sim > prev) bestByChunk.set(p.chunkId, sim);
     }
-    const scored = [...bestByChunk.entries()]
-      .map(([id, sim]) => ({ id, sim }))
-      .sort((a, b) => b.sim - a.sim);
-    lists.push(scored.map((s, i) => ({ id: s.id, rank: i + 1 })));
+
+    // The competition: this query's base candidates, in THIS model's space.
+    // Base space → their cosine sims are the ANN scores we already have;
+    // otherwise re-embed their texts under the model (persistent cache).
+    let competitorSims: number[];
+    if (isBase) {
+      competitorSims = baseChunks.map((rc) => rc.score);
+    } else {
+      const texts = baseChunks.map((rc) => rc.chunk.chunk.text);
+      const vecs = await embedDocsCached(texts, model);
+      competitorSims = vecs.map((v) => cosine(qv, v));
+    }
+
+    const overriddenSims = [...bestByChunk.values()];
+    lists.push(
+      [...bestByChunk.entries()].map(([id, sim]) => ({
+        id,
+        // 1-based rank among competitors + fellow overridden chunks (self ties
+        // don't count against it).
+        rank:
+          1 +
+          competitorSims.filter((s) => s > sim).length +
+          overriddenSims.filter((s) => s > sim).length,
+      })),
+    );
   }
 
   // Reciprocal Rank Fusion.

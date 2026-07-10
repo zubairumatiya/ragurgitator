@@ -1,15 +1,20 @@
 // ---------------------------------------------------------------------------
-// Session-scoped embedding cache + cosine, shared by the in-memory re-ranking
-// experiments that re-embed a small pool under alternate models WITHOUT touching
-// the chunks_<model>_<dim> tables: the per-chunk "try a different model" trial
-// (lib/rag/eval.runModelTrial) and the graded-nDCG ranking builder
-// (lib/rag/ranking.ts).
+// Two-layer embedding cache + cosine, shared by everything that embeds text
+// under a model other than a config's base ANN table: the per-chunk "try a
+// different model" trial (lib/rag/eval.runModelTrial), the graded-nDCG ranking
+// builder (lib/rag/ranking.ts), and delegate-space retrieval (lib/rag/retriever).
 //
-// Keyed by (model, role, text), so the same pool chunk or question embedded
-// again — a repeat run, a "Save" re-run, an aggregate that reuses the baseline
-// model — is effectively free. In-memory only: it dies with the server process
-// and never persists.
+// L1 is the original in-process Map (dies with the server). L2 is the global
+// embedding_cache table (migration 0020): content-addressed by
+// (model, input_kind, sha256(text)) — no raw text stored — so any string ever
+// embedded under a model costs one provider API call across restarts, trials,
+// and queries. Misses embed via the provider and write back to both layers.
+// L2 is best-effort: if migration 0020 hasn't been applied (undefined_table,
+// 42P01) the cache degrades to the old memory-only behavior.
 // ---------------------------------------------------------------------------
+import { createHash } from "node:crypto";
+
+import { sql } from "@/lib/db";
 import { embedQuery, embedTexts } from "@/lib/rag/embeddings";
 
 const uniq = (xs: string[]): string[] => [...new Set(xs)];
@@ -30,31 +35,108 @@ export function cosine(a: number[], b: number[]): number {
   return denom === 0 ? 0 : dot / denom;
 }
 
-const cache = new Map<string, number[]>();
-const cacheKey = (model: string, role: "document" | "query", text: string) =>
-  `${model} ${role} ${text}`;
+type InputKind = "document" | "query";
+
+const memory = new Map<string, number[]>();
+const memKey = (model: string, kind: InputKind, text: string) =>
+  `${model} ${kind} ${text}`;
+
+// Must match the backfill script and any SQL-side hashing:
+// encode(sha256(text::bytea), 'hex') over the exact input string (UTF-8).
+const hashText = (text: string): string =>
+  createHash("sha256").update(text, "utf8").digest("hex");
+
+const isMissingTable = (err: unknown): boolean =>
+  (err as { code?: string }).code === "42P01";
+
+// Batched L2 read: vectors for the given texts that are already persisted,
+// keyed back by text. Missing-table → empty (memory-only degradation).
+async function readPersisted(
+  model: string,
+  kind: InputKind,
+  texts: string[],
+): Promise<Map<string, number[]>> {
+  if (texts.length === 0) return new Map();
+  const hashes = texts.map(hashText);
+  try {
+    const rows = await sql<{ text_hash: string; embedding: number[] }[]>`
+      select text_hash, embedding
+      from embedding_cache
+      where model = ${model} and input_kind = ${kind}
+        and text_hash = any(${hashes})
+    `;
+    const byHash = new Map(rows.map((r) => [r.text_hash, r.embedding]));
+    const out = new Map<string, number[]>();
+    texts.forEach((t, i) => {
+      const vec = byHash.get(hashes[i]);
+      if (vec) out.set(t, vec);
+    });
+    return out;
+  } catch (err) {
+    if (isMissingTable(err)) return new Map();
+    throw err;
+  }
+}
+
+// L2 write-back for freshly embedded texts. `on conflict do nothing`: a
+// concurrent request may have raced us to the same (deterministic) vector.
+async function writePersisted(
+  model: string,
+  kind: InputKind,
+  entries: { text: string; vector: number[] }[],
+): Promise<void> {
+  try {
+    for (const { text, vector } of entries) {
+      await sql`
+        insert into embedding_cache (model, input_kind, text_hash, dimension, embedding)
+        values (${model}, ${kind}, ${hashText(text)}, ${vector.length}, ${vector}::real[])
+        on conflict do nothing
+      `;
+    }
+  } catch (err) {
+    if (isMissingTable(err)) return;
+    throw err;
+  }
+}
 
 // Embed `texts` as documents under `model`, returning vectors in input order.
-// Only uncached, de-duplicated texts hit the API.
+// L1 hit → free; L2 hit → one batched point-read; only never-seen texts hit the
+// provider API (de-duplicated), and those are banked in both layers.
 export async function embedDocsCached(
   texts: string[],
   model: string,
 ): Promise<number[][]> {
-  const missing = uniq(texts.filter((t) => !cache.has(cacheKey(model, "document", t))));
+  const notInMemory = uniq(
+    texts.filter((t) => !memory.has(memKey(model, "document", t))),
+  );
+  const persisted = await readPersisted(model, "document", notInMemory);
+  for (const [t, vec] of persisted) memory.set(memKey(model, "document", t), vec);
+
+  const missing = notInMemory.filter((t) => !persisted.has(t));
   if (missing.length > 0) {
     const vecs = await embedTexts(missing, model);
-    missing.forEach((t, i) => cache.set(cacheKey(model, "document", t), vecs[i]));
+    missing.forEach((t, i) => memory.set(memKey(model, "document", t), vecs[i]));
+    await writePersisted(
+      model,
+      "document",
+      missing.map((t, i) => ({ text: t, vector: vecs[i] })),
+    );
   }
-  return texts.map((t) => cache.get(cacheKey(model, "document", t))!);
+  return texts.map((t) => memory.get(memKey(model, "document", t))!);
 }
 
-// Embed one query string under `model`, cached.
+// Embed one query string under `model`, cached through both layers.
 export async function embedQueryCached(text: string, model: string): Promise<number[]> {
-  const key = cacheKey(model, "query", text);
-  let vec = cache.get(key);
+  const key = memKey(model, "query", text);
+  let vec = memory.get(key);
+  if (vec) return vec;
+
+  const persisted = await readPersisted(model, "query", [text]);
+  vec = persisted.get(text);
   if (!vec) {
     vec = await embedQuery(text, model);
-    cache.set(key, vec);
+    await writePersisted(model, "query", [{ text, vector: vec }]);
   }
+  memory.set(key, vec);
   return vec;
 }
