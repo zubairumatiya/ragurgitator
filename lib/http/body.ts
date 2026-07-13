@@ -6,8 +6,7 @@
 // every problem is reported in one response rather than just the first.
 //
 // readJsonBody/invalidBody are exported separately for routes that need to
-// branch on the raw payload before choosing a schema (see questions/[id]/
-// rechunk).
+// branch on the raw payload before choosing a schema (see the configs routes).
 // ---------------------------------------------------------------------------
 import { z } from "zod";
 

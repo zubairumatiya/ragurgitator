@@ -42,7 +42,6 @@ import type {
   EvalEvent,
   ModelTrialContext,
   ModelTrialResult,
-  RechunkResult,
 } from "@/lib/rag/eval";
 import { AutotunePanel } from "@/app/components/AutotunePanel";
 import { ConfigChangeDialog } from "@/app/components/ConfigChangeDialog";
@@ -956,8 +955,6 @@ export function EvalDashboard() {
                             </div>
                             {expandedId === q.questionId && (
                               <ExplainPanel
-                                questionId={q.questionId}
-                                chunkId={q.sourceChunkId}
                                 state={explains[q.questionId]}
                                 k={summary.k}
                               />
@@ -1503,13 +1500,9 @@ function Badge({ hit, rank }: { hit: boolean | null; rank: number | null }) {
 // unscored), it's shown up top on its own since the list won't contain it.
 // Lazy-loaded, so it renders loading/error states too.
 function ExplainPanel({
-  questionId,
-  chunkId,
   state,
   k,
 }: {
-  questionId: string;
-  chunkId: string;
   state: ExplainState | undefined;
   k: number;
 }) {
@@ -1532,16 +1525,6 @@ function ExplainPanel({
   const scored = retrieved.length > 0;
   const expectedInTopK = retrieved.some((c) => c.isExpected);
   const toggle = (id: string) => setOpen((o) => ({ ...o, [id]: !o[id] }));
-
-  // The ground-truth chunk's current standing, to compare against an experiment.
-  // On a miss it's on `expected`; on a hit it sits in the retrieved list.
-  const hitRow = retrieved.find((c) => c.isExpected);
-  const baseline =
-    expected?.rank != null
-      ? { rank: expected.rank, score: expected.score }
-      : hitRow
-        ? { rank: hitRow.rank, score: hitRow.score }
-        : null;
 
   // Range label for the gap section, e.g. "ranks 6–22" (or "rank 6" for one).
   const gapLo = k + 1;
@@ -1617,106 +1600,6 @@ function ExplainPanel({
           </ol>
         </div>
       )}
-
-      {/* What-if: re-chunk this one chunk and re-rank (ephemeral until "Set as
-          size override"). */}
-      <RechunkExperiment
-        questionId={questionId}
-        chunkId={chunkId}
-        baseline={baseline}
-        k={k}
-        positionHint={expected?.position ?? 0}
-      />
-    </div>
-  );
-}
-
-// Ephemeral per-chunk "what-if". One button that opens an experiment with two
-// modes — Uniform sub-divide (mode A) or Resize one custom chunk (mode B).
-// Nothing is persisted; the live index and the question's stored score are safe.
-function RechunkExperiment({
-  questionId,
-  chunkId,
-  baseline,
-  k,
-  positionHint,
-}: {
-  questionId: string;
-  chunkId: string;
-  baseline: { rank: number | null; score: number | null } | null;
-  k: number;
-  positionHint: number;
-}) {
-  const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<"uniform" | "custom">("uniform");
-  // Both tabs stay mounted (just hidden) once visited, so switching between them
-  // preserves each one's inputs/results. Closing with ✕ resets everything. The
-  // custom tab is lazy-mounted so its window fetch only fires once it's opened.
-  const [mounted, setMounted] = useState({ uniform: true, custom: false });
-
-  function show(next: "uniform" | "custom") {
-    setMode(next);
-    setMounted((m) => (m[next] ? m : { ...m, [next]: true }));
-  }
-
-  function close() {
-    setOpen(false);
-    setMode("uniform");
-    setMounted({ uniform: true, custom: false });
-  }
-
-  if (!open) {
-    return (
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="cursor-pointer self-start rounded border border-dashed border-zinc-300 px-2 py-1 text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-900/40"
-      >
-        Re-chunk this chunk
-      </button>
-    );
-  }
-
-  return (
-    <div className="flex flex-col gap-2 rounded border border-dashed border-zinc-300 p-2 dark:border-zinc-700">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex gap-2">
-          <ModeTab active={mode === "uniform"} onClick={() => show("uniform")}>
-            Uniform sub-divide
-          </ModeTab>
-          <ModeTab active={mode === "custom"} onClick={() => show("custom")}>
-            Resize borders
-          </ModeTab>
-        </div>
-        <button
-          type="button"
-          onClick={close}
-          className="cursor-pointer text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
-        >
-          ✕
-        </button>
-      </div>
-
-      <div className={mode === "uniform" ? "" : "hidden"}>
-        {mounted.uniform && (
-          <RechunkLab
-            questionId={questionId}
-            chunkId={chunkId}
-            baseline={baseline}
-            k={k}
-          />
-        )}
-      </div>
-      <div className={mode === "custom" ? "" : "hidden"}>
-        {mounted.custom && (
-          <ChunkBoundaryLab
-            questionId={questionId}
-            baseline={baseline}
-            k={k}
-            positionHint={positionHint}
-          />
-        )}
-      </div>
     </div>
   );
 }
@@ -1745,272 +1628,6 @@ function ModeTab({
   );
 }
 
-// Shared result view for both modes: before→after headline, per-piece standing,
-// and the experiment top-k (this chunk's pieces flagged green). `annotation`
-// describes the trial, e.g. "3 pieces @ size 256 / overlap 25" or "custom · 412 tokens".
-function RechunkResultView({
-  result,
-  baseline,
-  k,
-  annotation,
-}: {
-  result: RechunkResult;
-  baseline: { rank: number | null; score: number | null } | null;
-  k: number;
-  annotation: string;
-}) {
-  const [open, setOpen] = useState<Record<string, boolean>>({});
-  const toggle = (id: string) => setOpen((o) => ({ ...o, [id]: !o[id] }));
-
-  const before =
-    baseline?.rank != null
-      ? `#${baseline.rank}${baseline.score != null ? ` · sim ${baseline.score.toFixed(3)}` : ""}`
-      : "—";
-  const after = result.hit
-    ? `hit @ #${result.bestSubRank}`
-    : result.bestSubRank != null
-      ? `miss · best piece #${result.bestSubRank}`
-      : "miss";
-
-  return (
-    <div className="flex flex-col gap-2">
-      <span className="text-zinc-600 dark:text-zinc-400">
-        ground-truth chunk: <span className="font-mono">{before}</span>
-        <span className="mx-1 text-zinc-400">→</span>
-        <span
-          className={`font-mono font-medium ${
-            result.hit
-              ? "text-green-700 dark:text-green-400"
-              : "text-red-700 dark:text-red-400"
-          }`}
-        >
-          {after}
-        </span>
-        <span className="ml-1 text-zinc-400">({annotation})</span>
-      </span>
-
-      <div className="flex flex-col gap-1">
-        <span className="font-medium uppercase tracking-wide text-zinc-500">
-          Pieces
-        </span>
-        <ol className="flex flex-col gap-1">
-          {result.subChunks.map((s) => {
-            const id = `sub-${s.subIndex}`;
-            return (
-              <li key={id} className="flex flex-col gap-0.5">
-                <button
-                  type="button"
-                  onClick={() => toggle(id)}
-                  className={`flex cursor-pointer items-center gap-1 text-left hover:underline ${
-                    s.inTopK
-                      ? "font-medium text-green-700 dark:text-green-400"
-                      : "text-zinc-500"
-                  }`}
-                >
-                  <span className="text-zinc-400">{open[id] ? "▾" : "▸"}</span>
-                  piece {s.subIndex + 1}/{result.subChunkCount} · rank #{s.rank}{" "}
-                  · sim {s.score.toFixed(3)}
-                  {s.inTopK && ` · in top ${k} ✓`}
-                </button>
-                {open[id] && <ChunkText text={s.text} expected={s.inTopK} />}
-              </li>
-            );
-          })}
-        </ol>
-      </div>
-
-      <div className="flex flex-col gap-1">
-        <span className="font-medium uppercase tracking-wide text-zinc-500">
-          Retrieved · top {k} (with this chunk reshaped)
-        </span>
-        <ol className="flex flex-col gap-1">
-          {result.topK.map((c) => {
-            const id = `top-${c.rank}`;
-            const label = c.isSubChunk
-              ? `piece ${(c.subIndex ?? 0) + 1}/${result.subChunkCount}`
-              : `${c.fileName ?? "?"} · chunk #${c.position ?? "?"}`;
-            return (
-              <li key={id} className="flex flex-col gap-0.5">
-                <button
-                  type="button"
-                  onClick={() => toggle(id)}
-                  className={`flex cursor-pointer items-center gap-1 text-left hover:underline ${
-                    c.isSubChunk
-                      ? "font-medium text-green-700 dark:text-green-400"
-                      : "text-zinc-500"
-                  }`}
-                >
-                  <span className="text-zinc-400">{open[id] ? "▾" : "▸"}</span>#
-                  {c.rank} · <span className="font-mono">{label}</span> · sim{" "}
-                  {c.score.toFixed(3)}
-                  {c.isSubChunk && " · this chunk ✓"}
-                </button>
-                {open[id] && (
-                  <ChunkText text={c.text} expected={c.isSubChunk} />
-                )}
-              </li>
-            );
-          })}
-        </ol>
-      </div>
-    </div>
-  );
-}
-
-// Mode A — uniform sub-divide (the original experiment): split the chunk at a
-// trial size/overlap and re-rank against a corpus where that chunk is swapped
-// for its sub-chunks.
-function RechunkLab({
-  questionId,
-  chunkId,
-  baseline,
-  k,
-}: {
-  questionId: string;
-  chunkId: string;
-  baseline: { rank: number | null; score: number | null } | null;
-  k: number;
-}) {
-  const [size, setSize] = useState(256);
-  const [overlap, setOverlap] = useState(25);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<RechunkResult | null>(null);
-  // Persisting this trial as a size override (Phase B). `saved` ties to the
-  // (size, overlap) that produced the current result; a fresh Run clears it.
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [saveErr, setSaveErr] = useState<string | null>(null);
-
-  const invalid =
-    !Number.isInteger(size) || size < 1 || overlap < 0 || overlap >= size;
-
-  async function run() {
-    if (invalid) return;
-    setBusy(true);
-    setError(null);
-    setSaved(false);
-    setSaveErr(null);
-    try {
-      const res = await apiFetch(`/api/eval/questions/${questionId}/rechunk`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ size, overlap }),
-      });
-      const data = (await res.json()) as RechunkResult | { error: string };
-      if (!res.ok || "error" in data) {
-        setError(
-          "error" in data ? data.error : `Request failed (${res.status}).`,
-        );
-        setResult(null);
-        return;
-      }
-      setResult(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Network error.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  // Persist this (size, overlap) as a size override for the chunk: retrieval then
-  // represents it by its best piece. Takes effect on the next Re-score.
-  async function saveOverride() {
-    setSaving(true);
-    setSaveErr(null);
-    try {
-      const res = await apiFetch(`/api/eval/chunks/${chunkId}/override`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ size, overlap }),
-      });
-      const data = (await res.json().catch(() => null)) as {
-        error?: string;
-      } | null;
-      if (!res.ok) {
-        setSaveErr(data?.error ?? `Request failed (${res.status}).`);
-        return;
-      }
-      setSaved(true);
-    } catch (err) {
-      setSaveErr(err instanceof Error ? err.message : "Network error.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="flex flex-col gap-0.5">
-          <span className="text-zinc-500">size (tokens)</span>
-          <input
-            type="number"
-            min={1}
-            value={size}
-            onChange={(e) => setSize(Math.floor(Number(e.target.value)))}
-            className="w-24 rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700"
-          />
-        </label>
-        <label className="flex flex-col gap-0.5">
-          <span className="text-zinc-500">overlap (tokens)</span>
-          <input
-            type="number"
-            min={0}
-            value={overlap}
-            onChange={(e) => setOverlap(Math.floor(Number(e.target.value)))}
-            className="w-24 rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700"
-          />
-        </label>
-        <button
-          onClick={run}
-          disabled={busy || invalid}
-          className="rounded-md bg-black px-3 py-1.5 font-medium text-white cursor-pointer transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
-        >
-          {busy ? "Running…" : "Run"}
-        </button>
-      </div>
-
-      <span className="text-zinc-400">
-        Overlap only affects this chunk’s internal seams — neighbor boundaries
-        aren’t re-formed, so size is the higher-signal knob here.
-      </span>
-
-      {error && <span className="text-red-600 dark:text-red-400">{error}</span>}
-
-      {result && (
-        <>
-          <RechunkResultView
-            result={result}
-            baseline={baseline}
-            k={k}
-            annotation={`${result.subChunkCount} piece${result.subChunkCount === 1 ? "" : "s"} @ size ${size} / overlap ${overlap}`}
-          />
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={saveOverride}
-              disabled={saving || saved}
-              title="Persist this re-split as a size override for this chunk (rank-fused; hit = any piece in top-k)"
-              className="cursor-pointer rounded border border-zinc-300 px-2 py-1 text-zinc-700 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-900/40"
-            >
-              {saving ? "Saving…" : saved ? "Saved ✓" : "Set as size override"}
-            </button>
-            {saved && (
-              <span className="text-zinc-500">
-                Re-score to apply across this chunk’s questions.
-              </span>
-            )}
-            {saveErr && (
-              <span className="text-red-600 dark:text-red-400">{saveErr}</span>
-            )}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
 // Selection reported by the border picker: the reshaped chunk's text plus the
 // stats callers need for annotations and warnings.
 type BorderSelection = {
@@ -2020,85 +1637,8 @@ type BorderSelection = {
   intoNeighbors: number;
 };
 
-// Mode B — resize one custom chunk: pick borders (drag or numeric), then re-rank
-// the question against the corpus with that one reshaped chunk substituted in.
-// Ephemeral; the picker itself is shared with "try a different configuration".
-function ChunkBoundaryLab({
-  questionId,
-  baseline,
-  k,
-  positionHint,
-}: {
-  questionId: string;
-  baseline: { rank: number | null; score: number | null } | null;
-  k: number;
-  positionHint: number;
-}) {
-  const [sel, setSel] = useState<BorderSelection | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [runError, setRunError] = useState<string | null>(null);
-  const [result, setResult] = useState<RechunkResult | null>(null);
-
-  async function run() {
-    if (!sel) return;
-    setBusy(true);
-    setRunError(null);
-    try {
-      const res = await apiFetch(`/api/eval/questions/${questionId}/rechunk`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sections: [sel.text] }),
-      });
-      const data = (await res.json()) as RechunkResult | { error: string };
-      if (!res.ok || "error" in data) {
-        setRunError(
-          "error" in data ? data.error : `Request failed (${res.status}).`,
-        );
-        setResult(null);
-        return;
-      }
-      setResult(data);
-    } catch (err) {
-      setRunError(err instanceof Error ? err.message : "Network error.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="flex flex-col gap-2">
-      <ChunkBorderPicker
-        questionId={questionId}
-        positionHint={positionHint}
-        onSelection={setSel}
-      >
-        <button
-          onClick={run}
-          disabled={busy || !sel}
-          className="rounded-md bg-black px-3 py-1.5 font-medium text-white cursor-pointer transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
-        >
-          {busy ? "Running…" : "Run"}
-        </button>
-      </ChunkBorderPicker>
-
-      {runError && (
-        <span className="text-red-600 dark:text-red-400">{runError}</span>
-      )}
-
-      {result && sel && (
-        <RechunkResultView
-          result={result}
-          baseline={baseline}
-          k={k}
-          annotation={`custom · ${sel.tokens} tokens${sel.gapTokens > 0 ? `, ${sel.gapTokens} uncovered` : ""}`}
-        />
-      )}
-    </div>
-  );
-}
-
-// The draggable-border picker (extracted from the boundary lab so the
-// "try a different configuration" runner reuses it). Stitches the labeled chunk
+// The draggable-border picker for the "try a different configuration" runner's
+// custom-shape variations. Stitches the labeled chunk
 // + frozen neighbors into contiguous text, lets the user set the chunk's
 // [start, end) token borders (numeric inputs, or by dragging the borders in the
 // preview — each drag snaps to the nearest token), warns when the borders leave
@@ -2664,9 +2204,6 @@ function ModelTrial({
   const [saving, setSaving] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [result, setResult] = useState<ModelTrialResult | null>(null);
-  // Whether the currently-shown result has been persisted — keeps "Save result"
-  // disabled so the same snapshot can't be saved twice. A fresh Run clears it.
-  const [savedResult, setSavedResult] = useState(false);
   // Phase 5: this chunk's persisted model override for the active config (null =
   // none). Setting it re-embeds the chunk under that model so retrieval ranks it
   // there (rank-fused). Re-score to see the effect on recall.
@@ -2808,12 +2345,15 @@ function ModelTrial({
         );
         return;
       }
-      setResult(data.result);
       if (data.savedTrial) {
+        // Saved: the trial now lives in "Models tried" (the source of truth),
+        // so close the runner instead of showing the same outcomes twice. The
+        // knobs/pool keep their state for the next open.
         onSaved(data.savedTrial);
-        setSavedResult(true);
-      } else if (!save) {
-        setSavedResult(false); // a plain Run produced a new, unsaved result
+        setResult(null);
+        setOpen(false);
+      } else {
+        setResult(data.result);
       }
     } catch (err) {
       setRunError(err instanceof Error ? err.message : "Network error.");
@@ -3110,10 +2650,10 @@ function ModelTrial({
               />
               <button
                 onClick={() => run(true)}
-                disabled={saving || running || savedResult}
+                disabled={saving || running}
                 className="self-start cursor-pointer rounded border border-zinc-300 px-2 py-1 font-medium text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
               >
-                {savedResult ? "Saved ✓" : saving ? "Saving…" : "Save result"}
+                {saving ? "Saving…" : "Save result"}
               </button>
             </div>
           )}
@@ -3386,18 +2926,31 @@ function avgTrialSim(questions: TrialQuestionOutcome[]): number | null {
   return questions.reduce((sum, q) => sum + q.newScore, 0) / questions.length;
 }
 
-// Mean retrieved rank of a trial's questions under the trial variation: the
-// in-pool rank for hits, k+1 for misses (just past the cutoff) — lower is
-// better. Comparable with the chunk card's live chunkAvgRank, which uses the
-// same miss convention.
+// Mean retrieved rank of a trial's questions under the trial variation — lower
+// is better; a miss counts as k+1 (just past the cutoff), matching the chunk
+// card's live chunkAvgRank. Prefers the projected FUSED rank when the trial
+// recorded one (a dry-run of real rank-fused retrieval, so directly comparable
+// with the live rank); falls back to the optimistic in-pool rank for trials
+// saved before fused ranks existed.
 function avgTrialRank(trial: SavedModelTrial): number | null {
   if (trial.results.length === 0) return null;
   return (
-    trial.results.reduce(
-      (sum, r) => sum + (r.newHit ? r.newRank : trial.k + 1),
-      0,
-    ) / trial.results.length
+    trial.results.reduce((sum, r) => {
+      const hit = r.fusedRank != null ? (r.fusedHit ?? false) : r.newHit;
+      const rank = r.fusedRank ?? r.newRank;
+      return sum + (hit ? rank : trial.k + 1);
+    }, 0) / trial.results.length
   );
+}
+
+// A saved trial's fused-hit rollup for its header — null unless EVERY question
+// recorded a fused dry-run (older trials mix in optimistic in-pool numbers,
+// which would make the count lie).
+function fusedHitCount(trial: SavedModelTrial): number | null {
+  if (trial.results.length === 0) return null;
+  return trial.results.every((r) => r.fusedRank != null)
+    ? trial.results.filter((r) => r.fusedHit).length
+    : null;
 }
 
 // Per-question before→after for a trial: each question's stored full-corpus
@@ -3442,6 +2995,22 @@ function TrialOutcomes({
                 <span className="text-zinc-400">
                   sim {q.newScore.toFixed(3)}
                 </span>
+                {/* The promotion forecast: the chunk's merged position under
+                    REAL rank-fused retrieval with this variation applied —
+                    against the base ANN's full candidate list, not just the
+                    test pool. Absent on trials saved before it was recorded. */}
+                {q.fusedRank != null && (
+                  <span
+                    title="Projected rank if applied: real rank-fused retrieval against the base model's full candidate list (plus the config's other overrides), not just the test pool."
+                    className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-medium ${
+                      q.fusedHit
+                        ? "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400"
+                        : "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400"
+                    }`}
+                  >
+                    fused @{q.fusedRank}
+                  </span>
+                )}
                 {/* Drill into the re-ranked test pool, like the question top-k.
                     Absent on trials saved before topPool was recorded. */}
                 {top.length > 0 && (
@@ -3524,10 +3093,13 @@ function SavedTrialRow({
 }) {
   const [open, setOpen] = useState(false);
   const sim = avgTrialSim(trial.results);
+  const fusedHits = fusedHitCount(trial);
   // Green title: this trial ranks the chunk's questions STRICTLY better than
   // whatever currently serves the chunk — lower mean retrieved rank, so @1+@1
-  // beats @1+@2, and a miss costs k+1. In-pool vs full-corpus, so a nudge —
-  // not a guarantee.
+  // beats @1+@2, and a miss costs k+1. With fused ranks recorded this is a
+  // like-for-like comparison (both sides are real fused retrieval); on older
+  // trials it falls back to the optimistic in-pool rank — a nudge, not a
+  // guarantee.
   const trialAvgRank = avgTrialRank(trial);
   const beatsCurrent =
     !isApplied &&
@@ -3584,6 +3156,17 @@ function SavedTrialRow({
             {trial.hitCount}/{trial.questionCount} hit
             {trial.questionCount === 1 ? "" : "s"}
           </span>
+          {fusedHits !== null && (
+            <>
+              <span className="text-zinc-400">·</span>
+              <span
+                title="Hits under the fused dry-run: real rank-fused retrieval with this variation applied — what promotion would actually score."
+                className="text-zinc-500"
+              >
+                fused {fusedHits}/{trial.questionCount}
+              </span>
+            </>
+          )}
           <span className="text-zinc-400">·</span>
           {/* Hover the count to see which chunks made up the test pool. */}
           <PoolTooltip pool={trial.pool}>

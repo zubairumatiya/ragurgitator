@@ -26,16 +26,19 @@ import { isProviderAvailable, modelSpec } from "@/lib/rag/embeddingModels";
 import {
   clearRetrievalChanges,
   listOverrides,
+  overrideEmbeddings,
   retrievalStateFingerprint,
   setChunkOverride,
   setChunkOverridePieces,
+  type ChunkOverride,
+  type OverrideEmbedding,
 } from "@/lib/rag/overrideStore";
 import { anthropicClient } from "@/lib/llm/client";
 import { splitText, tokenizeWithOffsets } from "@/lib/rag/chunker";
 import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
 import { embedQuery, embedTexts } from "@/lib/rag/embeddings";
 import { stitchChunks } from "@/lib/rag/reconstruct";
-import { retrieveForQuery } from "@/lib/rag/retriever";
+import { fuseWithOverrides, retrieveForQuery } from "@/lib/rag/retriever";
 import {
   allLabeledQuestions,
   chunksNeedingQuestionsByDifficulty,
@@ -520,7 +523,7 @@ export async function rescoreAllQuestions(
 }
 
 // ---------------------------------------------------------------------------
-// Re-chunk experiment: an ephemeral per-chunk "what-if".
+// Re-chunk experiment: an ephemeral per-chunk "what-if" (autotune Stage 1).
 //
 // Re-split ONE labeled chunk at a trial (size, overlap), embed the pieces, and
 // re-rank the question against a corpus where that chunk is replaced by its
@@ -530,8 +533,9 @@ export async function rescoreAllQuestions(
 // This is a LOCAL APPROXIMATION of a full re-chunk: the chunk's document
 // neighbors stay frozen, so the seams between this chunk and its neighbors are
 // not re-formed (overlap only moves this chunk's INTERNAL seams). Size is the
-// high-signal knob here; read overlap results with that caveat. Methodology
-// matches the miss drill-down: exact full-scan rank (see rankWithSubstitutedChunk).
+// high-signal knob here; read overlap results with that caveat. Ranking is an
+// exact full-scan against the substituted corpus (see rankWithSubstitutedChunk)
+// — no pool approximation, unlike the model trials below.
 // ---------------------------------------------------------------------------
 
 // One sub-chunk's standing in the experiment ranking.
@@ -554,9 +558,8 @@ export type RechunkRankedChunk = {
   isSubChunk: boolean;
 };
 
-// Shared result of both experiment modes (uniform sub-divide and custom-boundary).
-// The trial knobs (size/overlap, or boundaries) aren't echoed back — the caller
-// already submitted them and renders them itself.
+// Experiment result. The trial knobs (size/overlap) aren't echoed back — the
+// caller already submitted them and renders them itself.
 export type RechunkResult = {
   subChunkCount: number;
   k: number;
@@ -568,7 +571,7 @@ export type RechunkResult = {
 
 // Core: replace the labeled chunk with `subTexts`, embed those, and exact-rank the
 // question against the substituted corpus. Reuses the cached query vector (embeds
-// only on a cache miss). Shared by both modes; nothing is persisted.
+// only on a cache miss). Nothing is persisted.
 async function rankExperiment(
   ctx: ExperimentContext,
   subTexts: string[],
@@ -615,8 +618,8 @@ async function rankExperiment(
   return { subChunkCount: subTexts.length, k, hit, bestSubRank, topK, subChunks };
 }
 
-// Mode A — uniform sub-divide: split the labeled chunk at a trial (size, overlap)
-// and re-rank. Returns null when the question has no label under the active config.
+// Uniform sub-divide: split the labeled chunk at a trial (size, overlap) and
+// re-rank. Returns null when the question has no label under the active config.
 export async function runRechunkExperiment(
   questionId: string,
   size: number,
@@ -633,25 +636,6 @@ export async function runRechunkExperiment(
     `[rag:eval] rechunk q=${questionId.slice(0, 8)} size=${size} overlap=${overlap}: ` +
       `${result.subChunkCount} sub-chunk(s), hit=${result.hit} ` +
       `bestRank=${result.bestSubRank ?? "n/a"} in ${Math.round(performance.now() - t0)}ms`,
-  );
-  return result;
-}
-
-// Mode B — custom boundaries: replace the labeled chunk with the supplied section
-// text(s) (a single hand-reshaped chunk today) and re-rank. Same null contract.
-export async function runCustomChunkExperiment(
-  questionId: string,
-  sections: string[],
-): Promise<RechunkResult | null> {
-  const t0 = performance.now();
-  const ctx = await getExperimentContext(questionId);
-  if (!ctx) return null;
-
-  const result = await rankExperiment(ctx, sections);
-
-  console.log(
-    `[rag:eval] custom-chunk q=${questionId.slice(0, 8)}: ${sections.length} section(s), ` +
-      `hit=${result.hit} bestRank=${result.bestSubRank ?? "n/a"} in ${Math.round(performance.now() - t0)}ms`,
   );
   return result;
 }
@@ -739,13 +723,21 @@ export async function buildChunkWindow(
 // the top-k. Nothing touches the live index; results are ephemeral unless the
 // user saves a snapshot (eval_model_trials).
 //
-// This is a LOCAL APPROXIMATION: the new-model rank is WITHIN the pool, not the
-// full corpus, and it's compared against the question's STORED full-corpus
-// result (the baseline). The pool is far smaller than the corpus, so read a
-// rescued miss as "this model re-orders the candidates better," not as true
-// recall. We re-embed in memory and rank by cosine (not pgvector), so the trial
-// is decoupled from the chunks_<model>_<dim> tables and any output dimension
-// works.
+// The in-pool rank is a LOCAL APPROXIMATION: the new-model rank is WITHIN the
+// pool, not the full corpus, and it's compared against the question's STORED
+// full-corpus result (the baseline). The pool is far smaller than the corpus,
+// so read a rescued miss as "this model re-orders the candidates better," not
+// as true recall. We re-embed in memory and rank by cosine (not pgvector), so
+// the trial is decoupled from the chunks_<model>_<dim> tables and any output
+// dimension works.
+//
+// Each question ALSO gets a FUSED DRY-RUN (fusedRank/fusedHit): the real
+// rank-interleave fusion (retriever.fuseWithOverrides) run with a hypothetical
+// override for this chunk layered onto the config's existing overrides — the
+// exact merged position the chunk would occupy if the variation were applied.
+// This is the honest number: the in-pool rank routinely over-promises (a chunk
+// that's #1 among ~10 pool chunks can be #3+ against the base ANN's full
+// candidate list), which is exactly what used to surprise on promotion.
 // ---------------------------------------------------------------------------
 
 // What the trial UI needs to set up a run: the chunk, its questions (with the
@@ -1023,6 +1015,30 @@ export async function runModelTrial(
   ]);
   const otherVecById = new Map(otherChunks.map((c, i) => [c.chunkId, otherVectors[i]]));
 
+  // Fused dry-run state: the config's overrides with THIS chunk's entry replaced
+  // by the trial variation — what promotion would actually persist. Pieces for
+  // the trial model are the in-memory trial vectors; other models keep their
+  // stored pieces (minus this chunk's, if it's currently overridden elsewhere).
+  // Memoized per model: fuseWithOverrides asks once per model per question.
+  const hypOverrides: ChunkOverride[] = [
+    ...(await listOverrides()).filter((o) => o.sourceChunkId !== chunkId),
+    { sourceChunkId: chunkId, model, kind: variation.kind },
+  ];
+  const pieceCache = new Map<string, Promise<OverrideEmbedding[]>>();
+  const piecesFor = (m: string): Promise<OverrideEmbedding[]> => {
+    let p = pieceCache.get(m);
+    if (!p) {
+      p = overrideEmbeddings(m).then((stored) => {
+        const kept = stored.filter((piece) => piece.chunkId !== chunkId);
+        return m === model
+          ? [...kept, ...pieceVectors.map((embedding) => ({ chunkId, embedding }))]
+          : kept;
+      });
+      pieceCache.set(m, p);
+    }
+    return p;
+  };
+
   const k = activeConfig().topK;
   const questionsOut: TrialQuestionOutcome[] = [];
   for (const q of questions) {
@@ -1053,6 +1069,20 @@ export async function runModelTrial(
     const newScore = Math.max(
       ...scored.filter((s) => s.id === chunkId).map((s) => s.sim),
     );
+
+    // Fused dry-run: the chunk's merged position under REAL rank-fused
+    // retrieval with the hypothetical override applied. The chunk is always in
+    // the merged list (every overridden chunk is), so the rank is always found.
+    const baseQVec = await embedQueryCached(q.question, baselineModel);
+    const { merged } = await fuseWithOverrides(
+      q.question,
+      baseQVec,
+      k,
+      hypOverrides,
+      piecesFor,
+    );
+    const fusedRank = merged.findIndex((c) => c.id === chunkId) + 1;
+
     questionsOut.push({
       questionId: q.questionId,
       question: q.question,
@@ -1061,6 +1091,8 @@ export async function runModelTrial(
       newHit: newRank >= 1 && newRank <= k,
       newRank,
       newScore,
+      fusedRank,
+      fusedHit: fusedRank >= 1 && fusedRank <= k,
       topPool,
     });
   }
@@ -1124,7 +1156,9 @@ export async function runModelTrial(
   console.log(
     `[rag:eval] config-trial chunk=${chunkId.slice(0, 8)} kind=${variation.kind} model=${model} ` +
       `pieces=${pieceCount ?? 1} pool=${poolChunks.length} q=${questionsOut.length} ` +
-      `hits=${hitCount}/${questionsOut.length} ${save ? "(saved) " : ""}` +
+      `hits=${hitCount}/${questionsOut.length} ` +
+      `fused=${questionsOut.filter((o) => o.fusedHit).length}/${questionsOut.length} ` +
+      `${save ? "(saved) " : ""}` +
       `in ${Math.round(performance.now() - t0)}ms`,
   );
   return { result, savedTrial };

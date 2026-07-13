@@ -49,7 +49,10 @@ export type ResultInsert = {
   hit: boolean;
   foundRank: number | null;
   retrievedIds: string[];
-  retrievedScores: number[]; // per retrievedIds entry, same order: cosine similarity (base path) or rank-derived score (fused path)
+  // Per retrievedIds entry, same order: the chunk's cosine similarity in its
+  // canonical space (base model, or its delegate model on the fused path — so
+  // not necessarily descending, the stored order is authoritative).
+  retrievedScores: number[];
   // Fingerprint of the override state this was scored under (0022) — stale iff
   // it differs from the current retrievalStateFingerprint().
   retrievalState: string;
@@ -1030,6 +1033,13 @@ export type TrialQuestionOutcome = {
   newHit: boolean;
   newRank: number;
   newScore: number;
+  // Fused dry-run (see eval.runModelTrial): the merged position this chunk
+  // would occupy under REAL rank-fused retrieval if the trial variation were
+  // applied as its override — ranked against the base ANN's full candidate
+  // list plus the config's other overrides, not just the test pool. The
+  // honest promotion forecast. Optional: absent on trials saved before this.
+  fusedRank?: number;
+  fusedHit?: boolean;
   // The trial model's top-k of the re-ranked pool for this question (capped at
   // k). Lets a saved trial show what accompanied/beat the chunk. Optional —
   // trials saved before this field existed simply omit it.

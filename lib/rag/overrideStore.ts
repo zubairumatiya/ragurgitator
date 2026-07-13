@@ -28,8 +28,18 @@ export type OverridePiece = {
 // One entry of the retrieval change log (0021) — what the stale badge lists.
 export type RetrievalChange = { description: string; at: Date };
 
+// Version of the rank-fusion ALGORITHM (retriever.fuseWithOverrides), folded
+// into the fingerprint below. Bump it whenever fusion semantics change (how
+// ranks are computed/merged, what `score` means) so results scored under the
+// old algorithm flag stale and get re-scored — the override ROWS can't capture
+// that kind of change. v2 = fractional fusion ranks + real canonical-space
+// sims (July 2026); the pre-v2 fingerprint had no version prefix, so adding
+// one also invalidates everything scored before versioning existed.
+export const FUSION_VERSION = 2;
+
 // Fingerprint of the active config's current override state (0022): sha-256
-// over the canonical override rows, or 'baseline' when there are none. Each
+// over the fusion version + the canonical override rows, or 'baseline' when
+// there are none (the base-ANN-only path — no fusion, so no version). Each
 // eval result is stamped with the fingerprint it was scored under; a result is
 // stale iff its fingerprint differs from the current one — so REVERTING a
 // change (e.g. delegate back to baseline) makes the old results valid again
@@ -56,13 +66,15 @@ export async function retrievalStateFingerprint(): Promise<string> {
       order by source_chunk_id, piece_index
     `;
     if (rows.length === 0) return "baseline";
-    const canonical = rows
-      .map(
-        (r) =>
-          `${r.source_chunk_id}|${r.model}|${r.kind}|${r.piece_index}|` +
-          `${r.token_start ?? ""}|${r.token_end ?? ""}|${r.text_hash ?? ""}`,
-      )
-      .join("\n");
+    const canonical =
+      `fusion-v${FUSION_VERSION}\n` +
+      rows
+        .map(
+          (r) =>
+            `${r.source_chunk_id}|${r.model}|${r.kind}|${r.piece_index}|` +
+            `${r.token_start ?? ""}|${r.token_end ?? ""}|${r.text_hash ?? ""}`,
+        )
+        .join("\n");
     return createHash("sha256").update(canonical).digest("hex");
   } catch (err) {
     // Overrides table missing (0013 unapplied) -> plain baseline retrieval.

@@ -23,18 +23,34 @@
 // override model (cached persistently — see embedCache/0020 — so steady-state
 // cost is one query embedding per override model). The candidates themselves
 // still score only from the base list; the delegate-space sims exist purely to
-// POSITION the overridden chunks honestly, mirroring the model-trial pool
-// methodology (lib/rag/eval.runModelTrial).
+// POSITION the overridden chunks honestly.
+//
+// The fusion core (fuseWithOverrides) takes the override state as an argument
+// so the model-trial dry-run (lib/rag/eval.runModelTrial) can inject a
+// HYPOTHETICAL override and report the exact merged rank a chunk would occupy
+// if the trial were applied — the trial and live retrieval share this code and
+// cannot drift.
 // ---------------------------------------------------------------------------
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
 import { embedQuery } from "@/lib/rag/embeddings";
-import { listOverrides, overrideEmbeddings } from "@/lib/rag/overrideStore";
+import {
+  listOverrides,
+  overrideEmbeddings,
+  type ChunkOverride,
+  type OverrideEmbedding,
+} from "@/lib/rag/overrideStore";
 import { query, queryExcluding, resolveChunks } from "@/lib/rag/vectorStore";
 import type { RetrievedChunk } from "@/types/rag";
 
 // Base candidates pulled for fusion when overrides exist (vs the final top-k).
 const FUSION_BASE_FACTOR = 4;
+
+// One entry of the merged fusion list. `sim` is the chunk's real cosine to the
+// query in its CANONICAL space (base model for base chunks, the override model
+// for overridden chunks) — informational: honest per-chunk, but not comparable
+// across spaces and therefore not monotone with the merged order.
+export type FusedCandidate = { id: string; rank: number; sim: number };
 
 export async function retrieve(question: string): Promise<RetrievedChunk[]> {
   const trimmed = question.trim();
@@ -43,26 +59,30 @@ export async function retrieve(question: string): Promise<RetrievedChunk[]> {
   return retrieveForQuery(trimmed, vector);
 }
 
-// Retrieve a query's top results in the active config. `baseVector` is the query
-// already embedded under the base model (eval reuses a cached one); override-
-// model query vectors are embedded on demand from `text`. `limit` defaults to the
-// config's top_k; eval passes a larger superset so one retrieved list can score
-// Recall@recall_k and nDCG@ndcg_k at once (A1, see lib/rag/evalSettingsStore).
-export async function retrieveForQuery(
+// Rank-interleave fusion against an explicit override state. Returns the FULL
+// merged list (every base candidate + every overridden chunk, ascending rank)
+// plus resolved metadata for the base candidates; callers slice/resolve as
+// needed. Live retrieval passes the stored overrides; the trial dry-run passes
+// a hypothetical set.
+//
+// ⚠ If you change the SEMANTICS of this merge (rank formula, candidate set,
+// what `sim`/score means), bump FUSION_VERSION in overrideStore.ts — that's
+// what flags results scored under the old algorithm as stale.
+export async function fuseWithOverrides(
   text: string,
   baseVector: number[],
-  limit?: number,
-): Promise<RetrievedChunk[]> {
+  k: number,
+  overrides: ChunkOverride[],
+  piecesFor: (model: string) => Promise<OverrideEmbedding[]>,
+): Promise<{
+  merged: FusedCandidate[];
+  meta: Map<string, { documentId: string; position: number; text: string }>;
+}> {
   const cfg = activeConfig();
-  const k = limit ?? cfg.topK;
-  const overrides = await listOverrides();
-  // No overrides → the original single-space ANN. Identical behaviour + cost.
-  if (overrides.length === 0) return query(baseVector, k);
-
   const overriddenIds = overrides.map((o) => o.sourceChunkId);
   const models = [...new Set(overrides.map((o) => o.model))];
 
-  const lists: { id: string; rank: number }[][] = [];
+  const lists: FusedCandidate[][] = [];
   const meta = new Map<string, { documentId: string; position: number; text: string }>();
 
   // Base space: ANN over the non-overridden chunks; pull a generous N for fusion.
@@ -75,7 +95,9 @@ export async function retrieveForQuery(
       text: rc.chunk.chunk.text,
     }),
   );
-  lists.push(baseChunks.map((rc, i) => ({ id: rc.chunk.chunk.id, rank: i + 1 })));
+  lists.push(
+    baseChunks.map((rc, i) => ({ id: rc.chunk.chunk.id, rank: i + 1, sim: rc.score })),
+  );
 
   // Override spaces: score each override model's PIECES against the query
   // embedded under that model, collapse to the best (max-cosine) piece per
@@ -88,7 +110,7 @@ export async function retrieveForQuery(
   for (const model of models) {
     const isBase = model === cfg.embeddingModel;
     const qv = isBase ? baseVector : await embedQueryCached(text, model);
-    const pieces = await overrideEmbeddings(model);
+    const pieces = await piecesFor(model);
     const bestByChunk = new Map<string, number>();
     for (const p of pieces) {
       const sim = cosine(qv, p.embedding);
@@ -119,6 +141,7 @@ export async function retrieveForQuery(
           0.5 +
           competitorSims.filter((s) => s > sim).length +
           overriddenSims.filter((s) => s > sim).length,
+        sim,
       })),
     );
   }
@@ -126,21 +149,46 @@ export async function retrieveForQuery(
   // Rank-interleave merge: ascending rank across all lists. Base ranks are
   // unique integers and override ranks are fractional, so cross-kind ties are
   // impossible by construction.
-  const top = lists
-    .flat()
-    .sort((a, b) => a.rank - b.rank)
-    .slice(0, k);
+  const merged = lists.flat().sort((a, b) => a.rank - b.rank);
+  return { merged, meta };
+}
+
+// Retrieve a query's top results in the active config. `baseVector` is the query
+// already embedded under the base model (eval reuses a cached one); override-
+// model query vectors are embedded on demand from `text`. `limit` defaults to the
+// config's top_k; eval passes a larger superset so one retrieved list can score
+// Recall@recall_k and nDCG@ndcg_k at once (A1, see lib/rag/evalSettingsStore).
+export async function retrieveForQuery(
+  text: string,
+  baseVector: number[],
+  limit?: number,
+): Promise<RetrievedChunk[]> {
+  const cfg = activeConfig();
+  const k = limit ?? cfg.topK;
+  const overrides = await listOverrides();
+  // No overrides → the original single-space ANN. Identical behaviour + cost.
+  if (overrides.length === 0) return query(baseVector, k);
+
+  const { merged, meta } = await fuseWithOverrides(
+    text,
+    baseVector,
+    k,
+    overrides,
+    overrideEmbeddings,
+  );
+  const top = merged.slice(0, k);
 
   // Override winners weren't in the base ANN (they were excluded) — resolve them.
   const unresolved = top.map(({ id }) => id).filter((id) => !meta.has(id));
   for (const [id, m] of await resolveChunks(unresolved)) meta.set(id, m);
 
-  return top.map(({ id, rank }) => {
+  return top.map(({ id, sim }) => {
     const m = meta.get(id);
     return {
-      // Informational only (raw cosine isn't comparable across spaces): a
-      // rank-derived score in (0, 1), monotone with the merged order.
-      score: 1 / (1 + rank),
+      // The chunk's real cosine in its canonical space (base or delegate model).
+      // Honest per chunk, but NOT comparable across spaces — the merged rank
+      // order is authoritative, so scores here aren't necessarily descending.
+      score: sim,
       chunk: {
         embedding: [],
         chunk: {
