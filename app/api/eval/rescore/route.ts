@@ -12,16 +12,22 @@ import { ndjsonStream } from "@/lib/http/ndjson";
 import { withRequestConfig } from "@/lib/http/configScope";
 
 export async function POST(request: Request) {
-  // Optional body { documentId } — the bulk-actions document scope. Older
-  // callers send no body; non-JSON is treated as absent.
-  const raw = (await request.json().catch(() => null)) as { documentId?: unknown } | null;
-  const documentId =
-    typeof raw?.documentId === "string" ? raw.documentId : undefined;
+  // Optional body { documentIds } (or legacy { documentId }) — the bulk-actions
+  // document scope. Older callers send no body; non-JSON is treated as absent.
+  const raw = (await request.json().catch(() => null)) as {
+    documentId?: unknown;
+    documentIds?: unknown;
+  } | null;
+  const documentIds = Array.isArray(raw?.documentIds)
+    ? raw.documentIds.filter((id): id is string => typeof id === "string")
+    : typeof raw?.documentId === "string"
+      ? [raw.documentId]
+      : undefined;
 
   return withRequestConfig(request, async () =>
     ndjsonStream<EvalEvent>(async (send) => {
       try {
-        await rescoreAllQuestions(send, documentId);
+        await rescoreAllQuestions(send, documentIds);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Re-scoring failed.";
         send({ type: "error", message });

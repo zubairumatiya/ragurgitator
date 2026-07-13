@@ -7,13 +7,18 @@
 //   POST { size, overlap? }   — size override: re-split the chunk and rank it by
 //                               its best piece (hit = any piece in top-k).
 //   DELETE                    — clear whatever override the chunk has.
-// Both are RRF-fused with the base ANN (see lib/rag/retriever). Scoped to the
+// Both are rank-fused with the base ANN (see lib/rag/retriever). Scoped to the
 // active config. `params` is a Promise in this Next.js version.
+//
+// On success the CHANGED chunk's questions are re-scored inline (rescored: n in
+// the response) so its rates reflect the new retrieval immediately; every other
+// result goes retrieval-stale (badge + change log) until the next full run.
 // ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
 import {
+  rescoreChunkQuestions,
   setChunkModelOverride,
   setChunkSizeModelOverride,
   setChunkSizeOverride,
@@ -52,7 +57,7 @@ export async function POST(
           : await setChunkSizeOverride(chunkId, body.data.size, body.data.overlap ?? 0);
         switch (status) {
           case "ok":
-            return Response.json({ ok: true });
+            return Response.json({ ok: true, rescored: await rescoreChunkQuestions(chunkId) });
           case "not-found":
             return Response.json(
               { error: "Chunk not found under the active config." },
@@ -79,7 +84,7 @@ export async function POST(
       const status = await setChunkModelOverride(chunkId, body.data.model!);
       switch (status) {
         case "ok":
-          return Response.json({ ok: true });
+          return Response.json({ ok: true, rescored: await rescoreChunkQuestions(chunkId) });
         case "not-found":
           return Response.json(
             { error: "Chunk not found under the active config." },
@@ -114,7 +119,7 @@ export async function DELETE(
     try {
       const cleared = await clearChunkOverride(chunkId);
       if (!cleared) return Response.json({ error: "No override to clear." }, { status: 404 });
-      return Response.json({ ok: true });
+      return Response.json({ ok: true, rescored: await rescoreChunkQuestions(chunkId) });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to clear override.";
       return Response.json({ error: message }, { status: 500 });

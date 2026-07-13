@@ -19,18 +19,25 @@ const Body = z.object({
   difficulty: z.enum(DIFFICULTIES, {
     error: "Provide a `difficulty` of 'easy', 'medium', or 'hard'.",
   }),
-  // Bulk-actions document scope: generate only for this document's chunks.
+  // Bulk-actions document scope: generate only for these documents' chunks
+  // (legacy single `documentId` still accepted; absent = the whole corpus).
   documentId: z.uuid({ error: "`documentId` must be a uuid." }).optional(),
+  documentIds: z
+    .array(z.uuid({ error: "`documentIds` must contain uuids." }))
+    .optional(),
 });
 
 export async function POST(request: Request) {
   const body = await parseBody(request, Body);
   if (body.response) return body.response;
+  const documentIds =
+    body.data.documentIds ??
+    (body.data.documentId ? [body.data.documentId] : undefined);
 
   return withRequestConfig(request, async () =>
     ndjsonStream<EvalEvent>(async (send) => {
       try {
-        await bulkAddDifficulty(body.data.difficulty, send, body.data.documentId);
+        await bulkAddDifficulty(body.data.difficulty, send, documentIds);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Bulk generation failed.";
         send({ type: "error", message });

@@ -6,7 +6,7 @@
 // full chunk and the best sub-size under each model (Stage 2), then remaining
 // size × model combos (Stage 3) — per the A2/A4 ladder. A winning candidate is
 // persisted as a per-chunk override (pieces, Phase B), CONFIRMED through real
-// RRF retrieval (reverted if the approximation over-promised), and the run ends
+// rank-fused retrieval (reverted if the approximation over-promised), and the run ends
 // with one full-corpus re-score (A3) + an eval_runs snapshot (feeds Appraise)
 // + an autotune_runs history row.
 //
@@ -252,7 +252,7 @@ export type ApplyResult = {
 };
 
 // Promote → persist → CONFIRM (§5.3): apply the override, re-score the chunk's
-// own questions through real RRF retrieval, and keep it only if the chunk's
+// own questions through real rank-fused retrieval, and keep it only if the chunk's
 // failing (question, metric) set shrank with no new failures — otherwise revert
 // the override and re-score again so the stored results stay truthful. Exported
 // for the post-run choice endpoint (POST /api/eval/autotune/apply).

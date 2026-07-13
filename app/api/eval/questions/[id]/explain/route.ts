@@ -14,9 +14,12 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  // ?state=baseline narrows to results scored under pure base-model retrieval
+  // (0022 fingerprint) — the baseline row's top-k while a delegate is active.
+  const state = new URL(request.url).searchParams.get("state") ?? undefined;
   return withRequestConfig(request, async () => {
     try {
-      const explain = await getQuestionExplain(id);
+      const explain = await getQuestionExplain(id, state);
       return Response.json(explain);
     } catch (err) {
       const message =

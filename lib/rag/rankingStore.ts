@@ -9,6 +9,7 @@
 // ---------------------------------------------------------------------------
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
+import { retrievalStateFingerprint } from "@/lib/rag/overrideStore";
 import { vectorLiteral } from "@/lib/rag/vectorStore";
 
 export type RankingKind = "aggregate" | "llm_pool" | "llm_rerank" | "manual";
@@ -160,6 +161,10 @@ export async function getRankingChunks(
 // ideal ranking. Empty when the question hasn't been scored under this config, so
 // callers can tell "unscored" (no order) from "scored but missed" (order, no hit).
 export async function getRetrievedOrder(questionId: string): Promise<string[]> {
+  // Prefer the result scored under the CURRENT override state (0022), like
+  // getSummary — so nDCG grades the same retrieval the dashboard shows, even
+  // right after a delegate revert resurrects an older matching result.
+  const currentState = await retrievalStateFingerprint();
   const rows = await sql<{ retrieved_ids: string[] }[]>`
     select res.retrieved_ids
     from eval_results res
@@ -167,7 +172,8 @@ export async function getRetrievedOrder(questionId: string): Promise<string[]> {
     join document_embeddings de on de.id = l.document_embedding_id
     where l.eval_question_id = ${questionId}
       and de.config_id = ${activeConfig().id}
-    order by res.scored_at desc
+    order by (res.retrieval_state is not distinct from ${currentState}) desc,
+             res.scored_at desc
     limit 1
   `;
   return rows[0]?.retrieved_ids ?? [];

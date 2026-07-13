@@ -18,7 +18,13 @@ import {
   type EvalCriteria,
 } from "@/lib/rag/evalSettingsStore";
 import { tokenizeWithOffsets } from "@/lib/rag/chunker";
-import { getRetrievalChangedAt, type OverrideKind } from "@/lib/rag/overrideStore";
+import {
+  clearRetrievalChanges,
+  getRetrievalChangedAt,
+  listRetrievalChanges,
+  retrievalStateFingerprint,
+  type OverrideKind,
+} from "@/lib/rag/overrideStore";
 import { getTruthOrder } from "@/lib/rag/rankingStore";
 
 export type ChunkNeedingQuestions = {
@@ -43,7 +49,10 @@ export type ResultInsert = {
   hit: boolean;
   foundRank: number | null;
   retrievedIds: string[];
-  retrievedScores: number[]; // cosine similarity per retrievedIds entry, same order
+  retrievedScores: number[]; // per retrievedIds entry, same order: cosine similarity (base path) or rank-derived score (fused path)
+  // Fingerprint of the override state this was scored under (0022) — stale iff
+  // it differs from the current retrievalStateFingerprint().
+  retrievalState: string;
 };
 
 export type QuestionDetail = {
@@ -63,7 +72,11 @@ export type QuestionDetail = {
   storedSim: number | null;
   retrievedIds: string[] | null;
   scoredAt: number | null;
-  stale: boolean; // true = edited since its last score; result shown is for the old text
+  // Edited since its last score OR scored before the last retrieval-shape
+  // change — amber badge, re-scored next run. Retrieval-stale rows still count
+  // toward the rates; edit-stale ones don't (their score is for the old text).
+  stale: boolean;
+  editStale: boolean; // the excluded-from-rates subset of `stale`
   // Graded nDCG@k against this question's official ideal ranking; null when it
   // has no ranking yet or no fresh score (ungraded → grey chip on /eval).
   ndcg: number | null;
@@ -152,9 +165,13 @@ export type EvalSummary = {
   pendingChunks: number;
   pendingScoring: number;
   // Of pendingScoring, how many are stale ONLY because retrieval changed shape
-  // after they were scored (an override/delegate set or cleared) — the dashboard
-  // explains the amber "stale" wave with a banner when this is non-zero.
+  // after they were scored (an override/delegate set or cleared). These still
+  // COUNT toward the rates (approximate is better than a cratered sample); the
+  // dashboard shows the stale badge while this is non-zero.
   retrievalStale: number;
+  // The logged override/delegate changes behind retrievalStale (0021), newest
+  // first — the stale badge's hover list. Empty when nothing is stale.
+  retrievalChanges: { description: string; at: number }[];
   // Total chunks under the active config — gates bulk "Add question" (no chunks
   // = nothing to generate against).
   chunkCount: number;
@@ -235,10 +252,12 @@ export type ChunkDifficultyGap = {
 // `documentId` (bulk-actions document scope) narrows to one document.
 export async function chunksNeedingQuestionsByDifficulty(
   difficulties: string[],
-  documentId?: string,
+  documentIds?: string[],
 ): Promise<ChunkDifficultyGap[]> {
   const table = await activeChunksTable();
   if (!table || difficulties.length === 0) return [];
+  // Bulk-actions scope: one or more documents; null/empty = the whole corpus.
+  const docScope = documentIds && documentIds.length > 0 ? documentIds : null;
 
   const rows = await sql<
     {
@@ -254,7 +273,7 @@ export async function chunksNeedingQuestionsByDifficulty(
     join document_embeddings de on de.id = c.document_embedding_id
     cross join unnest(${difficulties}::text[]) as d(difficulty)
     where de.config_id = ${activeConfig().id}
-      and (${documentId ?? null}::uuid is null or c.document_id = ${documentId ?? null})
+      and (${docScope}::uuid[] is null or c.document_id = any(${docScope}::uuid[]))
       and not exists (
         select 1
         from eval_labels l
@@ -377,7 +396,13 @@ export async function getChunkForGeneration(
 // before the config's retrieval last changed shape (an override/delegate set or
 // cleared — see retrieval_changed_at, 0019).
 export async function questionsNeedingScoring(): Promise<QuestionToScore[]> {
-  const retrievalChangedAt = await getRetrievalChangedAt();
+  const [retrievalChangedAt, currentState] = await Promise.all([
+    getRetrievalChangedAt(),
+    retrievalStateFingerprint(),
+  ]);
+  // A result is retrieval-fresh when its 0022 fingerprint matches the CURRENT
+  // override state (so a set-then-reverted change needs no re-score); legacy
+  // rows without one fall back to the 0019 timestamp rule.
   const rows = await sql<
     {
       question_id: string;
@@ -399,8 +424,12 @@ export async function questionsNeedingScoring(): Promise<QuestionToScore[]> {
         select 1 from eval_results r
         where r.eval_label_id = l.id
           and r.scored_at >= q.updated_at
-          and (${retrievalChangedAt}::timestamptz is null
-               or r.scored_at >= ${retrievalChangedAt})
+          and (
+            r.retrieval_state = ${currentState}
+            or (r.retrieval_state is null
+                and (${retrievalChangedAt}::timestamptz is null
+                     or r.scored_at >= ${retrievalChangedAt}))
+          )
       )
   `;
 
@@ -417,8 +446,10 @@ export async function questionsNeedingScoring(): Promise<QuestionToScore[]> {
 // of these against the current corpus keeps recall apples-to-apples after the corpus
 // changes (e.g. a doc was added/removed and now competes in the top-k).
 // questionsNeedingScoring() is the incremental counterpart used by "Process new chunks".
-// `documentId` (bulk-actions document scope) narrows to one document's questions.
-export async function allLabeledQuestions(documentId?: string): Promise<QuestionToScore[]> {
+// `documentIds` (bulk-actions scope) narrows to those documents' questions;
+// null/empty = every document.
+export async function allLabeledQuestions(documentIds?: string[]): Promise<QuestionToScore[]> {
+  const docScope = documentIds && documentIds.length > 0 ? documentIds : null;
   const rows = await sql<
     {
       question_id: string;
@@ -436,7 +467,7 @@ export async function allLabeledQuestions(documentId?: string): Promise<Question
     join eval_labels l on l.eval_question_id = q.id
     join document_embeddings de on de.id = l.document_embedding_id
     where de.config_id = ${activeConfig().id}
-      and (${documentId ?? null}::uuid is null or q.document_id = ${documentId ?? null})
+      and (${docScope}::uuid[] is null or q.document_id = any(${docScope}::uuid[]))
   `;
 
   return rows.map((r) => ({
@@ -548,8 +579,15 @@ export type QuestionExplain = {
   scoredAt: number | null;
 };
 
+// `retrievalState` narrows the drill-down to results scored under a specific
+// override state (0022) — the baseline row passes 'baseline' to show what pure
+// base-model retrieval returned while a delegate is active. When absent, the
+// newest result matching the CURRENT state wins (falling back to newest
+// overall), mirroring getSummary — so the drill-down always explains the same
+// result the badge shows, including after a delegate revert.
 export async function getQuestionExplain(
   questionId: string,
+  retrievalState?: string,
 ): Promise<QuestionExplain> {
   const empty: QuestionExplain = {
     expected: null,
@@ -573,6 +611,8 @@ export async function getQuestionExplain(
   if (!label) return empty;
 
   // Latest score for that label; retrieved_ids are stored in rank order.
+  // Prefer the requested state (or the current one) — see the doc comment.
+  const preferState = retrievalState ?? (await retrievalStateFingerprint());
   const [result] = await sql<
     {
       retrieved_ids: string[];
@@ -584,7 +624,10 @@ export async function getQuestionExplain(
     select retrieved_ids, retrieved_scores, k, scored_at
     from eval_results
     where eval_label_id = ${label.label_id}
-    order by scored_at desc
+      and (${retrievalState ?? null}::text is null
+           or retrieval_state = ${retrievalState ?? null})
+    order by (retrieval_state is not distinct from ${preferState}) desc,
+             scored_at desc
     limit 1
   `;
 
@@ -1054,11 +1097,38 @@ export async function getModelTrialChunk(
   };
 }
 
+// Chunk ids under the active config whose TEXT already has a cached 'document'
+// embedding under `model` (0020 content-addressed cache) — free trial-pool
+// candidates: delegate-space retrieval and past trials have already paid for
+// them. Hash must mirror lib/rag/embedCache (sha256 hex over the exact UTF-8
+// text). Cache table missing (0020 unapplied) → none.
+export async function cachedChunkIdsForModel(model: string): Promise<string[]> {
+  const table = await activeChunksTable();
+  if (!table) return [];
+  try {
+    const rows = await sql<{ id: string }[]>`
+      select c.id
+      from ${sql(table)} c
+      join document_embeddings de on de.id = c.document_embedding_id
+      join embedding_cache ec
+        on ec.model = ${model}
+       and ec.input_kind = 'document'
+       and ec.text_hash = encode(sha256(convert_to(c.text, 'UTF8')), 'hex')
+      where de.config_id = ${activeConfig().id}
+    `;
+    return rows.map((r) => r.id);
+  } catch (err) {
+    if ((err as { code?: string }).code === "42P01") return [];
+    throw err;
+  }
+}
+
 // The chunk's questions plus each one's latest stored result (the full-corpus
 // baseline) and the top-k ids it retrieved (which seed the candidate pool).
 export async function getModelTrialQuestions(
   chunkId: string,
 ): Promise<ModelTrialQuestion[]> {
+  const currentState = await retrievalStateFingerprint();
   const rows = await sql<
     {
       question_id: string;
@@ -1076,11 +1146,15 @@ export async function getModelTrialQuestions(
         and de.config_id = ${activeConfig().id}
     ),
     latest as (
+      -- Same current-state preference as getSummary, so a trial's "stored"
+      -- baseline column matches the result the dashboard shows.
       select distinct on (r.eval_question_id)
         r.eval_question_id, r.hit, r.found_rank, r.retrieved_ids
       from eval_results r
       join active_labels al on al.label_id = r.eval_label_id
-      order by r.eval_question_id, r.scored_at desc
+      order by r.eval_question_id,
+        (r.retrieval_state is not distinct from ${currentState}) desc,
+        r.scored_at desc
     )
     select
       q.id as question_id,
@@ -1261,10 +1335,11 @@ export async function insertResults(rows: ResultInsert[]): Promise<void> {
       await tx`
         insert into eval_results
           (eval_question_id, eval_label_id, k, hit, found_rank, retrieved_ids,
-           retrieved_scores)
+           retrieved_scores, retrieval_state)
         values
           (${r.questionId}, ${r.labelId}, ${r.k}, ${r.hit}, ${r.foundRank},
-           ${r.retrievedIds}::uuid[], ${r.retrievedScores}::real[])
+           ${r.retrievedIds}::uuid[], ${r.retrievedScores}::real[],
+           ${r.retrievalState})
       `;
     }
   });
@@ -1457,6 +1532,7 @@ export async function getSummary(): Promise<EvalSummary> {
     pendingChunks: 0,
     pendingScoring: 0,
     retrievalStale: 0,
+    retrievalChanges: [],
     chunkCount: 0,
     criteria,
     config: configInfo,
@@ -1466,8 +1542,19 @@ export async function getSummary(): Promise<EvalSummary> {
   const table = await activeChunksTable();
   if (!table) return empty;
 
-  const [detail, runRows, pendingChunkRows, chunkCountRows, overrides, retrievalChangedAt] =
-    await Promise.all([
+  // Fetched first: the detail query below prefers results scored under the
+  // CURRENT override state, so it needs the fingerprint as a parameter.
+  const currentState = await retrievalStateFingerprint();
+
+  const [
+    detail,
+    runRows,
+    pendingChunkRows,
+    chunkCountRows,
+    overrides,
+    retrievalChangedAt,
+    changeLog,
+  ] = await Promise.all([
     sql<
       {
         question_id: string;
@@ -1484,6 +1571,7 @@ export async function getSummary(): Promise<EvalSummary> {
         retrieved_ids: string[] | null;
         retrieved_scores: number[] | null;
         scored_at: Date | null;
+        retrieval_state: string | null;
         ignored: boolean;
       }[]
     >`
@@ -1494,12 +1582,18 @@ export async function getSummary(): Promise<EvalSummary> {
         where de.config_id = ${activeConfig().id}
       ),
       latest as (
+        -- The newest result scored under the CURRENT override state (0022),
+        -- falling back to the newest overall (shown stale) when none matches.
+        -- So reverting a delegate resurrects the pre-delegate results instead
+        -- of leaving the chunk stale until a redundant re-score.
         select distinct on (r.eval_question_id)
           r.eval_question_id, r.hit, r.found_rank, r.retrieved_ids,
-          r.retrieved_scores, r.scored_at
+          r.retrieved_scores, r.scored_at, r.retrieval_state
         from eval_results r
         join active_labels al on al.label_id = r.eval_label_id
-        order by r.eval_question_id, r.scored_at desc
+        order by r.eval_question_id,
+          (r.retrieval_state is not distinct from ${currentState}) desc,
+          r.scored_at desc
       )
       select
         q.id as question_id,
@@ -1516,6 +1610,7 @@ export async function getSummary(): Promise<EvalSummary> {
         lt.retrieved_ids,
         lt.retrieved_scores,
         lt.scored_at,
+        lt.retrieval_state,
         (ig.eval_question_id is not null) as ignored
       from eval_questions q
       join active_labels al on al.eval_question_id = q.id
@@ -1572,6 +1667,7 @@ export async function getSummary(): Promise<EvalSummary> {
     `,
     listChunkOverrideInfo(table),
     getRetrievalChangedAt(),
+    listRetrievalChanges(),
   ]);
 
   // Each question's official (is_truth) ideal ranking, if any — what its graded
@@ -1579,16 +1675,25 @@ export async function getSummary(): Promise<EvalSummary> {
   const truthOrders = await getTruthOrder(detail.map((r) => r.question_id));
 
   // Results scored before the last retrieval-shape change (override/delegate set
-  // or cleared) were produced by a retrieval that no longer exists.
+  // or cleared) were produced by a retrieval that no longer exists. They still
+  // COUNT toward the rates (badged stale, refreshed next run) — only edit-stale
+  // rows are excluded, since their score belongs to the question's OLD text.
   let retrievalStale = 0;
+  const editStaleIds = new Set<string>();
   const questions: QuestionDetail[] = detail.map((r) => {
     // Edited after its last score -> the shown hit/miss is for the old text. Treat
     // as pending (it will be re-scored next run, see questionsNeedingScoring).
     const editStale = r.scored_at !== null && r.updated_at.getTime() > r.scored_at.getTime();
+    if (editStale) editStaleIds.add(r.question_id);
+    // Retrieval-stale = scored under a DIFFERENT override state than today's
+    // (0022 fingerprint), so a set-then-reverted change isn't stale. Legacy
+    // rows without a fingerprint fall back to the 0019 timestamp rule.
     const retrStale =
       r.scored_at !== null &&
-      retrievalChangedAt !== null &&
-      r.scored_at.getTime() < retrievalChangedAt.getTime();
+      (r.retrieval_state !== null
+        ? r.retrieval_state !== currentState
+        : retrievalChangedAt !== null &&
+          r.scored_at.getTime() < retrievalChangedAt.getTime());
     if (retrStale && !editStale) retrievalStale += 1;
     const stale = editStale || retrStale;
     const scored = r.scored_at !== null;
@@ -1596,15 +1701,15 @@ export async function getSummary(): Promise<EvalSummary> {
     // rank within the stored superset, A1) — so changing recall_k in Settings is
     // reflected without a re-score, as long as it's within the retrieved depth.
     const hit = scored ? r.found_rank !== null && r.found_rank <= recallK : null;
-    const fresh = scored && !stale;
-    // Graded nDCG needs an ideal ranking AND a fresh retrieval order; otherwise
-    // it's ungraded (null) and the UI shows the grey placeholder. Graded at ndcg_k.
+    const countable = scored && !editStale;
+    // Graded nDCG needs an ideal ranking AND a countable retrieval order;
+    // otherwise it's ungraded (null) and the UI shows the grey placeholder.
     const ideal = truthOrders.get(r.question_id);
-    const qNdcg = fresh && ideal ? ndcg(ideal, r.retrieved_ids ?? [], ndcgK) : null;
+    const qNdcg = countable && ideal ? ndcg(ideal, r.retrieved_ids ?? [], ndcgK) : null;
     // The ground-truth chunk's cosine sim in the stored retrieval — found_rank is
     // 1-based into retrieved_scores. Null on a full miss or pre-0004 results.
     const storedSim =
-      fresh && r.found_rank !== null && r.retrieved_scores
+      countable && r.found_rank !== null && r.retrieved_scores
         ? (r.retrieved_scores[r.found_rank - 1] ?? null)
         : null;
     return {
@@ -1622,17 +1727,21 @@ export async function getSummary(): Promise<EvalSummary> {
       retrievedIds: r.retrieved_ids,
       scoredAt: r.scored_at ? r.scored_at.getTime() : null,
       stale,
+      editStale,
       ndcg: qNdcg,
       ignored: r.ignored,
     };
   });
 
-  // Only fresh scores count toward recall; unscored and stale are pending, and
+  // Scored rows count toward recall — including retrieval-stale ones (badged,
+  // approximate until the next run). Unscored and edit-stale are pending, and
   // ignored questions are excluded from every rate (§7) — they still render.
-  const scoredRows = questions.filter((q) => q.hit !== null && !q.stale && !q.ignored);
+  const scoredRows = questions.filter(
+    (q) => q.hit !== null && !editStaleIds.has(q.questionId) && !q.ignored,
+  );
   const hits = scoredRows.filter((q) => q.hit === true).length;
 
-  // MRR over the fresh-scored set, straight from found_rank (single-relevant) —
+  // MRR over the same scored set, straight from found_rank (single-relevant) —
   // no extra retrieval, so already-scored questions are covered retroactively.
   const mrr =
     scoredRows.length > 0
@@ -1654,6 +1763,13 @@ export async function getSummary(): Promise<EvalSummary> {
   // Matches questionsNeedingScoring() — no extra query needed.
   const pendingScoring = questions.filter((q) => q.hit === null || q.stale).length;
 
+  // Maintenance sweep: when nothing is retrieval-stale anymore but change-log
+  // entries linger (a revert restored the fingerprint, netting them out), drop
+  // them so the next real change starts a clean history. Best-effort.
+  if (retrievalStale === 0 && changeLog.length > 0) {
+    await clearRetrievalChanges().catch(() => {});
+  }
+
   const byDoc = new Map<string, DocumentBreakdown>();
   for (const q of questions) {
     let d = byDoc.get(q.documentId);
@@ -1661,7 +1777,8 @@ export async function getSummary(): Promise<EvalSummary> {
       d = { documentId: q.documentId, fileName: q.fileName, scored: 0, hits: 0 };
       byDoc.set(q.documentId, d);
     }
-    if (q.hit !== null && !q.stale && !q.ignored) {
+    // Same inclusion rule as the headline rates: retrieval-stale counts.
+    if (q.hit !== null && !editStaleIds.has(q.questionId) && !q.ignored) {
       d.scored += 1;
       if (q.hit) d.hits += 1;
     }
@@ -1692,6 +1809,12 @@ export async function getSummary(): Promise<EvalSummary> {
     pendingChunks: pendingChunkRows[0]?.n ?? 0,
     pendingScoring,
     retrievalStale,
+    // Log entries can outlive their stale rows (e.g. a scoped re-score covered
+    // them all) — hide the history once nothing is actually stale.
+    retrievalChanges:
+      retrievalStale > 0
+        ? changeLog.map((c) => ({ description: c.description, at: c.at.getTime() }))
+        : [],
     chunkCount: chunkCountRows[0]?.n ?? 0,
     criteria,
     config: configInfo,

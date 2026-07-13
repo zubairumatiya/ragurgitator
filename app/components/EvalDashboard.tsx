@@ -12,7 +12,14 @@
 // ---------------------------------------------------------------------------
 "use client";
 
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import { useRouter } from "next/navigation";
 import { HIGH_NDCG } from "@/lib/config";
 import { apiFetch } from "@/lib/http/client";
@@ -121,10 +128,11 @@ export function EvalDashboard() {
   const [summary, setSummary] = useState<EvalSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   // "Bulk actions → Change base model / chunk size" edits THIS config in place
-  // (or one document via per-chunk overrides when a document scope is picked).
+  // (or selected documents via per-chunk overrides when a document scope is
+  // picked — null means the whole config).
   const [changeScope, setChangeScope] = useState<{
-    docId: string | null;
-    docName: string | null;
+    docIds: string[] | null;
+    docNames: string[] | null;
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -366,24 +374,25 @@ export function EvalDashboard() {
         `Recall@k ${pct(r.recall)} · nDCG ${fmtScore(r.ndcg)}.`,
     );
 
-  const onRescore = (documentId: string | null) =>
+  const onRescore = (documentIds: string[] | null) =>
     runStream(
       "/api/eval/rescore",
       (r) =>
         `Re-scored ${r.scored} question(s). ` +
         `Recall@k ${pct(r.recall)} · nDCG ${fmtScore(r.ndcg)}.`,
-      documentId ? { documentId } : undefined,
+      documentIds ? { documentIds } : undefined,
     );
 
   // Bulk actions → Add question → {difficulty}: generate at one difficulty
-  // (corpus-wide, or one document when scoped), then score. Same NDJSON stream.
-  const onBulkAdd = (difficulty: Difficulty, documentId: string | null) =>
+  // (corpus-wide, or the selected documents when scoped), then score. Same
+  // NDJSON stream.
+  const onBulkAdd = (difficulty: Difficulty, documentIds: string[] | null) =>
     runStream(
       "/api/eval/bulk-generate",
       (r) =>
         `Added ${r.generated} ${difficulty} question(s), scored ${r.scored}. ` +
         `Recall@k ${pct(r.recall)} · nDCG ${fmtScore(r.ndcg)}.`,
-      { difficulty, documentId: documentId ?? undefined },
+      { difficulty, documentIds: documentIds ?? undefined },
     );
 
   async function saveEdit(id: string) {
@@ -516,6 +525,15 @@ export function EvalDashboard() {
 
   return (
     <div className="flex flex-col gap-6">
+      {/* Retrieval changed shape (a delegate/override was set or cleared) after
+          some results were scored — they still count toward the rates, badged
+          stale until the next full run re-scores them. Hover for the changes. */}
+      {!busy && summary !== null && summary.retrievalStale > 0 && (
+        <StaleBadge
+          count={summary.retrievalStale}
+          changes={summary.retrievalChanges}
+        />
+      )}
       <div className="flex flex-wrap items-center gap-3">
         <button
           onClick={onProcess}
@@ -532,8 +550,8 @@ export function EvalDashboard() {
         <BulkActions
           busy={busy}
           onAddDifficulty={onBulkAdd}
-          onChangeConfig={(docId, docName) =>
-            setChangeScope({ docId, docName })
+          onChangeConfig={(docIds, docNames) =>
+            setChangeScope({ docIds, docNames })
           }
           onRescore={onRescore}
           canRescore={canRescore}
@@ -557,8 +575,8 @@ export function EvalDashboard() {
       {changeScope && summary && (
         <ConfigChangeDialog
           config={summary.config}
-          documentId={changeScope.docId}
-          documentName={changeScope.docName}
+          documentIds={changeScope.docIds}
+          documentNames={changeScope.docNames}
           onClose={() => setChangeScope(null)}
           onDone={() => {
             // Settings/labels changed — refresh the banner and re-pull the summary.
@@ -566,20 +584,6 @@ export function EvalDashboard() {
             reload();
           }}
         />
-      )}
-
-      {/* Retrieval changed shape (a delegate/override was set or cleared) after
-          these results were scored — they're marked stale and excluded from the
-          rates until re-scored. Process new chunks re-scores exactly this set. */}
-      {!busy && summary !== null && summary.retrievalStale > 0 && (
-        <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
-          A delegate/override change altered retrieval after{" "}
-          {summary.retrievalStale} result
-          {summary.retrievalStale === 1 ? " was" : "s were"} scored — those
-          results are stale and excluded from the rates. Run{" "}
-          <span className="font-medium">Process new chunks</span> (or Re-score
-          all) to refresh them.
-        </p>
       )}
 
       {progress && <RunProgress progress={progress} k={summary?.k ?? 0} />}
@@ -705,10 +709,27 @@ export function EvalDashboard() {
               </h2>
               <div className="flex flex-col gap-3">
                 {groupByChunk(summary.questions).map((group) => {
+                  // Same inclusion rule as the headline rates: retrieval-stale
+                  // scores still count, edit-stale ones don't.
                   const scored = group.questions.filter(
-                    (q) => q.hit !== null && !q.stale && !q.ignored,
+                    (q) => q.hit !== null && !q.editStale && !q.ignored,
                   );
                   const hits = scored.filter((q) => q.hit === true).length;
+                  // Mean retrieved rank under the chunk's CURRENT retrieval
+                  // (delegate or baseline); a miss counts as k+1 (just past the
+                  // cutoff). Lower is better — the bar a trial must beat for
+                  // its green title.
+                  const chunkAvgRank =
+                    scored.length > 0
+                      ? scored.reduce(
+                          (sum, q) =>
+                            sum +
+                            (q.hit && q.foundRank !== null
+                              ? q.foundRank
+                              : summary.recallK + 1),
+                          0,
+                        ) / scored.length
+                      : null;
                   // Mean stored sim of the ground-truth chunk across this chunk's
                   // scored questions — same read as a trial's "avg sim", but for
                   // the live (baseline/delegate) retrieval.
@@ -809,11 +830,21 @@ export function EvalDashboard() {
                                       FP?
                                     </span>
                                   )}
-                                <Badge
-                                  hit={q.hit}
-                                  rank={q.foundRank}
-                                  stale={q.stale}
-                                />
+                                {/* Stale is its own pill so the hit/miss badge
+                                    keeps its green/red identity. */}
+                                {q.stale && (
+                                  <span
+                                    title={
+                                      q.editStale
+                                        ? "Edited since its last score — this result is for the old text and doesn't count toward the rates until re-scored"
+                                        : "Scored under a different override/delegate state — still counts toward the rates, re-scored next run"
+                                    }
+                                    className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400"
+                                  >
+                                    stale
+                                  </span>
+                                )}
+                                <Badge hit={q.hit} rank={q.foundRank} />
                                 <MetricChip label="nDCG" value={q.ndcg} />
                               </span>
                             </div>
@@ -935,6 +966,7 @@ export function EvalDashboard() {
                               <NdcgRankingPanel
                                 questionId={q.questionId}
                                 onChange={refreshSummary}
+                                onClose={() => setRankingOpenId(null)}
                               />
                             )}
                           </li>
@@ -946,6 +978,7 @@ export function EvalDashboard() {
                       <ChunkExperiments
                         chunkId={group.chunkId}
                         baselineModel={summary.config.baseModel}
+                        chunkAvgRank={chunkAvgRank}
                         overrideInfo={override ?? null}
                         onDelegateChange={reload}
                       >
@@ -1117,6 +1150,58 @@ function OverrideBadge({ info }: { info: ChunkOverrideInfo }) {
 // dropdown at the top targets everything at the whole corpus ("All documents",
 // the default) or one document — doc-scoped config changes apply as per-chunk
 // overrides.
+// Amber chip above the toolbar while retrieval-stale results are counting
+// toward the rates (item 5): retrieval changed shape after they were scored,
+// so the headline numbers are approximate until the next full run. Hover lists
+// the exact override/delegate changes behind it (the 0021 change log).
+function StaleBadge({
+  count,
+  changes,
+}: {
+  count: number;
+  changes: { description: string; at: number }[];
+}) {
+  return (
+    <span className="group relative inline-block self-start">
+      <span className="inline-flex cursor-default items-center gap-1.5 rounded-full border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+        <span aria-hidden>◷</span>
+        {count} stale result{count === 1 ? "" : "s"} in rates
+      </span>
+      <span className="absolute left-0 top-full z-30 hidden pt-1 group-hover:block">
+        <span className="flex w-80 flex-col gap-1.5 rounded border border-zinc-200 bg-white p-2 text-xs shadow-lg dark:border-zinc-700 dark:bg-zinc-900">
+          <span className="font-medium uppercase tracking-wide text-zinc-500">
+            Retrieval changed since these were scored
+          </span>
+          {changes.length > 0 ? (
+            <span className="flex max-h-48 flex-col gap-1 overflow-auto">
+              {changes.map((c, i) => (
+                <span
+                  key={i}
+                  className="flex items-baseline justify-between gap-2 text-zinc-600 dark:text-zinc-400"
+                >
+                  <span>{c.description}</span>
+                  <span className="shrink-0 text-zinc-400">
+                    {new Date(c.at).toLocaleTimeString()}
+                  </span>
+                </span>
+              ))}
+            </span>
+          ) : (
+            <span className="text-zinc-500">
+              An override/delegate change altered rank-fused retrieval for every
+              query.
+            </span>
+          )}
+          <span className="text-red-600 dark:text-red-400">
+            Re-scoring everything takes a while — batch up several changes, then
+            run Process new chunks once.
+          </span>
+        </span>
+      </span>
+    </span>
+  );
+}
+
 function BulkActions({
   busy,
   onAddDifficulty,
@@ -1126,28 +1211,35 @@ function BulkActions({
   canAddQuestion,
 }: {
   busy: boolean;
-  onAddDifficulty: (d: Difficulty, documentId: string | null) => void;
+  onAddDifficulty: (d: Difficulty, documentIds: string[] | null) => void;
   onChangeConfig: (
-    documentId: string | null,
-    documentName: string | null,
+    documentIds: string[] | null,
+    documentNames: string[] | null,
   ) => void;
-  onRescore: (documentId: string | null) => void;
+  onRescore: (documentIds: string[] | null) => void;
   canRescore: boolean;
   canAddQuestion: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [subOpen, setSubOpen] = useState(false);
-  // Document scope. "" = all documents. The list is fetched once, on first open.
+  // Document scope: collapsed to an "Apply to: …" summary by default (all
+  // documents). Expanding reveals a toggle list — clicking a document flips it
+  // in/out of the selection and the menu STAYS open, so several can be picked.
+  // Empty selection = all documents. The list is fetched on first expand.
+  const [docsOpen, setDocsOpen] = useState(false);
   const [docs, setDocs] = useState<IngestedDocument[] | null>(null);
-  const [docId, setDocId] = useState("");
+  const [docIds, setDocIds] = useState<string[]>([]);
   const close = () => {
     setOpen(false);
     setSubOpen(false);
+    setDocsOpen(false);
   };
 
-  function toggleMenu() {
-    const opening = !open;
-    setOpen(opening);
+  const toggleMenu = () => setOpen((o) => !o);
+
+  function toggleDocsSection() {
+    const opening = !docsOpen;
+    setDocsOpen(opening);
     if (!opening || docs !== null) return;
     apiFetch("/api/documents")
       .then((res) => res.json())
@@ -1157,9 +1249,16 @@ function BulkActions({
       .catch(() => setDocs([]));
   }
 
-  const scopeId = docId || null;
-  const scopeName = scopeId
-    ? (docs?.find((d) => d.id === scopeId)?.fileName ?? null)
+  const toggleDoc = (id: string) =>
+    setDocIds((ids) =>
+      ids.includes(id) ? ids.filter((d) => d !== id) : [...ids, id],
+    );
+
+  const scopeIds = docIds.length > 0 ? docIds : null;
+  const scopeNames = scopeIds
+    ? scopeIds.map(
+        (id) => docs?.find((d) => d.id === id)?.fileName ?? "unknown document",
+      )
     : null;
 
   return (
@@ -1177,22 +1276,75 @@ function BulkActions({
         <>
           <div className="fixed inset-0 z-10" onClick={close} />
           <div className="absolute left-0 top-full z-20 mt-1 w-60 rounded-md border border-zinc-200 bg-white py-1 text-sm shadow-lg dark:border-zinc-800 dark:bg-zinc-900">
-            {/* Which documents the actions below apply to. */}
-            <label className="flex flex-col gap-1 px-3 pb-1.5 pt-1 text-xs text-zinc-500">
-              Apply to
-              <select
-                value={docId}
-                onChange={(e) => setDocId(e.target.value)}
-                className="w-full rounded border border-zinc-300 bg-transparent px-1.5 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
-              >
-                <option value="">All documents</option>
-                {docs?.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.fileName}
-                  </option>
-                ))}
-              </select>
-            </label>
+            {/* Which documents the actions below apply to — collapsed to the
+                current scope by default; expand to toggle documents, none
+                selected = all documents. */}
+            <button
+              type="button"
+              onClick={toggleDocsSection}
+              className="flex w-full cursor-pointer items-center justify-between gap-2 px-3 py-1.5 text-left text-xs text-zinc-500 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+            >
+              <span className="truncate">
+                Apply to:{" "}
+                <span
+                  className={
+                    docIds.length > 0
+                      ? "font-medium text-blue-700 dark:text-blue-400"
+                      : undefined
+                  }
+                >
+                  {docIds.length === 0
+                    ? "All documents"
+                    : `${docIds.length} document${docIds.length === 1 ? "" : "s"}`}
+                </span>
+              </span>
+              <span className="shrink-0 text-zinc-400">
+                {docsOpen ? "▾" : "▸"}
+              </span>
+            </button>
+            {docsOpen && (
+              <div className="flex flex-col gap-1 px-3 pb-1.5 text-xs text-zinc-500">
+                <div className="max-h-44 overflow-auto rounded border border-zinc-200 dark:border-zinc-700">
+                  {docs === null ? (
+                    <span className="block animate-pulse px-2 py-1 text-zinc-400">
+                      Loading documents…
+                    </span>
+                  ) : docs.length === 0 ? (
+                    <span className="block px-2 py-1 text-zinc-400">
+                      No documents ingested yet.
+                    </span>
+                  ) : (
+                    docs.map((d) => {
+                      const selected = docIds.includes(d.id);
+                      return (
+                        <button
+                          key={d.id}
+                          type="button"
+                          onClick={() => toggleDoc(d.id)}
+                          className={`flex w-full cursor-pointer items-center justify-between gap-2 border-l-2 px-2 py-1 text-left ${
+                            selected
+                              ? "border-blue-500 bg-blue-50 font-medium text-blue-800 dark:bg-blue-900/30 dark:text-blue-300"
+                              : "border-transparent text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                          }`}
+                        >
+                          <span className="truncate">{d.fileName}</span>
+                          {selected && <span className="shrink-0">✓</span>}
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+                {docIds.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setDocIds([])}
+                    className="cursor-pointer self-end text-zinc-400 underline hover:no-underline"
+                  >
+                    clear — use all documents
+                  </button>
+                )}
+              </div>
+            )}
             <div className="my-1 border-t border-zinc-200 dark:border-zinc-800" />
             <button
               type="button"
@@ -1216,7 +1368,7 @@ function BulkActions({
                     type="button"
                     onClick={() => {
                       close();
-                      onAddDifficulty(d, scopeId);
+                      onAddDifficulty(d, scopeIds);
                     }}
                     className="cursor-pointer rounded border border-zinc-300 px-2 py-0.5 text-xs font-medium capitalize text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
                   >
@@ -1229,7 +1381,7 @@ function BulkActions({
               type="button"
               onClick={() => {
                 close();
-                onRescore(scopeId);
+                onRescore(scopeIds);
               }}
               disabled={!canRescore}
               title={
@@ -1246,11 +1398,11 @@ function BulkActions({
               type="button"
               onClick={() => {
                 close();
-                onChangeConfig(scopeId, scopeName);
+                onChangeConfig(scopeIds, scopeNames);
               }}
               title={
-                scopeId
-                  ? "Overrides this document's chunks to another model (config unchanged)"
+                scopeIds
+                  ? "Overrides the selected documents' chunks to another model (config unchanged)"
                   : "Changes THIS config in place — re-embeds but keeps question(s)"
               }
               className="block w-full cursor-pointer px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
@@ -1261,11 +1413,11 @@ function BulkActions({
               type="button"
               onClick={() => {
                 close();
-                onChangeConfig(scopeId, scopeName);
+                onChangeConfig(scopeIds, scopeNames);
               }}
               title={
-                scopeId
-                  ? "Re-splits this document's chunks via per-chunk overrides (config unchanged)"
+                scopeIds
+                  ? "Re-splits the selected documents' chunks via per-chunk overrides (config unchanged)"
                   : "Changes THIS config in place — re-embeds but keeps question(s)"
               }
               className="block w-full cursor-pointer px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
@@ -1327,24 +1479,9 @@ function MetricChip({ label, value }: { label: string; value: number | null }) {
   );
 }
 
-function Badge({
-  hit,
-  rank,
-  stale,
-}: {
-  hit: boolean | null;
-  rank: number | null;
-  stale: boolean;
-}) {
+function Badge({ hit, rank }: { hit: boolean | null; rank: number | null }) {
   if (hit === null) {
     return <span className="shrink-0 text-xs text-zinc-400">unscored</span>;
-  }
-  if (stale) {
-    return (
-      <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
-        stale
-      </span>
-    );
   }
   if (hit) {
     return (
@@ -1854,7 +1991,7 @@ function RechunkLab({
               type="button"
               onClick={saveOverride}
               disabled={saving || saved}
-              title="Persist this re-split as a size override for this chunk (RRF-fused; hit = any piece in top-k)"
+              title="Persist this re-split as a size override for this chunk (rank-fused; hit = any piece in top-k)"
               className="cursor-pointer rounded border border-zinc-300 px-2 py-1 text-zinc-700 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-900/40"
             >
               {saving ? "Saving…" : saved ? "Saved ✓" : "Set as size override"}
@@ -2516,6 +2653,12 @@ function ModelTrial({
   // server-side). Seeded with the auto pool — the questions' top-k — on load.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [showCorpus, setShowCorpus] = useState(false);
+  // Chunks whose text is already embedded under the selected trial model (0020
+  // cache) — auto-added to the pool since they're free, tagged "(cached)".
+  // prevCachedRef remembers the last auto-add so switching models removes the
+  // old model's freebies (they'd cost real embeddings under the new one).
+  const [cachedIds, setCachedIds] = useState<Set<string>>(new Set());
+  const prevCachedRef = useRef<Set<string>>(new Set());
 
   const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -2526,7 +2669,7 @@ function ModelTrial({
   const [savedResult, setSavedResult] = useState(false);
   // Phase 5: this chunk's persisted model override for the active config (null =
   // none). Setting it re-embeds the chunk under that model so retrieval ranks it
-  // there (RRF-fused). Re-score to see the effect on recall.
+  // there (rank-fused). Re-score to see the effect on recall.
   const [override, setOverride] = useState<string | null>(null);
   const [ovBusy, setOvBusy] = useState(false);
 
@@ -2567,6 +2710,57 @@ function ModelTrial({
       return next;
     });
   }
+
+  const autoPoolIds = useMemo(
+    () =>
+      new Set(
+        state?.status === "ready"
+          ? state.ctx.autoPool.map((c) => c.chunkId)
+          : [],
+      ),
+    [state],
+  );
+
+  // Swap the auto-added cached set: drop the previous model's freebies (unless
+  // they're regular auto-pool members the user keeps), add the new model's.
+  // The test chunk is excluded — it's always in the pool regardless.
+  function applyCached(ids: Set<string>) {
+    const next = new Set([...ids].filter((id) => id !== chunkId));
+    setSelected((prev) => {
+      const merged = new Set(prev);
+      for (const id of prevCachedRef.current) {
+        if (!next.has(id) && !autoPoolIds.has(id)) merged.delete(id);
+      }
+      for (const id of next) merged.add(id);
+      return merged;
+    });
+    prevCachedRef.current = next;
+    setCachedIds(next);
+  }
+
+  // Whenever the trial model changes, pull the chunks already embedded under it
+  // — including them is free, and a wider pool keeps the trial honest about the
+  // live competition. Size-only variations run in base space (competitors'
+  // vectors already exist), so nothing extra to add there.
+  useEffect(() => {
+    if (!open || state?.status !== "ready") return;
+    if (variation === "size" || !model) {
+      applyCached(new Set());
+      return;
+    }
+    let alive = true;
+    apiFetch(`/api/eval/cached-chunks?model=${encodeURIComponent(model)}`)
+      .then((res) => res.json())
+      .then((data: { chunkIds?: string[] }) => {
+        if (alive) applyCached(new Set(data.chunkIds ?? []));
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+    // applyCached/autoPoolIds are stable per `state`; model/variation drive it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, state, model, variation]);
 
   // Client-side gate mirroring the server's variation validation.
   const shapeInvalid =
@@ -2629,23 +2823,16 @@ function ModelTrial({
     }
   }
 
-  // Persist the current variation as this chunk's override for the active
-  // config (model / size / size+model), or clear it. Custom drag-border shapes
-  // can't be persisted (no override path for arbitrary sections yet).
-  async function applyOverride(clear: boolean) {
-    if (!clear && variation !== "model" && shapeMode === "custom") return;
+  // Clear this chunk's persisted override. (Setting one from here is gone —
+  // run + save a trial, then promote it via "Make delegate" in Models tried,
+  // so every override comes with its recorded evidence.)
+  async function clearOverride() {
     setOvBusy(true);
     setRunError(null);
     try {
-      const res = clear
-        ? await apiFetch(`/api/eval/chunks/${chunkId}/override`, {
-            method: "DELETE",
-          })
-        : await apiFetch(`/api/eval/chunks/${chunkId}/override`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(variationBody()),
-          });
+      const res = await apiFetch(`/api/eval/chunks/${chunkId}/override`, {
+        method: "DELETE",
+      });
       const data = (await res.json().catch(() => null)) as {
         error?: string;
       } | null;
@@ -2653,8 +2840,7 @@ function ModelTrial({
         setRunError(data?.error ?? `Request failed (${res.status}).`);
         return;
       }
-      const baseline = state?.status === "ready" ? state.ctx.baselineModel : "";
-      setOverride(clear ? null : variation === "size" ? baseline : model);
+      setOverride(null);
     } catch (err) {
       setRunError(err instanceof Error ? err.message : "Network error.");
     } finally {
@@ -2756,27 +2942,6 @@ function ModelTrial({
             >
               {running ? "Running…" : "Run"}
             </button>
-            <button
-              onClick={() => applyOverride(false)}
-              disabled={
-                ovBusy ||
-                running ||
-                saving ||
-                cantRun ||
-                (variation === "model" && model === state.ctx.baselineModel) ||
-                (variation !== "model" && shapeMode === "custom")
-              }
-              title={
-                variation === "model" && model === state.ctx.baselineModel
-                  ? "Can't override to the base model"
-                  : variation !== "model" && shapeMode === "custom"
-                    ? "Custom-border shapes can't be persisted as an override yet — use a uniform re-split"
-                    : "Persist this variation for this chunk's retrieval (RRF-fused)"
-              }
-              className="rounded-md border border-indigo-300 px-3 py-1 font-medium text-indigo-700 cursor-pointer hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-indigo-800 dark:text-indigo-300 dark:hover:bg-indigo-900/20"
-            >
-              {ovBusy ? "Saving…" : "Set as override"}
-            </button>
           </div>
 
           {/* Chunk-shape controls: uniform re-split, or drag the chunk's borders. */}
@@ -2846,7 +3011,7 @@ function ModelTrial({
                 re-score to see its effect.
               </span>
               <button
-                onClick={() => applyOverride(true)}
+                onClick={clearOverride}
                 disabled={ovBusy}
                 className="cursor-pointer underline hover:no-underline disabled:opacity-50"
               >
@@ -2870,6 +3035,13 @@ function ModelTrial({
               <span className="text-zinc-400">(always included)</span>
             </div>
 
+            {cachedIds.size > 0 && (
+              <span className="text-zinc-400">
+                {cachedIds.size} chunk{cachedIds.size === 1 ? "" : "s"} already
+                embedded under <span className="font-mono">{model}</span>{" "}
+                joined the pool automatically — cached, so they cost nothing.
+              </span>
+            )}
             {state.ctx.autoPool.length > 0 ? (
               <ul className="flex flex-col gap-0.5">
                 {state.ctx.autoPool.map((c) => (
@@ -2878,6 +3050,7 @@ function ModelTrial({
                     label={`${c.fileName} · #${c.position ?? "?"}`}
                     preview={c.text}
                     checked={selected.has(c.chunkId)}
+                    cached={cachedIds.has(c.chunkId)}
                     onToggle={() => toggleChunk(c.chunkId)}
                   />
                 ))}
@@ -2906,6 +3079,7 @@ function ModelTrial({
                         label={`${c.fileName} · #${c.position ?? "?"}`}
                         preview={c.preview}
                         checked={selected.has(c.chunkId)}
+                        cached={cachedIds.has(c.chunkId)}
                         onToggle={() => toggleChunk(c.chunkId)}
                       />
                     ))}
@@ -2959,17 +3133,24 @@ function ModelTrial({
 function ChunkExperiments({
   chunkId,
   baselineModel,
+  chunkAvgRank,
   overrideInfo,
   onDelegateChange,
   children,
 }: {
   chunkId: string;
   baselineModel: string;
+  // Live mean retrieved rank across this chunk's questions, misses as k+1
+  // (null when unscored) — what the chunk's CURRENT retrieval (delegate or
+  // baseline) achieves; trial rows turn green when strictly lower (e.g. @1+@1
+  // beats @1+@2).
+  chunkAvgRank: number | null;
   overrideInfo: ChunkOverrideInfo | null;
   onDelegateChange: () => void;
   children: ReactNode;
 }) {
   const [saved, setSaved] = useState<SavedModelTrial[]>([]);
+  const [trialsLoading, setTrialsLoading] = useState(true);
   const [delegating, setDelegating] = useState(false);
   const [delegateErr, setDelegateErr] = useState<string | null>(null);
 
@@ -3005,6 +3186,8 @@ function ChunkExperiments({
   }
 
   // Load the chunk's saved trials once on mount (lightweight — no embeddings).
+  // These land after the summary paints, so the section shows a loading pulse
+  // instead of popping in.
   useEffect(() => {
     let alive = true;
     apiFetch(`/api/eval/chunks/${chunkId}/trials`)
@@ -3012,7 +3195,10 @@ function ChunkExperiments({
       .then((data: { trials?: SavedModelTrial[] }) => {
         if (alive && data.trials) setSaved(data.trials);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (alive) setTrialsLoading(false);
+      });
     return () => {
       alive = false;
     };
@@ -3026,9 +3212,9 @@ function ChunkExperiments({
   }
 
   // Promote a saved trial to this chunk's persisted override (delegate model,
-  // size, or combo), or clear it (null) back to the config's base settings. The
-  // dashboard reloads so the blue header chip + metrics pick it up; a re-score
-  // applies it to the rates.
+  // size, or combo), or clear it (null) back to the config's base settings.
+  // The route re-scores THIS chunk's questions before responding (everything
+  // else goes stale-badged); the dashboard reload picks up both.
   async function setDelegate(body: Record<string, unknown> | null) {
     setDelegating(true);
     setDelegateErr(null);
@@ -3061,6 +3247,15 @@ function ChunkExperiments({
   const sizeTrials = saved.filter((t) => t.kind === "size");
   const comboTrials = saved.filter((t) => t.kind === "size+model");
 
+  // The saved trial the active delegate/override came from (if any) — the
+  // baseline row expands with its stored (baseline-side) per-question results.
+  const appliedTrial = saved.find((t) => isApplied(t)) ?? null;
+  // What currently serves this chunk, as a mean retrieved rank: prefer the live
+  // ranks (fresh right after the delegate-change auto-rescore); fall back to
+  // the applied trial's in-pool ranks while the chunk is unscored.
+  const currentAvgRank =
+    chunkAvgRank ?? (appliedTrial ? avgTrialRank(appliedTrial) : null);
+
   const renderRows = (trials: SavedModelTrial[]) =>
     trials.map((t) => {
       const body = overrideBodyFor(t);
@@ -3070,6 +3265,7 @@ function ChunkExperiments({
           trial={t}
           isApplied={isApplied(t)}
           canApply={body !== null}
+          currentAvgRank={currentAvgRank}
           delegating={delegating}
           onApply={() => body && setDelegate(body)}
           onDelete={() => removeSaved(t.id)}
@@ -3079,35 +3275,32 @@ function ChunkExperiments({
 
   return (
     <>
-      {(saved.length > 0 || delegateModel) && (
+      {(trialsLoading || saved.length > 0 || delegateModel) && (
         <div className="flex flex-col gap-2 border-t border-zinc-200 px-3 py-2 text-[11px] dark:border-zinc-800">
-          {(modelTrials.length > 0 || delegateModel) && (
+          {(trialsLoading || modelTrials.length > 0 || delegateModel) && (
             <div className="flex flex-col gap-1">
               <span className="font-medium uppercase tracking-wide text-zinc-500">
                 Models tried
               </span>
               <ul className="flex flex-col gap-1">
-                {/* With a delegate active, the base model moves down here. */}
+                {/* With a delegate active, the base model moves down here (it
+                    comes from the summary, so it renders before the trials
+                    fetch resolves — the loading pulse sits below it). */}
                 {delegateModel && (
-                  <li className="flex items-center gap-1.5 rounded border border-amber-200 bg-amber-50 p-2 dark:border-amber-900/50 dark:bg-amber-900/15">
-                    <span className="font-mono font-medium text-amber-700 dark:text-amber-400">
-                      {baselineModel}
-                    </span>
-                    <span className="text-amber-600 dark:text-amber-500">
-                      (baseline)
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setDelegate(null)}
-                      disabled={delegating}
-                      title="Clear the delegate — rank this chunk under the base model again"
-                      className="ml-auto cursor-pointer text-amber-700 underline hover:no-underline disabled:opacity-50 dark:text-amber-400"
-                    >
-                      Restore as delegate
-                    </button>
-                  </li>
+                  <BaselineRow
+                    model={baselineModel}
+                    appliedTrial={appliedTrial}
+                    overrideInfo={overrideInfo}
+                    delegating={delegating}
+                    onRestore={() => setDelegate(null)}
+                  />
                 )}
                 {renderRows(modelTrials)}
+                {trialsLoading && (
+                  <li className="animate-pulse text-zinc-400">
+                    Loading models tried…
+                  </li>
+                )}
               </ul>
             </div>
           )}
@@ -3148,11 +3341,15 @@ function PoolRow({
   label,
   preview,
   checked,
+  cached,
   onToggle,
 }: {
   label: string;
   preview: string;
   checked: boolean;
+  // Already embedded under the selected trial model (0020 cache) — including
+  // it in the pool is free, so it's auto-selected and tagged.
+  cached?: boolean;
   onToggle: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -3172,6 +3369,7 @@ function PoolRow({
         >
           <span className="text-zinc-400">{open ? "▾" : "▸"}</span>
           <span className="font-mono">{label}</span>
+          {cached && <span className="text-zinc-400">(cached)</span>}
         </button>
       </div>
       {open && <ChunkText text={preview} />}
@@ -3186,6 +3384,20 @@ function PoolRow({
 function avgTrialSim(questions: TrialQuestionOutcome[]): number | null {
   if (questions.length === 0) return null;
   return questions.reduce((sum, q) => sum + q.newScore, 0) / questions.length;
+}
+
+// Mean retrieved rank of a trial's questions under the trial variation: the
+// in-pool rank for hits, k+1 for misses (just past the cutoff) — lower is
+// better. Comparable with the chunk card's live chunkAvgRank, which uses the
+// same miss convention.
+function avgTrialRank(trial: SavedModelTrial): number | null {
+  if (trial.results.length === 0) return null;
+  return (
+    trial.results.reduce(
+      (sum, r) => sum + (r.newHit ? r.newRank : trial.k + 1),
+      0,
+    ) / trial.results.length
+  );
 }
 
 // Per-question before→after for a trial: each question's stored full-corpus
@@ -3226,7 +3438,7 @@ function TrialOutcomes({
                 {q.question}
               </span>
               <span className="flex flex-wrap items-center gap-1.5 text-zinc-500">
-                <Badge hit={q.newHit} rank={q.newRank} stale={false} />
+                <Badge hit={q.newHit} rank={q.newRank} />
                 <span className="text-zinc-400">
                   sim {q.newScore.toFixed(3)}
                 </span>
@@ -3288,12 +3500,13 @@ function TrialOutcomes({
 }
 
 // One saved trial under the chunk's variations lists: a collapsed headline that
-// expands to the per-question before→after, with apply/delegate and delete
-// actions.
+// expands to the per-question before→after, with the apply/delegate action at
+// the top of the expansion and delete in the header.
 function SavedTrialRow({
   trial,
   isApplied,
   canApply,
+  currentAvgRank,
   delegating,
   onApply,
   onDelete,
@@ -3301,19 +3514,26 @@ function SavedTrialRow({
   trial: SavedModelTrial;
   isApplied: boolean; // this trial is the chunk's active override/delegate
   canApply: boolean; // false for custom drag-border shapes (not persistable)
+  // The chunk's current mean retrieved rank (delegate or baseline; misses as
+  // k+1) — the bar a trial must strictly beat (LOWER) for the green title.
+  // Null = nothing to compare.
+  currentAvgRank: number | null;
   delegating: boolean;
   onApply: () => void;
   onDelete: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const sim = avgTrialSim(trial.results);
-  // "Strictly better than baseline": no question regressed and at least one
-  // improved — the green-title signal that this variation dominates the base
-  // config on everything this chunk was asked.
-  const beatsBaseline =
-    trial.results.length > 0 &&
-    trial.results.every((q) => q.newHit || q.storedHit !== true) &&
-    trial.hitCount > trial.storedHitCount;
+  // Green title: this trial ranks the chunk's questions STRICTLY better than
+  // whatever currently serves the chunk — lower mean retrieved rank, so @1+@1
+  // beats @1+@2, and a miss costs k+1. In-pool vs full-corpus, so a nudge —
+  // not a guarantee.
+  const trialAvgRank = avgTrialRank(trial);
+  const beatsCurrent =
+    !isApplied &&
+    trialAvgRank !== null &&
+    currentAvgRank !== null &&
+    trialAvgRank < currentAvgRank;
   const shape = variationLabel(
     trial.kind,
     trial.chunkSize,
@@ -3340,14 +3560,14 @@ function SavedTrialRow({
             title={
               isApplied
                 ? "This variation is the chunk's current override"
-                : beatsBaseline
-                  ? "Beat the baseline config on every question in this trial"
+                : beatsCurrent
+                  ? "Ranks these questions better (lower mean retrieved rank) than the chunk's current retrieval (delegate or baseline)"
                   : undefined
             }
             className={`font-mono font-medium ${
               isApplied
                 ? "text-blue-700 dark:text-blue-400"
-                : beatsBaseline
+                : beatsCurrent
                   ? "text-green-700 dark:text-green-400"
                   : "text-zinc-700 dark:text-zinc-300"
             }`}
@@ -3381,21 +3601,6 @@ function SavedTrialRow({
             {new Date(trial.createdAt).toLocaleString()}
           </span>
         </button>
-        {!isApplied && (
-          <button
-            type="button"
-            onClick={onApply}
-            disabled={delegating || !canApply}
-            title={
-              canApply
-                ? "Persist this variation to represent this chunk in this config and for it's metrics after a re-score"
-                : "Custom-border shapes can't be persisted as an override yet"
-            }
-            className="shrink-0 cursor-pointer rounded border border-blue-300 px-1.5 py-0.5 font-medium text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-900/20"
-          >
-            {delegating ? "Applying…" : applyLabel}
-          </button>
-        )}
         <button
           type="button"
           onClick={onDelete}
@@ -3405,15 +3610,205 @@ function SavedTrialRow({
         </button>
       </div>
       {open && (
-        <TrialOutcomes
-          model={trial.trialModel}
-          variation={shape}
-          poolSize={trial.poolSize}
-          pool={trial.pool}
-          pieceCount={trial.pieceCount}
-          questions={trial.results}
-        />
+        <>
+          {!isApplied && (
+            <button
+              type="button"
+              onClick={onApply}
+              disabled={delegating || !canApply}
+              title={
+                canApply
+                  ? "Persist this variation to represent this chunk in this config — its questions re-score immediately"
+                  : "Custom-border shapes can't be persisted as an override yet"
+              }
+              className="self-start cursor-pointer rounded border border-blue-300 px-1.5 py-0.5 font-medium text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-900/20"
+            >
+              {delegating ? "Applying & re-scoring…" : applyLabel}
+            </button>
+          )}
+          <TrialOutcomes
+            model={trial.trialModel}
+            variation={shape}
+            poolSize={trial.poolSize}
+            pool={trial.pool}
+            pieceCount={trial.pieceCount}
+            questions={trial.results}
+          />
+        </>
       )}
+    </li>
+  );
+}
+
+// The config's base model, listed under "Models tried" while a delegate serves
+// the chunk. Expands like a trial row: the per-question BASELINE outcomes come
+// from the applied trial's stored (before) results, or the autotune outcome
+// rows when the delegate wasn't set from a saved trial. "Restore as delegate"
+// sits at the top of the expansion, mirroring the trial rows' apply button.
+function BaselineRow({
+  model,
+  appliedTrial,
+  overrideInfo,
+  delegating,
+  onRestore,
+}: {
+  model: string;
+  appliedTrial: SavedModelTrial | null;
+  overrideInfo: ChunkOverrideInfo | null;
+  delegating: boolean;
+  onRestore: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  // Per-question BASELINE top-k drill-down: what pure base-model retrieval
+  // returned (the newest result with the 'baseline' 0022 fingerprint), fetched
+  // lazily via the explain endpoint's ?state=baseline filter.
+  const [openQ, setOpenQ] = useState<Record<string, boolean>>({});
+  const [openChunk, setOpenChunk] = useState<Record<string, boolean>>({});
+  const [explains, setExplains] = useState<Record<string, ExplainState>>({});
+  const stored = appliedTrial?.results ?? [];
+  const outcomes = overrideInfo?.outcomes ?? [];
+
+  function toggleTopK(id: string) {
+    const opening = !openQ[id];
+    setOpenQ((o) => ({ ...o, [id]: opening }));
+    if (!opening || explains[id]) return;
+    setExplains((m) => ({ ...m, [id]: { status: "loading" } }));
+    apiFetch(`/api/eval/questions/${id}/explain?state=baseline`)
+      .then(async (res) => {
+        const data = (await res.json()) as QuestionExplain | { error: string };
+        if (!res.ok || "error" in data) {
+          throw new Error(
+            "error" in data ? data.error : `Request failed (${res.status}).`,
+          );
+        }
+        setExplains((m) => ({ ...m, [id]: { status: "ready", data } }));
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : "Failed to load.";
+        setExplains((m) => ({ ...m, [id]: { status: "error", message } }));
+      });
+  }
+  return (
+    <li className="flex flex-col gap-1 rounded border border-amber-200 bg-amber-50 p-2 dark:border-amber-900/50 dark:bg-amber-900/15">
+      <div className="flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex flex-1 cursor-pointer flex-wrap items-center gap-1.5 text-left"
+        >
+          <span className="text-amber-500 dark:text-amber-600">
+            {open ? "▾" : "▸"}
+          </span>
+          <span className="font-mono font-medium text-amber-700 dark:text-amber-400">
+            {model}
+          </span>
+          <span className="text-amber-600 dark:text-amber-500">(baseline)</span>
+          {appliedTrial && (
+            <span className="text-amber-600/80 dark:text-amber-500/80">
+              {appliedTrial.storedHitCount}/{appliedTrial.questionCount} hit
+              {appliedTrial.questionCount === 1 ? "" : "s"} before the delegate
+            </span>
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={onRestore}
+          disabled={delegating}
+          title="Clear the delegate — rank this chunk under the base model again (its questions re-score immediately)"
+          className="shrink-0 cursor-pointer text-amber-700 underline hover:no-underline disabled:opacity-50 dark:text-amber-400"
+        >
+          {delegating ? "Restoring & re-scoring…" : "Restore as delegate"}
+        </button>
+      </div>
+      {open &&
+        // Per-question outcomes under the BASELINE model. Preferred source: the
+        // applied trial's stored full-corpus results (what each question did
+        // before the delegate). No baseline sim/top-k was stored, so this is a
+        // slimmer list than a trial expansion.
+        (stored.length > 0 ? (
+          <ul className="flex flex-col gap-1.5">
+            {stored.map((q) => {
+              const state = explains[q.questionId];
+              return (
+                <li key={q.questionId} className="flex flex-col gap-0.5">
+                  <span className="text-zinc-700 dark:text-zinc-300">
+                    {q.question}
+                  </span>
+                  <span className="flex items-center gap-1.5 text-zinc-500">
+                    <Badge hit={q.storedHit} rank={q.storedRank} />
+                    <button
+                      type="button"
+                      onClick={() => toggleTopK(q.questionId)}
+                      title="What the BASE model's retrieval returned for this question (latest baseline-state score)"
+                      className="cursor-pointer underline decoration-dotted underline-offset-2 hover:text-zinc-700 dark:hover:text-zinc-300"
+                    >
+                      top-k
+                    </button>
+                  </span>
+                  {openQ[q.questionId] && (
+                    <>
+                      {(!state || state.status === "loading") && (
+                        <span className="animate-pulse text-zinc-400">
+                          Loading baseline retrieval…
+                        </span>
+                      )}
+                      {state?.status === "error" && (
+                        <span className="text-red-600 dark:text-red-400">
+                          {state.message}
+                        </span>
+                      )}
+                      {state?.status === "ready" &&
+                        (state.data.retrieved.length > 0 ? (
+                          <ol className="mt-0.5 flex flex-col gap-1">
+                            {state.data.retrieved.map((c) => {
+                              const key = `${q.questionId}:${c.chunkId}`;
+                              return (
+                                <ChunkRow
+                                  key={key}
+                                  chunk={c}
+                                  isOpen={openChunk[key] ?? false}
+                                  onToggle={() =>
+                                    setOpenChunk((o) => ({
+                                      ...o,
+                                      [key]: !o[key],
+                                    }))
+                                  }
+                                />
+                              );
+                            })}
+                          </ol>
+                        ) : (
+                          <span className="text-zinc-500">
+                            No stored baseline retrieval for this question —
+                            re-score while the baseline serves this chunk to
+                            capture one.
+                          </span>
+                        ))}
+                    </>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        ) : outcomes.length > 0 ? (
+          // Autotune-applied delegate: show each question's recorded "before".
+          <ul className="flex flex-col gap-1">
+            {outcomes.map((o, i) => (
+              <li
+                key={i}
+                title={o.question}
+                className="font-mono text-zinc-500"
+              >
+                {fmtOutcome(o)}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <span className="text-zinc-500">
+            No stored baseline outcomes for this chunk — the delegate wasn&apos;t
+            applied from a saved trial.
+          </span>
+        ))}
     </li>
   );
 }

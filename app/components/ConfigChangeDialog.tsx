@@ -28,15 +28,15 @@ type Phase =
 
 export function ConfigChangeDialog({
   config,
-  documentId,
-  documentName,
+  documentIds,
+  documentNames,
   onClose,
   onDone,
 }: {
   config: EvalConfigInfo;
-  // Bulk-actions document scope: null = the whole config.
-  documentId: string | null;
-  documentName: string | null;
+  // Bulk-actions document scope (one or more documents): null = the whole config.
+  documentIds: string[] | null;
+  documentNames: string[] | null;
   onClose: () => void;
   // Called after a successful run so the dashboard reloads (labels/settings changed).
   onDone: () => void;
@@ -48,7 +48,7 @@ export function ConfigChangeDialog({
   const [topK, setTopK] = useState(config.topK);
   const [phase, setPhase] = useState<Phase>({ kind: "form" });
 
-  const docScoped = documentId !== null;
+  const docScoped = documentIds !== null && documentIds.length > 0;
 
   useEffect(() => {
     apiFetch("/api/embedding-models")
@@ -83,53 +83,58 @@ export function ConfigChangeDialog({
       if (chunkSize !== config.chunkSize || docScoped) body.chunkSize = chunkSize;
       if (chunkOverlap !== config.chunkOverlap || docScoped) body.chunkOverlap = chunkOverlap;
       if (changedTopK) body.topK = topK;
-      if (docScoped) {
-        body.documentId = documentId;
+      if (docScoped && !changedShape) {
         // Doc scope only ever overrides model/shape — strip a shape that didn't
         // actually change so a pure model swap stays a model override.
-        if (!changedShape) {
-          delete body.chunkSize;
-          delete body.chunkOverlap;
+        delete body.chunkSize;
+        delete body.chunkOverlap;
+      }
+
+      // The reconfigure route takes one documentId per call, so a multi-doc
+      // scope runs sequentially; results accumulate across the runs. Unscoped
+      // is a single config-wide call (documentId absent).
+      const scopes: (string | null)[] = docScoped ? documentIds! : [null];
+      const results: IngestResult[] = [];
+      for (const docId of scopes) {
+        const scopedBody = docId === null ? body : { ...body, documentId: docId };
+        const res = await apiFetch(`/api/configs/${config.id}/reconfigure`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(scopedBody),
+        });
+        if (!res.ok || !res.body) {
+          const d = (await res.json().catch(() => null)) as { error?: string } | null;
+          setPhase({ kind: "error", message: d?.error ?? `Request failed (${res.status}).` });
+          return;
         }
-      }
-      const res = await apiFetch(`/api/configs/${config.id}/reconfigure`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok || !res.body) {
-        const d = (await res.json().catch(() => null)) as { error?: string } | null;
-        setPhase({ kind: "error", message: d?.error ?? `Request failed (${res.status}).` });
-        return;
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let total = 0;
-      let done = 0;
-      let results: IngestResult[] = [];
-      for (;;) {
-        const { done: eof, value } = await reader.read();
-        if (eof) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          const ev = JSON.parse(line) as IngestEvent;
-          if (ev.type === "start") {
-            total = ev.total;
-            setPhase({ kind: "running", done: 0, total, file: "" });
-          } else if (ev.type === "step") {
-            setPhase({ kind: "running", done, total, file: ev.fileName });
-          } else if (ev.type === "file-done") {
-            done += 1;
-            setPhase({ kind: "running", done, total, file: "" });
-          } else if (ev.type === "done") {
-            results = ev.results;
-          } else if (ev.type === "error") {
-            setPhase({ kind: "error", message: ev.message });
-            return;
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let total = 0;
+        let done = 0;
+        for (;;) {
+          const { done: eof, value } = await reader.read();
+          if (eof) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            const ev = JSON.parse(line) as IngestEvent;
+            if (ev.type === "start") {
+              total = ev.total;
+              setPhase({ kind: "running", done: 0, total, file: "" });
+            } else if (ev.type === "step") {
+              setPhase({ kind: "running", done, total, file: ev.fileName });
+            } else if (ev.type === "file-done") {
+              done += 1;
+              setPhase({ kind: "running", done, total, file: "" });
+            } else if (ev.type === "done") {
+              results.push(...ev.results);
+            } else if (ev.type === "error") {
+              setPhase({ kind: "error", message: ev.message });
+              return;
+            }
           }
         }
       }
@@ -150,15 +155,20 @@ export function ConfigChangeDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
-          {docScoped ? "Change settings for one document" : "Change this config"}
+          {docScoped
+            ? `Change settings for ${documentIds!.length === 1 ? "one document" : `${documentIds!.length} documents`}`
+            : "Change this config"}
         </h2>
 
         <p className="text-xs text-zinc-500">
           {docScoped ? (
             <>
-              Applies to <span className="font-mono">{documentName}</span> only, as
-              per-chunk overrides — the config&apos;s own settings don&apos;t change.
-              Re-score to see the effect on rates.
+              Applies to{" "}
+              <span className="font-mono">
+                {(documentNames ?? []).join(", ")}
+              </span>{" "}
+              only, as per-chunk overrides — the config&apos;s own settings
+              don&apos;t change. Re-score to see the effect on rates.
             </>
           ) : (
             <>

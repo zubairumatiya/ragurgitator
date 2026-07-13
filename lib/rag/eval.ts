@@ -24,7 +24,9 @@ import {
 } from "@/lib/rag/evalSettingsStore";
 import { isProviderAvailable, modelSpec } from "@/lib/rag/embeddingModels";
 import {
+  clearRetrievalChanges,
   listOverrides,
+  retrievalStateFingerprint,
   setChunkOverride,
   setChunkOverridePieces,
 } from "@/lib/rag/overrideStore";
@@ -222,10 +224,10 @@ async function authorQuestions(
 export async function generateMissingQuestions(
   difficulties: Difficulty[],
   emit: Emit = () => {},
-  documentId?: string,
+  documentIds?: string[],
 ): Promise<number> {
   if (difficulties.length === 0) return 0;
-  const gaps = await chunksNeedingQuestionsByDifficulty(difficulties, documentId);
+  const gaps = await chunksNeedingQuestionsByDifficulty(difficulties, documentIds);
   if (gaps.length === 0) return 0;
 
   console.log(
@@ -312,6 +314,9 @@ async function scoreQuestions(
     questions.map((q) => q.questionId),
     cfg.embeddingModel,
   );
+  // Stamp every result with the override state it's scored under (0022) — the
+  // state can't change mid-run, so one fingerprint covers the batch.
+  const retrievalState = await retrievalStateFingerprint();
 
   const results: ResultInsert[] = [];
   let done = 0;
@@ -322,7 +327,7 @@ async function scoreQuestions(
       await putCachedQueryEmbedding(q.questionId, cfg.embeddingModel, vector);
     }
     // Pass the question text too: override configs embed it under the override
-    // models for the RRF fusion; non-override configs ignore it (base vector only).
+    // models for the rank-interleave fusion; non-override configs ignore it (base vector only).
     const retrieved = await retrieveForQuery(q.question, vector, depth);
     const ids = retrieved.map((r) => r.chunk.chunk.id);
     const scores = retrieved.map((r) => r.score);
@@ -338,6 +343,7 @@ async function scoreQuestions(
       foundRank,
       retrievedIds: ids,
       retrievedScores: scores,
+      retrievalState,
     });
     done += 1;
     emit({
@@ -365,6 +371,19 @@ export async function scoreQuestionNow(questionId: string): Promise<boolean> {
   return true;
 }
 
+// Re-score ONE CHUNK's pending questions — the automatic follow-up to a
+// delegate/override change: the changed chunk gets fresh rates immediately
+// while every other chunk keeps its (now stale-badged) scores until the next
+// full run. Draws from questionsNeedingScoring so a question already fresh
+// (e.g. scored moments ago) isn't scored twice.
+export async function rescoreChunkQuestions(chunkId: string): Promise<number> {
+  const pending = (await questionsNeedingScoring()).filter(
+    (q) => q.sourceChunkId === chunkId,
+  );
+  if (pending.length === 0) return 0;
+  return scoreQuestions(pending);
+}
+
 // Score every question that has no fresh result (new or edited since last score).
 export async function scoreUnscoredQuestions(emit: Emit = () => {}): Promise<number> {
   const pending = await questionsNeedingScoring();
@@ -384,6 +403,9 @@ export async function processNewChunks(emit: Emit = () => {}): Promise<{
   const criteria = await getActiveCriteria();
   const generated = await generateMissingQuestions(criteria.difficulties, emit);
   const scored = await scoreUnscoredQuestions(emit);
+  // Everything pending (incl. retrieval-stale) is fresh now — the logged
+  // override changes are baked into the rates, so the stale badge can drop.
+  await clearRetrievalChanges();
 
   const summary = await getSummary();
   // Only snapshot when something actually changed, so repeated clicks don't
@@ -420,10 +442,10 @@ export async function processNewChunks(emit: Emit = () => {}): Promise<{
 export async function bulkAddDifficulty(
   difficulty: Difficulty,
   emit: Emit = () => {},
-  documentId?: string,
+  documentIds?: string[],
 ): Promise<{ generated: number; scored: number; recall: number | null }> {
   await addDifficulty(difficulty);
-  const generated = await generateMissingQuestions([difficulty], emit, documentId);
+  const generated = await generateMissingQuestions([difficulty], emit, documentIds);
   const scored = await scoreUnscoredQuestions(emit);
 
   const summary = await getSummary();
@@ -456,17 +478,20 @@ export async function bulkAddDifficulty(
 // top-k. Generation is untouched; this only scores.
 export async function rescoreAllQuestions(
   emit: Emit = () => {},
-  documentId?: string,
+  documentIds?: string[],
 ): Promise<{
   scored: number;
   recall: number | null;
 }> {
   const t0 = performance.now();
-  const questions = await allLabeledQuestions(documentId);
+  const questions = await allLabeledQuestions(documentIds);
   console.log(
     `[rag:eval] re-scoring all ${questions.length} question(s) @ k=${activeConfig().topK}`,
   );
   const scored = await scoreQuestions(questions, emit);
+  // An unscoped re-score refreshes every result; a document-scoped one leaves
+  // other documents' stale rows (and thus the badge's change log) in place.
+  if (!documentIds || documentIds.length === 0) await clearRetrievalChanges();
 
   const summary = await getSummary();
   if (scored > 0) {
@@ -829,7 +854,7 @@ export async function getModelTrialContext(
 
 // Promote the ephemeral "try a different model" result into a PERSISTED per-chunk
 // override (Phase 5): re-embed the chunk's text under `model` and store it, so
-// retrieval ranks this chunk in that model's space (RRF-fused — see retriever).
+// retrieval ranks this chunk in that model's space (rank-fused — see retriever).
 // Returns a status the route maps to an HTTP code. Overriding to the config's own
 // base model is rejected (clear the override to use base instead).
 export async function setChunkModelOverride(
@@ -878,7 +903,13 @@ export async function setChunkSizeOverride(
     dimension: v.length,
     embedding: v,
   }));
-  await setChunkOverridePieces(chunkId, activeConfig().embeddingModel, "size", pieces);
+  await setChunkOverridePieces(
+    chunkId,
+    activeConfig().embeddingModel,
+    "size",
+    pieces,
+    `re-split @ ${size}/${overlap} tokens`,
+  );
   return "ok";
 }
 
@@ -917,7 +948,13 @@ export async function setChunkSizeModelOverride(
     dimension: v.length,
     embedding: v,
   }));
-  await setChunkOverridePieces(chunkId, model, "size+model", pieces);
+  await setChunkOverridePieces(
+    chunkId,
+    model,
+    "size+model",
+    pieces,
+    `re-split @ ${size}/${overlap} tokens + ${model}`,
+  );
   return "ok";
 }
 

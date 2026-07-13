@@ -37,9 +37,11 @@ type Action =
 export function NdcgRankingPanel({
   questionId,
   onChange,
+  onClose,
 }: {
   questionId: string;
   onChange: () => void;
+  onClose: () => void;
 }) {
   const [ctx, setCtx] = useState<RankingContext | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -75,6 +77,16 @@ export function NdcgRankingPanel({
     };
   }, [questionId]);
 
+  // Escape dismisses the panel — the toggle link that opened it is usually far
+  // above a fully-built panel, so it needs its own way out.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   async function act(body: Action) {
     setBusy(body.action);
     setError(null);
@@ -108,6 +120,19 @@ export function NdcgRankingPanel({
 
   return (
     <div className="mt-1 flex flex-col gap-3 rounded border border-dashed border-zinc-300 p-2 text-xs dark:border-zinc-700">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-medium uppercase tracking-wide text-zinc-500">
+          nDCG ranking builder
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          title="Close (Esc)"
+          className="cursor-pointer text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300"
+        >
+          ✕
+        </button>
+      </div>
       {error && <p className="text-red-600 dark:text-red-400">{error}</p>}
 
       {/* Step 1-3: seed a pool from a saved cluster preset, build the aggregate.

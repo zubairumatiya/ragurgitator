@@ -230,7 +230,7 @@ export async function query(
 
 // Like query(), but excludes a set of chunk ids from the active config's base
 // ANN — the chunks that have been overridden to a different model (Phase 5).
-// Those are ranked separately in their override model's space and RRF-fused with
+// Those are ranked separately in their override model's space and rank-fused with
 // this list (see retriever.retrieveForQuery). An empty exclude list behaves like
 // query(). Pulls `limit` candidates (callers pass a generous N for fusion).
 export async function queryExcluding(
@@ -267,7 +267,7 @@ export async function queryExcluding(
 }
 
 // Resolve a set of chunk ids (in the active config's base table) to their text +
-// position + document. Used to flesh out override chunks that won RRF but weren't
+// position + document. Used to flesh out override chunks that won the merge but weren't
 // in the base ANN result (they were excluded from it).
 export async function resolveChunks(
   ids: string[],

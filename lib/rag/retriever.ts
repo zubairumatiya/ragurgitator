@@ -7,11 +7,14 @@
 // model — unchanged from before.
 //
 // When the config has per-chunk model OVERRIDES (Phase 5), retrieval fuses
-// multiple embedding spaces by Reciprocal Rank Fusion (D7): the base-model ANN
+// multiple embedding spaces by a RANK-INTERLEAVE MERGE (D7): the base-model ANN
 // over the NON-overridden chunks, plus — for each override model — that model's
 // overridden chunks. Raw cosine isn't comparable across embedding spaces, so we
-// combine by RANK, not score. Each chunk contributes from exactly one list (its
-// canonical model), so the spaces interleave by rank position.
+// combine by RANK, not score. Each chunk carries exactly one rank (from its
+// canonical model's space) and the merged order is simply ascending rank: base
+// chunks at integer positions, overridden chunks at fractional positions
+// strictly between the base candidates they beat and the ones they didn't —
+// so the two kinds never tie and no arbitrary tie-break can favour either.
 //
 // An overridden chunk's rank is NOT its rank among the few other overridden
 // chunks (a near-empty list would hand it rank ~1 for every query — a
@@ -30,8 +33,6 @@ import { listOverrides, overrideEmbeddings } from "@/lib/rag/overrideStore";
 import { query, queryExcluding, resolveChunks } from "@/lib/rag/vectorStore";
 import type { RetrievedChunk } from "@/types/rag";
 
-// Standard RRF constant; tunable (see plan §9 — RRF tuning).
-const RRF_K = 60;
 // Base candidates pulled for fusion when overrides exist (vs the final top-k).
 const FUSION_BASE_FACTOR = 4;
 
@@ -81,7 +82,7 @@ export async function retrieveForQuery(
   // source chunk (a chunk is represented by its strongest piece — hit = any
   // piece in top-k, eval-autotuning-plan §6.3), then rank each overridden chunk
   // among the base candidates re-embedded under the same model. Only the
-  // overridden chunks enter the RRF list; the competitors just set the bar.
+  // overridden chunks enter the merge list; the competitors just set the bar.
   // Size-only overrides live in base space, so the base vector and the base
   // candidates' ANN scores are reused as-is (no re-embedding).
   for (const model of models) {
@@ -111,33 +112,35 @@ export async function retrieveForQuery(
     lists.push(
       [...bestByChunk.entries()].map(([id, sim]) => ({
         id,
-        // 1-based rank among competitors + fellow overridden chunks (self ties
-        // don't count against it).
+        // Fractional rank: beating m of (competitors + fellow overridden
+        // chunks, self ties excluded) places it strictly BETWEEN merged
+        // positions m and m+1 — never tying a base chunk's integer rank.
         rank:
-          1 +
+          0.5 +
           competitorSims.filter((s) => s > sim).length +
           overriddenSims.filter((s) => s > sim).length,
       })),
     );
   }
 
-  // Reciprocal Rank Fusion.
-  const rrf = new Map<string, number>();
-  for (const list of lists) {
-    for (const { id, rank } of list) {
-      rrf.set(id, (rrf.get(id) ?? 0) + 1 / (RRF_K + rank));
-    }
-  }
-  const top = [...rrf.entries()].sort((a, b) => b[1] - a[1]).slice(0, k);
+  // Rank-interleave merge: ascending rank across all lists. Base ranks are
+  // unique integers and override ranks are fractional, so cross-kind ties are
+  // impossible by construction.
+  const top = lists
+    .flat()
+    .sort((a, b) => a.rank - b.rank)
+    .slice(0, k);
 
   // Override winners weren't in the base ANN (they were excluded) — resolve them.
-  const unresolved = top.map(([id]) => id).filter((id) => !meta.has(id));
+  const unresolved = top.map(({ id }) => id).filter((id) => !meta.has(id));
   for (const [id, m] of await resolveChunks(unresolved)) meta.set(id, m);
 
-  return top.map(([id, score]) => {
+  return top.map(({ id, rank }) => {
     const m = meta.get(id);
     return {
-      score,
+      // Informational only (raw cosine isn't comparable across spaces): a
+      // rank-derived score in (0, 1), monotone with the merged order.
+      score: 1 / (1 + rank),
       chunk: {
         embedding: [],
         chunk: {
