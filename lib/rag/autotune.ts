@@ -10,16 +10,15 @@
 // with one full-corpus re-score (A3) + an eval_runs snapshot (feeds Appraise)
 // + an autotune_runs history row.
 //
-// The inner search reuses the EXISTING ephemeral experiments, so it is a LOCAL
-// APPROXIMATION on two axes:
-//   - Stage 1 ranks sub-pieces by exact full-scan in the BASE space
-//     (runRechunkExperiment); Stages 2–3 rank within a small candidate POOL
-//     (the distractors the chunk's questions already retrieved) under the alt
-//     model — "re-orders the pool better", not true corpus recall.
-//   - Per-question nDCG can't be recomputed cheaply mid-search, so an
-//     nDCG-failing question "clears" approximately when its ground-truth rank
-//     lands within ndcg_k without regressing. The per-chunk confirm re-score
-//     (real retrieval, real metrics) is the arbiter either way.
+// The inner search ranks every candidate through the REAL rank-fused dry-run
+// (fuseWithOverrides with the hypothetical override injected — the same
+// methodology as runModelTrial's fusedRank), so a candidate's rank IS the
+// merged position live retrieval would give it. The remaining approximation:
+// per-question nDCG can't be recomputed cheaply mid-search, so an nDCG-failing
+// question "clears" approximately when its ground-truth rank lands within
+// ndcg_k without regressing. The per-chunk confirm re-score (real retrieval,
+// real metrics) is the arbiter either way — it also catches override state
+// drifting between a chunk's search and its apply.
 // ---------------------------------------------------------------------------
 import { autotuneModelLadder } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
@@ -29,11 +28,10 @@ import {
   type AutotuneOutcome,
 } from "@/lib/rag/autotuneStore";
 import { splitText } from "@/lib/rag/chunker";
-import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
+import { embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
 import { isProviderAvailable, modelSpec } from "@/lib/rag/embeddingModels";
 import {
   rescoreAllQuestions,
-  runRechunkExperiment,
   scoreQuestionNow,
   setChunkModelOverride,
   setChunkSizeModelOverride,
@@ -45,7 +43,14 @@ import {
   getSummary,
   type QuestionDetail,
 } from "@/lib/rag/evalStore";
-import { clearChunkOverride } from "@/lib/rag/overrideStore";
+import {
+  clearChunkOverride,
+  listOverrides,
+  overrideEmbeddings,
+  type ChunkOverride,
+  type OverrideEmbedding,
+} from "@/lib/rag/overrideStore";
+import { fuseWithOverrides } from "@/lib/rag/retriever";
 
 export type AutotuneMetric = "recall" | "mrr" | "ndcg";
 export type CandidateFamily = "size" | "model" | "size+model";
@@ -96,6 +101,15 @@ export type AutotuneEvent =
       candidates: AutotuneCandidate[];
     }
   | { type: "chunk-unresolved"; chunkId: string; reason: string }
+  | {
+      // autotune.stopEarly: every targeted metric's aggregate rate reached its
+      // min-rate mid-run, so the remaining below-bar chunks were skipped.
+      type: "early-stop";
+      skippedChunks: number;
+      recall: number | null;
+      mrr: number | null;
+      ndcg: number | null;
+    }
   | { type: "rescore-start"; total: number }
   | { type: "rescore-progress"; done: number; total: number }
   | {
@@ -126,7 +140,6 @@ type TargetQuestion = {
   beforeRank: number | null;
   beforeRr: number | null;
   beforeNdcg: number | null;
-  retrievedIds: string[];
 };
 
 // Which targeted metrics a FRESHLY SCORED question fails under the criteria
@@ -216,25 +229,56 @@ function usableModelLadder(): string[] {
   });
 }
 
-// Stage-2/3 pool trial: rank candidate texts (re-split pieces, or the whole
-// chunk) against the chunk's distractor pool, everything embedded under `model`.
-// Returns each target question's best candidate rank WITHIN the pool (1-based).
-// Same methodology as runModelTrial, generalized to N candidate texts.
-async function poolTrialRanks(
+// Candidate trial: the REAL rank-fused dry-run — inject the candidate as a
+// hypothetical override (replacing any stored override on this chunk), run
+// fuseWithOverrides per target question, and read the chunk's merged position.
+// Same methodology as runModelTrial's fusedRank, so a candidate's rank here is
+// the rank live retrieval (and the confirm re-score) would actually produce.
+// `candidateTexts` are the re-split pieces, or [whole chunk] for model-only;
+// `model` is the space they compete in (the base model for size-only).
+async function fusedTrialRanks(
   targets: TargetQuestion[],
+  chunkId: string,
   candidateTexts: string[],
-  poolTexts: string[],
+  family: CandidateFamily,
   model: string,
 ): Promise<(number | null)[]> {
   const candVecs = await embedDocsCached(candidateTexts, model);
-  const poolVecs = await embedDocsCached(poolTexts, model);
+  const hypOverrides: ChunkOverride[] = [
+    ...(await listOverrides()).filter((o) => o.sourceChunkId !== chunkId),
+    { sourceChunkId: chunkId, model, kind: family },
+  ];
+  // Pieces per model: the stored overrides minus this chunk's, plus the
+  // in-memory candidate vectors under the trial model. Memoized —
+  // fuseWithOverrides asks once per model per question.
+  const pieceCache = new Map<string, Promise<OverrideEmbedding[]>>();
+  const piecesFor = (m: string): Promise<OverrideEmbedding[]> => {
+    let p = pieceCache.get(m);
+    if (!p) {
+      p = overrideEmbeddings(m).then((stored) => {
+        const kept = stored.filter((piece) => piece.chunkId !== chunkId);
+        return m === model
+          ? [...kept, ...candVecs.map((embedding) => ({ chunkId, embedding }))]
+          : kept;
+      });
+      pieceCache.set(m, p);
+    }
+    return p;
+  };
+
+  const cfg = activeConfig();
   const ranks: (number | null)[] = [];
   for (const t of targets) {
-    const qv = await embedQueryCached(t.question, model);
-    const bestCand = Math.max(...candVecs.map((v) => cosine(qv, v)));
-    // Rank = 1 + how many pool distractors beat the best candidate piece.
-    const beaten = poolVecs.filter((v) => cosine(qv, v) > bestCand).length;
-    ranks.push(beaten + 1);
+    const baseQVec = await embedQueryCached(t.question, cfg.embeddingModel);
+    const { merged } = await fuseWithOverrides(
+      t.question,
+      baseQVec,
+      cfg.topK,
+      hypOverrides,
+      piecesFor,
+    );
+    const idx = merged.findIndex((c) => c.id === chunkId);
+    ranks.push(idx === -1 ? null : idx + 1);
   }
   return ranks;
 }
@@ -356,7 +400,6 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       beforeRank: q.foundRank,
       beforeRr: q.rr,
       beforeNdcg: q.ndcg,
-      retrievedIds: q.retrievedIds ?? [],
     });
   }
 
@@ -366,6 +409,16 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
     list.push(t);
     byChunk.set(t.sourceChunkId, list);
   }
+
+  // Worst chunks first: lowest mean baseline reciprocal rank (a complete miss
+  // counts 0), tie-broken toward more targeted questions. Those chunks drag
+  // the aggregate rates hardest, so the biggest lifts land earliest — which is
+  // what makes stopEarly's cutoff cheap instead of arbitrary.
+  const meanRr = (ts: TargetQuestion[]) =>
+    ts.reduce((s, t) => s + (t.beforeRank === null ? 0 : 1 / t.beforeRank), 0) / ts.length;
+  const orderedChunks = [...byChunk.entries()].sort(
+    (a, b) => meanRr(a[1]) - meanRr(b[1]) || b[1].length - a[1].length,
+  );
 
   const search = criteria.autotune.search;
   const applyMode = criteria.autotune.apply;
@@ -407,8 +460,29 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
     { kind: CandidateFamily; model: string | null; size: number | null }
   >();
 
+  // stopEarly (0024): are all targeted metrics' AGGREGATE rates at their
+  // min-rate? Checked against the latest summary after each kept override.
+  // Mid-run summaries can carry stale neighbours (only the applied chunk's
+  // questions are re-scored), so this is approximate — the final re-score
+  // below remains the arbiter of the stored rates.
+  const barsReached = (s: {
+    recall: number | null;
+    mrr: number | null;
+    ndcg: number | null;
+  }): boolean =>
+    (!recallTargeting || (s.recall !== null && s.recall >= criteria.recall.minRate!)) &&
+    (!mrrTargeting || (s.mrr !== null && s.mrr >= criteria.mrr.minRate!)) &&
+    (!ndcgTargeting || (s.ndcg !== null && s.ndcg >= criteria.ndcg.minRate!));
+  const stopEarly = criteria.autotune.stopEarly;
+  let latestRates = { recall: summary.recall, mrr: summary.mrr, ndcg: summary.ndcg };
+  let barsMet = stopEarly && barsReached(latestRates);
+
   let chunkIndex = 0;
-  for (const [chunkId, chunkTargets] of byChunk) {
+  for (const [chunkId, chunkTargets] of orderedChunks) {
+    if (barsMet) {
+      emit({ type: "early-stop", skippedChunks: orderedChunks.length - chunkIndex, ...latestRates });
+      break;
+    }
     chunkIndex += 1;
     emit({
       type: "chunk-start",
@@ -440,23 +514,38 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
           size: cand.size,
         });
         emit({ type: "chunk-resolved", chunkId, candidate: cand });
+        if (stopEarly) {
+          const s = await getSummary();
+          latestRates = { recall: s.recall, mrr: s.mrr, ndcg: s.ndcg };
+          barsMet = barsReached(latestRates);
+        }
         return true;
       }
       emit({ type: "chunk-unresolved", chunkId, reason: res.detail });
       return false;
     };
 
+    const [chunkRow] = await getChunksByIds([chunkId]);
+    const chunkText = chunkRow?.text ?? null;
+    if (chunkText === null) {
+      emit({ type: "chunk-unresolved", chunkId, reason: "Chunk no longer exists." });
+      continue;
+    }
+
     // ---- STAGE 1: chunk size, base model --------------------------------
     for (const size of sizes) {
       if (rungs >= rungCap) break;
       rungs += 1;
       const overlap = overlapFor(size);
-      const ranks: (number | null)[] = [];
-      for (const t of chunkTargets) {
-        const res = await runRechunkExperiment(t.questionId, size, overlap);
-        ranks.push(res?.bestSubRank ?? null);
-        attempts += 1;
-      }
+      const pieces = await splitText(chunkText, size, overlap);
+      const ranks = await fusedTrialRanks(
+        chunkTargets,
+        chunkId,
+        pieces,
+        "size",
+        cfg.embeddingModel,
+      );
+      attempts += chunkTargets.length;
       emit({ type: "attempt", chunkId, stage: "size", detail: `size ${size}`, attempts });
       const cand = mkCandidate("size", size, overlap, null, chunkTargets, ranks, bars);
       if (cand.score > (bestSize?.score ?? baselineScore)) bestSize = cand;
@@ -471,87 +560,75 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
     }
     if (resolvedHere || (search === "first_success" && candidates.length > 0)) continue;
 
-    // Distractor pool for the model stages: everything the chunk's targeted
-    // questions retrieved, minus the chunk itself.
-    const poolIds = [
-      ...new Set(chunkTargets.flatMap((t) => t.retrievedIds)),
-    ].filter((id) => id !== chunkId);
-    const [chunkRow] = await getChunksByIds([chunkId]);
-    const pool = await getChunksByIds(poolIds);
-    const poolTexts = pool.map((p) => p.text);
-    const chunkText = chunkRow?.text ?? null;
-
     // ---- STAGE 2: models — full chunk (B) and best sub-size (A) ----------
-    if (chunkText !== null) {
-      for (const model of models) {
-        if (rungs >= rungCap) break;
-        rungs += 2;
-        const rungCands: AutotuneCandidate[] = [];
+    for (const model of models) {
+      if (rungs >= rungCap) break;
+      rungs += 2;
+      const rungCands: AutotuneCandidate[] = [];
 
-        const ranksB = await poolTrialRanks(chunkTargets, [chunkText], poolTexts, model);
+      const ranksB = await fusedTrialRanks(chunkTargets, chunkId, [chunkText], "model", model);
+      attempts += chunkTargets.length;
+      emit({ type: "attempt", chunkId, stage: "model", detail: model, attempts });
+      const candB = mkCandidate("model", null, null, model, chunkTargets, ranksB, bars);
+      if (candB.clears) rungCands.push(candB);
+
+      if (bestSize !== null) {
+        const pieces = await splitText(chunkText, bestSize.size!, bestSize.overlap ?? 0);
+        const ranksA = await fusedTrialRanks(chunkTargets, chunkId, pieces, "size+model", model);
         attempts += chunkTargets.length;
-        emit({ type: "attempt", chunkId, stage: "model", detail: model, attempts });
-        const candB = mkCandidate("model", null, null, model, chunkTargets, ranksB, bars);
-        if (candB.clears) rungCands.push(candB);
+        emit({
+          type: "attempt",
+          chunkId,
+          stage: "combo",
+          detail: `size ${bestSize.size} × ${model}`,
+          attempts,
+        });
+        const candA = mkCandidate(
+          "size+model",
+          bestSize.size,
+          bestSize.overlap,
+          model,
+          chunkTargets,
+          ranksA,
+          bars,
+        );
+        if (candA.clears) rungCands.push(candA);
+      }
 
-        if (bestSize !== null) {
-          const pieces = await splitText(chunkText, bestSize.size!, bestSize.overlap ?? 0);
-          const ranksA = await poolTrialRanks(chunkTargets, pieces, poolTexts, model);
+      candidates.push(...rungCands);
+      if (search === "first_success" && rungCands.length > 0) break;
+    }
+
+    // ---- STAGE 3: combo fallback — remaining sizes × models --------------
+    if (candidates.length === 0) {
+      outer: for (const size of sizes) {
+        if (size === bestSize?.size) continue; // already tried in Stage 2
+        const overlap = overlapFor(size);
+        const pieces = await splitText(chunkText, size, overlap);
+        for (const model of models) {
+          if (rungs >= rungCap) break outer;
+          rungs += 1;
+          const ranks = await fusedTrialRanks(chunkTargets, chunkId, pieces, "size+model", model);
           attempts += chunkTargets.length;
           emit({
             type: "attempt",
             chunkId,
             stage: "combo",
-            detail: `size ${bestSize.size} × ${model}`,
+            detail: `size ${size} × ${model}`,
             attempts,
           });
-          const candA = mkCandidate(
+          const cand = mkCandidate(
             "size+model",
-            bestSize.size,
-            bestSize.overlap,
+            size,
+            overlap,
             model,
             chunkTargets,
-            ranksA,
+            ranks,
             bars,
           );
-          if (candA.clears) rungCands.push(candA);
-        }
-
-        candidates.push(...rungCands);
-        if (search === "first_success" && rungCands.length > 0) break;
-      }
-
-      // ---- STAGE 3: combo fallback — remaining sizes × models ------------
-      if (candidates.length === 0) {
-        outer: for (const size of sizes) {
-          if (size === bestSize?.size) continue; // already tried in Stage 2
-          const overlap = overlapFor(size);
-          const pieces = await splitText(chunkText, size, overlap);
-          for (const model of models) {
-            if (rungs >= rungCap) break outer;
-            rungs += 1;
-            const ranks = await poolTrialRanks(chunkTargets, pieces, poolTexts, model);
-            attempts += chunkTargets.length;
-            emit({
-              type: "attempt",
-              chunkId,
-              stage: "combo",
-              detail: `size ${size} × ${model}`,
-              attempts,
-            });
-            const cand = mkCandidate(
-              "size+model",
-              size,
-              overlap,
-              model,
-              chunkTargets,
-              ranks,
-              bars,
-            );
-            if (cand.clears) {
-              candidates.push(cand);
-              if (search === "first_success") break outer;
-            }
+          if (cand.clears) {
+            candidates.push(cand);
+            if (search === "first_success") break outer;
           }
         }
       }

@@ -49,6 +49,7 @@ import { AutotunePanel } from "@/app/components/AutotunePanel";
 import { ConfigChangeDialog } from "@/app/components/ConfigChangeDialog";
 import { EVAL_CRITERIA_CHANGED } from "@/app/components/EvalSettings";
 import { NdcgRankingPanel } from "@/app/components/NdcgRankingPanel";
+import { Tooltip } from "@/app/components/Tooltip";
 import type { IngestedDocument } from "@/lib/rag/vectorStore";
 
 function pct(n: number | null): string {
@@ -58,6 +59,16 @@ function pct(n: number | null): string {
 // nDCG lands in [0, 1] but isn't a percentage — plain 2-decimal score.
 function fmtScore(n: number | null): string {
   return n === null ? "—" : n.toFixed(2);
+}
+
+// Hover explainer for the MRR card: the reciprocal rank each position
+// contributes, all the way to the metric's k — so a value like 0.50 reads as
+// "the ground truth averages around rank 2", and a min-rate maps to the
+// worst acceptable rank. The 1/r fraction names its own rank, so no prefix.
+function mrrFractionsTitle(k: number): string {
+  const rows = [];
+  for (let r = 1; r <= k; r++) rows.push(`1/${r} = ${(1 / r).toFixed(2)}`);
+  return `Per-question reciprocal rank:\n${rows.join("\n")}\nbeyond ${k} → 0.00`;
 }
 
 // Continuous tint for a score in [0, 1], mixing from the miss badge's red to
@@ -658,16 +669,18 @@ export function EvalDashboard() {
               />
             )}
             {summary.criteria.mrr.enabled && (
-              <Stat
-                label={`MRR@${summary.mrrK}`}
-                value={fmtScore(summary.mrr)}
-                big
-                sub={
-                  summary.criteria.mrr.minRate != null
-                    ? `min ${summary.criteria.mrr.minRate.toFixed(2)}`
-                    : undefined
-                }
-              />
+              <Tooltip text={mrrFractionsTitle(summary.mrrK)}>
+                <Stat
+                  label={`MRR@${summary.mrrK}`}
+                  value={fmtScore(summary.mrr)}
+                  big
+                  sub={
+                    summary.criteria.mrr.minRate != null
+                      ? `min ${summary.criteria.mrr.minRate.toFixed(2)}`
+                      : undefined
+                  }
+                />
+              </Tooltip>
             )}
             {summary.criteria.ndcg.enabled && (
               <Stat

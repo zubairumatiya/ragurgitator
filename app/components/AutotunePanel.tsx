@@ -170,6 +170,11 @@ export function AutotunePanel({
             case "chunk-unresolved":
               pushLog(`✗ unresolved — ${event.reason}`);
               break;
+            case "early-stop":
+              pushLog(
+                `⏹ min-rates reached — skipped ${event.skippedChunks} remaining chunk(s) to save cost`,
+              );
+              break;
             case "rescore-start":
               setProgress({ phase: "rescore", done: 0, total: event.total });
               break;

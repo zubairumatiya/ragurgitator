@@ -55,6 +55,7 @@ const Body = z.object({
       overlapPct: z.number().min(0).max(0.9).optional(),
       apply: z.enum(["choose", "auto_best"]).optional(),
       search: z.enum(["first_success", "exhaustive"]).optional(),
+      stopEarly: z.boolean().optional(),
     })
     .optional(),
 });

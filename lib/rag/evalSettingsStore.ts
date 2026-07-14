@@ -28,6 +28,9 @@ export type AutotuneSettings = {
   overlapPct: number; // overlap tokens = round(size * overlapPct)
   apply: AutotuneApply;
   search: AutotuneSearch;
+  // Halt the run once every targeted metric's aggregate rate reaches its
+  // min-rate, skipping the remaining below-bar chunks (0024).
+  stopEarly: boolean;
 };
 
 export type EvalCriteria = {
@@ -53,6 +56,7 @@ type CriteriaRow = {
   autotune_overlap_pct: number;
   autotune_apply: string;
   autotune_search: string;
+  autotune_stop_early: boolean;
 };
 
 const DIFFICULTIES: readonly Difficulty[] = ["easy", "medium", "hard"];
@@ -69,6 +73,7 @@ function toCriteria(row: CriteriaRow): EvalCriteria {
       overlapPct: row.autotune_overlap_pct,
       apply: row.autotune_apply === "auto_best" ? "auto_best" : "choose",
       search: row.autotune_search === "exhaustive" ? "exhaustive" : "first_success",
+      stopEarly: row.autotune_stop_early,
     },
   };
 }
@@ -78,7 +83,8 @@ const COLUMNS = sql`
   mrr_enabled, mrr_k, mrr_min_rate,
   ndcg_enabled, ndcg_k, ndcg_min_rate,
   eval_difficulties,
-  autotune_size_ladder, autotune_overlap_pct, autotune_apply, autotune_search
+  autotune_size_ladder, autotune_overlap_pct, autotune_apply, autotune_search,
+  autotune_stop_early
 `;
 
 // Criteria for a specific config; null when the id is malformed / missing.
@@ -142,6 +148,7 @@ export async function updateCriteria(
       autotune_overlap_pct = ${next.autotune.overlapPct},
       autotune_apply      = ${next.autotune.apply},
       autotune_search     = ${next.autotune.search},
+      autotune_stop_early = ${next.autotune.stopEarly},
       updated_at          = now()
     where id = ${configId}
   `;

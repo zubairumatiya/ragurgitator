@@ -19,6 +19,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
+import { Tooltip } from "@/app/components/Tooltip";
 import { apiFetch } from "@/lib/http/client";
 import type { ConfigSummary } from "@/lib/rag/configStore";
 import type { AutotuneApply, AutotuneSearch, EvalCriteria } from "@/lib/rag/evalSettingsStore";
@@ -35,12 +36,17 @@ function parseKOrNull(s: string): number | null {
   return Number.isFinite(n) && n >= 1 ? n : null;
 }
 
-// "" / invalid => null (metric runs but isn't an autotune target). Clamped 0..1.
+// "" / invalid => null (metric runs but isn't an autotune target). Rates are
+// 0..1, so a value above 1 (or with a % sign) can only mean a percentage —
+// read it as one (90 → 0.9) instead of clamping it to 1. Clamped 0..1.
 function parseRateOrNull(s: string): number | null {
   const t = s.trim();
   if (t === "") return null;
-  const n = Number(t);
-  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : null;
+  const pct = t.endsWith("%");
+  const n = Number(pct ? t.slice(0, -1) : t);
+  if (!Number.isFinite(n)) return null;
+  const rate = pct || n > 1 ? n / 100 : n;
+  return Math.min(1, Math.max(0, rate));
 }
 
 export function EvalSettings() {
@@ -61,6 +67,7 @@ export function EvalSettings() {
   const [overlap, setOverlap] = useState("");
   const [apply, setApply] = useState<AutotuneApply>("choose");
   const [search, setSearch] = useState<AutotuneSearch>("first_success");
+  const [stopEarly, setStopEarly] = useState(false);
   const [sync, setSync] = useState(false);
   const [savedSync, setSavedSync] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -96,6 +103,7 @@ export function EvalSettings() {
       setOverlap(String(Math.round(c.autotune.overlapPct * 100)));
       setApply(c.autotune.apply);
       setSearch(c.autotune.search);
+      setStopEarly(c.autotune.stopEarly);
       setSync(data.config.corpusSync);
       setSavedSync(data.config.corpusSync);
       setOpen(true);
@@ -124,6 +132,7 @@ export function EvalSettings() {
           : {}),
         apply,
         search,
+        stopEarly,
       },
     };
     setSaving(true);
@@ -238,17 +247,19 @@ export function EvalSettings() {
               />
             </label>
             <div className="flex items-center justify-between gap-2 py-0.5">
-              <span
-                className="cursor-help text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400"
-                title={
+              <Tooltip
+                align="left"
+                text={
                   "During autotune, several candidate fixes (chunk sizes, models, combos) " +
                   "can all clear your min-rate for the same chunk. 'choose' pauses so you " +
                   "pick which fix to apply; 'auto-best' applies the highest-scoring one " +
                   "automatically."
                 }
               >
-                When 1+ pass
-              </span>
+                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                  When 1+ pass
+                </span>
+              </Tooltip>
               <div className="flex gap-1">
                 <Seg active={apply === "choose"} onClick={() => setApply("choose")}>
                   choose
@@ -275,6 +286,26 @@ export function EvalSettings() {
                   best-of-best
                 </Seg>
               </div>
+            </div>
+            <div className="flex items-center justify-between gap-2 py-0.5">
+              <Tooltip
+                align="left"
+                text={
+                  "Autotune works through the worst chunks first; with this on, the run " +
+                  "stops as soon as every targeted metric's overall rate reaches its " +
+                  "min-rate, skipping the remaining below-bar chunks to save embedding cost."
+                }
+              >
+                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                  Stop once reached
+                </span>
+              </Tooltip>
+              <input
+                type="checkbox"
+                checked={stopEarly}
+                onChange={(e) => setStopEarly(e.target.checked)}
+                className="cursor-pointer"
+              />
             </div>
 
             {/* CORPUS (auto-sync, 0017) */}
@@ -379,11 +410,20 @@ function MetricRow({
           className="w-14 rounded border border-zinc-300 bg-transparent px-1.5 py-1 text-xs disabled:opacity-50 dark:border-zinc-700"
         />
       </label>
-      <label className="flex items-center gap-1 text-xs text-zinc-500">
+      <label
+        className="flex items-center gap-1 text-xs text-zinc-500"
+        title="Fraction from 0–1. Values above 1 are read as a percentage: 90 or 90% becomes 0.9."
+      >
         min
         <input
           value={min}
           onChange={(e) => setMin(e.target.value)}
+          onBlur={() => {
+            // Echo the canonical decimal back (90 → 0.9) so what's saved is
+            // never a surprise; garbage clears to unset.
+            const rate = parseRateOrNull(min);
+            setMin(rate === null ? "" : String(rate));
+          }}
           placeholder="–"
           disabled={!on}
           className="w-16 rounded border border-zinc-300 bg-transparent px-1.5 py-1 text-xs disabled:opacity-50 dark:border-zinc-700"
