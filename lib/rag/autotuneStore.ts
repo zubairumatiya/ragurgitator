@@ -11,6 +11,8 @@ import { activeConfig } from "@/lib/rag/activeConfig";
 export type AutotuneRunHeader = {
   recallK: number | null;
   recallMinRate: number | null;
+  mrrK: number | null;
+  mrrMinRate: number | null;
   ndcgK: number | null;
   ndcgMinRate: number | null;
   targeted: number;
@@ -22,7 +24,7 @@ export type AutotuneRunHeader = {
 export type AutotuneOutcome = {
   questionId: string;
   sourceChunkId: string;
-  metric: "recall" | "ndcg";
+  metric: "recall" | "mrr" | "ndcg";
   beforeValue: number | null;
   beforeRank: number | null;
   afterValue: number | null;
@@ -42,10 +44,12 @@ export async function insertAutotuneRun(
   return sql.begin(async (tx) => {
     const [run] = await tx<{ id: string }[]>`
       insert into autotune_runs
-        (config_id, recall_k, recall_min_rate, ndcg_k, ndcg_min_rate,
+        (config_id, recall_k, recall_min_rate, mrr_k, mrr_min_rate,
+         ndcg_k, ndcg_min_rate,
          targeted, resolved, unresolved, attempts)
       values
         (${cfg.id}, ${header.recallK}, ${header.recallMinRate},
+         ${header.mrrK}, ${header.mrrMinRate},
          ${header.ndcgK}, ${header.ndcgMinRate},
          ${header.targeted}, ${header.resolved}, ${header.unresolved},
          ${header.attempts})

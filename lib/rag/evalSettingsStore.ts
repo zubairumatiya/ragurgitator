@@ -32,6 +32,7 @@ export type AutotuneSettings = {
 
 export type EvalCriteria = {
   recall: MetricCriteria;
+  mrr: MetricCriteria;
   ndcg: MetricCriteria;
   difficulties: Difficulty[]; // '{}' => legacy no-difficulty generation
   autotune: AutotuneSettings;
@@ -41,6 +42,9 @@ type CriteriaRow = {
   recall_enabled: boolean;
   recall_k: number | null;
   recall_min_rate: number | null;
+  mrr_enabled: boolean;
+  mrr_k: number | null;
+  mrr_min_rate: number | null;
   ndcg_enabled: boolean;
   ndcg_k: number | null;
   ndcg_min_rate: number | null;
@@ -56,6 +60,7 @@ const DIFFICULTIES: readonly Difficulty[] = ["easy", "medium", "hard"];
 function toCriteria(row: CriteriaRow): EvalCriteria {
   return {
     recall: { enabled: row.recall_enabled, k: row.recall_k, minRate: row.recall_min_rate },
+    mrr: { enabled: row.mrr_enabled, k: row.mrr_k, minRate: row.mrr_min_rate },
     ndcg: { enabled: row.ndcg_enabled, k: row.ndcg_k, minRate: row.ndcg_min_rate },
     // Keep only recognised difficulties, in the canonical easy→hard order.
     difficulties: DIFFICULTIES.filter((d) => row.eval_difficulties.includes(d)),
@@ -70,6 +75,7 @@ function toCriteria(row: CriteriaRow): EvalCriteria {
 
 const COLUMNS = sql`
   recall_enabled, recall_k, recall_min_rate,
+  mrr_enabled, mrr_k, mrr_min_rate,
   ndcg_enabled, ndcg_k, ndcg_min_rate,
   eval_difficulties,
   autotune_size_ladder, autotune_overlap_pct, autotune_apply, autotune_search
@@ -94,6 +100,7 @@ export async function getActiveCriteria(): Promise<EvalCriteria> {
 // A nested partial — the Settings UI sends only the fields it changed.
 export type CriteriaPatch = {
   recall?: Partial<MetricCriteria>;
+  mrr?: Partial<MetricCriteria>;
   ndcg?: Partial<MetricCriteria>;
   difficulties?: Difficulty[];
   autotune?: Partial<AutotuneSettings>;
@@ -111,6 +118,7 @@ export async function updateCriteria(
 
   const next: EvalCriteria = {
     recall: { ...cur.recall, ...patch.recall },
+    mrr: { ...cur.mrr, ...patch.mrr },
     ndcg: { ...cur.ndcg, ...patch.ndcg },
     difficulties: patch.difficulties
       ? DIFFICULTIES.filter((d) => patch.difficulties!.includes(d))
@@ -123,6 +131,9 @@ export async function updateCriteria(
       recall_enabled      = ${next.recall.enabled},
       recall_k            = ${next.recall.k},
       recall_min_rate     = ${next.recall.minRate},
+      mrr_enabled         = ${next.mrr.enabled},
+      mrr_k               = ${next.mrr.k},
+      mrr_min_rate        = ${next.mrr.minRate},
       ndcg_enabled        = ${next.ndcg.enabled},
       ndcg_k              = ${next.ndcg.k},
       ndcg_min_rate       = ${next.ndcg.minRate},
@@ -153,11 +164,12 @@ export function effectiveK(metric: MetricCriteria, topK: number): number {
 }
 
 // The retrieval depth one scoring pass needs: the largest enabled metric k, so a
-// single retrieved list serves both Recall@recall_k and nDCG@ndcg_k (A1). Falls
-// back to top_k when neither metric is enabled.
+// single retrieved list serves Recall@recall_k, MRR@mrr_k, and nDCG@ndcg_k (A1).
+// Falls back to top_k when no metric is enabled.
 export function retrievalDepth(criteria: EvalCriteria, topK: number): number {
   const ks: number[] = [];
   if (criteria.recall.enabled) ks.push(effectiveK(criteria.recall, topK));
+  if (criteria.mrr.enabled) ks.push(effectiveK(criteria.mrr, topK));
   if (criteria.ndcg.enabled) ks.push(effectiveK(criteria.ndcg, topK));
   return ks.length > 0 ? Math.max(...ks) : topK;
 }

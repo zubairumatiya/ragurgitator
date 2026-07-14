@@ -51,6 +51,7 @@ type DoneStats = {
   pendingChoice: number;
   attempts: number;
   recall: number | null;
+  mrr: number | null;
   ndcg: number | null;
 };
 
@@ -74,9 +75,10 @@ export function AutotunePanel({
   const [done, setDone] = useState<DoneStats | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const { recall, ndcg, autotune } = summary.criteria;
+  const { recall, mrr, ndcg, autotune } = summary.criteria;
   const hasTarget =
     (recall.enabled && recall.minRate !== null) ||
+    (mrr.enabled && mrr.minRate !== null) ||
     (ndcg.enabled && ndcg.minRate !== null);
   const below = belowBarCount(summary);
 
@@ -388,7 +390,8 @@ export function AutotunePanel({
                   ? `, ${done.pendingChoice} awaiting your choice above`
                   : ""}
                 , {done.attempts} experiment(s). Recall{" "}
-                {done.recall === null ? "—" : `${(done.recall * 100).toFixed(1)}%`} · nDCG{" "}
+                {done.recall === null ? "—" : `${(done.recall * 100).toFixed(1)}%`} · MRR{" "}
+                {done.mrr === null ? "—" : done.mrr.toFixed(2)} · nDCG{" "}
                 {done.ndcg === null ? "—" : done.ndcg.toFixed(2)}.
               </p>
             )}

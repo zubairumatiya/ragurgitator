@@ -47,7 +47,7 @@ import {
 } from "@/lib/rag/evalStore";
 import { clearChunkOverride } from "@/lib/rag/overrideStore";
 
-export type AutotuneMetric = "recall" | "ndcg";
+export type AutotuneMetric = "recall" | "mrr" | "ndcg";
 export type CandidateFamily = "size" | "model" | "size+model";
 
 // One override candidate found by the search, with its approximate standing.
@@ -106,6 +106,7 @@ export type AutotuneEvent =
       pendingChoice: number;
       attempts: number;
       recall: number | null;
+      mrr: number | null;
       ndcg: number | null;
     }
   | { type: "error"; message: string };
@@ -123,20 +124,26 @@ type TargetQuestion = {
   metrics: AutotuneMetric[];
   beforeHit: boolean;
   beforeRank: number | null;
+  beforeRr: number | null;
   beforeNdcg: number | null;
   retrievedIds: string[];
 };
 
 // Which targeted metrics a FRESHLY SCORED question fails under the criteria
 // (D1: recall per-question is binary, so any positive recall min-rate means
-// "must be a hit"; nDCG is graded against its own min-rate). Unscored, stale,
-// and ungraded-nDCG questions are not targetable.
+// "must be a hit"; MRR compares the per-question reciprocal rank at mrr_k;
+// nDCG is graded against its own min-rate). Unscored, stale, and ungraded-nDCG
+// questions are not targetable.
 function failingMetrics(q: QuestionDetail, criteria: EvalCriteria): AutotuneMetric[] {
   if (q.ignored || q.hit === null || q.stale) return [];
   const out: AutotuneMetric[] = [];
   const r = criteria.recall;
   if (r.enabled && r.minRate !== null && r.minRate > 0 && q.hit === false) {
     out.push("recall");
+  }
+  const m = criteria.mrr;
+  if (m.enabled && m.minRate !== null && m.minRate > 0 && q.rr !== null && q.rr < m.minRate) {
+    out.push("mrr");
   }
   const n = criteria.ndcg;
   if (n.enabled && n.minRate !== null && q.ndcg !== null && q.ndcg < n.minRate) {
@@ -155,19 +162,20 @@ function failingPairs(questions: QuestionDetail[], criteria: EvalCriteria): Set<
   return pairs;
 }
 
+// The effective per-metric depths (and MRR's min-rate) one run targets — the
+// bar approxClears checks candidates against.
+type MetricBars = { recallK: number; mrrK: number; mrrMinRate: number; ndcgK: number };
+
 // Approximate bar-clearing for one question at a candidate's ground-truth rank.
-// recall: within recall_k. nDCG: within ndcg_k without losing rank — the real
-// graded value is only computed at confirm time (see header comment).
-function approxClears(
-  t: TargetQuestion,
-  rank: number | null,
-  recallK: number,
-  ndcgK: number,
-): boolean {
+// recall: within recall_k. MRR: 1/rank at mrr_k must reach the min-rate (exact
+// — rr is fully determined by the rank). nDCG: within ndcg_k without losing
+// rank — the real graded value is only computed at confirm time (see header).
+function approxClears(t: TargetQuestion, rank: number | null, bars: MetricBars): boolean {
   if (rank === null) return false;
   for (const m of t.metrics) {
-    if (m === "recall" && rank > recallK) return false;
-    if (m === "ndcg" && (rank > ndcgK || (t.beforeRank !== null && rank > t.beforeRank))) {
+    if (m === "recall" && rank > bars.recallK) return false;
+    if (m === "mrr" && (rank > bars.mrrK || 1 / rank < bars.mrrMinRate)) return false;
+    if (m === "ndcg" && (rank > bars.ndcgK || (t.beforeRank !== null && rank > t.beforeRank))) {
       return false;
     }
   }
@@ -181,15 +189,14 @@ function mkCandidate(
   model: string | null,
   targets: TargetQuestion[],
   ranks: (number | null)[],
-  recallK: number,
-  ndcgK: number,
+  bars: MetricBars,
 ): AutotuneCandidate {
   return {
     family,
     size,
     overlap,
     model,
-    clears: targets.every((t, i) => approxClears(t, ranks[i], recallK, ndcgK)),
+    clears: targets.every((t, i) => approxClears(t, ranks[i], bars)),
     score: ranks.reduce<number>((s, r) => s + (r === null ? 0 : 1 / r), 0),
     ranks: targets.map((t, i) => ({ questionId: t.questionId, rank: ranks[i] })),
   };
@@ -311,8 +318,9 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
 
   const recallTargeting =
     criteria.recall.enabled && criteria.recall.minRate !== null;
+  const mrrTargeting = criteria.mrr.enabled && criteria.mrr.minRate !== null;
   const ndcgTargeting = criteria.ndcg.enabled && criteria.ndcg.minRate !== null;
-  if (!recallTargeting && !ndcgTargeting) {
+  if (!recallTargeting && !mrrTargeting && !ndcgTargeting) {
     emit({
       type: "error",
       message: "Set a min-rate on an enabled metric in Settings before autotuning.",
@@ -321,7 +329,14 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
   }
 
   const recallK = effectiveK(criteria.recall, cfg.topK);
+  const mrrK = effectiveK(criteria.mrr, cfg.topK);
   const ndcgK = effectiveK(criteria.ndcg, cfg.topK);
+  const bars: MetricBars = {
+    recallK,
+    mrrK,
+    mrrMinRate: criteria.mrr.minRate ?? 0,
+    ndcgK,
+  };
   const ignored = await listIgnoredQuestionIds();
 
   // Targets: every fresh below-bar question, minus ignores, grouped by chunk.
@@ -339,6 +354,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       metrics,
       beforeHit: q.hit === true,
       beforeRank: q.foundRank,
+      beforeRr: q.rr,
       beforeNdcg: q.ndcg,
       retrievedIds: q.retrievedIds ?? [],
     });
@@ -369,6 +385,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       pendingChoice: 0,
       attempts: 0,
       recall: summary.recall,
+      mrr: summary.mrr,
       ndcg: summary.ndcg,
     });
     return;
@@ -441,7 +458,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
         attempts += 1;
       }
       emit({ type: "attempt", chunkId, stage: "size", detail: `size ${size}`, attempts });
-      const cand = mkCandidate("size", size, overlap, null, chunkTargets, ranks, recallK, ndcgK);
+      const cand = mkCandidate("size", size, overlap, null, chunkTargets, ranks, bars);
       if (cand.score > (bestSize?.score ?? baselineScore)) bestSize = cand;
       if (cand.clears) {
         candidates.push(cand);
@@ -474,7 +491,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
         const ranksB = await poolTrialRanks(chunkTargets, [chunkText], poolTexts, model);
         attempts += chunkTargets.length;
         emit({ type: "attempt", chunkId, stage: "model", detail: model, attempts });
-        const candB = mkCandidate("model", null, null, model, chunkTargets, ranksB, recallK, ndcgK);
+        const candB = mkCandidate("model", null, null, model, chunkTargets, ranksB, bars);
         if (candB.clears) rungCands.push(candB);
 
         if (bestSize !== null) {
@@ -495,8 +512,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
             model,
             chunkTargets,
             ranksA,
-            recallK,
-            ndcgK,
+            bars,
           );
           if (candA.clears) rungCands.push(candA);
         }
@@ -530,8 +546,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
               model,
               chunkTargets,
               ranks,
-              recallK,
-              ndcgK,
+              bars,
             );
             if (cand.clears) {
               candidates.push(cand);
@@ -600,7 +615,8 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
         questionId: t.questionId,
         sourceChunkId: t.sourceChunkId,
         metric: m,
-        beforeValue: m === "recall" ? (t.beforeHit ? 1 : 0) : t.beforeNdcg,
+        beforeValue:
+          m === "recall" ? (t.beforeHit ? 1 : 0) : m === "mrr" ? t.beforeRr : t.beforeNdcg,
         beforeRank: t.beforeRank,
         afterValue:
           after === undefined
@@ -611,7 +627,9 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
                 : after.hit
                   ? 1
                   : 0
-              : after.ndcg,
+              : m === "mrr"
+                ? after.rr
+                : after.ndcg,
         afterRank: after?.foundRank ?? null,
         overrideKind: ov?.kind ?? null,
         overrideModel: ov?.model ?? null,
@@ -624,6 +642,8 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
     {
       recallK: recallTargeting ? recallK : null,
       recallMinRate: criteria.recall.minRate,
+      mrrK: mrrTargeting ? mrrK : null,
+      mrrMinRate: criteria.mrr.minRate,
       ndcgK: ndcgTargeting ? ndcgK : null,
       ndcgMinRate: criteria.ndcg.minRate,
       targeted: targets.length,
@@ -647,6 +667,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
     pendingChoice,
     attempts,
     recall: final.recall,
+    mrr: final.mrr,
     ndcg: final.ndcg,
   });
 }

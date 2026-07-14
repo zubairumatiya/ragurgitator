@@ -80,6 +80,10 @@ export type QuestionDetail = {
   // toward the rates; edit-stale ones don't (their score is for the old text).
   stale: boolean;
   editStale: boolean; // the excluded-from-rates subset of `stale`
+  // Reciprocal rank at mrr_k (1/found_rank, 0 when it landed past mrr_k or
+  // missed entirely); null when unscored. Feeds the MRR aggregate and the
+  // min-rate bar the same way `hit` feeds recall and `ndcg` feeds nDCG.
+  rr: number | null;
   // Graded nDCG@k against this question's official ideal ranking; null when it
   // has no ranking yet or no fresh score (ungraded → grey chip on /eval).
   ndcg: number | null;
@@ -141,17 +145,18 @@ export type EvalConfigInfo = {
 };
 
 export type EvalSummary = {
-  // `k` stays = recallK for back-compat (run progress / explain). recallK and
-  // ndcgK are the effective per-metric depths (A1).
+  // `k` stays = recallK for back-compat (run progress / explain). recallK,
+  // mrrK, and ndcgK are the effective per-metric depths (A1).
   k: number;
   recallK: number;
+  mrrK: number;
   ndcgK: number;
   total: number; // questions with a label under the active config
   scored: number; // of those, how many have a result
   hits: number;
   recall: number | null; // hits / scored
-  // Mean reciprocal rank over the same fresh-scored set as recall; null when
-  // nothing is scored, like recall.
+  // Mean reciprocal rank AT mrr_k over the same fresh-scored set as recall
+  // (a landing past mrr_k contributes 0); null when nothing is scored.
   mrr: number | null;
   // Mean graded nDCG@k (see lib/rag/evalMetrics.ndcg) over only the questions
   // that have an official ideal ranking AND a fresh score; null when none do.
@@ -247,6 +252,10 @@ export type ChunkDifficultyGap = {
   documentId: string;
   documentEmbeddingId: string;
   difficulty: string;
+  // For the live "question landed" stream event: where the dashboard should
+  // file the new row (its chunk group header) without waiting for a reload.
+  fileName: string;
+  position: number | null;
 };
 
 // For each requested difficulty, the chunks under the active config that lack a
@@ -269,11 +278,15 @@ export async function chunksNeedingQuestionsByDifficulty(
       document_id: string;
       document_embedding_id: string;
       difficulty: string;
+      file_name: string;
+      position: number | null;
     }[]
   >`
-    select c.id, c.text, c.document_id, c.document_embedding_id, d.difficulty
+    select c.id, c.text, c.document_id, c.document_embedding_id, d.difficulty,
+           doc.file_name, c.position
     from ${sql(table)} c
     join document_embeddings de on de.id = c.document_embedding_id
+    join documents doc on doc.id = c.document_id
     cross join unnest(${difficulties}::text[]) as d(difficulty)
     where de.config_id = ${activeConfig().id}
       and (${docScope}::uuid[] is null or c.document_id = any(${docScope}::uuid[]))
@@ -294,12 +307,16 @@ export async function chunksNeedingQuestionsByDifficulty(
     documentId: r.document_id,
     documentEmbeddingId: r.document_embedding_id,
     difficulty: r.difficulty,
+    fileName: r.file_name,
+    position: r.position,
   }));
 }
 
 // Insert one question (document-scoped) plus its ground-truth label for the
 // given config, atomically. Used by both generated questions (source='generated',
 // generatorModel set) and manual additions (source='manual', generatorModel null).
+// Returns the new question's id so the bulk generator can stream it to the
+// dashboard (and the later score-result event can reference the same row).
 export async function insertQuestionWithLabel(args: {
   documentId: string;
   documentEmbeddingId: string;
@@ -309,9 +326,9 @@ export async function insertQuestionWithLabel(args: {
   source?: "generated" | "manual";
   generatorModel: string | null;
   difficulty?: string | null; // graded synthetic only; null for manual / default-generated
-}): Promise<void> {
+}): Promise<string> {
   const source = args.source ?? "generated";
-  await sql.begin(async (tx) => {
+  return sql.begin(async (tx) => {
     const [q] = await tx<{ id: string }[]>`
       insert into eval_questions
         (document_id, question, expected_answer, source, generator_model, difficulty)
@@ -326,6 +343,7 @@ export async function insertQuestionWithLabel(args: {
       values
         (${q.id}, ${args.documentEmbeddingId}, ${args.sourceChunkId})
     `;
+    return q.id;
   });
 }
 
@@ -1515,6 +1533,7 @@ export async function getSummary(): Promise<EvalSummary> {
   const cfg = activeConfig();
   const criteria = await getActiveCriteria();
   const recallK = effectiveK(criteria.recall, cfg.topK);
+  const mrrK = effectiveK(criteria.mrr, cfg.topK);
   const ndcgK = effectiveK(criteria.ndcg, cfg.topK);
   const configInfo: EvalConfigInfo = {
     id: cfg.id,
@@ -1528,6 +1547,7 @@ export async function getSummary(): Promise<EvalSummary> {
   const empty: EvalSummary = {
     k: recallK,
     recallK,
+    mrrK,
     ndcgK,
     total: 0,
     scored: 0,
@@ -1711,6 +1731,8 @@ export async function getSummary(): Promise<EvalSummary> {
     // rank within the stored superset, A1) — so changing recall_k in Settings is
     // reflected without a re-score, as long as it's within the retrieved depth.
     const hit = scored ? r.found_rank !== null && r.found_rank <= recallK : null;
+    // Same recompute-at-current-k treatment for MRR: 1/rank within mrr_k, 0 past it.
+    const rr = scored ? reciprocalRank(r.found_rank, mrrK) : null;
     const countable = scored && !editStale;
     // Graded nDCG needs an ideal ranking AND a countable retrieval order;
     // otherwise it's ungraded (null) and the UI shows the grey placeholder.
@@ -1738,6 +1760,7 @@ export async function getSummary(): Promise<EvalSummary> {
       scoredAt: r.scored_at ? r.scored_at.getTime() : null,
       stale,
       editStale,
+      rr,
       ndcg: qNdcg,
       ignored: r.ignored,
     };
@@ -1751,12 +1774,11 @@ export async function getSummary(): Promise<EvalSummary> {
   );
   const hits = scoredRows.filter((q) => q.hit === true).length;
 
-  // MRR over the same scored set, straight from found_rank (single-relevant) —
-  // no extra retrieval, so already-scored questions are covered retroactively.
+  // MRR@mrr_k over the same scored set, from the per-question rr (single-relevant)
+  // — no extra retrieval, so already-scored questions are covered retroactively.
   const mrr =
     scoredRows.length > 0
-      ? scoredRows.reduce((sum, q) => sum + reciprocalRank(q.foundRank), 0) /
-        scoredRows.length
+      ? scoredRows.reduce((sum, q) => sum + (q.rr ?? 0), 0) / scoredRows.length
       : null;
 
   // Mean graded nDCG over exactly the questions that have one (ranked + freshly
@@ -1797,6 +1819,7 @@ export async function getSummary(): Promise<EvalSummary> {
   return {
     k: recallK,
     recallK,
+    mrrK,
     ndcgK,
     total: questions.length,
     scored: scoredRows.length,

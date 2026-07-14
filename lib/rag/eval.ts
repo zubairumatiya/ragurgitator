@@ -72,11 +72,32 @@ import {
 } from "@/lib/rag/evalStore";
 
 // Progress events streamed to the client during a process/rescore run. The
-// routes serialize these as NDJSON; the dashboard turns them into a two-phase
-// progress bar and flips question badges live as each result lands.
+// routes serialize these as NDJSON; the dashboard appends new questions and
+// flips badges live as each generation/result lands.
+
+// A freshly generated question, shipped on the generate-progress event so the
+// dashboard can append its row (unscored) without waiting for the end-of-run
+// reload. Carries the chunk-group header bits (fileName/position) since the
+// chunk may not have any questions on screen yet.
+export type GeneratedQuestionPayload = {
+  questionId: string;
+  question: string;
+  difficulty: string | null;
+  documentId: string;
+  fileName: string;
+  sourceChunkId: string;
+  expectedPosition: number | null;
+};
+
 export type EvalEvent =
   | { type: "generate-start"; total: number }
-  | { type: "generate-progress"; done: number; total: number }
+  // `question` is absent when the step produced nothing (truncation/refusal).
+  | {
+      type: "generate-progress";
+      done: number;
+      total: number;
+      question?: GeneratedQuestionPayload;
+    }
   | { type: "score-start"; total: number }
   | {
       type: "score-result";
@@ -242,8 +263,9 @@ export async function generateMissingQuestions(
   let done = 0;
   for (const gap of gaps) {
     const [q] = await authorQuestions(gap.text, 1, gap.difficulty as Difficulty);
+    let landed: GeneratedQuestionPayload | undefined;
     if (q && q.question.trim()) {
-      await insertQuestionWithLabel({
+      const questionId = await insertQuestionWithLabel({
         documentId: gap.documentId,
         documentEmbeddingId: gap.documentEmbeddingId,
         sourceChunkId: gap.chunkId,
@@ -253,9 +275,18 @@ export async function generateMissingQuestions(
         difficulty: gap.difficulty,
       });
       generated += 1;
+      landed = {
+        questionId,
+        question: q.question.trim(),
+        difficulty: gap.difficulty,
+        documentId: gap.documentId,
+        fileName: gap.fileName,
+        sourceChunkId: gap.chunkId,
+        expectedPosition: gap.position,
+      };
     }
     done += 1;
-    emit({ type: "generate-progress", done, total: gaps.length });
+    emit({ type: "generate-progress", done, total: gaps.length, question: landed });
   }
 
   console.log(`[rag:eval] generated ${generated} question(s)`);

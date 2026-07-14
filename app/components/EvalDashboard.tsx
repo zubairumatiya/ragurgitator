@@ -1,14 +1,15 @@
 // ---------------------------------------------------------------------------
 // UI: retrieval eval dashboard (/eval).
 //
-// Shows Recall@k and nDCG for the active config, a per-document breakdown, the run
-// history, and a per-question detail table with inline editing. The "Process
-// new chunks" button generates + scores only new/edited questions.
+// Shows Recall@k, MRR@k, and nDCG for the active config, a per-document
+// breakdown, the run history, and a per-question detail table with inline
+// editing. The "Process new chunks" button generates + scores only new/edited
+// questions.
 //
-// MRR is still computed and stored server-side (it rides the same retrieval pass)
-// but isn't surfaced here — Recall@k already covers the in-top-k signal at this
-// altitude. It'll resurface in the planned cross-chunk model-comparison rollup,
-// where averaging rank over many questions makes it pull its weight.
+// Recall@k answers "did the ground truth land in the window"; MRR@k adds "how
+// close to the top" (1/rank, 0 past mrr_k) — two configs can tie on recall
+// while one consistently ranks the chunk higher. The per-question rank already
+// shows on the hit badge, so MRR only appears as the headline aggregate.
 // ---------------------------------------------------------------------------
 "use client";
 
@@ -40,6 +41,7 @@ import type {
   ChunkWindow,
   Difficulty,
   EvalEvent,
+  GeneratedQuestionPayload,
   ModelTrialContext,
   ModelTrialResult,
 } from "@/lib/rag/eval";
@@ -254,6 +256,10 @@ export function EvalDashboard() {
                     ...q,
                     hit,
                     foundRank,
+                    rr:
+                      foundRank !== null && foundRank <= prev.mrrK
+                        ? 1 / foundRank
+                        : 0,
                     storedSim: null,
                     stale: false,
                     scoredAt: Date.now(),
@@ -262,6 +268,47 @@ export function EvalDashboard() {
             ),
           },
     );
+  }
+
+  // Append a freshly generated question (unscored) as its generate event lands,
+  // so bulk runs fill the table live instead of dumping everything at reload().
+  // groupByChunk files it under its existing chunk group; a chunk with no
+  // questions yet gets a new group at the bottom until the final reload()
+  // restores document order. The scoring phase's score-result events then flip
+  // its badge in place via patchQuestion, like any other row.
+  function appendQuestion(g: GeneratedQuestionPayload) {
+    setSummary((prev) => {
+      if (prev === null || prev.questions.some((q) => q.questionId === g.questionId)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        total: prev.total + 1,
+        questions: [
+          ...prev.questions,
+          {
+            questionId: g.questionId,
+            question: g.question,
+            source: "generated",
+            difficulty: g.difficulty,
+            documentId: g.documentId,
+            fileName: g.fileName,
+            sourceChunkId: g.sourceChunkId,
+            expectedPosition: g.expectedPosition,
+            hit: null,
+            foundRank: null,
+            storedSim: null,
+            retrievedIds: null,
+            scoredAt: null,
+            stale: false,
+            editStale: false,
+            rr: null,
+            ndcg: null,
+            ignored: false,
+          },
+        ],
+      };
+    });
   }
 
   // Drive a process/rescore run from its NDJSON event stream: advance the
@@ -319,6 +366,7 @@ export function EvalDashboard() {
                 done: event.done,
                 total: event.total,
               });
+              if (event.question) appendQuestion(event.question);
               break;
             case "score-start":
               hits = 0;
@@ -370,7 +418,7 @@ export function EvalDashboard() {
       "/api/eval/process",
       (r) =>
         `Generated ${r.generated} question(s), scored ${r.scored}. ` +
-        `Recall@k ${pct(r.recall)} · nDCG ${fmtScore(r.ndcg)}.`,
+        `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
     );
 
   const onRescore = (documentIds: string[] | null) =>
@@ -378,7 +426,7 @@ export function EvalDashboard() {
       "/api/eval/rescore",
       (r) =>
         `Re-scored ${r.scored} question(s). ` +
-        `Recall@k ${pct(r.recall)} · nDCG ${fmtScore(r.ndcg)}.`,
+        `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
       documentIds ? { documentIds } : undefined,
     );
 
@@ -390,7 +438,7 @@ export function EvalDashboard() {
       "/api/eval/bulk-generate",
       (r) =>
         `Added ${r.generated} ${difficulty} question(s), scored ${r.scored}. ` +
-        `Recall@k ${pct(r.recall)} · nDCG ${fmtScore(r.ndcg)}.`,
+        `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
       { difficulty, documentIds: documentIds ?? undefined },
     );
 
@@ -609,6 +657,18 @@ export function EvalDashboard() {
                 }
               />
             )}
+            {summary.criteria.mrr.enabled && (
+              <Stat
+                label={`MRR@${summary.mrrK}`}
+                value={fmtScore(summary.mrr)}
+                big
+                sub={
+                  summary.criteria.mrr.minRate != null
+                    ? `min ${summary.criteria.mrr.minRate.toFixed(2)}`
+                    : undefined
+                }
+              />
+            )}
             {summary.criteria.ndcg.enabled && (
               <Stat
                 label={`nDCG@${summary.ndcgK}`}
@@ -688,8 +748,8 @@ export function EvalDashboard() {
                             : null,
                         )}
                         <span className="ml-2 text-xs font-normal text-zinc-500">
-                          nDCG {fmtScore(r.ndcg)} · ({r.hitCount}/
-                          {r.questionCount} @ k=
+                          MRR {fmtScore(r.mrr)} · nDCG {fmtScore(r.ndcg)} · (
+                          {r.hitCount}/{r.questionCount} @ k=
                           {r.k})
                         </span>
                       </span>
@@ -1079,7 +1139,7 @@ export function EvalDashboard() {
 }
 
 // One hover row for the yellow-◷ tooltip, in the plan's §6.4 shape:
-// "easy · recall miss #14 → hit #3", "hard · nDCG 0.41 → 0.78".
+// "easy · recall miss #14 → hit #3", "med · MRR 0.25 → 1.00", "hard · nDCG 0.41 → 0.78".
 function fmtOutcome(o: OverrideOutcome): string {
   const d = o.difficulty ?? "·";
   if (o.metric === "recall") {
@@ -1092,7 +1152,8 @@ function fmtOutcome(o: OverrideOutcome): string {
     return `${d} · recall ${side(o.beforeValue, o.beforeRank)} → ${side(o.afterValue, o.afterRank)}`;
   }
   const val = (v: number | null) => (v === null ? "—" : v.toFixed(2));
-  return `${d} · nDCG ${val(o.beforeValue)} → ${val(o.afterValue)}`;
+  const label = o.metric === "mrr" ? "MRR" : "nDCG";
+  return `${d} · ${label} ${val(o.beforeValue)} → ${val(o.afterValue)}`;
 }
 
 // Chunk-header badges for an active per-chunk override (Phase D, §6.4): yellow

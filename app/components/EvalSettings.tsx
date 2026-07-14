@@ -51,6 +51,9 @@ export function EvalSettings() {
   const [recallOn, setRecallOn] = useState(true);
   const [recallK, setRecallK] = useState("");
   const [recallMin, setRecallMin] = useState("");
+  const [mrrOn, setMrrOn] = useState(true);
+  const [mrrK, setMrrK] = useState("");
+  const [mrrMin, setMrrMin] = useState("");
   const [ndcgOn, setNdcgOn] = useState(true);
   const [ndcgK, setNdcgK] = useState("");
   const [ndcgMin, setNdcgMin] = useState("");
@@ -83,6 +86,9 @@ export function EvalSettings() {
       setRecallOn(c.recall.enabled);
       setRecallK(c.recall.k != null ? String(c.recall.k) : "");
       setRecallMin(c.recall.minRate != null ? String(c.recall.minRate) : "");
+      setMrrOn(c.mrr.enabled);
+      setMrrK(c.mrr.k != null ? String(c.mrr.k) : "");
+      setMrrMin(c.mrr.minRate != null ? String(c.mrr.minRate) : "");
       setNdcgOn(c.ndcg.enabled);
       setNdcgK(c.ndcg.k != null ? String(c.ndcg.k) : "");
       setNdcgMin(c.ndcg.minRate != null ? String(c.ndcg.minRate) : "");
@@ -109,6 +115,7 @@ export function EvalSettings() {
     const overlapNum = Number(overlap);
     const patch = {
       recall: { enabled: recallOn, k: parseKOrNull(recallK), minRate: parseRateOrNull(recallMin) },
+      mrr: { enabled: mrrOn, k: parseKOrNull(mrrK), minRate: parseRateOrNull(mrrMin) },
       ndcg: { enabled: ndcgOn, k: parseKOrNull(ndcgK), minRate: parseRateOrNull(ndcgMin) },
       autotune: {
         ...(ladderArr.length > 0 ? { sizeLadder: ladderArr } : {}),
@@ -183,6 +190,16 @@ export function EvalSettings() {
               setK={setRecallK}
               min={recallMin}
               setMin={setRecallMin}
+              topK={config?.topK ?? 5}
+            />
+            <MetricRow
+              label="MRR"
+              on={mrrOn}
+              setOn={setMrrOn}
+              k={mrrK}
+              setK={setMrrK}
+              min={mrrMin}
+              setMin={setMrrMin}
               topK={config?.topK ?? 5}
             />
             <MetricRow

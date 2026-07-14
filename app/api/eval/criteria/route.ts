@@ -46,6 +46,7 @@ const Metric = z
 
 const Body = z.object({
   recall: Metric,
+  mrr: Metric,
   ndcg: Metric,
   difficulties: z.array(z.enum(["easy", "medium", "hard"])).optional(),
   autotune: z

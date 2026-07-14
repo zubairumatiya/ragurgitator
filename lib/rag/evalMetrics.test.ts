@@ -16,6 +16,13 @@ test("reciprocalRank: 1/rank, 0 on a miss", () => {
   assert.equal(reciprocalRank(null), 0);
 });
 
+test("reciprocalRank: the depth cap makes it MRR@k — 0 past k, unchanged within", () => {
+  assert.equal(reciprocalRank(3, 5), 1 / 3);
+  assert.equal(reciprocalRank(5, 5), 0.2);
+  assert.equal(reciprocalRank(6, 5), 0);
+  assert.equal(reciprocalRank(null, 5), 0);
+});
+
 test("ndcg: perfect order scores 1", () => {
   const ideal = ["a", "b", "c"];
   assert.equal(ndcg(ideal, ["a", "b", "c"], 3), 1);
