@@ -59,6 +59,7 @@ const Body = z.object({
       apply: z.enum(["choose", "auto_best"]).optional(),
       search: z.enum(["first_success", "exhaustive"]).optional(),
       stopEarly: z.boolean().optional(),
+      keepBest: z.boolean().optional(),
       chunkScope: z.array(z.string().uuid()).nullable().optional(),
     })
     .optional(),

@@ -69,6 +69,7 @@ export function EvalSettings() {
   const [apply, setApply] = useState<AutotuneApply>("choose");
   const [search, setSearch] = useState<AutotuneSearch>("first_success");
   const [stopEarly, setStopEarly] = useState(false);
+  const [keepBest, setKeepBest] = useState(false);
   // Autotune chunk scope (0025): null = all chunks; a Set = the custom picks.
   const [scopeDocs, setScopeDocs] = useState<AutotuneScopeDocument[]>([]);
   const [scopeSel, setScopeSel] = useState<Set<string> | null>(null);
@@ -114,6 +115,7 @@ export function EvalSettings() {
       setApply(c.autotune.apply);
       setSearch(c.autotune.search);
       setStopEarly(c.autotune.stopEarly);
+      setKeepBest(c.autotune.keepBest);
       setScopeDocs(data.scopeOptions ?? []);
       setScopeSel(c.autotune.chunkScope === null ? null : new Set(c.autotune.chunkScope));
       setScopeExpanded(new Set());
@@ -154,6 +156,7 @@ export function EvalSettings() {
         apply,
         search,
         stopEarly,
+        keepBest,
         chunkScope,
       },
     };
@@ -326,6 +329,27 @@ export function EvalSettings() {
                 type="checkbox"
                 checked={stopEarly}
                 onChange={(e) => setStopEarly(e.target.checked)}
+                className="cursor-pointer"
+              />
+            </div>
+            <div className="flex items-center justify-between gap-2 py-0.5">
+              <Tooltip
+                align="left"
+                text={
+                  "If no fix clears a chunk's min-rate, keep the best improvement " +
+                  "anyway (reported as 'improved', not resolved). Drawback: each kept " +
+                  "override can shift other chunks' rankings — for less gain than a " +
+                  "real fix."
+                }
+              >
+                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                  Keep best effort
+                </span>
+              </Tooltip>
+              <input
+                type="checkbox"
+                checked={keepBest}
+                onChange={(e) => setKeepBest(e.target.checked)}
                 className="cursor-pointer"
               />
             </div>

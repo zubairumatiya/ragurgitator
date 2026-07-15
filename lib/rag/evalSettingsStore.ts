@@ -31,6 +31,10 @@ export type AutotuneSettings = {
   // Halt the run once every targeted metric's aggregate rate reaches its
   // min-rate, skipping the remaining below-bar chunks (0024).
   stopEarly: boolean;
+  // When no candidate clears a chunk's bar, keep the best strictly-improving
+  // one anyway — still confirmed through real retrieval, reported as
+  // "improved" rather than resolved (0026).
+  keepBest: boolean;
   // Restrict runs to these source chunk ids (0025). null = ALL chunks,
   // including ones labeled after the setting was saved.
   chunkScope: string[] | null;
@@ -60,6 +64,7 @@ type CriteriaRow = {
   autotune_apply: string;
   autotune_search: string;
   autotune_stop_early: boolean;
+  autotune_keep_best: boolean;
   autotune_chunk_scope: string[] | null;
 };
 
@@ -78,6 +83,7 @@ function toCriteria(row: CriteriaRow): EvalCriteria {
       apply: row.autotune_apply === "auto_best" ? "auto_best" : "choose",
       search: row.autotune_search === "exhaustive" ? "exhaustive" : "first_success",
       stopEarly: row.autotune_stop_early,
+      keepBest: row.autotune_keep_best,
       chunkScope: row.autotune_chunk_scope,
     },
   };
@@ -89,7 +95,7 @@ const COLUMNS = sql`
   ndcg_enabled, ndcg_k, ndcg_min_rate,
   eval_difficulties,
   autotune_size_ladder, autotune_overlap_pct, autotune_apply, autotune_search,
-  autotune_stop_early, autotune_chunk_scope
+  autotune_stop_early, autotune_keep_best, autotune_chunk_scope
 `;
 
 // Criteria for a specific config; null when the id is malformed / missing.
@@ -154,6 +160,7 @@ export async function updateCriteria(
       autotune_apply      = ${next.autotune.apply},
       autotune_search     = ${next.autotune.search},
       autotune_stop_early = ${next.autotune.stopEarly},
+      autotune_keep_best  = ${next.autotune.keepBest},
       autotune_chunk_scope = ${next.autotune.chunkScope}::uuid[],
       updated_at          = now()
     where id = ${configId}

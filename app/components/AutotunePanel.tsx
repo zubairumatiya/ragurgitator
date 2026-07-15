@@ -19,9 +19,17 @@ import { failsBar } from "@/lib/rag/evalBar";
 import type { EvalSummary } from "@/lib/rag/evalStore";
 
 // Confirm-dialog preview of the engine's targeting: fresh below-bar questions,
-// ignored ones excluded (shared D1 rule — lib/rag/evalBar).
+// ignored ones excluded (shared D1 rule — lib/rag/evalBar), restricted to the
+// chunk scope when one is set (0025) — mirroring runAutotune's target filter.
 function belowBarCount(summary: EvalSummary): number {
-  return summary.questions.filter((q) => failsBar(q, summary.criteria)).length;
+  const scope =
+    summary.criteria.autotune.chunkScope === null
+      ? null
+      : new Set(summary.criteria.autotune.chunkScope);
+  return summary.questions.filter(
+    (q) =>
+      (scope === null || scope.has(q.sourceChunkId)) && failsBar(q, summary.criteria),
+  ).length;
 }
 
 function candidateLabel(c: AutotuneCandidate): string {
@@ -48,6 +56,7 @@ type DoneStats = {
   targeted: number;
   resolved: number;
   unresolved: number;
+  improved: number;
   pendingChoice: number;
   attempts: number;
   recall: number | null;
@@ -149,6 +158,9 @@ export function AutotunePanel({
               break;
             case "chunk-resolved":
               pushLog(`✓ resolved — ${candidateLabel(event.candidate)}`);
+              break;
+            case "chunk-improved":
+              pushLog(`△ improved (still below bar) — ${candidateLabel(event.candidate)}`);
               break;
             case "chunk-choice":
               pushLog(
@@ -287,7 +299,11 @@ export function AutotunePanel({
                   <span className="font-medium text-zinc-900 dark:text-zinc-100">
                     {below}
                   </span>{" "}
-                  question(s) are below their min-rate. The search tries chunk sizes
+                  question(s)
+                  {autotune.chunkScope !== null
+                    ? ` on your ${autotune.chunkScope.length} selected chunk(s)`
+                    : ""}{" "}
+                  are below their min-rate. The search tries chunk sizes
                   first, then embedding models, then combos ({autotune.search ===
                   "exhaustive"
                     ? "best-of-best: every size × model"
@@ -393,6 +409,9 @@ export function AutotunePanel({
             {done && (
               <p className="text-zinc-700 dark:text-zinc-300">
                 Done: {done.resolved}/{done.targeted} resolved
+                {done.improved > 0
+                  ? `, ${done.improved} improved (still below bar)`
+                  : ""}
                 {done.pendingChoice > 0
                   ? `, ${done.pendingChoice} awaiting your choice above`
                   : ""}

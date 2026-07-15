@@ -18,6 +18,7 @@ export type AutotuneRunHeader = {
   targeted: number;
   resolved: number;
   unresolved: number;
+  improved: number; // still below the bar, but a targeted metric got better
   attempts: number;
 };
 
@@ -46,13 +47,13 @@ export async function insertAutotuneRun(
       insert into autotune_runs
         (config_id, recall_k, recall_min_rate, mrr_k, mrr_min_rate,
          ndcg_k, ndcg_min_rate,
-         targeted, resolved, unresolved, attempts)
+         targeted, resolved, unresolved, improved, attempts)
       values
         (${cfg.id}, ${header.recallK}, ${header.recallMinRate},
          ${header.mrrK}, ${header.mrrMinRate},
          ${header.ndcgK}, ${header.ndcgMinRate},
          ${header.targeted}, ${header.resolved}, ${header.unresolved},
-         ${header.attempts})
+         ${header.improved}, ${header.attempts})
       returning id
     `;
     for (const o of outcomes) {

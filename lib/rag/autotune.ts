@@ -12,6 +12,12 @@
 // with one full-corpus re-score (A3) + an eval_runs snapshot (feeds Appraise)
 // + an autotune_runs history row.
 //
+// autotune.keepBest (0026): when NO candidate clears a chunk's bar (or every
+// finalist fails its confirm), the best strictly-improving candidate is kept
+// instead under a relaxed-but-real confirm — no new failures allowed and the
+// failing pairs' metric values must actually rise on real retrieval. Reported
+// as "improved", never as resolved.
+//
 // The inner search ranks every candidate through the REAL rank-fused dry-run
 // (fuseWithOverrides with the hypothetical override injected — the same
 // methodology as runModelTrial's fusedRank), so a candidate's rank IS the
@@ -94,6 +100,14 @@ export type AutotuneEvent =
     }
   | { type: "chunk-resolved"; chunkId: string; candidate: AutotuneCandidate }
   | {
+      // autotune.keepBest: no candidate cleared the bar, so the best
+      // strictly-improving one was kept instead — the chunk's questions are
+      // still below their min-rate, just closer.
+      type: "chunk-improved";
+      chunkId: string;
+      candidate: AutotuneCandidate;
+    }
+  | {
       // apply='choose' and more than one FAMILY cleared: nothing applied; the
       // user picks via POST /api/eval/autotune/apply after the run.
       type: "chunk-choice";
@@ -119,6 +133,7 @@ export type AutotuneEvent =
       targeted: number;
       resolved: number;
       unresolved: number;
+      improved: number; // subset of unresolved: still below bar, but better
       pendingChoice: number;
       attempts: number;
       recall: number | null;
@@ -304,16 +319,35 @@ export type ApplyResult = {
   // state, so no candidate could help — callers should stop retrying.
   status: "kept" | "reverted" | "skipped" | "failed";
   detail: string;
+  // On 'kept': how many (question, metric) checks are still failing — 0 means
+  // the chunk actually cleared its bar.
+  remaining?: number;
 };
+
+// The value the bar grades a (question, metric) pair on — what improve mode's
+// progress check sums before vs after.
+function pairValue(q: QuestionDetail, metric: AutotuneMetric): number {
+  if (metric === "recall") return q.hit ? 1 : 0;
+  if (metric === "mrr") return q.rr ?? 0;
+  return q.ndcg ?? 0;
+}
 
 // Promote → persist → CONFIRM (§5.3): apply the override, re-score the chunk's
 // own questions through real rank-fused retrieval, and keep it only if the chunk's
 // failing (question, metric) set shrank with no new failures — otherwise revert
 // the override and re-score again so the stored results stay truthful. Exported
 // for the post-run choice endpoint (POST /api/eval/autotune/apply).
+//
+// mode 'improve' (autotune.keepBest) relaxes the keep condition: the failing
+// set need not shrink as long as no new (question, metric) starts failing AND
+// the failing pairs' summed metric values strictly rose — still a real-
+// retrieval check, so the approximation can't over-promise its way in. The
+// values only move within the retrieval depth (a rank past it is a miss), so
+// "improvement" can't be noise from deep-rank shuffling.
 export async function applyAutotuneCandidate(
   chunkId: string,
   candidate: Pick<AutotuneCandidate, "family" | "size" | "overlap" | "model">,
+  mode: "clear" | "improve" = "clear",
 ): Promise<ApplyResult> {
   let before = await getSummary();
   const criteria = before.criteria;
@@ -338,12 +372,24 @@ export async function applyAutotuneCandidate(
     chunkQs = before.questions.filter((q) => q.sourceChunkId === chunkId);
   }
   const beforeFailing = failingPairs(chunkQs, criteria);
+  const failingSum = (qs: QuestionDetail[]) => {
+    const byId = new Map(qs.map((q) => [q.questionId, q]));
+    let sum = 0;
+    for (const pair of beforeFailing) {
+      const [questionId, metric] = pair.split(":") as [string, AutotuneMetric];
+      const q = byId.get(questionId);
+      if (q) sum += pairValue(q, metric);
+    }
+    return sum;
+  };
   if (beforeFailing.size === 0) {
     // Nothing failing under the CURRENT retrieval state (e.g. an override kept
     // earlier in the run already lifted this chunk's questions) — an override
     // here could only regress, so skip it.
     return { status: "skipped", detail: "Chunk already passes under the current overrides." };
   }
+
+  const beforeSum = failingSum(chunkQs);
 
   const persisted = await persistCandidate(chunkId, candidate);
   if (persisted !== "ok") {
@@ -353,12 +399,12 @@ export async function applyAutotuneCandidate(
   await rescoreChunk();
 
   const after = await getSummary();
-  const afterFailing = failingPairs(
-    after.questions.filter((q) => q.sourceChunkId === chunkId),
-    criteria,
-  );
+  const afterQs = after.questions.filter((q) => q.sourceChunkId === chunkId);
+  const afterFailing = failingPairs(afterQs, criteria);
   const newFailure = [...afterFailing].some((p) => !beforeFailing.has(p));
-  const progressed = afterFailing.size < beforeFailing.size;
+  const progressed =
+    afterFailing.size < beforeFailing.size ||
+    (mode === "improve" && failingSum(afterQs) > beforeSum + 1e-9);
 
   if (newFailure || !progressed) {
     await clearChunkOverride(chunkId);
@@ -372,7 +418,11 @@ export async function applyAutotuneCandidate(
   }
   return {
     status: "kept",
-    detail: `Failing checks ${beforeFailing.size} → ${afterFailing.size}.`,
+    detail:
+      afterFailing.size < beforeFailing.size
+        ? `Failing checks ${beforeFailing.size} → ${afterFailing.size}.`
+        : `Still ${afterFailing.size} failing check(s), but their metric values rose.`,
+    remaining: afterFailing.size,
   };
 }
 
@@ -451,6 +501,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
 
   const search = criteria.autotune.search;
   const applyMode = criteria.autotune.apply;
+  const keepBest = criteria.autotune.keepBest;
   emit({
     type: "autotune-start",
     targeted: targets.length,
@@ -464,6 +515,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       targeted: 0,
       resolved: 0,
       unresolved: 0,
+      improved: 0,
       pendingChoice: 0,
       attempts: 0,
       recall: summary.recall,
@@ -529,24 +581,39 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
     );
     const candidates: AutotuneCandidate[] = [];
     let bestSize: AutotuneCandidate | null = null; // best IMPROVING stage-1 size
+    // Best candidate seen at ANY stage that beats the baseline, clearing or
+    // not — the keepBest fallback when nothing survives the bar.
+    let bestEffort: AutotuneCandidate | null = null;
+    const consider = (cand: AutotuneCandidate): AutotuneCandidate => {
+      if (cand.score > Math.max(baselineScore, bestEffort?.score ?? 0)) bestEffort = cand;
+      return cand;
+    };
     let rungs = 0;
     let resolvedHere = false;
     let skippedHere = false; // apply said the chunk already passes — stop trying
     let lastFailure: string | null = null;
 
-    // Applies `cand` with confirm/revert; emits chunk-resolved on keep. A
+    // Applies `cand` with confirm/revert; emits chunk-resolved (or, for a kept
+    // improve-mode candidate that didn't fully clear, chunk-improved). A
     // failure is NOT emitted here — the chunk may have more finalists to try
     // (a revert restores the prior override state exactly, so the runner-up
     // starts clean); the caller emits one chunk-unresolved after the last.
-    const tryApply = async (cand: AutotuneCandidate): Promise<boolean> => {
-      const res = await applyAutotuneCandidate(chunkId, cand);
+    const tryApply = async (
+      cand: AutotuneCandidate,
+      mode: "clear" | "improve" = "clear",
+    ): Promise<boolean> => {
+      const res = await applyAutotuneCandidate(chunkId, cand, mode);
       if (res.status === "kept") {
         applied.set(chunkId, {
           kind: cand.family,
           model: cand.model,
           size: cand.size,
         });
-        emit({ type: "chunk-resolved", chunkId, candidate: cand });
+        emit({
+          type: mode === "clear" || res.remaining === 0 ? "chunk-resolved" : "chunk-improved",
+          chunkId,
+          candidate: cand,
+        });
         if (stopEarly) {
           const s = await getSummary();
           latestRates = { recall: s.recall, mrr: s.mrr, ndcg: s.ndcg };
@@ -581,7 +648,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       );
       attempts += chunkTargets.length;
       emit({ type: "attempt", chunkId, stage: "size", detail: `size ${size}`, attempts });
-      const cand = mkCandidate("size", size, overlap, null, chunkTargets, ranks, bars);
+      const cand = consider(mkCandidate("size", size, overlap, null, chunkTargets, ranks, bars));
       if (cand.score > (bestSize?.score ?? baselineScore)) bestSize = cand;
       if (cand.clears) {
         if (search === "first_success") {
@@ -611,7 +678,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       const ranksB = await fusedTrialRanks(chunkTargets, chunkId, [chunkText], "model", model);
       attempts += chunkTargets.length;
       emit({ type: "attempt", chunkId, stage: "model", detail: model, attempts });
-      const candB = mkCandidate("model", null, null, model, chunkTargets, ranksB, bars);
+      const candB = consider(mkCandidate("model", null, null, model, chunkTargets, ranksB, bars));
       if (candB.clears) rungCands.push(candB);
 
       if (bestSize !== null) {
@@ -625,14 +692,16 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
           detail: `size ${bestSize.size} × ${model}`,
           attempts,
         });
-        const candA = mkCandidate(
-          "size+model",
-          bestSize.size,
-          bestSize.overlap,
-          model,
-          chunkTargets,
-          ranksA,
-          bars,
+        const candA = consider(
+          mkCandidate(
+            "size+model",
+            bestSize.size,
+            bestSize.overlap,
+            model,
+            chunkTargets,
+            ranksA,
+            bars,
+          ),
         );
         if (candA.clears) rungCands.push(candA);
       }
@@ -659,14 +728,8 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
             detail: `size ${size} × ${model}`,
             attempts,
           });
-          const cand = mkCandidate(
-            "size+model",
-            size,
-            overlap,
-            model,
-            chunkTargets,
-            ranks,
-            bars,
+          const cand = consider(
+            mkCandidate("size+model", size, overlap, model, chunkTargets, ranks, bars),
           );
           if (cand.clears) {
             candidates.push(cand);
@@ -677,13 +740,24 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
     }
 
     // ---- DECIDE ----------------------------------------------------------
+    // keepBest fallback: when nothing cleared the bar (or every finalist
+    // failed its real-retrieval confirm below), keep the best strictly-
+    // improving candidate instead — under improve mode's relaxed-but-real
+    // confirm, so it too reverts unless real retrieval actually got better.
+    const tryBestEffort = async (): Promise<boolean> =>
+      keepBest && !skippedHere && bestEffort !== null
+        ? tryApply(bestEffort, "improve")
+        : false;
+
     if (candidates.length === 0) {
-      emit({
-        type: "chunk-unresolved",
-        chunkId,
-        reason:
-          lastFailure ?? "No size, model, or combo cleared the bar (approximate search).",
-      });
+      if (!(await tryBestEffort())) {
+        emit({
+          type: "chunk-unresolved",
+          chunkId,
+          reason:
+            lastFailure ?? "No size, model, or combo cleared the bar (approximate search).",
+        });
+      }
       continue;
     }
     // Best candidate per family, best-scoring first ('exhaustive' compares all
@@ -714,7 +788,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       resolvedHere = await tryApply(finalist);
       if (resolvedHere || skippedHere) break;
     }
-    if (!resolvedHere) {
+    if (!resolvedHere && !(await tryBestEffort())) {
       emit({ type: "chunk-unresolved", chunkId, reason: lastFailure! });
     }
   }
@@ -734,11 +808,23 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
   const finalByQ = new Map(final.questions.map((q) => [q.questionId, q]));
 
   let resolved = 0;
+  let improved = 0; // still below the bar, but a targeted metric's value rose
   const outcomes: AutotuneOutcome[] = [];
   for (const t of targets) {
     const after = finalByQ.get(t.questionId);
     const stillFailing = after ? failingMetrics(after, criteria) : t.metrics;
-    if (stillFailing.length === 0) resolved += 1;
+    if (stillFailing.length === 0) {
+      resolved += 1;
+    } else if (
+      after !== undefined &&
+      t.metrics.some((m) => {
+        const beforeValue =
+          m === "recall" ? (t.beforeHit ? 1 : 0) : m === "mrr" ? (t.beforeRr ?? 0) : (t.beforeNdcg ?? 0);
+        return pairValue(after, m) > beforeValue + 1e-9;
+      })
+    ) {
+      improved += 1;
+    }
     const ov = applied.get(t.sourceChunkId) ?? null;
     for (const m of t.metrics) {
       outcomes.push({
@@ -779,6 +865,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       targeted: targets.length,
       resolved,
       unresolved: targets.length - resolved,
+      improved,
       attempts,
     },
     outcomes,
@@ -786,7 +873,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
 
   console.log(
     `[rag:autotune] done: targeted=${targets.length} resolved=${resolved} ` +
-      `pendingChoice=${pendingChoice} attempts=${attempts} ` +
+      `improved=${improved} pendingChoice=${pendingChoice} attempts=${attempts} ` +
       `in ${Math.round(performance.now() - t0)}ms`,
   );
   emit({
@@ -794,6 +881,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
     targeted: targets.length,
     resolved,
     unresolved: targets.length - resolved,
+    improved,
     pendingChoice,
     attempts,
     recall: final.recall,
