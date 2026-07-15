@@ -1259,6 +1259,70 @@ export async function getCorpusChunkList(
   }));
 }
 
+export type AutotuneScopeChunk = {
+  chunkId: string;
+  position: number | null;
+  preview: string | null; // first chars of the chunk text, for the hover title
+  questions: number; // labeled questions on this chunk
+};
+export type AutotuneScopeDocument = {
+  documentId: string;
+  fileName: string;
+  chunks: AutotuneScopeChunk[];
+};
+
+// Every LABELED chunk under the active config, grouped by document — what the
+// Settings dropdown's "Chunks" autotune-scope picker lists (0025). Only labeled
+// chunks appear: a chunk without questions can never be an autotune target, so
+// listing it would only be noise.
+export async function listAutotuneScopeOptions(): Promise<AutotuneScopeDocument[]> {
+  const table = await activeChunksTable();
+  if (!table) return [];
+
+  const rows = await sql<
+    {
+      document_id: string;
+      file_name: string;
+      source_chunk_id: string;
+      position: number | null;
+      preview: string | null;
+      questions: number;
+    }[]
+  >`
+    select
+      d.id as document_id,
+      d.file_name,
+      l.source_chunk_id,
+      c.position,
+      left(c.text, 200) as preview,
+      count(*)::int as questions
+    from eval_labels l
+    join document_embeddings de on de.id = l.document_embedding_id
+    join eval_questions q on q.id = l.eval_question_id
+    join documents d on d.id = q.document_id
+    left join ${sql(table)} c on c.id = l.source_chunk_id
+    where de.config_id = ${activeConfig().id}
+    group by d.id, l.source_chunk_id, c.id
+    order by d.file_name asc, c.position asc nulls last
+  `;
+
+  const docs = new Map<string, AutotuneScopeDocument>();
+  for (const r of rows) {
+    let doc = docs.get(r.document_id);
+    if (!doc) {
+      doc = { documentId: r.document_id, fileName: r.file_name, chunks: [] };
+      docs.set(r.document_id, doc);
+    }
+    doc.chunks.push({
+      chunkId: r.source_chunk_id,
+      position: r.position,
+      preview: r.preview,
+      questions: r.questions,
+    });
+  }
+  return [...docs.values()];
+}
+
 // Persist a kept trial as a frozen snapshot (mirrors createRunSnapshot). Returns
 // the new row's id + timestamp so the caller can render it without a re-fetch.
 export async function insertModelTrial(args: {

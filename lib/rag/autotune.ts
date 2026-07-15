@@ -6,7 +6,9 @@
 // full chunk and the best sub-size under each model (Stage 2), then remaining
 // size × model combos (Stage 3) — per the A2/A4 ladder. A winning candidate is
 // persisted as a per-chunk override (pieces, Phase B), CONFIRMED through real
-// rank-fused retrieval (reverted if the approximation over-promised), and the run ends
+// rank-fused retrieval (reverted if the approximation over-promised — the
+// runner-up finalists then get their turn before the chunk is given up on),
+// and the run ends
 // with one full-corpus re-score (A3) + an eval_runs snapshot (feeds Appraise)
 // + an autotune_runs history row.
 //
@@ -298,7 +300,9 @@ async function persistCandidate(
 }
 
 export type ApplyResult = {
-  status: "kept" | "reverted" | "failed";
+  // 'skipped' = nothing failing on this chunk under the CURRENT override
+  // state, so no candidate could help — callers should stop retrying.
+  status: "kept" | "reverted" | "skipped" | "failed";
   detail: string;
 };
 
@@ -311,22 +315,41 @@ export async function applyAutotuneCandidate(
   chunkId: string,
   candidate: Pick<AutotuneCandidate, "family" | "size" | "overlap" | "model">,
 ): Promise<ApplyResult> {
-  const before = await getSummary();
+  let before = await getSummary();
   const criteria = before.criteria;
-  const chunkQs = before.questions.filter((q) => q.sourceChunkId === chunkId);
+  let chunkQs = before.questions.filter((q) => q.sourceChunkId === chunkId);
   if (chunkQs.length === 0) {
     return { status: "failed", detail: "Chunk has no questions under this config." };
   }
+
+  const rescoreChunk = async () => {
+    for (const q of chunkQs) await scoreQuestionNow(q.questionId);
+  };
+
+  // Fresh baseline first: an override kept on ANOTHER chunk earlier in the run
+  // changes the global retrieval fingerprint, flipping this chunk's questions
+  // to stale — and failingMetrics treats stale as not-failing, which would make
+  // beforeFailing empty and doom the keep condition below (afterFailing can
+  // never be smaller). Re-score so before vs after is fresh-vs-fresh under the
+  // same retrieval state.
+  if (chunkQs.some((q) => q.stale)) {
+    await rescoreChunk();
+    before = await getSummary();
+    chunkQs = before.questions.filter((q) => q.sourceChunkId === chunkId);
+  }
   const beforeFailing = failingPairs(chunkQs, criteria);
+  if (beforeFailing.size === 0) {
+    // Nothing failing under the CURRENT retrieval state (e.g. an override kept
+    // earlier in the run already lifted this chunk's questions) — an override
+    // here could only regress, so skip it.
+    return { status: "skipped", detail: "Chunk already passes under the current overrides." };
+  }
 
   const persisted = await persistCandidate(chunkId, candidate);
   if (persisted !== "ok") {
     return { status: "failed", detail: `Could not persist override (${persisted}).` };
   }
 
-  const rescoreChunk = async () => {
-    for (const q of chunkQs) await scoreQuestionNow(q.questionId);
-  };
   await rescoreChunk();
 
   const after = await getSummary();
@@ -382,11 +405,17 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
     ndcgK,
   };
   const ignored = await listIgnoredQuestionIds();
+  // Chunk scope (0025): a non-null list restricts the run to those chunks;
+  // null means every chunk, including ones labeled after the setting was saved.
+  const scope =
+    criteria.autotune.chunkScope === null ? null : new Set(criteria.autotune.chunkScope);
 
-  // Targets: every fresh below-bar question, minus ignores, grouped by chunk.
+  // Targets: every fresh below-bar question, minus ignores, within the chunk
+  // scope, grouped by chunk.
   const targets: TargetQuestion[] = [];
   for (const q of summary.questions) {
     if (ignored.has(q.questionId)) continue;
+    if (scope !== null && !scope.has(q.sourceChunkId)) continue;
     const metrics = failingMetrics(q, criteria);
     if (metrics.length === 0) continue;
     targets.push({
@@ -502,9 +531,13 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
     let bestSize: AutotuneCandidate | null = null; // best IMPROVING stage-1 size
     let rungs = 0;
     let resolvedHere = false;
+    let skippedHere = false; // apply said the chunk already passes — stop trying
+    let lastFailure: string | null = null;
 
-    // Applies `cand` with confirm/revert and emits the outcome. Returns true
-    // when the override was kept (chunk done).
+    // Applies `cand` with confirm/revert; emits chunk-resolved on keep. A
+    // failure is NOT emitted here — the chunk may have more finalists to try
+    // (a revert restores the prior override state exactly, so the runner-up
+    // starts clean); the caller emits one chunk-unresolved after the last.
     const tryApply = async (cand: AutotuneCandidate): Promise<boolean> => {
       const res = await applyAutotuneCandidate(chunkId, cand);
       if (res.status === "kept") {
@@ -521,7 +554,8 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
         }
         return true;
       }
-      emit({ type: "chunk-unresolved", chunkId, reason: res.detail });
+      lastFailure = res.detail;
+      if (res.status === "skipped") skippedHere = true;
       return false;
     };
 
@@ -550,15 +584,23 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       const cand = mkCandidate("size", size, overlap, null, chunkTargets, ranks, bars);
       if (cand.score > (bestSize?.score ?? baselineScore)) bestSize = cand;
       if (cand.clears) {
-        candidates.push(cand);
         if (search === "first_success") {
           // A clean Stage-1 size win auto-applies regardless of apply mode (#2).
+          // If the confirm reverts it, keep searching (later sizes, then
+          // models/combos) instead of writing the chunk off; the failed
+          // candidate is not collected, so DECIDE won't retry it.
           resolvedHere = await tryApply(cand);
-          break;
+          if (resolvedHere || skippedHere) break;
+        } else {
+          candidates.push(cand);
         }
       }
     }
-    if (resolvedHere || (search === "first_success" && candidates.length > 0)) continue;
+    if (resolvedHere) continue;
+    if (skippedHere) {
+      emit({ type: "chunk-unresolved", chunkId, reason: lastFailure! });
+      continue;
+    }
 
     // ---- STAGE 2: models — full chunk (B) and best sub-size (A) ----------
     for (const model of models) {
@@ -639,7 +681,8 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       emit({
         type: "chunk-unresolved",
         chunkId,
-        reason: "No size, model, or combo cleared the bar (approximate search).",
+        reason:
+          lastFailure ?? "No size, model, or combo cleared the bar (approximate search).",
       });
       continue;
     }
@@ -663,7 +706,17 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       });
       continue;
     }
-    await tryApply(finalists[0]);
+    // Try finalists in score order until one survives the real-retrieval
+    // confirm — a single over-promising approximation shouldn't cost the
+    // chunk its whole turn when a runner-up also cleared. 'skipped' means
+    // nothing is failing anymore, so later finalists would fail identically.
+    for (const finalist of finalists) {
+      resolvedHere = await tryApply(finalist);
+      if (resolvedHere || skippedHere) break;
+    }
+    if (!resolvedHere) {
+      emit({ type: "chunk-unresolved", chunkId, reason: lastFailure! });
+    }
   }
 
   // ---- RIPPLE RE-SCORE + SNAPSHOT (A3) -----------------------------------

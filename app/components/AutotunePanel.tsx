@@ -233,9 +233,11 @@ export function AutotunePanel({
               error: data?.detail ?? data?.error ?? `Request failed (${res.status}).`,
             };
           }
-          return data?.status === "reverted"
-            ? { ...ch, applying: false, error: `Reverted: ${data.detail}` }
-            : { ...ch, applying: false, appliedFamily: c.family };
+          if (data?.status === "reverted" || data?.status === "skipped") {
+            const label = data.status === "skipped" ? "Skipped" : "Reverted";
+            return { ...ch, applying: false, error: `${label}: ${data.detail}` };
+          }
+          return { ...ch, applying: false, appliedFamily: c.family };
         }),
       );
     } catch (err) {

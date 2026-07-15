@@ -2,7 +2,8 @@
 // API route: GET/PATCH /api/eval/criteria
 //
 // GET returns the active config's saved criteria + the config summary (top-k
-// placeholder, corpus link, auto-sync state) — what the nav-level Settings
+// placeholder, corpus link, auto-sync state) + the autotune chunk-scope options
+// (labeled chunks grouped by document, 0025) — what the nav-level Settings
 // dropdown seeds its form from (it lives outside the eval page, so it can't
 // lean on the eval summary).
 //
@@ -19,16 +20,18 @@ import { withRequestConfig } from "@/lib/http/configScope";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { getConfig } from "@/lib/rag/configStore";
 import { getActiveCriteria, updateCriteria } from "@/lib/rag/evalSettingsStore";
+import { listAutotuneScopeOptions } from "@/lib/rag/evalStore";
 
 export async function GET(request: Request) {
   return withRequestConfig(request, async () => {
     try {
-      const [criteria, config] = await Promise.all([
+      const [criteria, config, scopeOptions] = await Promise.all([
         getActiveCriteria(),
         getConfig(activeConfig().id),
+        listAutotuneScopeOptions(),
       ]);
       if (!config) return Response.json({ error: "Config not found." }, { status: 404 });
-      return Response.json({ criteria, config });
+      return Response.json({ criteria, config, scopeOptions });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to load criteria.";
       return Response.json({ error: message }, { status: 500 });
@@ -56,6 +59,7 @@ const Body = z.object({
       apply: z.enum(["choose", "auto_best"]).optional(),
       search: z.enum(["first_success", "exhaustive"]).optional(),
       stopEarly: z.boolean().optional(),
+      chunkScope: z.array(z.string().uuid()).nullable().optional(),
     })
     .optional(),
 });

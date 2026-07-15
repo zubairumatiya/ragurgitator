@@ -23,6 +23,7 @@ import { Tooltip } from "@/app/components/Tooltip";
 import { apiFetch } from "@/lib/http/client";
 import type { ConfigSummary } from "@/lib/rag/configStore";
 import type { AutotuneApply, AutotuneSearch, EvalCriteria } from "@/lib/rag/evalSettingsStore";
+import type { AutotuneScopeDocument } from "@/lib/rag/evalStore";
 
 // Fired (on window) after a successful save so config-scoped views (the eval
 // dashboard) can re-pull data that depends on the criteria.
@@ -68,6 +69,10 @@ export function EvalSettings() {
   const [apply, setApply] = useState<AutotuneApply>("choose");
   const [search, setSearch] = useState<AutotuneSearch>("first_success");
   const [stopEarly, setStopEarly] = useState(false);
+  // Autotune chunk scope (0025): null = all chunks; a Set = the custom picks.
+  const [scopeDocs, setScopeDocs] = useState<AutotuneScopeDocument[]>([]);
+  const [scopeSel, setScopeSel] = useState<Set<string> | null>(null);
+  const [scopeExpanded, setScopeExpanded] = useState<Set<string>>(new Set());
   const [sync, setSync] = useState(false);
   const [savedSync, setSavedSync] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -81,7 +86,12 @@ export function EvalSettings() {
     try {
       const res = await apiFetch("/api/eval/criteria");
       const data = (await res.json().catch(() => null)) as
-        | { criteria?: EvalCriteria; config?: ConfigSummary; error?: string }
+        | {
+            criteria?: EvalCriteria;
+            config?: ConfigSummary;
+            scopeOptions?: AutotuneScopeDocument[];
+            error?: string;
+          }
         | null;
       if (!res.ok || !data?.criteria || !data.config) {
         setErr(data?.error ?? `Failed to load settings (${res.status}).`);
@@ -104,6 +114,9 @@ export function EvalSettings() {
       setApply(c.autotune.apply);
       setSearch(c.autotune.search);
       setStopEarly(c.autotune.stopEarly);
+      setScopeDocs(data.scopeOptions ?? []);
+      setScopeSel(c.autotune.chunkScope === null ? null : new Set(c.autotune.chunkScope));
+      setScopeExpanded(new Set());
       setSync(data.config.corpusSync);
       setSavedSync(data.config.corpusSync);
       setOpen(true);
@@ -121,6 +134,14 @@ export function EvalSettings() {
       .map((s) => Math.floor(Number(s)))
       .filter((n) => Number.isFinite(n) && n > 0);
     const overlapNum = Number(overlap);
+    // Normalize the chunk scope: full selection saves as null ("all", so chunks
+    // labeled later are included automatically); a partial one keeps only ids
+    // that still exist in the options (drops stale picks).
+    const allChunkIds = scopeDocs.flatMap((d) => d.chunks.map((c) => c.chunkId));
+    const chunkScope =
+      scopeSel === null || allChunkIds.every((id) => scopeSel.has(id))
+        ? null
+        : allChunkIds.filter((id) => scopeSel.has(id));
     const patch = {
       recall: { enabled: recallOn, k: parseKOrNull(recallK), minRate: parseRateOrNull(recallMin) },
       mrr: { enabled: mrrOn, k: parseKOrNull(mrrK), minRate: parseRateOrNull(mrrMin) },
@@ -133,6 +154,7 @@ export function EvalSettings() {
         apply,
         search,
         stopEarly,
+        chunkScope,
       },
     };
     setSaving(true);
@@ -307,6 +329,45 @@ export function EvalSettings() {
                 className="cursor-pointer"
               />
             </div>
+            <div className="flex items-center justify-between gap-2 py-0.5">
+              <Tooltip
+                align="left"
+                text={
+                  "Which chunks autotune may target. 'all' covers every labeled chunk — " +
+                  "including ones whose questions are added later; 'custom' restricts runs " +
+                  "to the checked chunks, grouped by document."
+                }
+              >
+                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                  Chunks
+                </span>
+              </Tooltip>
+              <div className="flex gap-1">
+                <Seg active={scopeSel === null} onClick={() => setScopeSel(null)}>
+                  all
+                </Seg>
+                <Seg
+                  active={scopeSel !== null}
+                  onClick={() =>
+                    setScopeSel(
+                      (prev) =>
+                        prev ?? new Set(scopeDocs.flatMap((d) => d.chunks.map((c) => c.chunkId))),
+                    )
+                  }
+                >
+                  custom
+                </Seg>
+              </div>
+            </div>
+            {scopeSel !== null && (
+              <ChunkScopeTree
+                docs={scopeDocs}
+                selected={scopeSel}
+                setSelected={setScopeSel}
+                expanded={scopeExpanded}
+                setExpanded={setScopeExpanded}
+              />
+            )}
 
             {/* CORPUS (auto-sync, 0017) */}
             <p className="mb-1 mt-3 border-t border-zinc-200 pt-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:border-zinc-800">
@@ -429,6 +490,115 @@ function MetricRow({
           className="w-16 rounded border border-zinc-300 bg-transparent px-1.5 py-1 text-xs disabled:opacity-50 dark:border-zinc-700"
         />
       </label>
+    </div>
+  );
+}
+
+// The 'custom' autotune chunk scope picker: labeled chunks grouped by document.
+// A document row toggles all its chunks; expanding it exposes per-chunk boxes.
+function ChunkScopeTree({
+  docs,
+  selected,
+  setSelected,
+  expanded,
+  setExpanded,
+}: {
+  docs: AutotuneScopeDocument[];
+  selected: Set<string>;
+  setSelected: (next: Set<string>) => void;
+  expanded: Set<string>;
+  setExpanded: (next: Set<string>) => void;
+}) {
+  if (docs.length === 0) {
+    return (
+      <p className="mt-1 rounded border border-zinc-200 p-2 text-xs text-zinc-400 dark:border-zinc-800">
+        No labeled chunks yet — generate questions first.
+      </p>
+    );
+  }
+
+  const toggleChunk = (chunkId: string) => {
+    const next = new Set(selected);
+    if (next.has(chunkId)) next.delete(chunkId);
+    else next.add(chunkId);
+    setSelected(next);
+  };
+  const toggleDoc = (doc: AutotuneScopeDocument) => {
+    const next = new Set(selected);
+    const allIn = doc.chunks.every((c) => next.has(c.chunkId));
+    for (const c of doc.chunks) {
+      if (allIn) next.delete(c.chunkId);
+      else next.add(c.chunkId);
+    }
+    setSelected(next);
+  };
+  const toggleExpanded = (documentId: string) => {
+    const next = new Set(expanded);
+    if (next.has(documentId)) next.delete(documentId);
+    else next.add(documentId);
+    setExpanded(next);
+  };
+
+  return (
+    <div className="mt-1 max-h-44 overflow-y-auto rounded border border-zinc-200 dark:border-zinc-800">
+      {docs.map((doc) => {
+        const inCount = doc.chunks.filter((c) => selected.has(c.chunkId)).length;
+        const allIn = inCount === doc.chunks.length;
+        const isOpen = expanded.has(doc.documentId);
+        return (
+          <div key={doc.documentId} className="border-b border-zinc-100 last:border-b-0 dark:border-zinc-800/60">
+            <div className="flex items-center gap-1.5 px-1.5 py-1">
+              <button
+                type="button"
+                onClick={() => toggleExpanded(doc.documentId)}
+                className="w-4 shrink-0 cursor-pointer text-xs text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+                title={isOpen ? "Collapse chunks" : "Show chunks"}
+              >
+                {isOpen ? "▾" : "▸"}
+              </button>
+              <input
+                type="checkbox"
+                checked={allIn}
+                ref={(el) => {
+                  if (el) el.indeterminate = inCount > 0 && !allIn;
+                }}
+                onChange={() => toggleDoc(doc)}
+                className="cursor-pointer"
+              />
+              <span
+                className="min-w-0 flex-1 truncate text-xs text-zinc-700 dark:text-zinc-300"
+                title={doc.fileName}
+              >
+                {doc.fileName}
+              </span>
+              <span className="shrink-0 text-[10px] text-zinc-400">
+                {inCount}/{doc.chunks.length}
+              </span>
+            </div>
+            {isOpen &&
+              doc.chunks.map((c) => (
+                <label
+                  key={c.chunkId}
+                  className="flex cursor-pointer items-center gap-1.5 py-0.5 pl-8 pr-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                  title={c.preview ?? undefined}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selected.has(c.chunkId)}
+                    onChange={() => toggleChunk(c.chunkId)}
+                    className="cursor-pointer"
+                  />
+                  <span className="text-xs text-zinc-600 dark:text-zinc-400">
+                    chunk {c.position ?? "?"}
+                  </span>
+                  <span className="text-[10px] text-zinc-400">
+                    {c.questions} {c.questions === 1 ? "question" : "questions"}
+                  </span>
+                </label>
+              ))}
+          </div>
+        );
+      })}
     </div>
   );
 }

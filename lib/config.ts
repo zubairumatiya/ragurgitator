@@ -39,10 +39,11 @@ export const config = {
 //
 // Cross-provider entries (OpenAI/Cohere/local) route through the embedding
 // dispatcher (lib/rag/embeddingProviders.ts). They're OPT-IN: selecting one
-// without its key (OpenAI/Cohere) or before its weights download (local) just
-// fails that one trial with an error — it never touches the live index. This is
-// why they live here and NOT in rankingAggregateModels (which embeds eagerly for
-// every aggregate build — see below).
+// without its enabling env var (a key for OpenAI/Cohere; LOCAL_EMBEDDINGS for
+// the local models) just fails that one trial as "unavailable" — it never
+// touches the live index. This is why they live here and NOT in
+// rankingAggregateModels (which embeds eagerly for every aggregate build — see
+// below).
 //
 // Excludes the active embeddingModel (it's the baseline) and voyage-context-3
 // (a different, contextualized embedding API that can't drop into embed()).
@@ -71,8 +72,9 @@ export const HIGH_NDCG = 0.7;
 // CHEAPEST FIRST, as an explicit ordered list (no cost field exists in the
 // registry to derive it from). Free local models lead (slower but $0), then
 // Voyage from lite upward, then keyed providers last. The engine filters out
-// the config's base model and any provider without a key/weights at run time
-// (isProviderAvailable), so entries here are candidates, not guarantees.
+// the config's base model and any provider whose enabling env var is unset
+// (isProviderAvailable — keys for API providers, LOCAL_EMBEDDINGS for local),
+// so entries here are candidates, not guarantees.
 export const autotuneModelLadder: string[] = [
   "mxbai-embed-large",
   "bge-m3",

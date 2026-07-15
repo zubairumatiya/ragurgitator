@@ -60,20 +60,21 @@ export function modelSpec(id: string): EmbeddingModelSpec {
 }
 
 // --- Provider availability (drives the base-model picker's grey-out) ---------
-// Which env var holds each provider's credential. Local models run in-process
-// and need no key (only a one-time weights download), so they're always usable.
-const PROVIDER_KEY_ENV: Record<EmbeddingProviderId, string | null> = {
+// Which env var enables each provider. API providers: their credential. Local
+// models need no key, but they download multi-hundred-MB weights on first use
+// and can't run on serverless hosts — so they're opt-in behind LOCAL_EMBEDDINGS
+// (set to any non-empty value in environments that can run them).
+const PROVIDER_KEY_ENV: Record<EmbeddingProviderId, string> = {
   voyage: "VOYAGE_API_KEY",
   openai: "OPENAI_API_KEY",
   cohere: "COHERE_API_KEY",
-  local: null,
+  local: "LOCAL_EMBEDDINGS",
 };
 
-// Is this provider usable right now? Local: always. API providers: key present.
+// Is this provider usable right now? Its enabling env var is non-empty.
 // Server-only (reads process.env) — call it from a route/server component.
 export function isProviderAvailable(provider: EmbeddingProviderId): boolean {
-  const env = PROVIDER_KEY_ENV[provider];
-  return env === null ? true : Boolean(process.env[env]);
+  return Boolean(process.env[PROVIDER_KEY_ENV[provider]]);
 }
 
 export type BaseModelOption = {
