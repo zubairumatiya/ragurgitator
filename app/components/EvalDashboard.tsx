@@ -2870,6 +2870,17 @@ function ChunkExperiments({
   const currentAvgRank =
     chunkAvgRank ?? (appliedTrial ? avgTrialRank(appliedTrial) : null);
 
+  // Any non-applied trial in a group that STRICTLY beats the chunk's current
+  // retrieval (same bar as a row's green title) turns that group's collapsed
+  // header green — worth expanding.
+  const hasBetter = (trials: SavedModelTrial[]) =>
+    currentAvgRank !== null &&
+    trials.some((t) => {
+      if (isApplied(t)) return false;
+      const rank = avgTrialRank(t);
+      return rank !== null && rank < currentAvgRank;
+    });
+
   const renderRows = (trials: SavedModelTrial[]) =>
     trials.map((t) => {
       const body = overrideBodyFor(t);
@@ -2892,10 +2903,11 @@ function ChunkExperiments({
       {(trialsLoading || saved.length > 0 || delegateModel) && (
         <div className="flex flex-col gap-2 border-t border-zinc-200 px-3 py-2 text-[11px] dark:border-zinc-800">
           {(trialsLoading || modelTrials.length > 0 || delegateModel) && (
-            <div className="flex flex-col gap-1">
-              <span className="font-medium uppercase tracking-wide text-zinc-500">
-                Models tried
-              </span>
+            <TrialSection
+              label="Models tried"
+              hasBetter={hasBetter(modelTrials)}
+              count={trialsLoading ? undefined : modelTrials.length}
+            >
               <ul className="flex flex-col gap-1">
                 {/* With a delegate active, the base model moves down here (it
                     comes from the summary, so it renders before the trials
@@ -2916,23 +2928,25 @@ function ChunkExperiments({
                   </li>
                 )}
               </ul>
-            </div>
+            </TrialSection>
           )}
           {sizeTrials.length > 0 && (
-            <div className="flex flex-col gap-1">
-              <span className="font-medium uppercase tracking-wide text-zinc-500">
-                Chunk variations
-              </span>
+            <TrialSection
+              label="Chunk variations"
+              hasBetter={hasBetter(sizeTrials)}
+              count={sizeTrials.length}
+            >
               <ul className="flex flex-col gap-1">{renderRows(sizeTrials)}</ul>
-            </div>
+            </TrialSection>
           )}
           {comboTrials.length > 0 && (
-            <div className="flex flex-col gap-1">
-              <span className="font-medium uppercase tracking-wide text-zinc-500">
-                Combination variations
-              </span>
+            <TrialSection
+              label="Combination variations"
+              hasBetter={hasBetter(comboTrials)}
+              count={comboTrials.length}
+            >
               <ul className="flex flex-col gap-1">{renderRows(comboTrials)}</ul>
-            </div>
+            </TrialSection>
           )}
           {delegateErr && (
             <span className="text-red-600 dark:text-red-400">
@@ -2947,6 +2961,68 @@ function ChunkExperiments({
         onSaved={(t) => setSaved((s) => [t, ...s])}
       />
     </>
+  );
+}
+
+// One collapsible variations subsection (Models tried / Chunk variations /
+// Combination variations). Starts collapsed — the header alone carries the
+// signal, turning green when a saved trial in the group beats the chunk's
+// current retrieval.
+function TrialSection({
+  label,
+  hasBetter,
+  count,
+  children,
+}: {
+  label: string;
+  hasBetter: boolean;
+  // Collapsed-state hint (trials in the group); omit while still loading.
+  count?: number;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-800">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title={
+          hasBetter
+            ? "A saved variation ranks these questions better (lower mean retrieved rank) than the chunk's current retrieval"
+            : undefined
+        }
+        className={`flex w-full cursor-pointer items-center gap-1.5 px-2 py-1.5 text-left font-medium uppercase tracking-wide ${
+          hasBetter
+            ? "bg-green-50 text-green-700 hover:bg-green-100 dark:bg-green-900/30 dark:text-green-400 dark:hover:bg-green-900/50"
+            : "bg-zinc-50 text-zinc-600 hover:bg-zinc-100 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800"
+        }`}
+      >
+        <span
+          className={
+            hasBetter ? "text-green-600 dark:text-green-500" : "text-zinc-400"
+          }
+        >
+          {open ? "▾" : "▸"}
+        </span>
+        {label}
+        {count != null && (
+          <span
+            className={`ml-auto rounded-full px-1.5 py-px text-[10px] ${
+              hasBetter
+                ? "bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-400"
+                : "bg-zinc-200 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+            }`}
+          >
+            {count}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="border-t border-zinc-200 p-2 dark:border-zinc-800">
+          {children}
+        </div>
+      )}
+    </div>
   );
 }
 
