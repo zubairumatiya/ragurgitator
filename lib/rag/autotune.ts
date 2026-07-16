@@ -8,7 +8,8 @@
 // persisted as a per-chunk override (pieces, Phase B), CONFIRMED through real
 // rank-fused retrieval (reverted if the approximation over-promised — the
 // runner-up finalists then get their turn before the chunk is given up on),
-// and the run ends
+// snapshotted into the chunk's "Models tried" list (eval_model_trials — the
+// kept winner only, not every search rung), and the run ends
 // with one full-corpus re-score (A3) + an eval_runs snapshot (feeds Appraise)
 // + an autotune_runs history row.
 //
@@ -40,14 +41,17 @@ import { embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
 import { isProviderAvailable, modelSpec } from "@/lib/rag/embeddingModels";
 import {
   rescoreAllQuestions,
+  runModelTrial,
   scoreQuestionNow,
   setChunkModelOverride,
   setChunkSizeModelOverride,
   setChunkSizeOverride,
+  type TrialVariation,
 } from "@/lib/rag/eval";
 import { effectiveK, type EvalCriteria } from "@/lib/rag/evalSettingsStore";
 import {
   getChunksByIds,
+  getModelTrialQuestions,
   getSummary,
   type QuestionDetail,
 } from "@/lib/rag/evalStore";
@@ -319,6 +323,35 @@ async function persistCandidate(
   return setChunkSizeModelOverride(chunkId, c.size!, c.overlap ?? 0, c.model!);
 }
 
+// Snapshot a KEPT candidate into the chunk's saved trials (eval_model_trials),
+// so it shows up under "Models tried" like a hand-saved experiment. Only the
+// winner is saved — every search rung would drown the list. The pool mirrors
+// the manual runner's auto pool (getModelTrialContext): the distractors the
+// chunk's questions already retrieved; runModelTrial re-adds the chunk itself.
+// Best-effort — a snapshot failure never fails (or reverts) the applied
+// override, which stands on its own confirm.
+async function saveKeptTrialSnapshot(
+  chunkId: string,
+  c: Pick<AutotuneCandidate, "family" | "size" | "overlap" | "model">,
+): Promise<void> {
+  try {
+    const variation: TrialVariation =
+      c.family === "size"
+        ? { kind: "size", size: c.size!, overlap: c.overlap ?? 0 }
+        : c.family === "model"
+          ? { kind: "model", model: c.model! }
+          : { kind: "size+model", model: c.model!, size: c.size!, overlap: c.overlap ?? 0 };
+    const questions = await getModelTrialQuestions(chunkId);
+    const poolIds = [...new Set(questions.flatMap((q) => q.retrievedIds))].filter(
+      (id) => id !== chunkId,
+    );
+    await runModelTrial(chunkId, variation, poolIds, true);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[rag:autotune] trial snapshot failed for chunk ${chunkId}: ${message}`);
+  }
+}
+
 export type ApplyResult = {
   // 'skipped' = nothing failing on this chunk under the CURRENT override
   // state, so no candidate could help — callers should stop retrying.
@@ -421,6 +454,7 @@ export async function applyAutotuneCandidate(
         : "Override made no real-retrieval progress (approximation over-promised).",
     };
   }
+  await saveKeptTrialSnapshot(chunkId, candidate);
   return {
     status: "kept",
     detail:
