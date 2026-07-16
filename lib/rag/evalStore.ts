@@ -95,6 +95,7 @@ export type QuestionDetail = {
 // One autotune-run outcome row for the yellow ◷ hover (§6.4): a question's
 // per-metric before → after under the chunk's applied override.
 export type OverrideOutcome = {
+  questionId: string;
   question: string;
   difficulty: string | null;
   metric: string; // 'recall' | 'ndcg'
@@ -1519,6 +1520,7 @@ async function listChunkOverrideInfo(table: string): Promise<ChunkOverrideInfo[]
     const rows = await sql<
       {
         source_chunk_id: string;
+        eval_question_id: string;
         question: string;
         difficulty: string | null;
         metric: string;
@@ -1529,7 +1531,7 @@ async function listChunkOverrideInfo(table: string): Promise<ChunkOverrideInfo[]
       }[]
     >`
       select distinct on (o.eval_question_id, o.metric)
-        o.source_chunk_id, q.question, q.difficulty, o.metric,
+        o.source_chunk_id, o.eval_question_id, q.question, q.difficulty, o.metric,
         o.before_value, o.before_rank, o.after_value, o.after_rank
       from autotune_question_outcomes o
       join autotune_runs r on r.id = o.autotune_run_id
@@ -1540,6 +1542,7 @@ async function listChunkOverrideInfo(table: string): Promise<ChunkOverrideInfo[]
     for (const r of rows) {
       const list = outcomesByChunk.get(r.source_chunk_id) ?? [];
       list.push({
+        questionId: r.eval_question_id,
         question: r.question,
         difficulty: r.difficulty,
         metric: r.metric,

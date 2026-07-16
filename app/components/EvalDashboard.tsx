@@ -3373,6 +3373,33 @@ function SavedTrialRow({
   );
 }
 
+// Collapse the per-(question, metric) autotune outcome rows to one baseline
+// hit/rank per question, so an autotune-applied delegate's baseline row can
+// expand exactly like a trial-applied one. The recall row carries the honest
+// hit/miss (it always wins); another metric's before side only fills in when a
+// question recorded no recall outcome.
+function baselineFromOutcomes(outcomes: OverrideOutcome[]): {
+  questionId: string;
+  question: string;
+  hit: boolean | null;
+  rank: number | null;
+}[] {
+  const byQ = new Map<
+    string,
+    { questionId: string; question: string; hit: boolean | null; rank: number | null }
+  >();
+  for (const o of outcomes) {
+    if (byQ.has(o.questionId) && o.metric !== "recall") continue;
+    byQ.set(o.questionId, {
+      questionId: o.questionId,
+      question: o.question,
+      hit: o.beforeValue === null ? null : o.beforeValue > 0,
+      rank: o.beforeRank,
+    });
+  }
+  return [...byQ.values()];
+}
+
 // The config's base model, listed under "Models tried" while a delegate serves
 // the chunk. Expands like a trial row: the per-question BASELINE outcomes come
 // from the applied trial's stored (before) results, or the autotune outcome
@@ -3399,7 +3426,18 @@ function BaselineRow({
   const [openChunk, setOpenChunk] = useState<Record<string, boolean>>({});
   const [explains, setExplains] = useState<Record<string, ExplainState>>({});
   const stored = appliedTrial?.results ?? [];
-  const outcomes = overrideInfo?.outcomes ?? [];
+  // Per-question baseline results: the applied trial's stored full-corpus
+  // (before) results, or — when autotune applied the delegate with no saved
+  // trial — the run's recorded per-question "before" side.
+  const baselineQuestions =
+    stored.length > 0
+      ? stored.map((q) => ({
+          questionId: q.questionId,
+          question: q.question,
+          hit: q.storedHit,
+          rank: q.storedRank,
+        }))
+      : baselineFromOutcomes(overrideInfo?.outcomes ?? []);
 
   function toggleTopK(id: string) {
     const opening = !openQ[id];
@@ -3436,10 +3474,11 @@ function BaselineRow({
             {model}
           </span>
           <span className="text-amber-600 dark:text-amber-500">(baseline)</span>
-          {appliedTrial && (
+          {baselineQuestions.length > 0 && (
             <span className="text-amber-600/80 dark:text-amber-500/80">
-              {appliedTrial.storedHitCount}/{appliedTrial.questionCount} hit
-              {appliedTrial.questionCount === 1 ? "" : "s"} before the delegate
+              {baselineQuestions.filter((q) => q.hit).length}/
+              {baselineQuestions.length} hit
+              {baselineQuestions.length === 1 ? "" : "s"} before the delegate
             </span>
           )}
         </button>
@@ -3454,13 +3493,11 @@ function BaselineRow({
         </button>
       </div>
       {open &&
-        // Per-question outcomes under the BASELINE model. Preferred source: the
-        // applied trial's stored full-corpus results (what each question did
-        // before the delegate). No baseline sim/top-k was stored, so this is a
-        // slimmer list than a trial expansion.
-        (stored.length > 0 ? (
+        // Per-question outcomes under the BASELINE model. No baseline sim/top-k
+        // was stored, so this is a slimmer list than a trial expansion.
+        (baselineQuestions.length > 0 ? (
           <ul className="flex flex-col gap-1.5">
-            {stored.map((q) => {
+            {baselineQuestions.map((q) => {
               const state = explains[q.questionId];
               return (
                 <li key={q.questionId} className="flex flex-col gap-0.5">
@@ -3468,7 +3505,7 @@ function BaselineRow({
                     {q.question}
                   </span>
                   <span className="flex items-center gap-1.5 text-zinc-500">
-                    <Badge hit={q.storedHit} rank={q.storedRank} />
+                    <Badge hit={q.hit} rank={q.rank} />
                     <button
                       type="button"
                       onClick={() => toggleTopK(q.questionId)}
@@ -3523,23 +3560,10 @@ function BaselineRow({
               );
             })}
           </ul>
-        ) : outcomes.length > 0 ? (
-          // Autotune-applied delegate: show each question's recorded "before".
-          <ul className="flex flex-col gap-1">
-            {outcomes.map((o, i) => (
-              <li
-                key={i}
-                title={o.question}
-                className="font-mono text-zinc-500"
-              >
-                {fmtOutcome(o)}
-              </li>
-            ))}
-          </ul>
         ) : (
           <span className="text-zinc-500">
             No stored baseline outcomes for this chunk — the delegate wasn&apos;t
-            applied from a saved trial.
+            applied from a saved trial or an autotune run.
           </span>
         ))}
     </li>
