@@ -43,3 +43,6 @@ next-env.d.ts
 .conductor
 /data
 /docs
+
+# claude code worktrees
+.claude/worktrees/
