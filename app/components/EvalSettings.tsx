@@ -70,6 +70,9 @@ export function EvalSettings() {
   const [search, setSearch] = useState<AutotuneSearch>("first_success");
   const [stopEarly, setStopEarly] = useState(false);
   const [keepBest, setKeepBest] = useState(false);
+  // Fusion pools (0027): "" = unset (autotune follows live; live uses auto).
+  const [autotunePool, setAutotunePool] = useState("");
+  const [retrievalPool, setRetrievalPool] = useState("");
   // Autotune chunk scope (0025): null = all chunks; a Set = the custom picks.
   const [scopeDocs, setScopeDocs] = useState<AutotuneScopeDocument[]>([]);
   const [scopeSel, setScopeSel] = useState<Set<string> | null>(null);
@@ -116,6 +119,8 @@ export function EvalSettings() {
       setSearch(c.autotune.search);
       setStopEarly(c.autotune.stopEarly);
       setKeepBest(c.autotune.keepBest);
+      setAutotunePool(c.autotune.fusionPool != null ? String(c.autotune.fusionPool) : "");
+      setRetrievalPool(c.retrieval.fusionPool != null ? String(c.retrieval.fusionPool) : "");
       setScopeDocs(data.scopeOptions ?? []);
       setScopeSel(c.autotune.chunkScope === null ? null : new Set(c.autotune.chunkScope));
       setScopeExpanded(new Set());
@@ -158,7 +163,9 @@ export function EvalSettings() {
         stopEarly,
         keepBest,
         chunkScope,
+        fusionPool: parseKOrNull(autotunePool),
       },
+      retrieval: { fusionPool: parseKOrNull(retrievalPool) },
     };
     setSaving(true);
     setErr(null);
@@ -268,6 +275,32 @@ export function EvalSettings() {
                 max={90}
                 value={overlap}
                 onChange={(e) => setOverlap(e.target.value)}
+                className="w-20 rounded border border-zinc-300 bg-transparent px-2 py-1 text-xs dark:border-zinc-700"
+              />
+            </label>
+            <label className="flex items-center justify-between gap-2 py-0.5">
+              <Tooltip
+                align="left"
+                text={
+                  "How many top chunks each autotune trial embeds fresh under a " +
+                  "candidate model — the main embedding cost of a run. Chunks already " +
+                  "cached for that model join the ranking for free on top of this " +
+                  "number, so trials get more accurate as the cache warms without " +
+                  "costing more. The confirm step always runs at the live retrieval " +
+                  "pool, so a low number just means more winners get reverted at " +
+                  "confirm time. Empty = match live retrieval."
+                }
+              >
+                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                  Fusion pool
+                </span>
+              </Tooltip>
+              <input
+                type="number"
+                min={1}
+                value={autotunePool}
+                onChange={(e) => setAutotunePool(e.target.value)}
+                placeholder="live"
                 className="w-20 rounded border border-zinc-300 bg-transparent px-2 py-1 text-xs dark:border-zinc-700"
               />
             </label>
@@ -392,6 +425,38 @@ export function EvalSettings() {
                 setExpanded={setScopeExpanded}
               />
             )}
+
+            {/* RETRIEVAL (live fusion pool, 0027) */}
+            <p className="mb-1 mt-3 border-t border-zinc-200 pt-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:border-zinc-800">
+              Retrieval
+            </p>
+            <label className="flex items-center justify-between gap-2 py-0.5">
+              <Tooltip
+                align="left"
+                text={
+                  "When chunks have overrides, live retrieval positions each one by " +
+                  "ranking it against the query's top base-model chunks re-embedded " +
+                  "under the override's model. This number is how many are embedded " +
+                  "fresh; deeper chunks already in the cache join for free, so the " +
+                  "effective pool (and rank accuracy) grows as the cache warms. More " +
+                  "= more accurate fusion ranks, with diminishing returns. Changing " +
+                  "this changes rankings: scored results go stale until re-scored. " +
+                  "Empty = auto (4×top-k, min 50)."
+                }
+              >
+                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                  Fusion pool
+                </span>
+              </Tooltip>
+              <input
+                type="number"
+                min={1}
+                value={retrievalPool}
+                onChange={(e) => setRetrievalPool(e.target.value)}
+                placeholder="auto"
+                className="w-20 rounded border border-zinc-300 bg-transparent px-2 py-1 text-xs dark:border-zinc-700"
+              />
+            </label>
 
             {/* CORPUS (auto-sync, 0017) */}
             <p className="mb-1 mt-3 border-t border-zinc-200 pt-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:border-zinc-800">

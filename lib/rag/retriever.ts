@@ -20,8 +20,10 @@
 // chunks (a near-empty list would hand it rank ~1 for every query — a
 // structural boost unrelated to relevance). Instead it's ranked against this
 // query's REAL competition: the base ANN's candidates re-embedded under the
-// override model (cached persistently — see embedCache/0020 — so steady-state
-// cost is one query embedding per override model). The candidates themselves
+// override model — the configurable fusion pool is embedded fresh (cached
+// persistently, see embedCache/0020), and deeper candidates already in the
+// cache join for free, so steady-state cost is one query embedding per
+// override model while accuracy grows with the cache. The candidates themselves
 // still score only from the base list; the delegate-space sims exist purely to
 // POSITION the overridden chunks honestly.
 //
@@ -32,7 +34,12 @@
 // cannot drift.
 // ---------------------------------------------------------------------------
 import { activeConfig } from "@/lib/rag/activeConfig";
-import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
+import {
+  cachedDocVectors,
+  cosine,
+  embedDocsCached,
+  embedQueryCached,
+} from "@/lib/rag/embedCache";
 import { embedQuery } from "@/lib/rag/embeddings";
 import {
   listOverrides,
@@ -44,7 +51,31 @@ import { query, queryExcluding, resolveChunks } from "@/lib/rag/vectorStore";
 import type { RetrievedChunk } from "@/types/rag";
 
 // Base candidates pulled for fusion when overrides exist (vs the final top-k).
+// The auto pool is max(k * FUSION_BASE_FACTOR, 50); the config's
+// retrieval_fusion_pool (0027) overrides it, and autotune's trial dry-runs can
+// pass their own pool. Either way the pool never drops below k, or the merged
+// list couldn't fill the final top-k.
+//
+// The pool counts PAID embeddings only. The base ANN is actually pulled to a
+// deeper max(pool * FUSION_DEEP_FACTOR, FUSION_DEEP_FLOOR): candidates beyond
+// the pool join the competition FREE when their embedding under the override
+// model is already cached (a cosine against a stored vector — no API call), so
+// the effective pool grows toward the deep list as the cache warms. In base
+// space every candidate's sim is already known from the ANN, so the whole deep
+// list always competes there.
 const FUSION_BASE_FACTOR = 4;
+const FUSION_POOL_FLOOR = 50;
+const FUSION_DEEP_FACTOR = 4;
+const FUSION_DEEP_FLOOR = 200;
+
+// The effective fusion pool for a retrieval at depth k. `configured` is a
+// caller-supplied pool (autotune's setting); null/undefined falls back to the
+// active config's retrieval_fusion_pool, then to the auto formula.
+export function effectiveFusionPool(k: number, configured?: number | null): number {
+  const pool =
+    configured ?? activeConfig().fusionPool ?? Math.max(k * FUSION_BASE_FACTOR, FUSION_POOL_FLOOR);
+  return Math.max(k, pool);
+}
 
 // One entry of the merged fusion list. `sim` is the chunk's real cosine to the
 // query in its CANONICAL space (base model for base chunks, the override model
@@ -74,6 +105,9 @@ export async function fuseWithOverrides(
   k: number,
   overrides: ChunkOverride[],
   piecesFor: (model: string) => Promise<OverrideEmbedding[]>,
+  // Fusion pool override (0027) — autotune's trial dry-runs pass their own;
+  // omitted = the config's retrieval_fusion_pool, then the auto formula.
+  pool?: number | null,
 ): Promise<{
   merged: FusedCandidate[];
   meta: Map<string, { documentId: string; position: number; text: string }>;
@@ -85,9 +119,11 @@ export async function fuseWithOverrides(
   const lists: FusedCandidate[][] = [];
   const meta = new Map<string, { documentId: string; position: number; text: string }>();
 
-  // Base space: ANN over the non-overridden chunks; pull a generous N for fusion.
-  const baseN = Math.max(k * FUSION_BASE_FACTOR, 50);
-  const baseChunks = await queryExcluding(baseVector, baseN, overriddenIds);
+  // Base space: ANN over the non-overridden chunks. Pulled past the paid pool
+  // so already-cached deeper candidates can compete for free (header comment).
+  const paidN = effectiveFusionPool(k, pool);
+  const deepN = Math.max(paidN * FUSION_DEEP_FACTOR, FUSION_DEEP_FLOOR);
+  const baseChunks = await queryExcluding(baseVector, deepN, overriddenIds);
   baseChunks.forEach((rc) =>
     meta.set(rc.chunk.chunk.id, {
       documentId: rc.chunk.chunk.documentId,
@@ -119,15 +155,23 @@ export async function fuseWithOverrides(
     }
 
     // The competition: this query's base candidates, in THIS model's space.
-    // Base space → their cosine sims are the ANN scores we already have;
-    // otherwise re-embed their texts under the model (persistent cache).
+    // Base space → every deep candidate's cosine is its ANN score (free).
+    // Otherwise: embed the paid pool under the model (persistent cache), then
+    // add whichever DEEPER candidates are already cached — free accuracy that
+    // compounds as trials and queries warm the cache.
     let competitorSims: number[];
     if (isBase) {
       competitorSims = baseChunks.map((rc) => rc.score);
     } else {
-      const texts = baseChunks.map((rc) => rc.chunk.chunk.text);
-      const vecs = await embedDocsCached(texts, model);
-      competitorSims = vecs.map((v) => cosine(qv, v));
+      const paidTexts = baseChunks.slice(0, paidN).map((rc) => rc.chunk.chunk.text);
+      const paidVecs = await embedDocsCached(paidTexts, model);
+      competitorSims = paidVecs.map((v) => cosine(qv, v));
+      const deeperTexts = baseChunks.slice(paidN).map((rc) => rc.chunk.chunk.text);
+      const freeVecs = await cachedDocVectors(deeperTexts, model);
+      for (const t of deeperTexts) {
+        const vec = freeVecs.get(t);
+        if (vec) competitorSims.push(cosine(qv, vec));
+      }
     }
 
     const overriddenSims = [...bestByChunk.values()];

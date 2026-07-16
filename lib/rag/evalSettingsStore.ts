@@ -13,6 +13,7 @@
 import { sql } from "@/lib/db";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";
 import type { Difficulty } from "@/lib/rag/eval";
+import { noteFusionPoolChange } from "@/lib/rag/overrideStore";
 
 export type MetricCriteria = {
   enabled: boolean;
@@ -38,6 +39,20 @@ export type AutotuneSettings = {
   // Restrict runs to these source chunk ids (0025). null = ALL chunks,
   // including ones labeled after the setting was saved.
   chunkScope: string[] | null;
+  // Fusion pool for the trial dry-runs only (0027): how many base candidates
+  // each trial re-embeds under a candidate model. null = follow live
+  // retrieval's pool. Search-only — the confirm re-score stays on the live
+  // pool, so a small value just risks more confirm-time reverts.
+  fusionPool: number | null;
+};
+
+export type RetrievalSettings = {
+  // Live-retrieval fusion pool (0027) — mirrors ResolvedConfig.fusionPool,
+  // surfaced here so the Settings dropdown can edit it. null = auto
+  // (max(top_k * 4, 50)). Changing it changes fusion ranks, so saving a new
+  // value stales scored results whenever overrides exist (fingerprinted in
+  // overrideStore.retrievalStateFingerprint).
+  fusionPool: number | null;
 };
 
 export type EvalCriteria = {
@@ -46,6 +61,7 @@ export type EvalCriteria = {
   ndcg: MetricCriteria;
   difficulties: Difficulty[]; // '{}' => legacy no-difficulty generation
   autotune: AutotuneSettings;
+  retrieval: RetrievalSettings;
 };
 
 type CriteriaRow = {
@@ -66,6 +82,8 @@ type CriteriaRow = {
   autotune_stop_early: boolean;
   autotune_keep_best: boolean;
   autotune_chunk_scope: string[] | null;
+  autotune_fusion_pool: number | null;
+  retrieval_fusion_pool: number | null;
 };
 
 const DIFFICULTIES: readonly Difficulty[] = ["easy", "medium", "hard"];
@@ -85,7 +103,9 @@ function toCriteria(row: CriteriaRow): EvalCriteria {
       stopEarly: row.autotune_stop_early,
       keepBest: row.autotune_keep_best,
       chunkScope: row.autotune_chunk_scope,
+      fusionPool: row.autotune_fusion_pool,
     },
+    retrieval: { fusionPool: row.retrieval_fusion_pool },
   };
 }
 
@@ -95,7 +115,8 @@ const COLUMNS = sql`
   ndcg_enabled, ndcg_k, ndcg_min_rate,
   eval_difficulties,
   autotune_size_ladder, autotune_overlap_pct, autotune_apply, autotune_search,
-  autotune_stop_early, autotune_keep_best, autotune_chunk_scope
+  autotune_stop_early, autotune_keep_best, autotune_chunk_scope,
+  autotune_fusion_pool, retrieval_fusion_pool
 `;
 
 // Criteria for a specific config; null when the id is malformed / missing.
@@ -121,6 +142,7 @@ export type CriteriaPatch = {
   ndcg?: Partial<MetricCriteria>;
   difficulties?: Difficulty[];
   autotune?: Partial<AutotuneSettings>;
+  retrieval?: Partial<RetrievalSettings>;
 };
 
 // Read-merge-write: load the current criteria, overlay the patch, write every
@@ -141,6 +163,7 @@ export async function updateCriteria(
       ? DIFFICULTIES.filter((d) => patch.difficulties!.includes(d))
       : cur.difficulties,
     autotune: { ...cur.autotune, ...patch.autotune },
+    retrieval: { ...cur.retrieval, ...patch.retrieval },
   };
 
   await sql`
@@ -162,9 +185,16 @@ export async function updateCriteria(
       autotune_stop_early = ${next.autotune.stopEarly},
       autotune_keep_best  = ${next.autotune.keepBest},
       autotune_chunk_scope = ${next.autotune.chunkScope}::uuid[],
+      autotune_fusion_pool = ${next.autotune.fusionPool},
+      retrieval_fusion_pool = ${next.retrieval.fusionPool},
       updated_at          = now()
     where id = ${configId}
   `;
+  // A live-pool change reshapes fusion ranks for every query — stamp + log it
+  // so the stale badge can explain (no-op while the config has no overrides).
+  if (next.retrieval.fusionPool !== cur.retrieval.fusionPool) {
+    await noteFusionPoolChange(cur.retrieval.fusionPool, next.retrieval.fusionPool);
+  }
   return next;
 }
 

@@ -32,6 +32,9 @@ export type ResolvedConfig = {
   chunkSize: number;
   chunkOverlap: number;
   topK: number;
+  // Live-retrieval fusion pool (0027): base candidates re-embedded per override
+  // model to position fusion ranks. null = auto (max(top_k * 4, 50)).
+  fusionPool: number | null;
   llmModel: string;
   dimension: number; // embedding dimension of the base model
   chunksTable: string; // chunks_<model>_<dim> table this config's vectors live in
@@ -41,16 +44,7 @@ const store = new AsyncLocalStorage<ResolvedConfig>();
 
 // Build a ResolvedConfig from a `configs` row, deriving the embedding dimension
 // and physical chunk table from the base model.
-function toResolved(row: {
-  id: string;
-  corpus_id: string | null;
-  corpus_sync: boolean;
-  base_model: string;
-  chunk_size: number;
-  chunk_overlap: number;
-  top_k: number;
-  llm_model: string;
-}): ResolvedConfig {
+function toResolved(row: ConfigRow): ResolvedConfig {
   const dimension = modelDimension(row.base_model);
   return {
     id: row.id,
@@ -60,6 +54,7 @@ function toResolved(row: {
     chunkSize: row.chunk_size,
     chunkOverlap: row.chunk_overlap,
     topK: row.top_k,
+    fusionPool: row.retrieval_fusion_pool,
     llmModel: row.llm_model,
     dimension,
     chunksTable: chunksTable(row.base_model, dimension),
@@ -74,6 +69,7 @@ type ConfigRow = {
   chunk_size: number;
   chunk_overlap: number;
   top_k: number;
+  retrieval_fusion_pool: number | null;
   llm_model: string;
 };
 
@@ -90,7 +86,8 @@ export function isUuid(s: string): boolean {
 export async function resolveConfig(configId: string): Promise<ResolvedConfig | null> {
   if (!isUuid(configId)) return null;
   const rows = await sql<ConfigRow[]>`
-    select id, corpus_id, corpus_sync, base_model, chunk_size, chunk_overlap, top_k, llm_model
+    select id, corpus_id, corpus_sync, base_model, chunk_size, chunk_overlap, top_k,
+           retrieval_fusion_pool, llm_model
     from configs
     where id = ${configId}
     limit 1
@@ -103,7 +100,8 @@ export async function resolveConfig(configId: string): Promise<ResolvedConfig | 
 // earliest as a stable default.
 export async function resolveDefaultConfig(): Promise<ResolvedConfig> {
   const rows = await sql<ConfigRow[]>`
-    select id, corpus_id, corpus_sync, base_model, chunk_size, chunk_overlap, top_k, llm_model
+    select id, corpus_id, corpus_sync, base_model, chunk_size, chunk_overlap, top_k,
+           retrieval_fusion_pool, llm_model
     from configs
     order by created_at
     limit 1

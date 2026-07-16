@@ -61,6 +61,14 @@ const Body = z.object({
       stopEarly: z.boolean().optional(),
       keepBest: z.boolean().optional(),
       chunkScope: z.array(z.string().uuid()).nullable().optional(),
+      // Trial fusion pool (0027): null = follow live retrieval's pool.
+      fusionPool: z.number().int().min(1).max(1000).nullable().optional(),
+    })
+    .optional(),
+  retrieval: z
+    .object({
+      // Live fusion pool (0027): null = auto (max(top_k * 4, 50)).
+      fusionPool: z.number().int().min(1).max(1000).nullable().optional(),
     })
     .optional(),
 });

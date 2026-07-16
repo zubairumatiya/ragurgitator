@@ -252,13 +252,17 @@ function usableModelLadder(): string[] {
 // Same methodology as runModelTrial's fusedRank, so a candidate's rank here is
 // the rank live retrieval (and the confirm re-score) would actually produce.
 // `candidateTexts` are the re-split pieces, or [whole chunk] for model-only;
-// `model` is the space they compete in (the base model for size-only).
+// `model` is the space they compete in (the base model for size-only). `pool`
+// is autotune's fusion pool (0027) — null follows live retrieval's. The
+// confirm re-score always runs at the live pool, so a smaller search pool
+// only trades embedding cost for coarser ranks (and possible confirm reverts).
 async function fusedTrialRanks(
   targets: TargetQuestion[],
   chunkId: string,
   candidateTexts: string[],
   family: CandidateFamily,
   model: string,
+  pool: number | null,
 ): Promise<(number | null)[]> {
   const candVecs = await embedDocsCached(candidateTexts, model);
   const hypOverrides: ChunkOverride[] = [
@@ -293,6 +297,7 @@ async function fusedTrialRanks(
       cfg.topK,
       hypOverrides,
       piecesFor,
+      pool,
     );
     const idx = merged.findIndex((c) => c.id === chunkId);
     ranks.push(idx === -1 ? null : idx + 1);
@@ -526,6 +531,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
   }
 
   const sizes = criteria.autotune.sizeLadder;
+  const trialPool = criteria.autotune.fusionPool;
   const overlapFor = (size: number) =>
     Math.min(size - 1, Math.max(0, Math.round(size * criteria.autotune.overlapPct)));
   const models = usableModelLadder();
@@ -645,6 +651,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
         pieces,
         "size",
         cfg.embeddingModel,
+        trialPool,
       );
       attempts += chunkTargets.length;
       emit({ type: "attempt", chunkId, stage: "size", detail: `size ${size}`, attempts });
@@ -675,7 +682,14 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       rungs += 2;
       const rungCands: AutotuneCandidate[] = [];
 
-      const ranksB = await fusedTrialRanks(chunkTargets, chunkId, [chunkText], "model", model);
+      const ranksB = await fusedTrialRanks(
+        chunkTargets,
+        chunkId,
+        [chunkText],
+        "model",
+        model,
+        trialPool,
+      );
       attempts += chunkTargets.length;
       emit({ type: "attempt", chunkId, stage: "model", detail: model, attempts });
       const candB = consider(mkCandidate("model", null, null, model, chunkTargets, ranksB, bars));
@@ -683,7 +697,14 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
 
       if (bestSize !== null) {
         const pieces = await splitText(chunkText, bestSize.size!, bestSize.overlap ?? 0);
-        const ranksA = await fusedTrialRanks(chunkTargets, chunkId, pieces, "size+model", model);
+        const ranksA = await fusedTrialRanks(
+          chunkTargets,
+          chunkId,
+          pieces,
+          "size+model",
+          model,
+          trialPool,
+        );
         attempts += chunkTargets.length;
         emit({
           type: "attempt",
@@ -719,7 +740,14 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
         for (const model of models) {
           if (rungs >= rungCap) break outer;
           rungs += 1;
-          const ranks = await fusedTrialRanks(chunkTargets, chunkId, pieces, "size+model", model);
+          const ranks = await fusedTrialRanks(
+            chunkTargets,
+            chunkId,
+            pieces,
+            "size+model",
+            model,
+            trialPool,
+          );
           attempts += chunkTargets.length;
           emit({
             type: "attempt",

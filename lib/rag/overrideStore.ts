@@ -34,8 +34,12 @@ export type RetrievalChange = { description: string; at: Date };
 // old algorithm flag stale and get re-scored — the override ROWS can't capture
 // that kind of change. v2 = fractional fusion ranks + real canonical-space
 // sims (July 2026); the pre-v2 fingerprint had no version prefix, so adding
-// one also invalidates everything scored before versioning existed.
-export const FUSION_VERSION = 2;
+// one also invalidates everything scored before versioning existed. v3 = the
+// competitor set became paid-pool + free already-cached candidates from a
+// deeper base list, and base-space overrides compete against the full deep
+// list (July 2026). Note v3 ranks also drift (toward more accurate) as the
+// cache warms — that part is uncapturable here by design.
+export const FUSION_VERSION = 3;
 
 // Fingerprint of the active config's current override state (0022): sha-256
 // over the fusion version + the canonical override rows, or 'baseline' when
@@ -66,8 +70,14 @@ export async function retrievalStateFingerprint(): Promise<string> {
       order by source_chunk_id, piece_index
     `;
     if (rows.length === 0) return "baseline";
+    // The live fusion pool (0027) shapes every fused rank, so it's part of the
+    // state — changing it (while overrides exist) stales scored results, and
+    // changing it back revalidates them. Auto (null) contributes NOTHING so
+    // fingerprints from before the pool existed stay valid — auto IS the
+    // historical behavior.
     const canonical =
       `fusion-v${FUSION_VERSION}\n` +
+      (cfg.fusionPool === null ? "" : `pool-${cfg.fusionPool}\n`) +
       rows
         .map(
           (r) =>
@@ -145,6 +155,23 @@ export async function listRetrievalChanges(): Promise<RetrievalChange[]> {
     if ((err as { code?: string }).code === "42P01") return [];
     throw err;
   }
+}
+
+// Record a change to the live fusion pool (0027). Only meaningful when the
+// config has overrides — without them retrieval is the plain base ANN and the
+// pool plays no part (and the fingerprint stays 'baseline'), so this no-ops
+// rather than flagging results stale for a change with zero effect.
+export async function noteFusionPoolChange(
+  prev: number | null,
+  next: number | null,
+): Promise<void> {
+  const overrides = await listOverrides();
+  if (overrides.length === 0) return;
+  await sql`
+    update configs set retrieval_changed_at = now() where id = ${activeConfig().id}
+  `;
+  const label = (v: number | null) => (v === null ? "auto" : String(v));
+  await logRetrievalChange(null, `fusion pool → ${label(next)} (was ${label(prev)})`);
 }
 
 // Drop the config's change log — called once a full re-score has made every

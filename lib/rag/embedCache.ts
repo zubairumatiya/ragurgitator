@@ -125,6 +125,29 @@ export async function embedDocsCached(
   return texts.map((t) => memory.get(memKey(model, "document", t))!);
 }
 
+// Cache-only lookup: vectors for whichever of `texts` are already known under
+// `model` (either layer) — NEVER calls the provider. L2 hits are promoted to
+// L1. Backs the free-competitor extension of the fusion pool (retriever):
+// texts beyond the paid pool join the ranking only if they're already banked.
+export async function cachedDocVectors(
+  texts: string[],
+  model: string,
+): Promise<Map<string, number[]>> {
+  const out = new Map<string, number[]>();
+  const misses: string[] = [];
+  for (const t of uniq(texts)) {
+    const vec = memory.get(memKey(model, "document", t));
+    if (vec) out.set(t, vec);
+    else misses.push(t);
+  }
+  const persisted = await readPersisted(model, "document", misses);
+  for (const [t, vec] of persisted) {
+    memory.set(memKey(model, "document", t), vec);
+    out.set(t, vec);
+  }
+  return out;
+}
+
 // Embed one query string under `model`, cached through both layers.
 export async function embedQueryCached(text: string, model: string): Promise<number[]> {
   const key = memKey(model, "query", text);
