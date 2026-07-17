@@ -26,6 +26,7 @@ import {
   type OverrideKind,
 } from "@/lib/rag/overrideStore";
 import { getTruthOrder } from "@/lib/rag/rankingStore";
+import type { ScreenCutoffs } from "@/lib/rag/retriever";
 
 export type ChunkNeedingQuestions = {
   chunkId: string;
@@ -56,6 +57,10 @@ export type ResultInsert = {
   // Fingerprint of the override state this was scored under (0022) — stale iff
   // it differs from the current retrievalStateFingerprint().
   retrievalState: string;
+  // Similarity cutoffs this retrieval was judged at (0028) — lets the
+  // post-autotune dirty screen prove the result unaffected by an override
+  // change without re-retrieving. See retriever.ScreenCutoffs.
+  screenCutoffs: ScreenCutoffs | null;
 };
 
 export type QuestionDetail = {
@@ -1428,14 +1433,109 @@ export async function insertResults(rows: ResultInsert[]): Promise<void> {
       await tx`
         insert into eval_results
           (eval_question_id, eval_label_id, k, hit, found_rank, retrieved_ids,
-           retrieved_scores, retrieval_state)
+           retrieved_scores, retrieval_state, screen_cutoffs)
         values
           (${r.questionId}, ${r.labelId}, ${r.k}, ${r.hit}, ${r.foundRank},
            ${r.retrievedIds}::uuid[], ${r.retrievedScores}::real[],
-           ${r.retrievalState})
+           ${r.retrievalState},
+           ${r.screenCutoffs === null ? null : JSON.stringify(r.screenCutoffs)}::jsonb)
       `;
     }
   });
+}
+
+// One question's latest stored result, reduced to what the post-autotune dirty
+// screen needs (eval.rescoreAffectedQuestions): which state it was scored
+// under, what it retrieved, and the 0028 cutoffs. `scoredAt`/`updatedAt` let
+// the screen treat edit-stale questions (text changed since scoring) as dirty.
+export type ScreeningResult = {
+  labelId: string;
+  questionId: string;
+  updatedAt: Date;
+  retrievalState: string | null;
+  retrievedIds: string[];
+  screenCutoffs: ScreenCutoffs | null;
+  scoredAt: Date | null;
+};
+
+// Latest result per label under the active config, preferring a row scored
+// under `preferState` (the run's FINAL fingerprint) so an already-fresh
+// question is recognized as such — same preference rule as getSummary.
+// Labels with no result at all come back with null fields (→ dirty).
+export async function latestResultsForScreening(
+  preferState: string,
+): Promise<Map<string, ScreeningResult>> {
+  const rows = await sql<
+    {
+      label_id: string;
+      question_id: string;
+      updated_at: Date;
+      retrieval_state: string | null;
+      retrieved_ids: string[] | null;
+      screen_cutoffs: ScreenCutoffs | null;
+      scored_at: Date | null;
+    }[]
+  >`
+    with labels as (
+      select l.id as label_id, q.id as question_id, q.updated_at
+      from eval_questions q
+      join eval_labels l on l.eval_question_id = q.id
+      join document_embeddings de on de.id = l.document_embedding_id
+      where de.config_id = ${activeConfig().id}
+    ),
+    latest as (
+      select distinct on (r.eval_label_id)
+        r.eval_label_id, r.retrieval_state, r.retrieved_ids, r.screen_cutoffs,
+        r.scored_at
+      from eval_results r
+      join labels lb on lb.label_id = r.eval_label_id
+      order by r.eval_label_id,
+        (r.retrieval_state is not distinct from ${preferState}) desc,
+        r.scored_at desc
+    )
+    select
+      lb.label_id, lb.question_id, lb.updated_at,
+      lt.retrieval_state, lt.retrieved_ids, lt.screen_cutoffs, lt.scored_at
+    from labels lb
+    left join latest lt on lt.eval_label_id = lb.label_id
+  `;
+  return new Map(
+    rows.map((r) => [
+      r.label_id,
+      {
+        labelId: r.label_id,
+        questionId: r.question_id,
+        updatedAt: r.updated_at,
+        retrievalState: r.retrieval_state,
+        retrievedIds: r.retrieved_ids ?? [],
+        screenCutoffs: r.screen_cutoffs,
+        scoredAt: r.scored_at,
+      },
+    ]),
+  );
+}
+
+// Re-stamp each label's newest `fromState` result as scored-under `toState` —
+// for results the dirty screen PROVED identical under the new override state
+// (eval.rescoreAffectedQuestions). Only the fingerprint changes; the scores
+// were shown to be what a real re-retrieval would produce.
+export async function restampLatestResults(
+  labelIds: string[],
+  fromState: string,
+  toState: string,
+): Promise<void> {
+  if (labelIds.length === 0) return;
+  await sql`
+    update eval_results
+    set retrieval_state = ${toState}
+    where id in (
+      select distinct on (eval_label_id) id
+      from eval_results
+      where eval_label_id = any(${labelIds}::uuid[])
+        and retrieval_state = ${fromState}
+      order by eval_label_id, scored_at desc
+    )
+  `;
 }
 
 // Freeze the current aggregate as a comparison point. config_id scopes the

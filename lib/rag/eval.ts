@@ -35,10 +35,21 @@ import {
 } from "@/lib/rag/overrideStore";
 import { anthropicClient } from "@/lib/llm/client";
 import { splitText, tokenizeWithOffsets } from "@/lib/rag/chunker";
-import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
-import { embedQuery, embedTexts } from "@/lib/rag/embeddings";
+import {
+  cachedQueryVectors,
+  cosine,
+  embedDocsCached,
+  embedQueryCached,
+} from "@/lib/rag/embedCache";
+import { embedQuery } from "@/lib/rag/embeddings";
+import { screenStoredResult, type ChangedChunkSims } from "@/lib/rag/dirtyScreen";
 import { stitchChunks } from "@/lib/rag/reconstruct";
-import { fuseWithOverrides, retrieveForQuery } from "@/lib/rag/retriever";
+import {
+  buildRetrievalContext,
+  fuseWithOverrides,
+  retrieveWithCutoffs,
+} from "@/lib/rag/retriever";
+import { chunkEmbeddings } from "@/lib/rag/vectorStore";
 import {
   allLabeledQuestions,
   chunksNeedingQuestionsByDifficulty,
@@ -56,10 +67,12 @@ import {
   insertModelTrial,
   insertQuestionWithLabel,
   insertResults,
+  latestResultsForScreening,
   listModelTrials,
   putCachedQueryEmbedding,
   questionsNeedingScoring,
   rankWithSubstitutedChunk,
+  restampLatestResults,
   type CorpusChunkListItem,
   type ExperimentContext,
   type PoolChunk,
@@ -327,8 +340,16 @@ export async function generateQuestionForChunk(
 // A question's query vector depends only on (text, model), so we reuse cached
 // vectors and embed only cache misses (caching them as we go). On a warm cache
 // each iteration is just a fast vector search — the win that makes repeat
-// "Re-score all" runs cheap. Misses still embed one-at-a-time inside the loop so
-// the per-question progress bar stays accurate.
+// "Re-score all" runs cheap.
+//
+// The override state is loaded ONCE for the batch (buildRetrievalContext) —
+// it can't change mid-run, and re-reading the override rows + every model's
+// pieces per question was the dominant repeat cost under override configs. A
+// few questions score concurrently; every shared cache they touch (embedding
+// cache, query-vector cache) upserts idempotently, so races cost at most a
+// duplicate embed of the same text.
+const SCORE_CONCURRENCY = 4;
+
 async function scoreQuestions(
   questions: QuestionToScore[],
   emit: Emit = () => {},
@@ -351,44 +372,53 @@ async function scoreQuestions(
   // Stamp every result with the override state it's scored under (0022) — the
   // state can't change mid-run, so one fingerprint covers the batch.
   const retrievalState = await retrievalStateFingerprint();
+  const ctx = await buildRetrievalContext();
 
-  const results: ResultInsert[] = [];
+  const results: ResultInsert[] = new Array<ResultInsert>(questions.length);
   let done = 0;
-  for (const q of questions) {
-    let vector = cached.get(q.questionId);
-    if (!vector) {
-      vector = await embedQuery(q.question);
-      await putCachedQueryEmbedding(q.questionId, cfg.embeddingModel, vector);
+  let nextIndex = 0;
+  const worker = async () => {
+    for (let i = nextIndex++; i < questions.length; i = nextIndex++) {
+      const q = questions[i];
+      let vector = cached.get(q.questionId);
+      if (!vector) {
+        vector = await embedQuery(q.question);
+        await putCachedQueryEmbedding(q.questionId, cfg.embeddingModel, vector);
+      }
+      // Pass the question text too: override configs embed it under the override
+      // models for the rank-interleave fusion; non-override configs ignore it (base vector only).
+      const { retrieved, cutoffs } = await retrieveWithCutoffs(q.question, vector, depth, ctx);
+      const ids = retrieved.map((r) => r.chunk.chunk.id);
+      const scores = retrieved.map((r) => r.score);
+      const rank = ids.indexOf(q.sourceChunkId);
+      const foundRank = rank === -1 ? null : rank + 1;
+      // Hit = the ground truth landed within recall_k of the retrieved superset.
+      const hit = foundRank !== null && foundRank <= recallK;
+      results[i] = {
+        questionId: q.questionId,
+        labelId: q.labelId,
+        k: recallK,
+        hit,
+        foundRank,
+        retrievedIds: ids,
+        retrievedScores: scores,
+        retrievalState,
+        screenCutoffs: cutoffs,
+      };
+      done += 1;
+      emit({
+        type: "score-result",
+        done,
+        total: questions.length,
+        questionId: q.questionId,
+        hit,
+        foundRank,
+      });
     }
-    // Pass the question text too: override configs embed it under the override
-    // models for the rank-interleave fusion; non-override configs ignore it (base vector only).
-    const retrieved = await retrieveForQuery(q.question, vector, depth);
-    const ids = retrieved.map((r) => r.chunk.chunk.id);
-    const scores = retrieved.map((r) => r.score);
-    const rank = ids.indexOf(q.sourceChunkId);
-    const foundRank = rank === -1 ? null : rank + 1;
-    // Hit = the ground truth landed within recall_k of the retrieved superset.
-    const hit = foundRank !== null && foundRank <= recallK;
-    results.push({
-      questionId: q.questionId,
-      labelId: q.labelId,
-      k: recallK,
-      hit,
-      foundRank,
-      retrievedIds: ids,
-      retrievedScores: scores,
-      retrievalState,
-    });
-    done += 1;
-    emit({
-      type: "score-result",
-      done,
-      total: questions.length,
-      questionId: q.questionId,
-      hit,
-      foundRank,
-    });
-  }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(SCORE_CONCURRENCY, questions.length) }, worker),
+  );
 
   await insertResults(results);
   return results.length;
@@ -554,6 +584,160 @@ export async function rescoreAllQuestions(
 }
 
 // ---------------------------------------------------------------------------
+// DIRTY-SET RE-SCORE — autotune's replacement for the final full re-score.
+//
+// An autotune run only changes the representation of the chunks it overrode
+// (or cleared); every other chunk's vectors are untouched. Per question, the
+// pure screen in dirtyScreen.ts decides from the stored 0028 cutoffs and a
+// couple of cached-vector cosines whether the run's changed chunks could have
+// altered the stored result at all. Questions proven unaffected keep their
+// stored rows, re-stamped with the final fingerprint; only the rest re-run
+// real retrieval. Same end state as rescoreAllQuestions, minus the redundant
+// retrievals — see dirtyScreen.ts for the screens and their soundness rules.
+// ---------------------------------------------------------------------------
+
+// One chunk whose override state differs between an autotune run's start and
+// end. `finalModel` = the override's model in the END state (null = override
+// cleared); `startOverridden` = it had one (any kind) at run start.
+export type ChangedChunk = {
+  chunkId: string;
+  finalModel: string | null;
+  startOverridden: boolean;
+};
+
+export async function rescoreAffectedQuestions(
+  changed: ChangedChunk[],
+  startState: string,
+  emit: Emit = () => {},
+): Promise<{ scored: number; skipped: number; recall: number | null }> {
+  const t0 = performance.now();
+  const cfg = activeConfig();
+  const criteria = await getActiveCriteria();
+  const depth = retrievalDepth(criteria, cfg.topK);
+  const finalState = await retrievalStateFingerprint();
+
+  const questions = await allLabeledQuestions();
+  const latest = await latestResultsForScreening(finalState);
+  const qids = questions.map((q) => q.questionId);
+
+  // Everything the screens compare is prefetched, batched, and CACHE-ONLY —
+  // a cache miss marks the question dirty rather than paying a provider call
+  // (the re-score would have to embed it anyway). Base-model query vectors
+  // live in eval_question_embeddings (keyed by question id); override-model
+  // ones live in embedding_cache (keyed by text — embedQueryCached banks them
+  // during every fused retrieval), hence the two lookups.
+  const baseQVecs = await getCachedQueryEmbeddings(qids, cfg.embeddingModel);
+  const models = [...new Set(changed.flatMap((c) => (c.finalModel ? [c.finalModel] : [])))];
+  const modelQVecs = new Map<string, Map<string, number[]>>(); // model → question TEXT → vec
+  for (const m of models) {
+    if (m !== cfg.embeddingModel) {
+      modelQVecs.set(m, await cachedQueryVectors(questions.map((q) => q.question), m));
+    }
+  }
+  const piecesByChunk = new Map<string, number[][]>();
+  for (const m of models) {
+    const pieces = await overrideEmbeddings(m);
+    for (const c of changed) {
+      if (c.finalModel !== m) continue;
+      piecesByChunk.set(
+        c.chunkId,
+        pieces.filter((p) => p.chunkId === c.chunkId).map((p) => p.embedding),
+      );
+    }
+  }
+  const chunkBaseVecs = await chunkEmbeddings(changed.map((c) => c.chunkId));
+
+  // Per question: compute the two sims each changed chunk needs (null when a
+  // vector isn't in any cache — the screen treats that as dirty) and let the
+  // pure screen (dirtyScreen.ts) decide.
+  const simsFor = (q: QuestionToScore): ChangedChunkSims[] => {
+    const qBase = baseQVecs.get(q.questionId) ?? null;
+    return changed.map((x) => {
+      const xBase = chunkBaseVecs.get(x.chunkId) ?? null;
+      const baseSim = qBase && xBase ? cosine(qBase, xBase) : null;
+      let bestPieceSim: number | null = null;
+      if (x.finalModel !== null) {
+        const qv =
+          x.finalModel === cfg.embeddingModel
+            ? qBase
+            : (modelQVecs.get(x.finalModel)?.get(q.question) ?? null);
+        const pieces = piecesByChunk.get(x.chunkId);
+        if (qv && pieces && pieces.length > 0) {
+          bestPieceSim = pieces.reduce((best, p) => Math.max(best, cosine(qv, p)), -Infinity);
+        }
+      }
+      return { ...x, baseSim, bestPieceSim };
+    });
+  };
+
+  const dirty: QuestionToScore[] = [];
+  const cleanLabelIds: string[] = [];
+  for (const q of questions) {
+    const r = latest.get(q.labelId);
+    const editStale = !r || r.scoredAt === null || r.scoredAt < r.updatedAt;
+    // Already scored under the final state (and not edited since) → fresh.
+    if (r && r.retrievalState === finalState && !editStale) continue;
+    const verdict = !r
+      ? "dirty"
+      : screenStoredResult({
+          depth,
+          baseModel: cfg.embeddingModel,
+          startState,
+          retrievalState: r.retrievalState,
+          editStale,
+          retrievedIds: r.retrievedIds,
+          cutoffs: r.screenCutoffs,
+          changed: simsFor(q),
+        });
+    if (verdict === "clean") cleanLabelIds.push(q.labelId);
+    else dirty.push(q);
+  }
+
+  const skipped = questions.length - dirty.length;
+  console.log(
+    `[rag:eval] dirty-set re-score: ${dirty.length}/${questions.length} dirty ` +
+      `(${cleanLabelIds.length} proven clean, ${skipped - cleanLabelIds.length} already fresh) ` +
+      `across ${changed.length} changed chunk(s)`,
+  );
+
+  const scored = await scoreQuestions(dirty, emit);
+  // Proven-clean rows carry results a real re-retrieval would reproduce —
+  // only their fingerprint stamp changes.
+  await restampLatestResults(cleanLabelIds, startState, finalState);
+  // Every label is now fresh under finalState (re-scored, re-stamped, or
+  // already fresh), so the change log can drop like after a full re-score.
+  await clearRetrievalChanges();
+
+  const summary = await getSummary();
+  // Always snapshot (when there's anything to snapshot): autotune's history
+  // and Appraise expect an eval_runs row at the end of every run, even one
+  // whose final re-score proved everything clean.
+  if (questions.length > 0) {
+    await createRunSnapshot({
+      questionCount: summary.scored,
+      hitCount: summary.hits,
+      mrr: summary.mrr,
+      ndcg: summary.ndcg,
+      k: summary.recallK,
+    });
+  }
+
+  console.log(
+    `[rag:eval] rescoreAffectedQuestions done: scored=${scored} skipped=${skipped} ` +
+      `recall=${summary.recall ?? "n/a"} in ${Math.round(performance.now() - t0)}ms`,
+  );
+  emit({
+    type: "done",
+    generated: 0,
+    scored,
+    recall: summary.recall,
+    mrr: summary.mrr,
+    ndcg: summary.ndcg,
+  });
+  return { scored, skipped, recall: summary.recall };
+}
+
+// ---------------------------------------------------------------------------
 // Re-chunk experiment: an ephemeral per-chunk "what-if" (autotune Stage 1).
 //
 // Re-split ONE labeled chunk at a trial (size, overlap), embed the pieces, and
@@ -608,7 +792,9 @@ async function rankExperiment(
   subTexts: string[],
 ): Promise<RechunkResult> {
   const queryVector = ctx.queryVector ?? (await embedQuery(ctx.question));
-  const subVectors = await embedTexts(subTexts);
+  // Cached: repeat experiments at the same size (and any later autotune rung or
+  // promoted override over these pieces) reuse the vectors for free.
+  const subVectors = await embedDocsCached(subTexts, activeConfig().embeddingModel);
 
   const k = activeConfig().topK;
   const ranked = await rankWithSubstitutedChunk({
@@ -896,7 +1082,10 @@ export async function setChunkModelOverride(
   const chunk = await getModelTrialChunk(chunkId);
   if (!chunk) return "not-found";
 
-  const [vector] = await embedTexts([chunk.text], model);
+  // Cached: autotune's search (and any prior trial) already embedded this
+  // exact text under this model, so promoting a winner shouldn't re-pay the
+  // provider call.
+  const [vector] = await embedDocsCached([chunk.text], model);
   await setChunkOverride(chunkId, model, vector.length, vector);
   return "ok";
 }
@@ -920,7 +1109,9 @@ export async function setChunkSizeOverride(
   const subTexts = await splitText(chunk.text, size, overlap);
   if (subTexts.length === 0) return "invalid";
 
-  const vectors = await embedTexts(subTexts);
+  // Cached (see setChunkModelOverride) — the search rung that found this size
+  // already embedded the identical pieces.
+  const vectors = await embedDocsCached(subTexts, activeConfig().embeddingModel);
   const pieces = vectors.map((v, i) => ({
     text: subTexts[i],
     dimension: v.length,
@@ -965,7 +1156,8 @@ export async function setChunkSizeModelOverride(
   const subTexts = await splitText(chunk.text, size, overlap);
   if (subTexts.length === 0) return "invalid";
 
-  const vectors = await embedTexts(subTexts, model);
+  // Cached (see setChunkModelOverride).
+  const vectors = await embedDocsCached(subTexts, model);
   const pieces = vectors.map((v, i) => ({
     text: subTexts[i],
     dimension: v.length,

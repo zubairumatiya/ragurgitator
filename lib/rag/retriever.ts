@@ -83,6 +83,52 @@ export function effectiveFusionPool(k: number, configured?: number | null): numb
 // across spaces and therefore not monotone with the merged order.
 export type FusedCandidate = { id: string; rank: number; sim: number };
 
+// Similarity cutoffs captured during one retrieval and stored with the eval
+// result (eval_results.screen_cutoffs, 0028). They let the post-autotune
+// dirty screen (eval.rescoreAffectedQuestions) prove "this override change
+// cannot have altered this question's stored result" without re-retrieving:
+//  - deep: sim of the LAST candidate of the FULL deep base list — a chunk
+//    below it never competed in the base lane (as a candidate OR as a
+//    competitor for override-space ranking). null when the corpus didn't fill
+//    the deep list, or on the no-override fast path (no fusion, no pools).
+//  - models[m]: the depth-th strongest competitor sim in model m's space — an
+//    override piece scoring below it cannot crack the merged top-depth.
+//    Always includes the base model (covers future size-only overrides).
+// Only the base-ANN competitor sims count toward models[m] (never fellow
+// override pieces): overrides can change between runs, competitors can't
+// without changing the fingerprint, so the cutoff stays valid as a bound.
+export type ScreenCutoffs = {
+  depth: number;
+  deep: number | null;
+  models: Record<string, number>;
+};
+
+// Override state loaded ONCE for a batch of retrievals under the same
+// fingerprint (eval scoring re-scores hundreds of questions back-to-back).
+// Without it every retrieveForQuery call re-reads the override rows and every
+// model's pieces from the DB — the dominant repeat cost of "Re-score all" on
+// a warm embedding cache.
+export type RetrievalContext = {
+  overrides: ChunkOverride[];
+  piecesFor: (model: string) => Promise<OverrideEmbedding[]>;
+};
+
+export async function buildRetrievalContext(): Promise<RetrievalContext> {
+  const overrides = await listOverrides();
+  const pieceCache = new Map<string, Promise<OverrideEmbedding[]>>();
+  return {
+    overrides,
+    piecesFor: (model) => {
+      let p = pieceCache.get(model);
+      if (!p) {
+        p = overrideEmbeddings(model);
+        pieceCache.set(model, p);
+      }
+      return p;
+    },
+  };
+}
+
 export async function retrieve(question: string): Promise<RetrievedChunk[]> {
   const trimmed = question.trim();
   if (!trimmed) throw new Error("Cannot retrieve for an empty question.");
@@ -111,6 +157,7 @@ export async function fuseWithOverrides(
 ): Promise<{
   merged: FusedCandidate[];
   meta: Map<string, { documentId: string; position: number; text: string }>;
+  cutoffs: ScreenCutoffs;
 }> {
   const cfg = activeConfig();
   const overriddenIds = overrides.map((o) => o.sourceChunkId);
@@ -118,6 +165,7 @@ export async function fuseWithOverrides(
 
   const lists: FusedCandidate[][] = [];
   const meta = new Map<string, { documentId: string; position: number; text: string }>();
+  const cutoffModels: Record<string, number> = {};
 
   // Base space: ANN over the non-overridden chunks. Pulled past the paid pool
   // so already-cached deeper candidates can compete for free (header comment).
@@ -174,6 +222,12 @@ export async function fuseWithOverrides(
       }
     }
 
+    // Screen cutoff for this space: the k-th strongest competitor sim (k = the
+    // caller's retrieval depth for eval scoring). Competitor sims only — see
+    // ScreenCutoffs.
+    const sortedCompetitors = [...competitorSims].sort((a, b) => b - a);
+    if (sortedCompetitors.length >= k) cutoffModels[model] = sortedCompetitors[k - 1];
+
     const overriddenSims = [...bestByChunk.values()];
     lists.push(
       [...bestByChunk.entries()].map(([id, sim]) => ({
@@ -194,7 +248,20 @@ export async function fuseWithOverrides(
   // unique integers and override ranks are fractional, so cross-kind ties are
   // impossible by construction.
   const merged = lists.flat().sort((a, b) => a.rank - b.rank);
-  return { merged, meta };
+
+  // Base-model cutoff even when no current override lives in base space, so a
+  // FUTURE size-only override can still be screened against this result.
+  if (cutoffModels[cfg.embeddingModel] === undefined && baseChunks.length >= k) {
+    cutoffModels[cfg.embeddingModel] = baseChunks[k - 1].score;
+  }
+  const cutoffs: ScreenCutoffs = {
+    depth: k,
+    // Only a FULL deep list bounds base-lane membership; a shorter one means
+    // the whole corpus competed, so nothing can be proven "outside" it.
+    deep: baseChunks.length >= deepN ? baseChunks[baseChunks.length - 1].score : null,
+    models: cutoffModels,
+  };
+  return { merged, meta, cutoffs };
 }
 
 // Retrieve a query's top results in the active config. `baseVector` is the query
@@ -202,23 +269,51 @@ export async function fuseWithOverrides(
 // model query vectors are embedded on demand from `text`. `limit` defaults to the
 // config's top_k; eval passes a larger superset so one retrieved list can score
 // Recall@recall_k and nDCG@ndcg_k at once (A1, see lib/rag/evalSettingsStore).
+// `ctx` (batch scoring) supplies pre-loaded override state; omitted = read it.
 export async function retrieveForQuery(
   text: string,
   baseVector: number[],
   limit?: number,
+  ctx?: RetrievalContext,
 ): Promise<RetrievedChunk[]> {
+  return (await retrieveWithCutoffs(text, baseVector, limit, ctx)).retrieved;
+}
+
+// retrieveForQuery plus the ScreenCutoffs this retrieval was judged at — eval
+// scoring stores them with the result (0028) for the dirty screen.
+export async function retrieveWithCutoffs(
+  text: string,
+  baseVector: number[],
+  limit?: number,
+  ctx?: RetrievalContext,
+): Promise<{ retrieved: RetrievedChunk[]; cutoffs: ScreenCutoffs }> {
   const cfg = activeConfig();
   const k = limit ?? cfg.topK;
-  const overrides = await listOverrides();
+  const overrides = ctx?.overrides ?? (await listOverrides());
   // No overrides → the original single-space ANN. Identical behaviour + cost.
-  if (overrides.length === 0) return query(baseVector, k);
+  // deep is null (no fusion pools existed) and the base cutoff is simply the
+  // k-th retrieved score.
+  if (overrides.length === 0) {
+    const retrieved = await query(baseVector, k);
+    return {
+      retrieved,
+      cutoffs: {
+        depth: k,
+        deep: null,
+        models:
+          retrieved.length >= k
+            ? { [cfg.embeddingModel]: retrieved[k - 1].score }
+            : {},
+      },
+    };
+  }
 
-  const { merged, meta } = await fuseWithOverrides(
+  const { merged, meta, cutoffs } = await fuseWithOverrides(
     text,
     baseVector,
     k,
     overrides,
-    overrideEmbeddings,
+    ctx?.piecesFor ?? overrideEmbeddings,
   );
   const top = merged.slice(0, k);
 
@@ -226,7 +321,7 @@ export async function retrieveForQuery(
   const unresolved = top.map(({ id }) => id).filter((id) => !meta.has(id));
   for (const [id, m] of await resolveChunks(unresolved)) meta.set(id, m);
 
-  return top.map(({ id, sim }) => {
+  const retrieved = top.map(({ id, sim }) => {
     const m = meta.get(id);
     return {
       // The chunk's real cosine in its canonical space (base or delegate model).
@@ -244,4 +339,5 @@ export async function retrieveForQuery(
       },
     };
   });
+  return { retrieved, cutoffs };
 }

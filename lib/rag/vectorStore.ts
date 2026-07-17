@@ -266,6 +266,22 @@ export async function queryExcluding(
   }));
 }
 
+// Base-space embeddings for a set of chunk ids in the active config — for
+// similarity screens that need a chunk's own stored vector rather than an ANN
+// (eval.rescoreAffectedQuestions). pgvector's text form '[1,2,3]' is valid
+// JSON, so read ::text and parse.
+export async function chunkEmbeddings(ids: string[]): Promise<Map<string, number[]>> {
+  if (ids.length === 0) return new Map();
+  const cfg = activeConfig();
+  const rows = await sql<{ id: string; vec: string }[]>`
+    select id, embedding::text as vec
+    from ${sql(cfg.chunksTable)}
+    where config_id = ${cfg.id}
+      and id = any(${ids}::uuid[])
+  `;
+  return new Map(rows.map((r) => [r.id, JSON.parse(r.vec) as number[]]));
+}
+
 // Resolve a set of chunk ids (in the active config's base table) to their text +
 // position + document. Used to flesh out override chunks that won the merge but weren't
 // in the base ANN result (they were excluded from it).

@@ -10,7 +10,9 @@
 // runner-up finalists then get their turn before the chunk is given up on),
 // snapshotted into the chunk's "Models tried" list (eval_model_trials — the
 // kept winner only, not every search rung), and the run ends
-// with one full-corpus re-score (A3) + an eval_runs snapshot (feeds Appraise)
+// with a dirty-set re-score (A3 — only questions the kept overrides could have
+// affected re-run retrieval; the rest are proven unchanged and re-stamped, see
+// eval.rescoreAffectedQuestions) + an eval_runs snapshot (feeds Appraise)
 // + an autotune_runs history row.
 //
 // autotune.keepBest (0026): when NO candidate clears a chunk's bar (or every
@@ -40,12 +42,13 @@ import { splitText } from "@/lib/rag/chunker";
 import { embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
 import { isProviderAvailable, modelSpec } from "@/lib/rag/embeddingModels";
 import {
-  rescoreAllQuestions,
+  rescoreAffectedQuestions,
   runModelTrial,
   scoreQuestionNow,
   setChunkModelOverride,
   setChunkSizeModelOverride,
   setChunkSizeOverride,
+  type ChangedChunk,
   type TrialVariation,
 } from "@/lib/rag/eval";
 import { effectiveK, type EvalCriteria } from "@/lib/rag/evalSettingsStore";
@@ -57,8 +60,11 @@ import {
 } from "@/lib/rag/evalStore";
 import {
   clearChunkOverride,
+  getChunkOverridePieces,
   listOverrides,
   overrideEmbeddings,
+  retrievalStateFingerprint,
+  setChunkOverridePieces,
   type ChunkOverride,
   type OverrideEmbedding,
 } from "@/lib/rag/overrideStore";
@@ -66,6 +72,12 @@ import { fuseWithOverrides } from "@/lib/rag/retriever";
 
 export type AutotuneMetric = "recall" | "mrr" | "ndcg";
 export type CandidateFamily = "size" | "model" | "size+model";
+
+// Tie-break when candidate scores are EQUAL (common — score is Σ 1/rank, so
+// same ranks give identical floats): prefer the cheaper override family.
+// size stays in the base embedding space; model adds another space to fusion
+// (an extra query embedding per live retrieval); combo is both.
+const familyRank: Record<CandidateFamily, number> = { size: 0, model: 1, "size+model": 2 };
 
 // One override candidate found by the search, with its approximate standing.
 export type AutotuneCandidate = {
@@ -373,7 +385,8 @@ function pairValue(q: QuestionDetail, metric: AutotuneMetric): number {
 // Promote → persist → CONFIRM (§5.3): apply the override, re-score the chunk's
 // own questions through real rank-fused retrieval, and keep it only if the chunk's
 // failing (question, metric) set shrank with no new failures — otherwise revert
-// the override and re-score again so the stored results stay truthful. Exported
+// (restoring the chunk's pre-confirm override exactly, or baseline if it had
+// none) and re-score again so the stored results stay truthful. Exported
 // for the post-run choice endpoint (POST /api/eval/autotune/apply).
 //
 // mode 'improve' (autotune.keepBest) relaxes the keep condition: the failing
@@ -429,6 +442,12 @@ export async function applyAutotuneCandidate(
 
   const beforeSum = failingSum(chunkQs);
 
+  // Capture the chunk's CURRENT override (if any) before overwriting it —
+  // persistCandidate replaces it, so a failed confirm must put THIS back, not
+  // clear to baseline (which would destroy a working override kept by an
+  // earlier run just because a new candidate over-promised).
+  const prior = await getChunkOverridePieces(chunkId);
+
   const persisted = await persistCandidate(chunkId, candidate);
   if (persisted !== "ok") {
     return { status: "failed", detail: `Could not persist override (${persisted}).` };
@@ -445,7 +464,17 @@ export async function applyAutotuneCandidate(
     (mode === "improve" && failingSum(afterQs) > beforeSum + 1e-9);
 
   if (newFailure || !progressed) {
-    await clearChunkOverride(chunkId);
+    if (prior !== null) {
+      await setChunkOverridePieces(
+        chunkId,
+        prior.model,
+        prior.kind,
+        prior.pieces,
+        "restored pre-confirm override (autotune candidate reverted)",
+      );
+    } else {
+      await clearChunkOverride(chunkId);
+    }
     await rescoreChunk();
     return {
       status: "reverted",
@@ -469,6 +498,11 @@ export async function applyAutotuneCandidate(
 export async function runAutotune(emit: Emit = () => {}): Promise<void> {
   const t0 = performance.now();
   const cfg = activeConfig();
+  // Run-start override state, for the final dirty-set re-score: only chunks
+  // whose override changed between here and the end can affect other
+  // questions' stored results (rescoreAffectedQuestions).
+  const startState = await retrievalStateFingerprint();
+  const startOverrides = new Set((await listOverrides()).map((o) => o.sourceChunkId));
   const summary = await getSummary();
   const criteria = summary.criteria;
 
@@ -625,7 +659,15 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
     // not — the keepBest fallback when nothing survives the bar.
     let bestEffort: AutotuneCandidate | null = null;
     const consider = (cand: AutotuneCandidate): AutotuneCandidate => {
-      if (cand.score > Math.max(baselineScore, bestEffort?.score ?? 0)) bestEffort = cand;
+      const cur = bestEffort;
+      if (
+        cand.score > baselineScore &&
+        (cur === null ||
+          cand.score > cur.score ||
+          (cand.score === cur.score && familyRank[cand.family] < familyRank[cur.family]))
+      ) {
+        bestEffort = cand;
+      }
       return cand;
     };
     let rungs = 0;
@@ -822,14 +864,18 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       }
       continue;
     }
-    // Best candidate per family, best-scoring first ('exhaustive' compares all
-    // collected candidates; 'first_success' typically holds a single rung's).
+    // Best candidate per family, best-scoring first — score ties go to the
+    // cheaper family (familyRank), which decides who gets first shot at the
+    // confirm ('exhaustive' compares all collected candidates; 'first_success'
+    // typically holds a single rung's).
     const bestByFamily = new Map<CandidateFamily, AutotuneCandidate>();
     for (const c of candidates) {
       const cur = bestByFamily.get(c.family);
       if (!cur || c.score > cur.score) bestByFamily.set(c.family, c);
     }
-    const finalists = [...bestByFamily.values()].sort((a, b) => b.score - a.score);
+    const finalists = [...bestByFamily.values()].sort(
+      (a, b) => b.score - a.score || familyRank[a.family] - familyRank[b.family],
+    );
 
     if (finalists.length > 1 && applyMode === "choose") {
       pendingChoice += chunkTargets.length;
@@ -856,9 +902,24 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
   }
 
   // ---- RIPPLE RE-SCORE + SNAPSHOT (A3) -----------------------------------
-  // rescoreAllQuestions re-runs every labeled question through real retrieval
-  // and freezes the eval_runs snapshot Appraise reads.
-  await rescoreAllQuestions((e) => {
+  // Dirty-set re-score: only questions the run's override changes could have
+  // touched go through real retrieval again; the rest are PROVEN unchanged
+  // from their stored results and re-stamped (rescoreAffectedQuestions — same
+  // end state as a full re-score, minus the redundant retrievals). It also
+  // freezes the eval_runs snapshot Appraise reads.
+  //
+  // Net-changed chunks = the KEPT ones. A reverted candidate restores the
+  // chunk's pre-confirm override exactly (applyAutotuneCandidate), so only
+  // chunks whose confirm kept a new override differ from the run-start state.
+  const endOverrides = new Map(
+    (await listOverrides()).map((o) => [o.sourceChunkId, o]),
+  );
+  const changed: ChangedChunk[] = [...applied.keys()].map((id) => ({
+    chunkId: id,
+    finalModel: endOverrides.get(id)?.model ?? null,
+    startOverridden: startOverrides.has(id),
+  }));
+  const { skipped } = await rescoreAffectedQuestions(changed, startState, (e) => {
     if (e.type === "score-start") emit({ type: "rescore-start", total: e.total });
     if (e.type === "score-result") {
       emit({ type: "rescore-progress", done: e.done, total: e.total });
@@ -936,7 +997,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
   console.log(
     `[rag:autotune] done: targeted=${targets.length} resolved=${resolved} ` +
       `improved=${improved} pendingChoice=${pendingChoice} attempts=${attempts} ` +
-      `in ${Math.round(performance.now() - t0)}ms`,
+      `rescoreSkipped=${skipped} in ${Math.round(performance.now() - t0)}ms`,
   );
   emit({
     type: "autotune-done",

@@ -148,6 +148,30 @@ export async function cachedDocVectors(
   return out;
 }
 
+// Cache-only lookup for QUERY strings — the query-kind counterpart of
+// cachedDocVectors: vectors for whichever of `texts` are already banked under
+// `model`, never calling the provider. Backs the post-autotune dirty screen
+// (eval.rescoreAffectedQuestions), where a miss just means "can't prove clean,
+// re-score" — the re-score embeds (and banks) it anyway.
+export async function cachedQueryVectors(
+  texts: string[],
+  model: string,
+): Promise<Map<string, number[]>> {
+  const out = new Map<string, number[]>();
+  const misses: string[] = [];
+  for (const t of uniq(texts)) {
+    const vec = memory.get(memKey(model, "query", t));
+    if (vec) out.set(t, vec);
+    else misses.push(t);
+  }
+  const persisted = await readPersisted(model, "query", misses);
+  for (const [t, vec] of persisted) {
+    memory.set(memKey(model, "query", t), vec);
+    out.set(t, vec);
+  }
+  return out;
+}
+
 // Embed one query string under `model`, cached through both layers.
 export async function embedQueryCached(text: string, model: string): Promise<number[]> {
   const key = memKey(model, "query", text);

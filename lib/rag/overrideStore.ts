@@ -310,6 +310,50 @@ export async function listOverrides(): Promise<ChunkOverride[]> {
   }
 }
 
+// One chunk's FULL stored override under the active config — model, kind, and
+// the ordered pieces with their vectors — or null when it has none. Captured
+// by autotune before it persists a candidate, so a failed confirm can RESTORE
+// the prior override exactly (via setChunkOverridePieces) instead of clearing
+// the chunk to baseline and losing an earlier run's working override.
+export async function getChunkOverridePieces(
+  sourceChunkId: string,
+): Promise<{ model: string; kind: OverrideKind; pieces: OverridePiece[] } | null> {
+  const cfg = activeConfig();
+  try {
+    const rows = await sql<
+      {
+        model: string;
+        kind: string;
+        text: string | null;
+        dimension: number;
+        embedding: number[];
+        token_start: number | null;
+        token_end: number | null;
+      }[]
+    >`
+      select model, kind, text, dimension, embedding, token_start, token_end
+      from config_chunk_overrides
+      where config_id = ${cfg.id} and source_chunk_id = ${sourceChunkId}
+      order by piece_index
+    `;
+    if (rows.length === 0) return null;
+    return {
+      model: rows[0].model,
+      kind: rows[0].kind as OverrideKind,
+      pieces: rows.map((r) => ({
+        text: r.text,
+        dimension: r.dimension,
+        embedding: r.embedding,
+        tokenStart: r.token_start,
+        tokenEnd: r.token_end,
+      })),
+    };
+  } catch (err) {
+    if ((err as { code?: string }).code === "42P01") return null;
+    throw err;
+  }
+}
+
 // Every override PIECE under one model for the active config — the candidate set
 // the retriever ranks against the query embedded under that model. Returns one row per
 // piece (chunkId = the source chunk it belongs to); the retriever collapses to
