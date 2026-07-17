@@ -50,6 +50,7 @@ import { ConfigChangeDialog } from "@/app/components/ConfigChangeDialog";
 import { EVAL_CRITERIA_CHANGED } from "@/app/components/EvalSettings";
 import { NdcgRankingPanel } from "@/app/components/NdcgRankingPanel";
 import { Tooltip } from "@/app/components/Tooltip";
+import type { ClusterRunSummary } from "@/lib/rag/clusterStore";
 import type { IngestedDocument } from "@/lib/rag/vectorStore";
 
 function pct(n: number | null): string {
@@ -116,10 +117,12 @@ function groupByChunk(questions: QuestionDetail[]): ChunkGroup[] {
 }
 
 // Live progress for an in-flight process/rescore run. "generate" has no recall
-// yet; "score" tracks a running hit count so the panel can show recall climbing.
+// yet; "score" tracks a running hit count so the panel can show recall climbing;
+// "ranking" (bulk nDCG grading) tracks per-question build failures.
 type EvalProgress =
   | { phase: "generate"; done: number; total: number }
-  | { phase: "score"; done: number; total: number; hits: number };
+  | { phase: "score"; done: number; total: number; hits: number }
+  | { phase: "ranking"; done: number; total: number; failed: number };
 
 type RunResult = {
   generated: number;
@@ -127,6 +130,8 @@ type RunResult = {
   recall: number | null;
   mrr: number | null;
   ndcg: number | null;
+  // Bulk nDCG grading only: questions that got a new ground-truth ranking.
+  graded?: number;
 };
 
 // Lazy-loaded "why did it miss?" detail for an expanded question.
@@ -356,6 +361,7 @@ export function EvalDashboard() {
       const decoder = new TextDecoder();
       let buffer = "";
       let hits = 0;
+      let failed = 0;
       let final: RunResult | null = null;
 
       for (;;) {
@@ -398,6 +404,24 @@ export function EvalDashboard() {
               });
               patchQuestion(event.questionId, event.hit, event.foundRank);
               break;
+            case "ranking-start":
+              failed = 0;
+              setProgress({
+                phase: "ranking",
+                done: 0,
+                total: event.total,
+                failed: 0,
+              });
+              break;
+            case "ranking-progress":
+              if (!event.ok) failed += 1;
+              setProgress({
+                phase: "ranking",
+                done: event.done,
+                total: event.total,
+                failed,
+              });
+              break;
             case "done":
               final = {
                 generated: event.generated,
@@ -405,6 +429,7 @@ export function EvalDashboard() {
                 recall: event.recall,
                 mrr: event.mrr,
                 ndcg: event.ndcg,
+                graded: event.graded,
               };
               break;
             case "error":
@@ -451,6 +476,18 @@ export function EvalDashboard() {
         `Added ${r.generated} ${difficulty} question(s), scored ${r.scored}. ` +
         `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
       { difficulty, documentIds: documentIds ?? undefined },
+    );
+
+  // Bulk actions → Add nDCG rankings → {preset}: for every question in scope
+  // without a ground truth, build the aggregate ranking from that preset and
+  // promote it (the panel's builder, run corpus-wide). Same NDJSON stream.
+  const onBulkNdcg = (clusterRunId: string, documentIds: string[] | null) =>
+    runStream(
+      "/api/eval/bulk-ndcg",
+      (r) =>
+        `Graded ${r.graded ?? 0} question(s), scored ${r.scored}. ` +
+        `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
+      { clusterRunId, documentIds: documentIds ?? undefined },
     );
 
   async function saveEdit(id: string) {
@@ -608,6 +645,7 @@ export function EvalDashboard() {
         <BulkActions
           busy={busy}
           onAddDifficulty={onBulkAdd}
+          onAddNdcg={onBulkNdcg}
           onChangeConfig={(docIds, docNames) =>
             setChangeScope({ docIds, docNames })
           }
@@ -1276,6 +1314,7 @@ function StaleBadge({
 function BulkActions({
   busy,
   onAddDifficulty,
+  onAddNdcg,
   onChangeConfig,
   onRescore,
   canRescore,
@@ -1283,6 +1322,7 @@ function BulkActions({
 }: {
   busy: boolean;
   onAddDifficulty: (d: Difficulty, documentIds: string[] | null) => void;
+  onAddNdcg: (clusterRunId: string, documentIds: string[] | null) => void;
   onChangeConfig: (
     documentIds: string[] | null,
     documentNames: string[] | null,
@@ -1293,6 +1333,10 @@ function BulkActions({
 }) {
   const [open, setOpen] = useState(false);
   const [subOpen, setSubOpen] = useState(false);
+  // "Add nDCG rankings" submenu: the saved cluster presets to seed the bulk
+  // aggregate builds from, fetched on first expand (like the document scope).
+  const [ndcgOpen, setNdcgOpen] = useState(false);
+  const [presets, setPresets] = useState<ClusterRunSummary[] | null>(null);
   // Document scope: collapsed to an "Apply to: …" summary by default (all
   // documents). Expanding reveals a toggle list — clicking a document flips it
   // in/out of the selection and the menu STAYS open, so several can be picked.
@@ -1303,8 +1347,21 @@ function BulkActions({
   const close = () => {
     setOpen(false);
     setSubOpen(false);
+    setNdcgOpen(false);
     setDocsOpen(false);
   };
+
+  function toggleNdcgSection() {
+    const opening = !ndcgOpen;
+    setNdcgOpen(opening);
+    if (!opening || presets !== null) return;
+    apiFetch("/api/clusters")
+      .then((res) => res.json())
+      .then((data: { runs?: ClusterRunSummary[] }) =>
+        setPresets((data.runs ?? []).filter((r) => r.saved)),
+      )
+      .catch(() => setPresets([]));
+  }
 
   const toggleMenu = () => setOpen((o) => !o);
 
@@ -1446,6 +1503,70 @@ function BulkActions({
                     {d}
                   </button>
                 ))}
+              </div>
+            )}
+            {/* Bulk nDCG grading: pick a saved cluster preset, then every question
+                in scope WITHOUT a ground truth gets the aggregate ranking built
+                and promoted (existing truths are left alone). */}
+            <button
+              type="button"
+              onClick={toggleNdcgSection}
+              disabled={!canRescore}
+              title={
+                canRescore
+                  ? "Build + promote the aggregate ranking for every question in scope that has no ground truth yet"
+                  : "No labeled questions to grade yet"
+              }
+              className="flex w-full cursor-pointer items-center justify-between px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              Add nDCG rankings{" "}
+              <span className="text-zinc-400">{ndcgOpen ? "▾" : "▸"}</span>
+            </button>
+            {ndcgOpen && (
+              <div className="flex flex-col gap-1 px-3 pb-1.5 pt-0.5 text-xs">
+                {presets === null ? (
+                  <span className="animate-pulse text-zinc-400">
+                    Loading presets…
+                  </span>
+                ) : presets.length === 0 ? (
+                  <span className="text-zinc-400">
+                    Save a cluster preset on{" "}
+                    <span className="font-mono">/clusters</span> first.
+                  </span>
+                ) : (
+                  presets.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => {
+                        close();
+                        onAddNdcg(p.id, scopeIds);
+                      }}
+                      title={
+                        p.missingDocuments.length > 0
+                          ? "This preset predates some documents — their questions are " +
+                            "skipped (their pools would come from the wrong documents). " +
+                            `Not clustered: ${p.missingDocuments.map((d) => d.fileName).join(", ")}. ` +
+                            "Re-run clustering and save a new preset to cover them."
+                          : "Seed each question's candidate pool from this preset"
+                      }
+                      className="flex cursor-pointer items-center justify-between gap-2 rounded border border-zinc-300 px-2 py-0.5 text-left font-medium text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    >
+                      <span className="truncate">{p.name ?? "unnamed"}</span>
+                      <span className="shrink-0 font-normal tabular-nums text-[10px] text-zinc-400">
+                        {p.missingDocuments.length > 0 && (
+                          <span className="mr-1 font-medium text-amber-600 dark:text-amber-400">
+                            ⚠ {p.missingDocuments.length} doc
+                            {p.missingDocuments.length === 1 ? "" : "s"} not
+                            clustered
+                          </span>
+                        )}
+                        k={p.k} · {p.chunkCount} chunks · sil{" "}
+                        {p.silhouette.toFixed(2)}
+                      </span>
+                    </button>
+                  ))
+                )}
               </div>
             )}
             <button
@@ -2150,6 +2271,7 @@ function RunProgress({ progress, k }: { progress: EvalProgress; k: number }) {
   const fraction = progress.total > 0 ? progress.done / progress.total : 0;
   const percent = Math.round(fraction * 100);
   const scoring = progress.phase === "score";
+  const ranking = progress.phase === "ranking";
   const recall =
     scoring && progress.done > 0 ? progress.hits / progress.done : null;
 
@@ -2157,7 +2279,11 @@ function RunProgress({ progress, k }: { progress: EvalProgress; k: number }) {
     <div className="flex flex-col gap-2 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
       <div className="flex items-center justify-between text-xs text-zinc-500">
         <span>
-          {scoring ? "Scoring questions" : "Generating questions"}{" "}
+          {ranking
+            ? "Building nDCG rankings"
+            : scoring
+              ? "Scoring questions"
+              : "Generating questions"}{" "}
           <span className="tabular-nums">
             {progress.done}/{progress.total}
           </span>
@@ -2165,6 +2291,11 @@ function RunProgress({ progress, k }: { progress: EvalProgress; k: number }) {
             <span className="ml-2 text-zinc-400">
               · {progress.hits} hit{progress.hits === 1 ? "" : "s"} · Recall@{k}{" "}
               {(recall * 100).toFixed(0)}%
+            </span>
+          )}
+          {ranking && progress.failed > 0 && (
+            <span className="ml-2 text-red-500 dark:text-red-400">
+              · {progress.failed} failed
             </span>
           )}
         </span>

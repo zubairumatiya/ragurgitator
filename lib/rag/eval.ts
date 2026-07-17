@@ -120,6 +120,18 @@ export type EvalEvent =
       hit: boolean;
       foundRank: number | null;
     }
+  // Bulk nDCG grading (ranking.bulkBuildRankings): one aggregate ranking built +
+  // promoted per question. `ok: false` carries the per-question failure so one
+  // bad question doesn't abort the run.
+  | { type: "ranking-start"; total: number }
+  | {
+      type: "ranking-progress";
+      done: number;
+      total: number;
+      questionId: string;
+      ok: boolean;
+      error?: string;
+    }
   | {
       type: "done";
       generated: number;
@@ -127,6 +139,8 @@ export type EvalEvent =
       recall: number | null;
       mrr: number | null;
       ndcg: number | null;
+      // Bulk nDCG grading only: questions that got a new ground-truth ranking.
+      graded?: number;
     }
   | { type: "error"; message: string };
 
@@ -350,7 +364,7 @@ export async function generateQuestionForChunk(
 // duplicate embed of the same text.
 const SCORE_CONCURRENCY = 4;
 
-async function scoreQuestions(
+export async function scoreQuestions(
   questions: QuestionToScore[],
   emit: Emit = () => {},
 ): Promise<number> {

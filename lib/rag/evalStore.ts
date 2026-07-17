@@ -475,7 +475,9 @@ export async function questionsNeedingScoring(): Promise<QuestionToScore[]> {
 // questionsNeedingScoring() is the incremental counterpart used by "Process new chunks".
 // `documentIds` (bulk-actions scope) narrows to those documents' questions;
 // null/empty = every document.
-export async function allLabeledQuestions(documentIds?: string[]): Promise<QuestionToScore[]> {
+export async function allLabeledQuestions(
+  documentIds?: string[],
+): Promise<(QuestionToScore & { documentId: string })[]> {
   const docScope = documentIds && documentIds.length > 0 ? documentIds : null;
   const rows = await sql<
     {
@@ -483,13 +485,15 @@ export async function allLabeledQuestions(documentIds?: string[]): Promise<Quest
       question: string;
       label_id: string;
       source_chunk_id: string;
+      document_id: string;
     }[]
   >`
     select
       q.id as question_id,
       q.question,
       l.id as label_id,
-      l.source_chunk_id
+      l.source_chunk_id,
+      q.document_id
     from eval_questions q
     join eval_labels l on l.eval_question_id = q.id
     join document_embeddings de on de.id = l.document_embedding_id
@@ -502,6 +506,7 @@ export async function allLabeledQuestions(documentIds?: string[]): Promise<Quest
     question: r.question,
     labelId: r.label_id,
     sourceChunkId: r.source_chunk_id,
+    documentId: r.document_id,
   }));
 }
 

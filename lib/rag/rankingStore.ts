@@ -50,6 +50,7 @@ async function activeChunksTable(): Promise<string | null> {
 export type QuestionScope = {
   documentEmbeddingId: string; // active-config embedding run a ranking is filed under
   question: string; // the question text — embedded + sent to the LLM ranker
+  documentId: string; // the question's source document — for preset-coverage flags
 };
 
 // The question's text + the active-config embedding run its ground-truth label
@@ -58,8 +59,10 @@ export type QuestionScope = {
 export async function getQuestionScope(
   questionId: string,
 ): Promise<QuestionScope | null> {
-  const [row] = await sql<{ document_embedding_id: string; question: string }[]>`
-    select l.document_embedding_id, q.question
+  const [row] = await sql<
+    { document_embedding_id: string; question: string; document_id: string }[]
+  >`
+    select l.document_embedding_id, q.question, q.document_id
     from eval_labels l
     join eval_questions q on q.id = l.eval_question_id
     join document_embeddings de on de.id = l.document_embedding_id
@@ -68,7 +71,11 @@ export async function getQuestionScope(
     limit 1
   `;
   if (!row) return null;
-  return { documentEmbeddingId: row.document_embedding_id, question: row.question };
+  return {
+    documentEmbeddingId: row.document_embedding_id,
+    question: row.question,
+    documentId: row.document_id,
+  };
 }
 
 // The `n` cluster buckets whose centroids are nearest the question vector, in a

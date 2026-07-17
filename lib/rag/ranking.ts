@@ -25,13 +25,20 @@ import { config, rankingAggregateModels } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { anthropicClient } from "@/lib/llm/client";
 import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
-import { listRuns } from "@/lib/rag/clusterStore";
-import { scoreQuestionNow } from "@/lib/rag/eval";
+import { listRuns, missingDocumentsByRun } from "@/lib/rag/clusterStore";
+import { scoreQuestionNow, scoreQuestions, type EvalEvent } from "@/lib/rag/eval";
+import {
+  allLabeledQuestions,
+  createRunSnapshot,
+  getSummary,
+  questionsNeedingScoring,
+} from "@/lib/rag/evalStore";
 import { ndcg } from "@/lib/rag/evalMetrics";
 import {
   getQuestionScope,
   getRankingChunks,
   getRetrievedOrder,
+  getTruthOrder,
   listRankings,
   nearestBuckets,
   poolFromBuckets,
@@ -78,6 +85,10 @@ export type RankingPreset = {
   avgCohesion: number; // mean member-to-centroid cosine across all points
   sizes: number[]; // by ordinal — the per-bucket detail shown when expanded
   cohesions: number[]; // by ordinal
+  // False when THIS question's document has no chunk in the preset (ingested
+  // after it was clustered) — its pool would come from the wrong documents, so
+  // the panel warns before a build.
+  coversQuestionDoc: boolean;
 };
 
 // Whether an LLM ranking of a given kind exists and is still current. 'fresh' = a
@@ -204,6 +215,7 @@ export async function getRankingContext(
       avgCohesion: r.avgCohesion,
       sizes: r.sizes,
       cohesions: r.cohesions,
+      coversQuestionDoc: !r.missingDocuments.some((d) => d.id === scope.documentId),
     }));
   const candidates = await Promise.all(stored.map((s) => resolve(s, retrievedOrder)));
 
@@ -444,6 +456,116 @@ export async function setOfficialRanking(
   const scope = await getQuestionScope(questionId);
   if (!scope) return false;
   return setTruth(questionId, scope.documentEmbeddingId, rankingId);
+}
+
+// "Bulk actions → Add nDCG rankings → {preset}": for every labeled question in
+// scope with NO ground truth yet, run the same aggregate builder the per-question
+// panel uses (seeded from the chosen cluster preset) and promote the result to
+// ground truth, then score whatever is still unscored so the nDCG chips fill in.
+// Questions that already have a truth are untouched — a manual/LLM choice the
+// user made shouldn't be clobbered by a bulk pass. Per-question failures are
+// reported on the stream and skipped rather than aborting the run.
+//
+// Modest concurrency: each build fans out to one embed call per aggregate model
+// (pool + query), so this is gentler than SCORE_CONCURRENCY; the shared embed
+// caches upsert idempotently, so races cost at most a duplicate embed.
+const BULK_RANKING_CONCURRENCY = 2;
+
+export async function bulkBuildRankings(
+  clusterRunId: string,
+  emit: (event: EvalEvent) => void = () => {},
+  documentIds?: string[],
+): Promise<{ graded: number; scored: number }> {
+  const t0 = performance.now();
+  const questions = await allLabeledQuestions(documentIds);
+  const truths = await getTruthOrder(questions.map((q) => q.questionId));
+  const pending = questions.filter((q) => !truths.has(q.questionId));
+
+  // Documents the preset doesn't cover (ingested after it was clustered). Their
+  // questions would get candidate pools drawn from the WRONG documents — a
+  // worthless ground truth — so they're skipped with a streamed reason instead.
+  const missingDocs = new Set(
+    ((await missingDocumentsByRun([clusterRunId])).get(clusterRunId) ?? []).map(
+      (d) => d.id,
+    ),
+  );
+
+  emit({ type: "ranking-start", total: pending.length });
+
+  const gradedIds = new Set<string>();
+  let done = 0;
+  let nextIndex = 0;
+  const worker = async () => {
+    for (let i = nextIndex++; i < pending.length; i = nextIndex++) {
+      const q = pending[i];
+      let ok = true;
+      let error: string | undefined;
+      try {
+        if (missingDocs.has(q.documentId)) {
+          throw new Error(
+            "This question's document isn't in the preset's clusters — re-run clustering and save a new preset.",
+          );
+        }
+        const candidate = await buildAggregateRanking(q.questionId, clusterRunId);
+        if (!(await setOfficialRanking(q.questionId, candidate.id))) {
+          throw new Error("Could not promote the ranking to ground truth.");
+        }
+        gradedIds.add(q.questionId);
+      } catch (err) {
+        ok = false;
+        error = err instanceof Error ? err.message : "Ranking build failed.";
+      }
+      done += 1;
+      emit({
+        type: "ranking-progress",
+        done,
+        total: pending.length,
+        questionId: q.questionId,
+        ok,
+        error,
+      });
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(BULK_RANKING_CONCURRENCY, pending.length) },
+      worker,
+    ),
+  );
+
+  // Newly graded but never scored questions have no retrieved order to grade
+  // against — score just those (already-scored ones read their nDCG from the
+  // stored result rows the moment the truth exists).
+  const needsScore = (await questionsNeedingScoring()).filter((q) =>
+    gradedIds.has(q.questionId),
+  );
+  const scored = await scoreQuestions(needsScore, emit);
+
+  const summary = await getSummary();
+  if (gradedIds.size > 0 || scored > 0) {
+    await createRunSnapshot({
+      questionCount: summary.scored,
+      hitCount: summary.hits,
+      mrr: summary.mrr,
+      ndcg: summary.ndcg,
+      k: summary.recallK,
+    });
+  }
+
+  console.log(
+    `[rag:ranking] bulk graded=${gradedIds.size}/${pending.length} scored=${scored} ` +
+      `in ${Math.round(performance.now() - t0)}ms`,
+  );
+  emit({
+    type: "done",
+    generated: 0,
+    scored,
+    recall: summary.recall,
+    mrr: summary.mrr,
+    ndcg: summary.ndcg,
+    graded: gradedIds.size,
+  });
+  return { graded: gradedIds.size, scored };
 }
 
 // Re-read a freshly upserted ranking by id (the store returns lists, not single

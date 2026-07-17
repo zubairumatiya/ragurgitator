@@ -44,6 +44,11 @@ export type ClusterRunSummary = {
   sizes: number[]; // by ordinal
   cohesions: number[]; // by ordinal
   createdAt: number;
+  // Active-config documents with NO chunk in this run — documents ingested
+  // after it was built. A run that misses a document gives that document's
+  // questions candidate pools drawn from the wrong documents, so the eval UI
+  // flags (and the bulk nDCG grader skips) them.
+  missingDocuments: { id: string; fileName: string }[];
 };
 
 export type ClusterRunDetail = ClusterRunSummary & { buckets: ClusterBucket[] };
@@ -188,6 +193,8 @@ function summaryFromCandidate(
     sizes: cand.sizes,
     cohesions: cand.cohesion,
     createdAt,
+    // A fresh run clusters the entire active corpus, so nothing is missing.
+    missingDocuments: [],
   };
 }
 
@@ -225,6 +232,51 @@ export async function runClustering(k: number, emit: Emit = () => {}): Promise<C
 
   emit({ type: "done", runs: summaries });
   return summaries;
+}
+
+// Per-run document-coverage gaps: for each given run, the active-config
+// documents that have no chunk in any of its buckets (ingested after the run
+// was built). Empty array = full coverage.
+export async function missingDocumentsByRun(
+  runIds: string[],
+): Promise<Map<string, { id: string; fileName: string }[]>> {
+  const byRun = new Map<string, { id: string; fileName: string }[]>();
+  if (runIds.length === 0) return byRun;
+  const table = await activeChunksTable();
+  if (!table) return new Map(runIds.map((id) => [id, []]));
+
+  const [docs, covered] = await Promise.all([
+    sql<{ id: string; file_name: string }[]>`
+      select distinct d.id, d.file_name
+      from ${sql(table)} c
+      join documents d on d.id = c.document_id
+      join document_embeddings de on de.id = c.document_embedding_id
+      where de.config_id = ${activeConfig().id}
+    `,
+    sql<{ cluster_run_id: string; document_id: string }[]>`
+      select distinct cc.cluster_run_id, c.document_id
+      from chunk_clusters cc
+      join ${sql(table)} c on c.id = cc.chunk_id
+      where cc.cluster_run_id = any(${runIds}::uuid[])
+    `,
+  ]);
+
+  const coveredByRun = new Map<string, Set<string>>();
+  for (const r of covered) {
+    const set = coveredByRun.get(r.cluster_run_id) ?? new Set<string>();
+    set.add(r.document_id);
+    coveredByRun.set(r.cluster_run_id, set);
+  }
+  for (const runId of runIds) {
+    const set = coveredByRun.get(runId) ?? new Set<string>();
+    byRun.set(
+      runId,
+      docs
+        .filter((d) => !set.has(d.id))
+        .map((d) => ({ id: d.id, fileName: d.file_name })),
+    );
+  }
+  return byRun;
 }
 
 // Per-run cluster rows (sizes + cohesions by ordinal), for building summaries.
@@ -269,7 +321,11 @@ export async function listRuns(): Promise<ClusterRunSummary[]> {
     order by saved desc, created_at desc
   `;
 
-  const buckets = await bucketRowsByRun(runs.map((r) => r.id));
+  const runIds = runs.map((r) => r.id);
+  const [buckets, missing] = await Promise.all([
+    bucketRowsByRun(runIds),
+    missingDocumentsByRun(runIds),
+  ]);
   return runs.map((r) => {
     const list = buckets.get(r.id) ?? [];
     return {
@@ -283,6 +339,7 @@ export async function listRuns(): Promise<ClusterRunSummary[]> {
       sizes: list.map((b) => b.size),
       cohesions: list.map((b) => b.cohesion),
       createdAt: r.created_at.getTime(),
+      missingDocuments: missing.get(r.id) ?? [],
     };
   });
 }
@@ -359,6 +416,7 @@ export async function getRun(id: string): Promise<ClusterRunDetail | null> {
     };
   });
 
+  const missing = await missingDocumentsByRun([run.id]);
   return {
     id: run.id,
     k: run.k,
@@ -370,6 +428,7 @@ export async function getRun(id: string): Promise<ClusterRunDetail | null> {
     sizes: buckets.map((b) => b.size),
     cohesions: buckets.map((b) => b.cohesion),
     createdAt: run.created_at.getTime(),
+    missingDocuments: missing.get(run.id) ?? [],
     buckets,
   };
 }

@@ -67,7 +67,15 @@ export function NdcgRankingPanel({
         }
         setError(null);
         setCtx(data);
-        setPresetId((p) => p || data.presets[0]?.id || "");
+        // Default to the first preset that actually covers this question's
+        // document — an uncovered one builds pools from the wrong documents.
+        setPresetId(
+          (p) =>
+            p ||
+            data.presets.find((x) => x.coversQuestionDoc)?.id ||
+            data.presets[0]?.id ||
+            "",
+        );
       } catch (err) {
         if (alive) setError(err instanceof Error ? err.message : "Failed to load.");
       }
@@ -289,6 +297,14 @@ function PresetCard({
             k={preset.k} · {preset.chunkCount} chunks · sil {preset.silhouette.toFixed(2)} · coh{" "}
             {preset.avgCohesion.toFixed(2)}
           </span>
+          {!preset.coversQuestionDoc && (
+            <span
+              className="shrink-0 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+              title="This question's document was ingested after this preset was clustered, so its chunks aren't in any bucket — an aggregate built from it would rank chunks from the wrong documents. Re-run clustering and save a new preset."
+            >
+              ⚠ doesn’t cover this doc
+            </span>
+          )}
         </label>
         <button
           type="button"
