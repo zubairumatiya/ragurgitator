@@ -155,6 +155,7 @@ export type AutotuneEvent =
       recall: number | null;
       mrr: number | null;
       ndcg: number | null;
+      durationMs: number;
     }
   | { type: "error"; message: string };
 
@@ -594,6 +595,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       recall: summary.recall,
       mrr: summary.mrr,
       ndcg: summary.ndcg,
+      durationMs: Math.round(performance.now() - t0),
     });
     return;
   }
@@ -994,10 +996,11 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
     outcomes,
   );
 
+  const durationMs = Math.round(performance.now() - t0);
   console.log(
     `[rag:autotune] done: targeted=${targets.length} resolved=${resolved} ` +
       `improved=${improved} pendingChoice=${pendingChoice} attempts=${attempts} ` +
-      `rescoreSkipped=${skipped} in ${Math.round(performance.now() - t0)}ms`,
+      `rescoreSkipped=${skipped} in ${durationMs}ms`,
   );
   emit({
     type: "autotune-done",
@@ -1010,5 +1013,6 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
     recall: final.recall,
     mrr: final.mrr,
     ndcg: final.ndcg,
+    durationMs,
   });
 }

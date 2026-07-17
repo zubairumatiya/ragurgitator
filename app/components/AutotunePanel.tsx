@@ -62,7 +62,14 @@ type DoneStats = {
   recall: number | null;
   mrr: number | null;
   ndcg: number | null;
+  durationMs: number;
 };
+
+function formatDuration(ms: number): string {
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+}
 
 export function AutotunePanel({
   summary,
@@ -415,7 +422,7 @@ export function AutotunePanel({
                 {done.pendingChoice > 0
                   ? `, ${done.pendingChoice} awaiting your choice above`
                   : ""}
-                , {done.attempts} experiment(s). Recall{" "}
+                , {done.attempts} experiment(s) in {formatDuration(done.durationMs)}. Recall{" "}
                 {done.recall === null ? "—" : `${(done.recall * 100).toFixed(1)}%`} · MRR{" "}
                 {done.mrr === null ? "—" : done.mrr.toFixed(2)} · nDCG{" "}
                 {done.ndcg === null ? "—" : done.ndcg.toFixed(2)}.
