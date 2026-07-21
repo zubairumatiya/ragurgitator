@@ -13,8 +13,15 @@
 // ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
 
+import { config } from "@/lib/config";
 import { activeConfig, resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";
+import {
+  responseEfficacyGate,
+  retrievalFloor,
+  type EfficacyResult,
+} from "@/lib/rag/efficacyGate";
+import { generateAnswer } from "@/lib/rag/generator";
 import {
   addDocumentToCorpus,
   dedupCorporaDocuments,
@@ -341,10 +348,48 @@ export async function syncRemoveDocFromConfigs(
   return removed;
 }
 
-export async function ask(
-  question: string,
-): Promise<{ answer: string; sources: RetrievedChunk[] }> {
+export async function ask(question: string): Promise<{
+  answer: string;
+  sources: RetrievedChunk[];
+  model: string; // which tier actually produced the returned answer
+  efficacy: EfficacyResult | null; // null when saver mode is off
+  escalated: boolean;
+}> {
   const sources = await retrieve(question);
-  const answer = `Retrieved ${sources.length} chunk${sources.length === 1 ? "" : "s"}. Generation is disabled — expand "sources" to inspect retrieval.`;
-  return { answer, sources };
+  const strongModel = activeConfig().llmModel;
+
+  // Saver mode off (default) → today's behaviour: one answer from the config's
+  // model, no gate, no extra cost.
+  if (!config.cascade.enabled) {
+    const answer = await generateAnswer(question, sources, strongModel);
+    return { answer, sources, model: strongModel, efficacy: null, escalated: false };
+  }
+
+  const cheapModel = config.cascade.cheapModel;
+
+  // AXIS 1 (rung 1, PRE-generation): weak retrieval is a context bottleneck a
+  // stronger model can't fix, so when it fails we answer once with the cheap
+  // model and never escalate (docs/long-term-savings-research.md §4.1).
+  const contextSufficient =
+    retrievalFloor(sources) >= config.cascade.retrievalHardFloor;
+
+  let model: string = cheapModel;
+  let answer = await generateAnswer(question, sources, model);
+  let efficacy = await responseEfficacyGate(question, answer, sources);
+
+  // Escalate only on an AXIS-2 failure (refusal / weak groundedness) AND only
+  // when the context was good enough to answer from in the first place.
+  const escalated =
+    contextSufficient &&
+    efficacy.verdict === "escalate" &&
+    strongModel !== cheapModel;
+
+  if (escalated) {
+    model = strongModel;
+    answer = await generateAnswer(question, sources, model);
+    // Re-score so the returned efficacy describes the answer we actually return.
+    efficacy = await responseEfficacyGate(question, answer, sources);
+  }
+
+  return { answer, sources, model, efficacy, escalated };
 }

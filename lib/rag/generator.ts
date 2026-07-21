@@ -26,11 +26,12 @@ Rules:
 export async function generateAnswer(
   question: string,
   chunks: RetrievedChunk[],
+  model: string = activeConfig().llmModel,
 ): Promise<string> {
   const userMessage = buildUserMessage(question, chunks);
 
   const response = await anthropicClient.messages.create({
-    model: activeConfig().llmModel,
+    model,
     max_tokens: config.maxAnswerTokens,
     system: SYSTEM_PROMPT,
     messages: [{ role: "user", content: userMessage }],

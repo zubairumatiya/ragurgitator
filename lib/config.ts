@@ -20,6 +20,31 @@ export const config = {
   chunkOverlap: 50,
   topK: 5,
   maxAnswerTokens: 1024,
+  // FrugalGPT cascade (lib/rag/efficacyGate.ts + pipeline.ask): the primary
+  // Phase-E savings lever (docs/long-term-savings-research.md §4.2). Answer with
+  // the cheap model first, then escalate to the config's llmModel only on an
+  // axis-2 (answer-quality) failure. The strong tier is whatever the active config
+  // already uses, so escalated (hard) queries see no quality change — the cascade
+  // only SAVES on easy ones. Every number below is tunable; efficacyThreshold is
+  // the exact knob a "sweep" would optimize.
+  cascade: {
+    // Opt-in saver mode. OFF (default) = today's behaviour: one answer from the
+    // config's llmModel, no gate, zero extra cost. ON = Haiku-first + gate +
+    // escalation. Seed of the "Savings" settings surface (alongside batch API +
+    // the semantic answer cache); a persisted/UI toggle can later override this.
+    enabled: false,
+    cheapModel: "claude-haiku-4-5", // cheap first tier; strong tier = activeConfig().llmModel
+    // Rung 1 (AXIS 1, pre-generation): retrieval cosine below which context is too
+    // weak to answer from. A stronger model can't fix missing context, so below
+    // this we answer once with the cheap model and NEVER escalate. Not a quality
+    // score — a context-sufficiency gate.
+    retrievalHardFloor: 0.35,
+    // AXIS 2 (rungs 0+2, post-generation) — the escalation trigger:
+    efficacyThreshold: 0.6, // accept the cheap answer at/above this axis-2 [0,1] score
+    groundednessTarget: 0.75, // rung 2: answer↔context cosine that counts as fully grounded
+    minAnswerChars: 40, // rung 0: answers shorter than this are suspect
+    shortPenalty: 0.6, // rung 0: score multiplier applied when the answer is too short
+  },
   evalQuestionsPerChunk: 1, // target eval questions per chunk; generation tops up the difference
   // --- Graded-nDCG ranking builder (/eval; see lib/rag/ranking.ts) ----------
   rankingNearestBuckets: 3, // cluster centroids nearest the question that seed the pool
