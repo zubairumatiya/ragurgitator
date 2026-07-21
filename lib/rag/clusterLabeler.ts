@@ -10,6 +10,7 @@
 // (Very large k makes for a big prompt; batch the buckets if that becomes a
 // problem.) Reuses config.llmModel so the label model tracks answer generation.
 // ---------------------------------------------------------------------------
+import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { anthropicClient } from "@/lib/llm/client";
 import { activeConfig } from "@/lib/rag/activeConfig";
@@ -31,9 +32,14 @@ const LabelArray = z.array(
   z.object({ ordinal: z.number().int(), label: z.string().trim().min(1) }),
 );
 
-export async function labelBuckets(buckets: BucketSamples[]): Promise<BucketLabel[]> {
-  if (buckets.length === 0) return [];
-
+// The Anthropic request params to label every bucket in one call — factored out
+// so the inline path (labelBuckets) and the batch path
+// (lib/batch/jobs/clusterLabeling) build the SAME prompt. `model` is passed in
+// so this stays scope-free.
+export function labelRequestParams(
+  buckets: BucketSamples[],
+  model: string,
+): Anthropic.Messages.MessageCreateParamsNonStreaming {
   const userMessage = buckets
     .map((b) => {
       const chunks = b.chunks
@@ -42,20 +48,25 @@ export async function labelBuckets(buckets: BucketSamples[]): Promise<BucketLabe
       return `Bucket ${b.ordinal}:\n${chunks || "  (no chunks)"}`;
     })
     .join("\n\n");
-
-  const response = await anthropicClient.messages.create({
-    model: activeConfig().llmModel,
+  return {
+    model,
     max_tokens: 2048,
     system: SYSTEM_PROMPT,
     messages: [{ role: "user", content: userMessage }],
-  });
+  };
+}
 
-  const block = response.content.find((b) => b.type === "text");
-  if (!block) throw new Error("Labeler returned no text content.");
+// Parse a labeler response — inline Message or batch result body — into labels,
+// keeping only the buckets we asked about, deduping ordinals and clamping length.
+export function parseBucketLabels(
+  message: { content: Array<{ type: string; text?: string }> },
+  buckets: BucketSamples[],
+): BucketLabel[] {
+  const block = message.content.find((b) => b.type === "text");
+  if (!block || typeof block.text !== "string") throw new Error("Labeler returned no text content.");
 
   const parsed = LabelArray.parse(JSON.parse(stripFences(block.text)));
 
-  // Keep only labels for buckets we asked about; dedupe ordinals; clamp length.
   const asked = new Set(buckets.map((b) => b.ordinal));
   const seen = new Set<number>();
   const out: BucketLabel[] = [];
@@ -65,6 +76,14 @@ export async function labelBuckets(buckets: BucketSamples[]): Promise<BucketLabe
     out.push({ ordinal, label: label.slice(0, 100) });
   }
   return out;
+}
+
+export async function labelBuckets(buckets: BucketSamples[]): Promise<BucketLabel[]> {
+  if (buckets.length === 0) return [];
+  const response = await anthropicClient.messages.create(
+    labelRequestParams(buckets, activeConfig().llmModel),
+  );
+  return parseBucketLabels(response, buckets);
 }
 
 // Models occasionally wrap JSON in ```json fences despite instructions; strip them.

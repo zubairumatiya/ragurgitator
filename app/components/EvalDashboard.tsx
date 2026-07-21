@@ -432,6 +432,16 @@ export function EvalDashboard() {
                 graded: event.graded,
               };
               break;
+            case "batch-submitted":
+              // Question generation was routed through the batch API (Settings →
+              // Savings). Nothing landed inline; surface where to track it.
+              setNotice(
+                `Submitted ${event.requestCount} question${
+                  event.requestCount === 1 ? "" : "s"
+                } as a batch — it runs in the background. Track it under “Batches”; ` +
+                  `we'll let you know when it's done.`,
+              );
+              return;
             case "error":
               setError(event.message);
               return;

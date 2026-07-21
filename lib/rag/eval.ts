@@ -33,6 +33,7 @@ import {
   type ChunkOverride,
   type OverrideEmbedding,
 } from "@/lib/rag/overrideStore";
+import type Anthropic from "@anthropic-ai/sdk";
 import { anthropicClient } from "@/lib/llm/client";
 import { splitText, tokenizeWithOffsets } from "@/lib/rag/chunker";
 import {
@@ -142,6 +143,10 @@ export type EvalEvent =
       // Bulk nDCG grading only: questions that got a new ground-truth ranking.
       graded?: number;
     }
+  // Emitted instead of the inline generate/score events when the config's
+  // Savings preference routes question generation through the batch API: the
+  // work was submitted, not run here — track it in the Batches panel.
+  | { type: "batch-submitted"; jobId: string; requestCount: number }
   | { type: "error"; message: string };
 
 type Emit = (event: EvalEvent) => void;
@@ -220,15 +225,21 @@ const QUESTIONS_FORMAT = {
 
 type GeneratedQuestion = { question: string; expected_answer: string };
 
-async function authorQuestions(
+// The Anthropic request params for authoring `count` question(s) from one
+// passage — factored out so the inline path (authorQuestions) and the batch path
+// (lib/batch/jobs/questionGeneration) build the SAME prompt. `model` is passed
+// in (the caller's activeConfig().llmModel) so this stays scope-free and can run
+// when a batch is applied later, outside the original request.
+export function questionRequestParams(
   text: string,
   count: number,
-  difficulty?: Difficulty,
-): Promise<GeneratedQuestion[]> {
+  difficulty: Difficulty | undefined,
+  model: string,
+): Anthropic.Messages.MessageCreateParamsNonStreaming {
   // The difficulty steer (when set) leads the user turn; the passage follows.
   const steer = difficulty ? `${difficultyInstruction(difficulty)}\n\n` : "";
-  const response = await anthropicClient.messages.create({
-    model: activeConfig().llmModel,
+  return {
+    model,
     // Scale headroom with the ask so a larger target can't truncate the JSON.
     max_tokens: Math.min(1024 + (count - 1) * 512, 4096),
     thinking: { type: "disabled" },
@@ -243,28 +254,42 @@ async function authorQuestions(
     messages: [
       {
         role: "user",
-        content:
-          `${steer}Write exactly ${count} question(s) for this passage:\n\n${text}`,
+        content: `${steer}Write exactly ${count} question(s) for this passage:\n\n${text}`,
       },
     ],
-  });
+  };
+}
 
-  const textBlock = response.content.find((b) => b.type === "text");
-  if (!textBlock || textBlock.type !== "text") return [];
-
-  // Structured outputs guarantee schema-valid JSON on a clean stop, but a
-  // truncation (max_tokens) or refusal can still yield unparseable text. Skip
-  // this chunk rather than failing the whole run — it stays under target and is
-  // retried on the next pass.
+// Parse a generation response — an inline Message OR a batch result's message
+// body — into up to `count` questions. Structured outputs guarantee schema-valid
+// JSON on a clean stop, but a truncation (max_tokens) or refusal can still yield
+// unparseable text: skip that chunk (it stays under target, retried next pass).
+export function parseQuestions(
+  message: { content: Array<{ type: string; text?: string }>; stop_reason?: string | null },
+  count: number,
+): GeneratedQuestion[] {
+  const textBlock = message.content.find((b) => b.type === "text");
+  if (!textBlock || typeof textBlock.text !== "string") return [];
   try {
     const parsed = JSON.parse(textBlock.text) as { questions?: GeneratedQuestion[] };
     return (parsed.questions ?? []).slice(0, count);
   } catch {
     console.warn(
-      `[rag:eval] could not parse generated questions (stop_reason=${response.stop_reason}); skipping chunk`,
+      `[rag:eval] could not parse generated questions (stop_reason=${message.stop_reason ?? "?"}); skipping chunk`,
     );
     return [];
   }
+}
+
+async function authorQuestions(
+  text: string,
+  count: number,
+  difficulty?: Difficulty,
+): Promise<GeneratedQuestion[]> {
+  const response = await anthropicClient.messages.create(
+    questionRequestParams(text, count, difficulty, activeConfig().llmModel),
+  );
+  return parseQuestions(response, count);
 }
 
 // Generate one question per SELECTED difficulty for every chunk that's missing

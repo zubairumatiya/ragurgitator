@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
+import { BatchRequestsPanel } from "@/app/components/BatchRequestsPanel";
 import { EvalSettings } from "@/app/components/EvalSettings";
 
 // The nested sub-nav inside a config tab: the three peer views, scoped to the
@@ -46,7 +47,10 @@ export function Nav() {
         })}
       </nav>
 
-      <EvalSettings />
+      <div className="flex items-center gap-2">
+        <BatchRequestsPanel />
+        <EvalSettings />
+      </div>
     </div>
   );
 }

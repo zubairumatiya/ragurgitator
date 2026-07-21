@@ -21,6 +21,15 @@ import { useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { Tooltip } from "@/app/components/Tooltip";
 import { apiFetch } from "@/lib/http/client";
+import {
+  DEFAULT_BATCH_SAVINGS,
+  JOB_KINDS,
+  JOB_LABELS,
+  type BatchChoice,
+  type BatchLeg,
+  type BatchSavings,
+  type JobKind,
+} from "@/lib/batch/types";
 import type { ConfigSummary } from "@/lib/rag/configStore";
 import type { AutotuneApply, AutotuneSearch, EvalCriteria } from "@/lib/rag/evalSettingsStore";
 import type { AutotuneScopeDocument } from "@/lib/rag/evalStore";
@@ -81,6 +90,16 @@ export function EvalSettings() {
   const [savedSync, setSavedSync] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Savings (Phase E1 — batch API): one preference object round-tripped via
+  // /api/batch, plus whether real email is wired and how many batches are in
+  // flight for THIS config (the overwrite warning).
+  const [savings, setSavings] = useState<BatchSavings>(DEFAULT_BATCH_SAVINGS);
+  const [emailReady, setEmailReady] = useState(false);
+  const [inFlightCount, setInFlightCount] = useState(0);
+  const setLeg = (leg: BatchLeg, v: BatchChoice) =>
+    setSavings((s) => ({ ...s, bulk: { ...s.bulk, [leg]: v } }));
+  const setJob = (kind: JobKind, v: BatchChoice) =>
+    setSavings((s) => ({ ...s, jobs: { ...s.jobs, [kind]: v } }));
 
   // Fetch the saved criteria + config and seed the form, then open — so it
   // always reflects the latest saved state without a render-cascading effect.
@@ -126,6 +145,20 @@ export function EvalSettings() {
       setScopeExpanded(new Set());
       setSync(data.config.corpusSync);
       setSavedSync(data.config.corpusSync);
+      // Savings preference + email/in-flight state (its own store; non-fatal).
+      try {
+        const bres = await apiFetch("/api/batch");
+        const bdata = (await bres.json().catch(() => null)) as
+          | { savings?: BatchSavings; emailConfigured?: boolean; inFlight?: unknown[] }
+          | null;
+        if (bres.ok && bdata?.savings) {
+          setSavings(bdata.savings);
+          setEmailReady(Boolean(bdata.emailConfigured));
+          setInFlightCount(bdata.inFlight?.length ?? 0);
+        }
+      } catch {
+        /* leave defaults — the Savings section still renders */
+      }
       setOpen(true);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Network error.");
@@ -193,6 +226,17 @@ export function EvalSettings() {
           setErr(data2?.error ?? `Sync update failed (${res2.status}).`);
           return;
         }
+      }
+      // Savings preference lives in its own store (configs.batch_savings).
+      const bres = await apiFetch("/api/batch", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: savings.mode, bulk: savings.bulk, jobs: savings.jobs }),
+      });
+      if (!bres.ok) {
+        const bdata = (await bres.json().catch(() => null)) as { error?: string } | null;
+        setErr(bdata?.error ?? `Savings update failed (${bres.status}).`);
+        return;
       }
       setOpen(false);
       window.dispatchEvent(new Event(EVAL_CRITERIA_CHANGED));
@@ -493,15 +537,68 @@ export function EvalSettings() {
               </p>
             )}
 
-            {/* LONG-TERM SAVINGS (deferred — Phase E stub) */}
-            <button
-              type="button"
-              disabled
-              title="Coming soon — cut ongoing cost without dropping below your min-rate"
-              className="mt-3 w-full cursor-not-allowed rounded border border-dashed border-zinc-300 px-2 py-1.5 text-xs text-zinc-400 dark:border-zinc-700 dark:text-zinc-500"
-            >
-              Long-term savings (coming soon)
-            </button>
+            {/* SAVINGS (Phase E1 — batch API: −50% Anthropic / −33% Voyage) */}
+            <p className="mb-1 mt-3 border-t border-zinc-200 pt-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:border-zinc-800">
+              Savings
+            </p>
+            <label className="flex items-center justify-between gap-2 py-0.5">
+              <Tooltip
+                align="left"
+                text={
+                  "Bulk sets one choice for the whole embedding leg and one for the " +
+                  "whole LLM leg. Individual lets you choose per job (question " +
+                  "generation, nDCG ranking, cluster labeling, ingest/re-embedding)."
+                }
+              >
+                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                  Adjust
+                </span>
+              </Tooltip>
+              <select
+                value={savings.mode}
+                onChange={(e) =>
+                  setSavings((s) => ({ ...s, mode: e.target.value as BatchSavings["mode"] }))
+                }
+                className="w-32 rounded border border-zinc-300 bg-transparent px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+              >
+                <option value="bulk">Bulk</option>
+                <option value="individual">Individual</option>
+              </select>
+            </label>
+
+            {savings.mode === "bulk" ? (
+              <>
+                <ChoiceRow
+                  label="Embedding"
+                  value={savings.bulk.embedding}
+                  onChange={(v) => setLeg("embedding", v)}
+                />
+                <ChoiceRow label="LLM" value={savings.bulk.llm} onChange={(v) => setLeg("llm", v)} />
+              </>
+            ) : (
+              JOB_KINDS.map((kind) => (
+                <ChoiceRow
+                  key={kind}
+                  label={JOB_LABELS[kind]}
+                  value={savings.jobs[kind]}
+                  onChange={(v) => setJob(kind, v)}
+                />
+              ))
+            )}
+
+            <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">
+              Batch API is cheaper but asynchronous.{" "}
+              {emailReady
+                ? "We'll email you when it's done."
+                : "We'll notify you here when it's done."}
+            </p>
+            {inFlightCount > 0 && (
+              <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                {inFlightCount} batch request{inFlightCount === 1 ? "" : "s"} processing for this
+                config — changes may be overwritten when {inFlightCount === 1 ? "it" : "they"}{" "}
+                complete{inFlightCount === 1 ? "s" : ""}.
+              </p>
+            )}
 
             {err && <p className="mt-2 text-xs text-red-600 dark:text-red-400">{err}</p>}
 
@@ -693,6 +790,33 @@ function ChunkScopeTree({
 }
 
 // A small segmented-control button used by the autotuning apply/search toggles.
+// One Savings row: a label + a Standard/Batch API <select> (a dropdown, not a
+// checkbox — matches the requested UX). Used for both the two bulk legs and the
+// four individual jobs.
+function ChoiceRow({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: BatchChoice;
+  onChange: (v: BatchChoice) => void;
+}) {
+  return (
+    <label className="flex items-center justify-between gap-2 py-0.5">
+      <span className="truncate text-zinc-600 dark:text-zinc-400">{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value as BatchChoice)}
+        className="w-32 shrink-0 rounded border border-zinc-300 bg-transparent px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+      >
+        <option value="standard">Standard</option>
+        <option value="batch">Batch API</option>
+      </select>
+    </label>
+  );
+}
+
 function Seg({
   active,
   onClick,
