@@ -250,11 +250,15 @@ function mkCandidate(
 }
 
 // The model ladder actually usable right now: cheapest-first (A4), minus the
-// config's base model and any provider without a key/weights.
-function usableModelLadder(): string[] {
+// config's base model and any provider without a key/weights. `scope` (the
+// config's autotune.modelScope, 0030) further whitelists model ids: null = no
+// restriction; an explicit list keeps only its members (so [] = size-only).
+function usableModelLadder(scope: string[] | null): string[] {
   const base = activeConfig().embeddingModel;
+  const allowed = scope === null ? null : new Set(scope);
   return autotuneModelLadder.filter((id) => {
     if (id === base) return false;
+    if (allowed !== null && !allowed.has(id)) return false;
     try {
       return isProviderAvailable(modelSpec(id).provider);
     } catch {
@@ -604,7 +608,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
   const trialPool = criteria.autotune.fusionPool;
   const overlapFor = (size: number) =>
     Math.min(size - 1, Math.max(0, Math.round(size * criteria.autotune.overlapPct)));
-  const models = usableModelLadder();
+  const models = usableModelLadder(criteria.autotune.modelScope);
   // Per-chunk cap on search RUNGS (a rung = one size, or one model's two
   // branches) so even exhaustive mode is bounded (A4/A5).
   const rungCap = sizes.length + 2 * models.length + 6;

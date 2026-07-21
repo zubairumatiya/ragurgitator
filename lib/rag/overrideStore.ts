@@ -39,7 +39,11 @@ export type RetrievalChange = { description: string; at: Date };
 // deeper base list, and base-space overrides compete against the full deep
 // list (July 2026). Note v3 ranks also drift (toward more accurate) as the
 // cache warms — that part is uncapturable here by design.
-export const FUSION_VERSION = 3;
+// v4 = a model override that SHARES the base model's vectorSpace now folds into
+// the base lane (ranked by real cosine against the base query, no separate
+// fusion lane or re-embedding under its own model) instead of opening a lane
+// (July 2026) — same-space overrides rank differently, so older results re-score.
+export const FUSION_VERSION = 4;
 
 // Fingerprint of the active config's current override state (0022): sha-256
 // over the fusion version + the canonical override rows, or 'baseline' when
