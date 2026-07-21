@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
 
+import { config } from "@/lib/config";
 import { activeConfig, resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";
 import {
@@ -24,7 +25,8 @@ import {
 import { getConfig, listSyncedConfigIds } from "@/lib/rag/configStore";
 import { embedTexts } from "@/lib/rag/embeddings";
 import { labelFor, loadDocument, type LoadInput } from "@/lib/rag/loader";
-import { retrieve } from "@/lib/rag/retriever";
+import { retrieve, retrieveForQuery } from "@/lib/rag/retriever";
+import { semanticCacheLookup, semanticCacheStore } from "@/lib/rag/semanticCache";
 import {
   deleteEmbeddingRunFor,
   findDocumentByHash,
@@ -341,10 +343,37 @@ export async function syncRemoveDocFromConfigs(
   return removed;
 }
 
+// Query flow entry: answer a user question. A semantic-cache hit — a past
+// question close enough in embedding space (docs/semantic-caching-plan.md) —
+// short-circuits retrieval entirely; a miss runs the normal pipeline and banks
+// the result for next time. The cache is transparent: with it disabled (or its
+// table not yet migrated) this behaves exactly as before.
 export async function ask(
   question: string,
 ): Promise<{ answer: string; sources: RetrievedChunk[] }> {
-  const sources = await retrieve(question);
-  const answer = `Retrieved ${sources.length} chunk${sources.length === 1 ? "" : "s"}. Generation is disabled — expand "sources" to inspect retrieval.`;
-  return { answer, sources };
+  const trimmed = question.trim();
+
+  // Disabled, or nothing to match on → original path unchanged (retrieve() also
+  // owns the empty-question error, so behaviour is byte-for-byte the same).
+  if (!config.semanticCache.enabled || !trimmed) {
+    const sources = await retrieve(question);
+    return { answer: describeRetrieval(sources), sources };
+  }
+
+  const probe = await semanticCacheLookup(trimmed);
+  if (probe.hit) return probe.result;
+
+  // Reuse the vector the cache already embedded (banked in embedding_cache) so a
+  // miss doesn't pay to embed the query a second time.
+  const sources = await retrieveForQuery(trimmed, probe.vector);
+  const result = { answer: describeRetrieval(sources), sources };
+  await semanticCacheStore(trimmed, probe.vector, result);
+  return result;
+}
+
+// The placeholder answer while generation is disabled in this branch. When the
+// generation work lands, this becomes generateAnswer(...) — the cache stores
+// whatever ask() returns, so the caching layer needs no change then.
+function describeRetrieval(sources: RetrievedChunk[]): string {
+  return `Retrieved ${sources.length} chunk${sources.length === 1 ? "" : "s"}. Generation is disabled — expand "sources" to inspect retrieval.`;
 }

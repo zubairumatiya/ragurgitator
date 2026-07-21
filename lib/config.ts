@@ -29,6 +29,20 @@ export const config = {
   // Vercel's 4.5 MB serverless body cap to leave room for multipart overhead;
   // raise it if you self-host behind your own limit.
   maxUploadBytes: 4 * 1024 * 1024,
+  // --- Semantic answer cache (docs/semantic-caching-plan.md, migration 0031) --
+  // A near-duplicate of a past question serves that question's stored answer,
+  // so ask() skips retrieval/generation. `enabled: false` makes ask() behave
+  // exactly as before; the table not existing degrades it to a no-op too.
+  semanticCache: {
+    enabled: true,
+    // Conservative cosine trigger for any vector-space without a calibrated
+    // value in semantic_cache_thresholds. High on purpose: in RAG a false hit
+    // is a wrong answer (see the plan doc). Phase 2 calibration lowers it per
+    // space only where the eval bank proves it's safe.
+    defaultThreshold: 0.95,
+    // Safety cap on cached queries scored (in JS) per lookup for one config.
+    maxCandidates: 500,
+  },
 } as const;
 
 // Alternate embedding models offered by the per-chunk "try a different model"
