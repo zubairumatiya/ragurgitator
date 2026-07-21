@@ -15,10 +15,12 @@
 // Config-scoped (withRequestConfig) so it acts on the tab the dropdown is on.
 // ---------------------------------------------------------------------------
 import { z } from "zod";
+import { autotuneModelLadder } from "@/lib/config";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { getConfig } from "@/lib/rag/configStore";
+import { listAutotuneModelOptions } from "@/lib/rag/embeddingModels";
 import { getActiveCriteria, updateCriteria } from "@/lib/rag/evalSettingsStore";
 import { listAutotuneScopeOptions } from "@/lib/rag/evalStore";
 
@@ -31,7 +33,13 @@ export async function GET(request: Request) {
         listAutotuneScopeOptions(),
       ]);
       if (!config) return Response.json({ error: "Config not found." }, { status: 404 });
-      return Response.json({ criteria, config, scopeOptions });
+      // The alternate models a run could try right now (keyed, ladder order),
+      // grouped by shared vector space in the Settings checklist.
+      const autotuneModels = listAutotuneModelOptions(
+        autotuneModelLadder,
+        activeConfig().embeddingModel,
+      );
+      return Response.json({ criteria, config, scopeOptions, autotuneModels });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to load criteria.";
       return Response.json({ error: message }, { status: 500 });
@@ -61,6 +69,8 @@ const Body = z.object({
       stopEarly: z.boolean().optional(),
       keepBest: z.boolean().optional(),
       chunkScope: z.array(z.string().uuid()).nullable().optional(),
+      // Model scope (0030): null = all usable models; [] = size-only.
+      modelScope: z.array(z.string()).nullable().optional(),
       // Trial fusion pool (0027): null = follow live retrieval's pool.
       fusionPool: z.number().int().min(1).max(1000).nullable().optional(),
     })

@@ -22,7 +22,7 @@ import {
   getActiveCriteria,
   retrievalDepth,
 } from "@/lib/rag/evalSettingsStore";
-import { isProviderAvailable, modelSpec } from "@/lib/rag/embeddingModels";
+import { isProviderAvailable, modelSpec, sameVectorSpace } from "@/lib/rag/embeddingModels";
 import {
   clearRetrievalChanges,
   listOverrides,
@@ -644,7 +644,10 @@ export async function rescoreAffectedQuestions(
   const models = [...new Set(changed.flatMap((c) => (c.finalModel ? [c.finalModel] : [])))];
   const modelQVecs = new Map<string, Map<string, number[]>>(); // model → question TEXT → vec
   for (const m of models) {
-    if (m !== cfg.embeddingModel) {
+    // Same-space models fold into the base lane (retriever.fuseWithOverrides),
+    // so their pieces are scored against the BASE query vector — no model-space
+    // query vectors are needed (or fetched) for them.
+    if (!sameVectorSpace(m, cfg.embeddingModel)) {
       modelQVecs.set(m, await cachedQueryVectors(questions.map((q) => q.question), m));
     }
   }
@@ -671,8 +674,10 @@ export async function rescoreAffectedQuestions(
       const baseSim = qBase && xBase ? cosine(qBase, xBase) : null;
       let bestPieceSim: number | null = null;
       if (x.finalModel !== null) {
+        // Match the retriever's query vector: same-space folds use the base
+        // query vector, foreign spaces use the model-embedded one.
         const qv =
-          x.finalModel === cfg.embeddingModel
+          sameVectorSpace(x.finalModel, cfg.embeddingModel)
             ? qBase
             : (modelQVecs.get(x.finalModel)?.get(q.question) ?? null);
         const pieces = piecesByChunk.get(x.chunkId);

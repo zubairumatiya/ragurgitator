@@ -39,6 +39,10 @@ export type AutotuneSettings = {
   // Restrict runs to these source chunk ids (0025). null = ALL chunks,
   // including ones labeled after the setting was saved.
   chunkScope: string[] | null;
+  // Restrict which ALTERNATE embedding models a run may try to these ids
+  // (0030). null = ALL usable models (the cheapest-first ladder minus the base
+  // model and any keyless provider); an empty array = size-only (no models).
+  modelScope: string[] | null;
   // Fusion pool for the trial dry-runs only (0027): how many base candidates
   // each trial re-embeds under a candidate model. null = follow live
   // retrieval's pool. Search-only — the confirm re-score stays on the live
@@ -82,6 +86,7 @@ type CriteriaRow = {
   autotune_stop_early: boolean;
   autotune_keep_best: boolean;
   autotune_chunk_scope: string[] | null;
+  autotune_model_scope: string[] | null;
   autotune_fusion_pool: number | null;
   retrieval_fusion_pool: number | null;
 };
@@ -103,6 +108,7 @@ function toCriteria(row: CriteriaRow): EvalCriteria {
       stopEarly: row.autotune_stop_early,
       keepBest: row.autotune_keep_best,
       chunkScope: row.autotune_chunk_scope,
+      modelScope: row.autotune_model_scope,
       fusionPool: row.autotune_fusion_pool,
     },
     retrieval: { fusionPool: row.retrieval_fusion_pool },
@@ -116,7 +122,7 @@ const COLUMNS = sql`
   eval_difficulties,
   autotune_size_ladder, autotune_overlap_pct, autotune_apply, autotune_search,
   autotune_stop_early, autotune_keep_best, autotune_chunk_scope,
-  autotune_fusion_pool, retrieval_fusion_pool
+  autotune_model_scope, autotune_fusion_pool, retrieval_fusion_pool
 `;
 
 // Criteria for a specific config; null when the id is malformed / missing.
@@ -185,6 +191,7 @@ export async function updateCriteria(
       autotune_stop_early = ${next.autotune.stopEarly},
       autotune_keep_best  = ${next.autotune.keepBest},
       autotune_chunk_scope = ${next.autotune.chunkScope}::uuid[],
+      autotune_model_scope = ${next.autotune.modelScope}::text[],
       autotune_fusion_pool = ${next.autotune.fusionPool},
       retrieval_fusion_pool = ${next.retrieval.fusionPool},
       updated_at          = now()

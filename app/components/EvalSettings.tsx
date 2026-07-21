@@ -22,6 +22,7 @@ import { useState, type ReactNode } from "react";
 import { Tooltip } from "@/app/components/Tooltip";
 import { apiFetch } from "@/lib/http/client";
 import type { ConfigSummary } from "@/lib/rag/configStore";
+import type { AutotuneModelOption } from "@/lib/rag/embeddingModels";
 import type { AutotuneApply, AutotuneSearch, EvalCriteria } from "@/lib/rag/evalSettingsStore";
 import type { AutotuneScopeDocument } from "@/lib/rag/evalStore";
 
@@ -77,6 +78,10 @@ export function EvalSettings() {
   const [scopeDocs, setScopeDocs] = useState<AutotuneScopeDocument[]>([]);
   const [scopeSel, setScopeSel] = useState<Set<string> | null>(null);
   const [scopeExpanded, setScopeExpanded] = useState<Set<string>>(new Set());
+  // Autotune model scope (0030): the keyed alternate models a run could try,
+  // and which are allowed. null = all of them (also covers models keyed later).
+  const [modelOpts, setModelOpts] = useState<AutotuneModelOption[]>([]);
+  const [modelSel, setModelSel] = useState<Set<string> | null>(null);
   const [sync, setSync] = useState(false);
   const [savedSync, setSavedSync] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -94,6 +99,7 @@ export function EvalSettings() {
             criteria?: EvalCriteria;
             config?: ConfigSummary;
             scopeOptions?: AutotuneScopeDocument[];
+            autotuneModels?: AutotuneModelOption[];
             error?: string;
           }
         | null;
@@ -124,6 +130,8 @@ export function EvalSettings() {
       setScopeDocs(data.scopeOptions ?? []);
       setScopeSel(c.autotune.chunkScope === null ? null : new Set(c.autotune.chunkScope));
       setScopeExpanded(new Set());
+      setModelOpts(data.autotuneModels ?? []);
+      setModelSel(c.autotune.modelScope === null ? null : new Set(c.autotune.modelScope));
       setSync(data.config.corpusSync);
       setSavedSync(data.config.corpusSync);
       setOpen(true);
@@ -149,6 +157,14 @@ export function EvalSettings() {
       scopeSel === null || allChunkIds.every((id) => scopeSel.has(id))
         ? null
         : allChunkIds.filter((id) => scopeSel.has(id));
+    // Model scope: all-selected saves as null ("all", so models keyed later are
+    // included too); a partial selection keeps only ids that still exist as
+    // options ([] when the user allowed none = size-only tuning).
+    const allModelIds = modelOpts.map((m) => m.id);
+    const modelScope =
+      modelSel === null || allModelIds.every((id) => modelSel.has(id))
+        ? null
+        : allModelIds.filter((id) => modelSel.has(id));
     const patch = {
       recall: { enabled: recallOn, k: parseKOrNull(recallK), minRate: parseRateOrNull(recallMin) },
       mrr: { enabled: mrrOn, k: parseKOrNull(mrrK), minRate: parseRateOrNull(mrrMin) },
@@ -163,6 +179,7 @@ export function EvalSettings() {
         stopEarly,
         keepBest,
         chunkScope,
+        modelScope,
         fusionPool: parseKOrNull(autotunePool),
       },
       retrieval: { fusionPool: parseKOrNull(retrievalPool) },
@@ -425,6 +442,39 @@ export function EvalSettings() {
                 setExpanded={setScopeExpanded}
               />
             )}
+            <div className="flex items-center justify-between gap-2 py-0.5">
+              <Tooltip
+                align="left"
+                text={
+                  "Which alternate embedding models autotune may try as per-chunk " +
+                  "overrides (only models with a key are listed). Models in the base " +
+                  "model's own vector space rank directly against it — no extra fusion " +
+                  "lane, no extra query embedding per live retrieval. A model in a " +
+                  "separate space adds a fusion lane. Uncheck all to tune chunk size only."
+                }
+              >
+                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                  Models
+                </span>
+              </Tooltip>
+              <div className="flex gap-2 text-[11px]">
+                <button
+                  type="button"
+                  onClick={() => setModelSel(null)}
+                  className="cursor-pointer text-zinc-500 hover:underline"
+                >
+                  all
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setModelSel(new Set())}
+                  className="cursor-pointer text-zinc-500 hover:underline"
+                >
+                  none
+                </button>
+              </div>
+            </div>
+            <ModelScopeChecklist models={modelOpts} selected={modelSel} setSelected={setModelSel} />
 
             {/* RETRIEVAL (live fusion pool, 0027) */}
             <p className="mb-1 mt-3 border-t border-zinc-200 pt-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:border-zinc-800">
@@ -689,6 +739,123 @@ function ChunkScopeTree({
         );
       })}
     </div>
+  );
+}
+
+const PROVIDER_LABEL: Record<string, string> = {
+  voyage: "Voyage",
+  openai: "OpenAI",
+  cohere: "Cohere",
+  local: "Local",
+};
+
+// The autotune "Models" checklist: the keyed alternate models a run may try,
+// grouped by VECTOR SPACE — provider-agnostic, so any model shows up the moment
+// its provider key is set. The base model's own space heads the list under a
+// "no fusion" label (an override under those models ranks directly against the
+// base, so live retrieval opens no extra fusion lane). Every OTHER distinct
+// space is its own subsection and costs one fusion lane at retrieval (each
+// extra space = one more query embedding + rank-merge lane per query); models
+// that genuinely share a space — the voyage-4 family, or two Matryoshka output
+// dims of one OpenAI/Cohere model — cluster into a single subsection and share
+// that one lane. `selected === null` = all allowed (the default, and what a
+// fully-checked list saves back as); nothing checked = size-only tuning.
+function ModelScopeChecklist({
+  models,
+  selected,
+  setSelected,
+}: {
+  models: AutotuneModelOption[];
+  selected: Set<string> | null;
+  setSelected: (next: Set<string> | null) => void;
+}) {
+  if (models.length === 0) {
+    return (
+      <p className="mt-1 rounded border border-zinc-200 p-2 text-xs text-zinc-400 dark:border-zinc-800">
+        No other keyed models available — add a provider key (OpenAI, Cohere, …)
+        to widen autotune.
+      </p>
+    );
+  }
+
+  const allIds = models.map((m) => m.id);
+  const isChecked = (id: string) => selected === null || selected.has(id);
+  const toggle = (id: string) => {
+    const next = new Set(selected ?? allIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setSelected(next);
+  };
+
+  // A model with no vectorSpace is its own private space (keyed by id). Grouping
+  // preserves ladder order; the base space is pulled to the front below.
+  const spaceKey = (m: AutotuneModelOption) => m.vectorSpace ?? `solo:${m.id}`;
+  const groups = new Map<string, AutotuneModelOption[]>();
+  for (const m of models) {
+    const list = groups.get(spaceKey(m));
+    if (list) list.push(m);
+    else groups.set(spaceKey(m), [m]);
+  }
+  // Base space first (its members carry sameSpaceAsBase), the rest in ladder order.
+  const orderedKeys = [...groups.keys()].sort(
+    (a, b) =>
+      Number(groups.get(b)![0].sameSpaceAsBase) - Number(groups.get(a)![0].sameSpaceAsBase),
+  );
+
+  // Fusion lanes the CURRENT selection implies = distinct NON-base spaces with a
+  // checked member (base-space picks are free).
+  const lanes = new Set(
+    models.filter((m) => isChecked(m.id) && !m.sameSpaceAsBase).map(spaceKey),
+  ).size;
+
+  const header = (group: AutotuneModelOption[]) => {
+    if (group[0].sameSpaceAsBase) return "Same space as base — no fusion";
+    const provider = PROVIDER_LABEL[group[0].provider] ?? group[0].provider;
+    return group.length > 1
+      ? `${provider} · ${group[0].vectorSpace} — shared space (+1 fusion lane)`
+      : `${provider} — separate space (+1 fusion lane)`;
+  };
+
+  return (
+    <>
+      <div className="mt-1 max-h-44 overflow-y-auto rounded border border-zinc-200 dark:border-zinc-800">
+        {orderedKeys.map((key) => {
+          const group = groups.get(key)!;
+          return (
+            <div
+              key={key}
+              className="border-b border-zinc-100 last:border-b-0 dark:border-zinc-800/60"
+            >
+              <p className="px-1.5 pt-1 text-[10px] font-medium uppercase tracking-wide text-zinc-400">
+                {header(group)}
+              </p>
+              {group.map((m) => (
+                <label
+                  key={m.id}
+                  className="flex cursor-pointer items-center gap-1.5 px-1.5 py-0.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                >
+                  <input
+                    type="checkbox"
+                    checked={isChecked(m.id)}
+                    onChange={() => toggle(m.id)}
+                    className="cursor-pointer"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-xs text-zinc-700 dark:text-zinc-300">
+                    {m.id}
+                  </span>
+                  <span className="shrink-0 text-[10px] text-zinc-400">{m.provider}</span>
+                </label>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+      <p className="mt-0.5 text-[10px] text-zinc-400">
+        {lanes === 0
+          ? "All picks stay in the base space — no fusion lanes."
+          : `${lanes} fusion lane${lanes > 1 ? "s" : ""} at retrieval (1 per extra space).`}
+      </p>
+    </>
   );
 }
 

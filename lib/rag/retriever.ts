@@ -8,13 +8,22 @@
 //
 // When the config has per-chunk model OVERRIDES (Phase 5), retrieval fuses
 // multiple embedding spaces by a RANK-INTERLEAVE MERGE (D7): the base-model ANN
-// over the NON-overridden chunks, plus — for each override model — that model's
-// overridden chunks. Raw cosine isn't comparable across embedding spaces, so we
-// combine by RANK, not score. Each chunk carries exactly one rank (from its
-// canonical model's space) and the merged order is simply ascending rank: base
-// chunks at integer positions, overridden chunks at fractional positions
-// strictly between the base candidates they beat and the ones they didn't —
-// so the two kinds never tie and no arbitrary tie-break can favour either.
+// over the NON-overridden chunks, plus — for each FOREIGN-space override model —
+// that model's overridden chunks. Raw cosine isn't comparable across embedding
+// spaces, so we combine by RANK, not score. Each chunk carries exactly one rank
+// (from its canonical model's space) and the merged order is simply ascending
+// rank: base chunks at integer positions, overridden chunks at fractional
+// positions strictly between the base candidates they beat and the ones they
+// didn't — so the two kinds never tie and no arbitrary tie-break can favour
+// either.
+//
+// SHARED SPACE ⇒ NO FUSION: an override whose model shares the base model's
+// vectorSpace (embeddingModels.sameVectorSpace) is cosine-comparable to the
+// base query, so it is NOT a separate space — its pieces rank by real cosine
+// directly against the base candidates (reusing the base query vector, no pool
+// re-embedding). Only genuinely FOREIGN spaces open a fusion lane. So keeping
+// autotune inside the base model's space (the Settings "Models" checklist)
+// means live retrieval pays for zero extra embeddings.
 //
 // An overridden chunk's rank is NOT its rank among the few other overridden
 // chunks (a near-empty list would hand it rank ~1 for every query — a
@@ -41,6 +50,7 @@ import {
   embedQueryCached,
 } from "@/lib/rag/embedCache";
 import { embedQuery } from "@/lib/rag/embeddings";
+import { sameVectorSpace } from "@/lib/rag/embeddingModels";
 import {
   listOverrides,
   overrideEmbeddings,
@@ -189,11 +199,19 @@ export async function fuseWithOverrides(
   // piece in top-k, eval-autotuning-plan §6.3), then rank each overridden chunk
   // among the base candidates re-embedded under the same model. Only the
   // overridden chunks enter the merge list; the competitors just set the bar.
-  // Size-only overrides live in base space, so the base vector and the base
-  // candidates' ANN scores are reused as-is (no re-embedding).
+  //
+  // BASE-SPACE FOLD: a size-only override, the base model itself, OR any model
+  // that shares the base's vectorSpace (sameVectorSpace) produces vectors that
+  // are cosine-comparable to the base query — so the base query vector and the
+  // base candidates' ANN scores are reused as-is: no query re-embedding, no
+  // pool re-embedding, and the override's pieces rank by real cosine in the one
+  // base lane. Only a FOREIGN-space model opens a true fusion lane (its own
+  // query embedding + pool re-embed). This is the "shared space ⇒ no fusion"
+  // saving; changing which models fold changes fused ranks, so it is gated by
+  // FUSION_VERSION (overrideStore.ts).
   for (const model of models) {
-    const isBase = model === cfg.embeddingModel;
-    const qv = isBase ? baseVector : await embedQueryCached(text, model);
+    const isBaseSpace = sameVectorSpace(model, cfg.embeddingModel);
+    const qv = isBaseSpace ? baseVector : await embedQueryCached(text, model);
     const pieces = await piecesFor(model);
     const bestByChunk = new Map<string, number>();
     for (const p of pieces) {
@@ -203,12 +221,12 @@ export async function fuseWithOverrides(
     }
 
     // The competition: this query's base candidates, in THIS model's space.
-    // Base space → every deep candidate's cosine is its ANN score (free).
-    // Otherwise: embed the paid pool under the model (persistent cache), then
-    // add whichever DEEPER candidates are already cached — free accuracy that
-    // compounds as trials and queries warm the cache.
+    // Base space (incl. same-space folds) → every deep candidate's cosine is
+    // its ANN score (free). Otherwise: embed the paid pool under the model
+    // (persistent cache), then add whichever DEEPER candidates are already
+    // cached — free accuracy that compounds as trials and queries warm the cache.
     let competitorSims: number[];
-    if (isBase) {
+    if (isBaseSpace) {
       competitorSims = baseChunks.map((rc) => rc.score);
     } else {
       const paidTexts = baseChunks.slice(0, paidN).map((rc) => rc.chunk.chunk.text);
