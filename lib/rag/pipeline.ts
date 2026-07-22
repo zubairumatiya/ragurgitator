@@ -19,7 +19,6 @@ import { chunkDocument } from "@/lib/rag/chunker";
 import {
   responseEfficacyGate,
   retrievalFloor,
-  type EfficacyResult,
 } from "@/lib/rag/efficacyGate";
 import { generateAnswer } from "@/lib/rag/generator";
 import {
@@ -31,7 +30,12 @@ import {
 import { getConfig, listSyncedConfigIds } from "@/lib/rag/configStore";
 import { embedTexts } from "@/lib/rag/embeddings";
 import { labelFor, loadDocument, type LoadInput } from "@/lib/rag/loader";
-import { retrieve } from "@/lib/rag/retriever";
+import { retrieve, retrieveForQuery } from "@/lib/rag/retriever";
+import {
+  semanticCacheLookup,
+  semanticCacheStore,
+  type CachedResult,
+} from "@/lib/rag/semanticCache";
 import {
   deleteEmbeddingRunFor,
   findDocumentByHash,
@@ -348,14 +352,42 @@ export async function syncRemoveDocFromConfigs(
   return removed;
 }
 
-export async function ask(question: string): Promise<{
-  answer: string;
-  sources: RetrievedChunk[];
-  model: string; // which tier actually produced the returned answer
-  efficacy: EfficacyResult | null; // null when saver mode is off
-  escalated: boolean;
-}> {
-  const sources = await retrieve(question);
+// Query flow entry: answer a user question. Two layers wrap the generation
+// cascade:
+//   1. Semantic cache (docs/semantic-caching-plan.md) — a past question close
+//      enough in embedding space serves its banked answer, skipping retrieval AND
+//      generation. Transparent: disabled or its table unmigrated → behaves as if
+//      absent.
+//   2. Generation cascade (answerWithCascade) — the actual answer, cheap-model
+//      first with axis-2 escalation when saver mode is on.
+export async function ask(question: string): Promise<CachedResult> {
+  const trimmed = question.trim();
+
+  // Disabled, or nothing to match on → straight to the cascade (retrieve() also
+  // owns the empty-question error, so behaviour is byte-for-byte the same).
+  if (!config.semanticCache.enabled || !trimmed) {
+    return answerWithCascade(question, await retrieve(question));
+  }
+
+  const probe = await semanticCacheLookup(trimmed);
+  if (probe.hit) return probe.result;
+
+  // Miss: reuse the vector the cache already embedded (banked in embedding_cache)
+  // so we don't pay to embed the query twice, run the cascade, and bank it.
+  const sources = await retrieveForQuery(trimmed, probe.vector);
+  const result = await answerWithCascade(question, sources);
+  await semanticCacheStore(trimmed, probe.vector, result);
+  return result;
+}
+
+// The FrugalGPT generation cascade over already-retrieved sources: cheap model
+// first, escalate to the config's llmModel only on an AXIS-2 failure. Factored
+// out of ask() so the semantic-cache miss path can feed it the sources it
+// retrieved from the cache's already-embedded vector.
+async function answerWithCascade(
+  question: string,
+  sources: RetrievedChunk[],
+): Promise<CachedResult> {
   const strongModel = activeConfig().llmModel;
 
   // Saver mode off (default) → today's behaviour: one answer from the config's
