@@ -49,6 +49,7 @@ import { AutotunePanel } from "@/app/components/AutotunePanel";
 import { ConfigChangeDialog } from "@/app/components/ConfigChangeDialog";
 import { EVAL_CRITERIA_CHANGED } from "@/app/components/EvalSettings";
 import { NdcgRankingPanel } from "@/app/components/NdcgRankingPanel";
+import { DriftBadge } from "@/app/components/DriftBadge";
 import { Tooltip } from "@/app/components/Tooltip";
 import type { ClusterRunSummary } from "@/lib/rag/clusterStore";
 import type { IngestedDocument } from "@/lib/rag/vectorStore";
@@ -65,10 +66,11 @@ function fmtScore(n: number | null): string {
 // Hover explainer for the MRR card: the reciprocal rank each position
 // contributes, all the way to the metric's k — so a value like 0.50 reads as
 // "the ground truth averages around rank 2", and a min-rate maps to the
-// worst acceptable rank. The 1/r fraction names its own rank, so no prefix.
+// worst acceptable rank. Rows name the rank rather than showing 1/r, since the
+// point is reading a score back as a position, not the arithmetic.
 function mrrFractionsTitle(k: number): string {
   const rows = [];
-  for (let r = 1; r <= k; r++) rows.push(`1/${r} = ${(1 / r).toFixed(2)}`);
+  for (let r = 1; r <= k; r++) rows.push(`rank ${r} → ${(1 / r).toFixed(2)}`);
   return `Per-question reciprocal rank:\n${rows.join("\n")}\nbeyond ${k} → 0.00`;
 }
 
@@ -491,13 +493,19 @@ export function EvalDashboard() {
   // Bulk actions → Add nDCG rankings → {preset}: for every question in scope
   // without a ground truth, build the aggregate ranking from that preset and
   // promote it (the panel's builder, run corpus-wide). Same NDJSON stream.
-  const onBulkNdcg = (clusterRunId: string, documentIds: string[] | null) =>
+  // `rebuild` also refreshes aggregate-truth questions and re-scores them — the
+  // corpus-drift badge's exit.
+  const onBulkNdcg = (
+    clusterRunId: string,
+    documentIds: string[] | null,
+    rebuild: boolean,
+  ) =>
     runStream(
       "/api/eval/bulk-ndcg",
       (r) =>
-        `Graded ${r.graded ?? 0} question(s), scored ${r.scored}. ` +
+        `${rebuild ? "Rebuilt" : "Graded"} ${r.graded ?? 0} question(s), scored ${r.scored}. ` +
         `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
-      { clusterRunId, documentIds: documentIds ?? undefined },
+      { clusterRunId, documentIds: documentIds ?? undefined, rebuild },
     );
 
   async function saveEdit(id: string) {
@@ -735,6 +743,7 @@ export function EvalDashboard() {
                 label={`nDCG@${summary.ndcgK}`}
                 value={fmtScore(summary.ndcg)}
                 big
+                badge={<NdcgStaleBadge summary={summary} />}
                 sub={
                   `${summary.ndcgCovered}/${summary.total} graded` +
                   (summary.criteria.ndcg.minRate != null
@@ -1332,7 +1341,11 @@ function BulkActions({
 }: {
   busy: boolean;
   onAddDifficulty: (d: Difficulty, documentIds: string[] | null) => void;
-  onAddNdcg: (clusterRunId: string, documentIds: string[] | null) => void;
+  onAddNdcg: (
+    clusterRunId: string,
+    documentIds: string[] | null,
+    rebuild: boolean,
+  ) => void;
   onChangeConfig: (
     documentIds: string[] | null,
     documentNames: string[] | null,
@@ -1347,6 +1360,10 @@ function BulkActions({
   // aggregate builds from, fetched on first expand (like the document scope).
   const [ndcgOpen, setNdcgOpen] = useState(false);
   const [presets, setPresets] = useState<ClusterRunSummary[] | null>(null);
+  // When on, the preset also refreshes already-graded (aggregate-truth) questions
+  // against the current buckets and re-scores them — clears the headline's
+  // corpus-drift badge. Off = the original "grade only ungraded" pass.
+  const [ndcgRebuild, setNdcgRebuild] = useState(false);
   // Document scope: collapsed to an "Apply to: …" summary by default (all
   // documents). Expanding reveals a toggle list — clicking a document flips it
   // in/out of the selection and the menu STAYS open, so several can be picked.
@@ -1534,6 +1551,24 @@ function BulkActions({
             </button>
             {ndcgOpen && (
               <div className="flex flex-col gap-1 px-3 pb-1.5 pt-0.5 text-xs">
+                {/* Rebuild toggle: off grades only ungraded questions; on also
+                    refreshes aggregate-truth questions + re-scores them, the
+                    drift-badge exit. Manual/LLM truths are left alone either way. */}
+                <label
+                  className="flex cursor-pointer items-start gap-1.5 pb-0.5 text-zinc-500"
+                  title="Also refresh already-graded questions whose ground truth is the aggregate — rebuilds their ideals against the current buckets and re-scores them. Manual/LLM truths are left untouched."
+                >
+                  <input
+                    type="checkbox"
+                    checked={ndcgRebuild}
+                    onChange={(e) => setNdcgRebuild(e.target.checked)}
+                    className="mt-0.5 cursor-pointer"
+                  />
+                  <span>
+                    Rebuild already-graded too{" "}
+                    <span className="text-zinc-400">(re-scores them)</span>
+                  </span>
+                </label>
                 {presets === null ? (
                   <span className="animate-pulse text-zinc-400">
                     Loading presets…
@@ -1545,36 +1580,53 @@ function BulkActions({
                   </span>
                 ) : (
                   presets.map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => {
-                        close();
-                        onAddNdcg(p.id, scopeIds);
-                      }}
-                      title={
-                        p.missingDocuments.length > 0
-                          ? "This preset predates some documents — their questions are " +
-                            "skipped (their pools would come from the wrong documents). " +
+                    <div key={p.id} className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          close();
+                          onAddNdcg(p.id, scopeIds, ndcgRebuild);
+                        }}
+                        title={
+                          ndcgRebuild
+                            ? "Seed each question's candidate pool from this preset; refresh aggregate-truth questions and re-score them too"
+                            : "Seed each question's candidate pool from this preset"
+                        }
+                        className="flex min-w-0 flex-1 cursor-pointer items-center justify-between gap-2 rounded border border-zinc-300 px-2 py-0.5 text-left font-medium text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                      >
+                        <span className="truncate">{p.name ?? "unnamed"}</span>
+                        <span className="shrink-0 font-normal tabular-nums text-[10px] text-zinc-400">
+                          k={p.k} · {p.chunkCount} chunks · sil{" "}
+                          {p.silhouette.toFixed(2)}
+                        </span>
+                      </button>
+                      {/* Two warnings, both riding outside the button so they
+                          can't force it to wrap: missing-docs (a preset that
+                          predates some documents — their questions are skipped)
+                          and drift (top-up pushed the centroids off-center). */}
+                      {p.missingDocuments.length > 0 && (
+                        <Tooltip
+                          align="right"
+                          text={
+                            `This preset predates ${p.missingDocuments.length} document` +
+                            `${p.missingDocuments.length === 1 ? "" : "s"} — their questions ` +
+                            "are skipped (their pools would come from the wrong documents). " +
                             `Not clustered: ${p.missingDocuments.map((d) => d.fileName).join(", ")}. ` +
                             "Re-run clustering and save a new preset to cover them."
-                          : "Seed each question's candidate pool from this preset"
-                      }
-                      className="flex cursor-pointer items-center justify-between gap-2 rounded border border-zinc-300 px-2 py-0.5 text-left font-medium text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                    >
-                      <span className="truncate">{p.name ?? "unnamed"}</span>
-                      <span className="shrink-0 font-normal tabular-nums text-[10px] text-zinc-400">
-                        {p.missingDocuments.length > 0 && (
-                          <span className="mr-1 font-medium text-amber-600 dark:text-amber-400">
-                            ⚠ {p.missingDocuments.length} doc
-                            {p.missingDocuments.length === 1 ? "" : "s"} not
-                            clustered
+                          }
+                        >
+                          <span className="shrink-0 font-medium text-amber-600 dark:text-amber-400">
+                            ⚠
                           </span>
-                        )}
-                        k={p.k} · {p.chunkCount} chunks · sil{" "}
-                        {p.silhouette.toFixed(2)}
-                      </span>
-                    </button>
+                        </Tooltip>
+                      )}
+                      <DriftBadge
+                        align="right"
+                        toppedUpCount={p.toppedUpCount}
+                        driftRatio={p.driftRatio}
+                        chunkCount={p.chunkCount}
+                      />
+                    </div>
                   ))
                 )}
               </div>
@@ -1641,22 +1693,78 @@ function Stat({
   value,
   big,
   sub,
+  badge,
 }: {
   label: string;
   value: string;
   big?: boolean;
   sub?: string;
+  // Small adornment in the label row (e.g. a staleness flag). Sits beside the
+  // label so the value below stays fully visible.
+  badge?: ReactNode;
 }) {
   return (
     <div className="flex flex-col gap-0.5 rounded-lg border border-zinc-200 px-4 py-3 dark:border-zinc-800">
-      <span className="text-xs uppercase tracking-wide text-zinc-500">
+      <span className="flex items-center gap-1.5 text-xs uppercase tracking-wide text-zinc-500">
         {label}
+        {badge}
       </span>
       <span className={big ? "text-2xl font-semibold" : "text-lg font-medium"}>
         {value}
       </span>
       {sub && <span className="text-xs text-zinc-400">{sub}</span>}
     </div>
+  );
+}
+
+// Headline-nDCG staleness flag: documents entered this config after the graded
+// set's ideals were built and/or after it was scored, so retrieval now competes
+// chunks the ideals never saw (0-gain) — the number can understate quality. The
+// tooltip points at whichever remedy applies; renders nothing when up to date.
+function NdcgStaleBadge({ summary }: { summary: EvalSummary }) {
+  if (summary.ndcgStaleDocs === 0) return null;
+  const n = summary.ndcgStaleDocs;
+  const stuck = summary.ndcgStuckTruths;
+  const parts = [
+    `${n} document${n === 1 ? "" : "s"} entered this config after some of these ` +
+      "rankings were graded. Those chunks were never candidates for the ideal " +
+      "rankings, but retrieval now surfaces them and scores them 0 against those " +
+      "ideals — so this nDCG can understate quality.",
+  ];
+  // Bulk rebuild is the fuller fix (it re-scores too), so prefer it whenever an
+  // AGGREGATE ideal is stale; fall back to a plain re-score when only retrieval
+  // predates the docs. Skip entirely when the only staleness is a stuck truth.
+  if (summary.ndcgStaleRebuild) {
+    parts.push(
+      "Fix: Bulk actions → Add nDCG rankings → tick “Rebuild already-graded too”, " +
+        "then pick your preset. That folds the new chunks into the ideals and " +
+        "re-scores in one pass.",
+    );
+  } else if (summary.ndcgStaleRescore) {
+    parts.push(
+      "Fix: Bulk actions → Re-score all, to refresh retrieval against the current corpus.",
+    );
+  }
+  // Non-aggregate truths the rebuild can't touch — name the chunks so they can
+  // be hand-fixed in the per-question panel.
+  if (stuck.length > 0) {
+    const shown = stuck.slice(0, 6);
+    const more = stuck.length - shown.length;
+    const list =
+      shown.map((s) => `${s.chunk} (${s.kind})`).join(", ") +
+      (more > 0 ? `, +${more} more` : "");
+    parts.push(
+      `${stuck.length} of these can’t be auto-fixed — their ground truth is a ` +
+        "manual/LLM ranking the rebuild leaves alone. Re-open each on its row and " +
+        `rebuild or re-promote: ${list}.`,
+    );
+  }
+  return (
+    <Tooltip text={parts.join("\n\n")}>
+      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium normal-case tracking-normal text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
+        ↻ {n} new doc{n === 1 ? "" : "s"}
+      </span>
+    </Tooltip>
   );
 }
 

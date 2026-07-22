@@ -50,6 +50,13 @@ export const config = {
   rankingNearestBuckets: 3, // cluster centroids nearest the question that seed the pool
   rankingPoolSize: 15, // candidate chunks ranked for the embedding aggregate
   rankingLlmPoolSize: 8, // smaller subset sent to the LLM ranker (cost control)
+  // --- Cluster preset drift (migration 0033; see clusterStore.topUpSavedRuns) -
+  // Fraction of a preset's CURRENT membership that arrived by top-up (nearest
+  // frozen centroid) rather than by the k-means fit. Past this, the centroids
+  // describe too little of the corpus to trust and the UI says "re-fit". Not a
+  // hard block: a drifted preset still builds usable pools, since the pool is
+  // re-sorted by similarity to the question and truncated.
+  clusterDriftThreshold: 0.2,
   // Max total upload size per ingest request, summed across files. Kept under
   // Vercel's 4.5 MB serverless body cap to leave room for multipart overhead;
   // raise it if you self-host behind your own limit.

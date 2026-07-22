@@ -284,6 +284,25 @@ export async function getTruthOrder(
   return new Map(rows.map((r) => [r.eval_question_id, r.chunk_ids]));
 }
 
+// The KIND of each question's official (is_truth) ranking, active-config scoped.
+// Lets the bulk rebuilder tell an aggregate truth (safe to refresh in place)
+// from a deliberate manual/LLM truth (left alone). Questions with no truth are
+// simply absent from the map.
+export async function truthKindByQuestion(
+  questionIds: string[],
+): Promise<Map<string, RankingKind>> {
+  if (questionIds.length === 0) return new Map();
+  const rows = await sql<{ eval_question_id: string; kind: RankingKind }[]>`
+    select r.eval_question_id, r.kind
+    from eval_rankings r
+    join document_embeddings de on de.id = r.document_embedding_id
+    where r.is_truth
+      and r.eval_question_id = any(${questionIds}::uuid[])
+      and de.config_id = ${activeConfig().id}
+  `;
+  return new Map(rows.map((r) => [r.eval_question_id, r.kind]));
+}
+
 export async function deleteRanking(id: string): Promise<boolean> {
   const rows = await sql`delete from eval_rankings where id = ${id} returning id`;
   return rows.length > 0;

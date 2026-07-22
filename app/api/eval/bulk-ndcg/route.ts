@@ -24,17 +24,20 @@ const Body = z.object({
   documentIds: z
     .array(z.uuid({ error: "`documentIds` must contain uuids." }))
     .optional(),
+  // When true, ALSO refresh questions whose ground truth is the aggregate (their
+  // ideals predate topped-up documents) and re-score them — the drift-badge exit.
+  rebuild: z.boolean().optional(),
 });
 
 export async function POST(request: Request) {
   const body = await parseBody(request, Body);
   if (body.response) return body.response;
-  const { clusterRunId, documentIds } = body.data;
+  const { clusterRunId, documentIds, rebuild } = body.data;
 
   return withRequestConfig(request, async () =>
     ndjsonStream<EvalEvent>(async (send) => {
       try {
-        await bulkBuildRankings(clusterRunId, send, documentIds);
+        await bulkBuildRankings(clusterRunId, send, documentIds, rebuild);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Bulk nDCG grading failed.";
         send({ type: "error", message });

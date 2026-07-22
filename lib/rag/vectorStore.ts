@@ -148,14 +148,17 @@ export type ChunkInsert = {
 
 // Persist one embedding run + its chunks under the ACTIVE config. Model,
 // dimension, chunk size/overlap and the physical table all come from the config,
-// so the caller only supplies the document and its chunks.
+// so the caller only supplies the document and its chunks. Returns the new chunk
+// ids so the caller can top them into saved cluster presets (clusterStore
+// .topUpSavedRuns) — done by the caller, not here, because re-chunking an
+// existing config must NOT top up (see the note on that function).
 export async function insertEmbeddingRunWithChunks(args: {
   documentId: string;
   chunks: ChunkInsert[];
-}): Promise<void> {
+}): Promise<string[]> {
   const cfg = activeConfig();
 
-  await sql.begin(async (tx) => {
+  return await sql.begin(async (tx) => {
     const [run] = await tx<{ id: string }[]>`
       insert into document_embeddings
         (config_id, document_id, model, dimension, chunk_size, chunk_overlap, chunk_count)
@@ -165,7 +168,7 @@ export async function insertEmbeddingRunWithChunks(args: {
       returning id
     `;
 
-    if (args.chunks.length === 0) return;
+    if (args.chunks.length === 0) return [];
 
     const rows = args.chunks.map((c) => ({
       config_id: cfg.id,
@@ -176,7 +179,10 @@ export async function insertEmbeddingRunWithChunks(args: {
       embedding: vectorLiteral(c.embedding),
     }));
 
-    await tx`insert into ${tx(cfg.chunksTable)} ${tx(rows)}`;
+    const inserted = await tx<{ id: string }[]>`
+      insert into ${tx(cfg.chunksTable)} ${tx(rows)} returning id
+    `;
+    return inserted.map((r) => r.id);
   });
 }
 

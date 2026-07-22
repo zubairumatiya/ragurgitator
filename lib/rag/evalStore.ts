@@ -25,8 +25,21 @@ import {
   retrievalStateFingerprint,
   type OverrideKind,
 } from "@/lib/rag/overrideStore";
-import { getTruthOrder } from "@/lib/rag/rankingStore";
+import {
+  getTruthOrder,
+  truthKindByQuestion,
+  type RankingKind,
+} from "@/lib/rag/rankingStore";
 import type { ScreenCutoffs } from "@/lib/rag/retriever";
+
+// Human labels for a ground-truth ranking's kind — mirrors the per-question
+// panel's KIND_LABEL, used in the drift badge's "stuck truth" callout.
+const TRUTH_KIND_LABEL: Record<RankingKind, string> = {
+  aggregate: "Embedding aggregate",
+  llm_pool: "LLM · ranked pool",
+  llm_rerank: "LLM · re-ranked top-k",
+  manual: "Manual",
+};
 
 export type ChunkNeedingQuestions = {
   chunkId: string;
@@ -170,6 +183,20 @@ export type EvalSummary = {
   // How many questions feed that nDCG average — the "5" in the dashboard's 5/n
   // (n = total). Questions without a ground-truth ranking aren't graded.
   ndcgCovered: number;
+  // nDCG corpus-drift signal (headline badge). Documents that entered this
+  // config AFTER a graded question's ideal was built and/or after it was scored:
+  // their chunks were never candidates for the ideals, yet retrieval now
+  // competes them in (0-gain, evalMetrics.ndcg), so this nDCG can understate
+  // quality. staleDocs = how many such documents; the two flags say which remedy
+  // the tooltip points at. All zero/false = the number reflects the corpus.
+  ndcgStaleDocs: number;
+  ndcgStaleRescore: boolean; // some graded question was scored before a doc arrived
+  ndcgStaleRebuild: boolean; // some AGGREGATE ideal predates a doc — bulk rebuild fixes it
+  // Graded questions whose ideal predates a newer document AND whose ground
+  // truth is a manual/LLM ranking (not the aggregate). The bulk rebuild leaves
+  // these alone, so they keep the badge lit until hand-fixed — named here (by
+  // labeled chunk + kind) so the tooltip can point at them. Empty when none.
+  ndcgStuckTruths: { chunk: string; kind: string }[];
   perDocument: DocumentBreakdown[];
   questions: QuestionDetail[];
   runs: RunSnapshot[];
@@ -1701,6 +1728,37 @@ async function listChunkOverrideInfo(table: string): Promise<ChunkOverrideInfo[]
   return out;
 }
 
+// When each question's OFFICIAL (is_truth) ideal ranking was built, under the
+// active config — used to tell whether documents arrived after it (making the
+// ideal incomplete). Separate from getTruthOrder so that hot path stays lean.
+async function truthRankingBuiltAt(
+  questionIds: string[],
+): Promise<Map<string, number>> {
+  if (questionIds.length === 0) return new Map();
+  const rows = await sql<{ eval_question_id: string; created_at: Date }[]>`
+    select r.eval_question_id, r.created_at
+    from eval_rankings r
+    join document_embeddings de on de.id = r.document_embedding_id
+    where r.is_truth
+      and r.eval_question_id = any(${questionIds}::uuid[])
+      and de.config_id = ${activeConfig().id}
+  `;
+  return new Map(rows.map((r) => [r.eval_question_id, r.created_at.getTime()]));
+}
+
+// When each document entered the ACTIVE config's corpus — the embedding run's
+// time, not the (possibly much older) documents row, since a doc only competes
+// in this config's retrieval once it's embedded here. One entry per document.
+async function activeDocIngestTimes(): Promise<number[]> {
+  const rows = await sql<{ created_at: Date }[]>`
+    select min(de.created_at) as created_at
+    from document_embeddings de
+    where de.config_id = ${activeConfig().id}
+    group by de.document_id
+  `;
+  return rows.map((r) => r.created_at.getTime());
+}
+
 export async function getSummary(): Promise<EvalSummary> {
   const cfg = activeConfig();
   const criteria = await getActiveCriteria();
@@ -1728,6 +1786,10 @@ export async function getSummary(): Promise<EvalSummary> {
     mrr: null,
     ndcg: null,
     ndcgCovered: 0,
+    ndcgStaleDocs: 0,
+    ndcgStaleRescore: false,
+    ndcgStaleRebuild: false,
+    ndcgStuckTruths: [],
     perDocument: [],
     questions: [],
     runs: [],
@@ -1963,6 +2025,52 @@ export async function getSummary(): Promise<EvalSummary> {
     graded.length > 0 ? graded.reduce((sum, v) => sum + v, 0) / graded.length : null;
   const ndcgCovered = graded.length;
 
+  // nDCG corpus-drift: documents that entered this config after the graded set's
+  // ideals were built and/or after it was scored. Each input ages the number
+  // independently — a doc after the ideal makes it incomplete (rebuild fixes),
+  // a doc after the score makes retrieval stale (re-score fixes). staleDocs is
+  // sized off the EARLIEST such input, so it counts every document the current
+  // number can't fully account for. Skipped entirely when nothing is graded.
+  let ndcgStaleDocs = 0;
+  let ndcgStaleRescore = false;
+  let ndcgStaleRebuild = false;
+  const stuckTruths = new Map<string, string>(); // chunk -> kind label (deduped)
+  const gradedQuestions = questions.filter((q) => q.ndcg !== null && !q.ignored);
+  if (gradedQuestions.length > 0) {
+    const gradedIds = gradedQuestions.map((q) => q.questionId);
+    const [truthBuiltAt, truthKinds, docTimes] = await Promise.all([
+      truthRankingBuiltAt(gradedIds),
+      truthKindByQuestion(gradedIds),
+      activeDocIngestTimes(),
+    ]);
+    const newestDoc = docTimes.length > 0 ? Math.max(...docTimes) : null;
+    if (newestDoc !== null) {
+      let earliestInput = Infinity;
+      for (const q of gradedQuestions) {
+        const builtAt = truthBuiltAt.get(q.questionId) ?? null;
+        if (q.scoredAt !== null && newestDoc > q.scoredAt) ndcgStaleRescore = true;
+        if (builtAt !== null && newestDoc > builtAt) {
+          // Ideal predates a newer document. An aggregate ideal the bulk rebuild
+          // refreshes; a manual/LLM truth it leaves alone, so name that chunk as
+          // needing a hand-fix instead of implying a rebuild would clear it.
+          if (truthKinds.get(q.questionId) === "aggregate") {
+            ndcgStaleRebuild = true;
+          } else {
+            const chunk = `${q.fileName}#${q.expectedPosition ?? "?"}`;
+            stuckTruths.set(
+              chunk,
+              TRUTH_KIND_LABEL[truthKinds.get(q.questionId) ?? "manual"],
+            );
+          }
+        }
+        const threshold = Math.min(builtAt ?? Infinity, q.scoredAt ?? Infinity);
+        if (threshold < earliestInput) earliestInput = threshold;
+      }
+      ndcgStaleDocs = docTimes.filter((t) => t > earliestInput).length;
+    }
+  }
+  const ndcgStuckTruths = [...stuckTruths].map(([chunk, kind]) => ({ chunk, kind }));
+
   // Questions "Process new chunks" would score: never scored, or edited since.
   // Matches questionsNeedingScoring() — no extra query needed.
   const pendingScoring = questions.filter((q) => q.hit === null || q.stale).length;
@@ -2000,6 +2108,10 @@ export async function getSummary(): Promise<EvalSummary> {
     mrr,
     ndcg: ndcgValue,
     ndcgCovered,
+    ndcgStaleDocs,
+    ndcgStaleRescore,
+    ndcgStaleRebuild,
+    ndcgStuckTruths,
     perDocument: [...byDoc.values()],
     questions,
     runs: runRows.map((r) => ({

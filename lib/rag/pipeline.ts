@@ -27,6 +27,7 @@ import {
   documentsForEmbedding,
   type EmbeddableDoc,
 } from "@/lib/rag/corpusStore";
+import { topUpSavedRuns } from "@/lib/rag/clusterStore";
 import { getConfig, listSyncedConfigIds } from "@/lib/rag/configStore";
 import { embedTexts } from "@/lib/rag/embeddings";
 import { labelFor, loadDocument, type LoadInput } from "@/lib/rag/loader";
@@ -95,7 +96,7 @@ async function ingestOne(
   const vectors = await embedTexts(chunks.map((c) => c.text));
 
   onStep("store");
-  await insertEmbeddingRunWithChunks({
+  const chunkIds = await insertEmbeddingRunWithChunks({
     documentId,
     chunks: chunks.map((c, i) => ({
       position: c.position,
@@ -103,6 +104,7 @@ async function ingestOne(
       embedding: vectors[i],
     })),
   });
+  await topUpSavedRuns(chunkIds);
 
   return chunks.length;
 }
@@ -199,7 +201,7 @@ async function embedStoredDocs(
         onEvent({ type: "step", index, fileName, step: "embed" });
         const vectors = await embedTexts(chunks.map((c) => c.text));
         onEvent({ type: "step", index, fileName, step: "store" });
-        await insertEmbeddingRunWithChunks({
+        const chunkIds = await insertEmbeddingRunWithChunks({
           documentId: d.id,
           chunks: chunks.map((c, i2) => ({
             position: c.position,
@@ -207,6 +209,7 @@ async function embedStoredDocs(
             embedding: vectors[i2],
           })),
         });
+        await topUpSavedRuns(chunkIds);
         result = { fileName, chunksAdded: chunks.length };
       }
     } catch (err) {

@@ -47,8 +47,16 @@ export type ClusterRunSummary = {
   // Active-config documents with NO chunk in this run — documents ingested
   // after it was built. A run that misses a document gives that document's
   // questions candidate pools drawn from the wrong documents, so the eval UI
-  // flags (and the bulk nDCG grader skips) them.
+  // flags (and the bulk nDCG grader skips) them. Top-up keeps this empty going
+  // forward; it stays populated for docs that predate migration 0033 and for
+  // every doc after a re-chunk (which top-up deliberately sits out).
   missingDocuments: { id: string; fileName: string }[];
+  // Members assigned to a frozen centroid AFTER the fit (migration 0033), and
+  // their share of current membership. chunkCount describes the fit and never
+  // moves, so driftRatio is the gap between "what was fit" and "what's in the
+  // buckets now" — past config.clusterDriftThreshold the UI says re-fit.
+  toppedUpCount: number;
+  driftRatio: number;
 };
 
 export type ClusterRunDetail = ClusterRunSummary & { buckets: ClusterBucket[] };
@@ -193,9 +201,91 @@ function summaryFromCandidate(
     sizes: cand.sizes,
     cohesions: cand.cohesion,
     createdAt,
-    // A fresh run clusters the entire active corpus, so nothing is missing.
+    // A fresh run clusters the entire active corpus, so nothing is missing and
+    // every member came from the fit itself.
     missingDocuments: [],
+    toppedUpCount: 0,
+    driftRatio: 0,
   };
+}
+
+// --- Incremental top-up (migration 0033) -----------------------------------
+// Assign freshly ingested chunks to their nearest EXISTING centroid in every
+// saved preset of the active config, so their questions become gradeable on
+// /eval right away instead of being skipped until someone re-runs clustering.
+//
+// Deliberately NOT called when re-chunking a config in place (lib/rag/
+// reconfigure.ts): that mints new ids for the WHOLE corpus, so topping up would
+// paper over a preset whose centroids describe a chunking that no longer
+// exists. Leaving those runs untouched lets the existing missing-documents flag
+// fire on every document, which is the honest signal to re-fit.
+//
+// Idempotent: the (cluster_run_id, chunk_id) primary key makes a repeat call a
+// no-op, so a retried ingest can't double-count drift.
+export async function topUpSavedRuns(chunkIds: string[]): Promise<number> {
+  if (chunkIds.length === 0) return 0;
+  const cfg = activeConfig();
+
+  // Model + dimension must match, not just config: a config whose model changed
+  // keeps its older runs, and their centroids live in a different vector space
+  // (and pgvector would reject the dimension outright).
+  const runs = await sql<{ id: string }[]>`
+    select id from cluster_runs
+    where config_id = ${cfg.id}
+      and saved = true
+      and model = ${cfg.embeddingModel}
+      and dimension = ${cfg.dimension}
+  `;
+  if (runs.length === 0) return 0;
+
+  let assigned = 0;
+  for (const run of runs) {
+    for (let start = 0; start < chunkIds.length; start += CC_INSERT_BATCH) {
+      const batch = chunkIds.slice(start, start + CC_INSERT_BATCH);
+      // One nearest-centroid lookup per chunk. `<=>` is cosine distance here, so
+      // 1 - distance matches the cosine similarity the k-means fit stored.
+      const rows = await sql<{ chunk_id: string }[]>`
+        insert into chunk_clusters (cluster_run_id, chunk_id, cluster_id, similarity, topped_up_at)
+        select ${run.id}, c.id, nearest.id, 1 - nearest.distance, now()
+        from ${sql(cfg.chunksTable)} c
+        cross join lateral (
+          select cl.id, cl.centroid <=> c.embedding as distance
+          from clusters cl
+          where cl.cluster_run_id = ${run.id}
+          order by cl.centroid <=> c.embedding
+          limit 1
+        ) nearest
+        where c.id = any(${batch}::uuid[])
+        on conflict (cluster_run_id, chunk_id) do nothing
+        returning chunk_id
+      `;
+      assigned += rows.length;
+    }
+  }
+
+  if (assigned > 0) {
+    console.log(
+      `[rag:clusters] topped up ${assigned} chunk assignment(s) across ` +
+        `${runs.length} saved preset(s) for config=${cfg.id.slice(0, 8)}`,
+    );
+  }
+  return assigned;
+}
+
+// Per-run count of members that arrived by top-up rather than by the fit. The
+// numerator of driftRatio; see migration 0033.
+async function toppedUpByRun(runIds: string[]): Promise<Map<string, number>> {
+  const byRun = new Map<string, number>();
+  if (runIds.length === 0) return byRun;
+  const rows = await sql<{ cluster_run_id: string; n: number }[]>`
+    select cluster_run_id, count(*)::int as n
+    from chunk_clusters
+    where cluster_run_id = any(${runIds}::uuid[])
+      and topped_up_at is not null
+    group by cluster_run_id
+  `;
+  for (const r of rows) byRun.set(r.cluster_run_id, r.n);
+  return byRun;
 }
 
 // Engine: load the corpus, run RESTARTS candidates at k, persist them as unsaved,
@@ -322,12 +412,15 @@ export async function listRuns(): Promise<ClusterRunSummary[]> {
   `;
 
   const runIds = runs.map((r) => r.id);
-  const [buckets, missing] = await Promise.all([
+  const [buckets, missing, toppedUp] = await Promise.all([
     bucketRowsByRun(runIds),
     missingDocumentsByRun(runIds),
+    toppedUpByRun(runIds),
   ]);
   return runs.map((r) => {
     const list = buckets.get(r.id) ?? [];
+    const toppedUpCount = toppedUp.get(r.id) ?? 0;
+    const current = r.chunk_count + toppedUpCount;
     return {
       id: r.id,
       k: r.k,
@@ -340,6 +433,8 @@ export async function listRuns(): Promise<ClusterRunSummary[]> {
       cohesions: list.map((b) => b.cohesion),
       createdAt: r.created_at.getTime(),
       missingDocuments: missing.get(r.id) ?? [],
+      toppedUpCount,
+      driftRatio: current > 0 ? toppedUpCount / current : 0,
     };
   });
 }
@@ -416,7 +511,12 @@ export async function getRun(id: string): Promise<ClusterRunDetail | null> {
     };
   });
 
-  const missing = await missingDocumentsByRun([run.id]);
+  const [missing, toppedUp] = await Promise.all([
+    missingDocumentsByRun([run.id]),
+    toppedUpByRun([run.id]),
+  ]);
+  const toppedUpCount = toppedUp.get(run.id) ?? 0;
+  const current = run.chunk_count + toppedUpCount;
   return {
     id: run.id,
     k: run.k,
@@ -429,6 +529,8 @@ export async function getRun(id: string): Promise<ClusterRunDetail | null> {
     cohesions: buckets.map((b) => b.cohesion),
     createdAt: run.created_at.getTime(),
     missingDocuments: missing.get(run.id) ?? [],
+    toppedUpCount,
+    driftRatio: current > 0 ? toppedUpCount / current : 0,
     buckets,
   };
 }

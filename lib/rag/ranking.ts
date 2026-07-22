@@ -38,11 +38,11 @@ import {
   getQuestionScope,
   getRankingChunks,
   getRetrievedOrder,
-  getTruthOrder,
   listRankings,
   nearestBuckets,
   poolFromBuckets,
   setTruth,
+  truthKindByQuestion,
   upsertRanking,
   type RankingKind,
   type StoredRanking,
@@ -466,6 +466,14 @@ export async function setOfficialRanking(
 // user made shouldn't be clobbered by a bulk pass. Per-question failures are
 // reported on the stream and skipped rather than aborting the run.
 //
+// `rebuild` is the exit for the headline's corpus-drift badge: it ALSO refreshes
+// questions whose truth is the aggregate (their ideals were built before newer
+// documents were topped into the buckets, so a rebuild lets those chunks enter
+// the ideal — clusterStore.topUpSavedRuns). A manual/LLM truth is still left
+// alone. To keep the number honest, a rebuild re-scores everything it rebuilt,
+// in that order: the new chunk enters the ideal FIRST, so re-scored retrieval
+// that now surfaces it scores real gain instead of 0 against a stale ideal.
+//
 // Modest concurrency: each build fans out to one embed call per aggregate model
 // (pool + query), so this is gentler than SCORE_CONCURRENCY; the shared embed
 // caches upsert idempotently, so races cost at most a duplicate embed.
@@ -475,11 +483,18 @@ export async function bulkBuildRankings(
   clusterRunId: string,
   emit: (event: EvalEvent) => void = () => {},
   documentIds?: string[],
+  rebuild = false,
 ): Promise<{ graded: number; scored: number }> {
   const t0 = performance.now();
   const questions = await allLabeledQuestions(documentIds);
-  const truths = await getTruthOrder(questions.map((q) => q.questionId));
-  const pending = questions.filter((q) => !truths.has(q.questionId));
+  const truthKinds = await truthKindByQuestion(questions.map((q) => q.questionId));
+  // Ungraded questions build in both modes; an aggregate truth is refreshed only
+  // on rebuild; a manual/LLM truth is never touched by a bulk pass.
+  const pending = questions.filter((q) => {
+    const kind = truthKinds.get(q.questionId);
+    if (!kind) return true;
+    return rebuild && kind === "aggregate";
+  });
 
   // Documents the preset doesn't cover (ingested after it was clustered). Their
   // questions would get candidate pools drawn from the WRONG documents — a
@@ -533,13 +548,16 @@ export async function bulkBuildRankings(
     ),
   );
 
-  // Newly graded but never scored questions have no retrieved order to grade
-  // against — score just those (already-scored ones read their nDCG from the
-  // stored result rows the moment the truth exists).
-  const needsScore = (await questionsNeedingScoring()).filter((q) =>
-    gradedIds.has(q.questionId),
-  );
-  const scored = await scoreQuestions(needsScore, emit);
+  // On a plain grade, only NEWLY-graded-but-never-scored questions need scoring
+  // (already-scored ones read their nDCG live from the stored result the moment
+  // a truth exists). On a rebuild, re-score EVERY question we rebuilt so its
+  // stored retrieval reflects the topped-up corpus too — otherwise the ideal is
+  // current but the retrieval still predates the new docs, and the drift badge's
+  // re-score half stays lit.
+  const toScore = rebuild
+    ? questions.filter((q) => gradedIds.has(q.questionId))
+    : (await questionsNeedingScoring()).filter((q) => gradedIds.has(q.questionId));
+  const scored = await scoreQuestions(toScore, emit);
 
   const summary = await getSummary();
   if (gradedIds.size > 0 || scored > 0) {

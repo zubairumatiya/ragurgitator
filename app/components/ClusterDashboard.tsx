@@ -15,6 +15,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "@/lib/http/client";
+import { DriftBadge } from "@/app/components/DriftBadge";
 import type {
   BucketChunk,
   ClusterBucket,
@@ -341,6 +342,11 @@ function RunCard({
           </span>
           <Bars values={run.sizes} max={Math.max(1, ...run.sizes)} title="bucket sizes" />
         </button>
+        <DriftBadge
+          toppedUpCount={run.toppedUpCount}
+          driftRatio={run.driftRatio}
+          chunkCount={run.chunkCount}
+        />
         {run.saved && (
           <button
             type="button"
