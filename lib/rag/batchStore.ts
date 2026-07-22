@@ -44,6 +44,7 @@ export type BatchSavingsPatch = {
   mode?: BatchSavings["mode"];
   bulk?: Partial<BatchSavings["bulk"]>;
   jobs?: Partial<BatchSavings["jobs"]>;
+  semanticCache?: Partial<BatchSavings["semanticCache"]>;
 };
 
 export async function updateBatchSavings(
@@ -56,6 +57,7 @@ export async function updateBatchSavings(
     mode: patch.mode ?? cur.mode,
     bulk: { ...cur.bulk, ...patch.bulk },
     jobs: { ...cur.jobs, ...patch.jobs },
+    semanticCache: { ...cur.semanticCache, ...patch.semanticCache },
   });
   const done = await sql`
     update configs set batch_savings = ${sql.json(next)}, updated_at = now()

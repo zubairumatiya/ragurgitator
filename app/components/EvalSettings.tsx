@@ -262,6 +262,7 @@ export function EvalSettings() {
           bulk: savings.bulk,
           jobs: savings.jobs,
           cascadeEnabled,
+          semanticCache: savings.semanticCache,
         }),
       });
       if (!bres.ok) {
@@ -680,6 +681,34 @@ export function EvalSettings() {
                 ? "We'll email you when it's done."
                 : "We'll notify you here when it's done."}
             </p>
+
+            {/* Semantic answer cache: serving is opt-in; the cache always fills. */}
+            <label className="mt-2 flex items-center justify-between gap-2 border-t border-zinc-200 py-0.5 pt-2 dark:border-zinc-800">
+              <Tooltip
+                align="left"
+                text={
+                  "Serve a stored answer when a new question is close enough to a " +
+                  "past one, skipping retrieval and the LLM. The cache is always " +
+                  "populated — this only controls whether close matches are served."
+                }
+              >
+                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                  Serve cached answers
+                </span>
+              </Tooltip>
+              <input
+                type="checkbox"
+                checked={savings.semanticCache.serve}
+                onChange={(e) =>
+                  setSavings((s) => ({
+                    ...s,
+                    semanticCache: { ...s.semanticCache, serve: e.target.checked },
+                  }))
+                }
+                className="h-4 w-4 shrink-0 cursor-pointer accent-black dark:accent-white"
+              />
+            </label>
+
             {inFlightCount > 0 && (
               <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
                 {inFlightCount} batch request{inFlightCount === 1 ? "" : "s"} processing for this

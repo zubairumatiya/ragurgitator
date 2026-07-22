@@ -55,9 +55,11 @@ export const config = {
   // raise it if you self-host behind your own limit.
   maxUploadBytes: 4 * 1024 * 1024,
   // --- Semantic answer cache (docs/semantic-caching-plan.md, migration 0031) --
-  // A near-duplicate of a past question serves that question's stored answer,
-  // so ask() skips retrieval/generation. `enabled: false` makes ask() behave
-  // exactly as before; the table not existing degrades it to a no-op too.
+  // Master switch for the cache MECHANISM (populate + proximity match). Whether
+  // a match is actually SERVED is a separate per-config toggle ("Serve cached
+  // answers", Settings → Savings, configs.batch_savings) — the cache still fills
+  // with serving off. `enabled: false` makes ask() behave exactly as before;
+  // the table not existing degrades it to a no-op too.
   semanticCache: {
     enabled: true,
     // Conservative cosine trigger for any vector-space without a calibrated

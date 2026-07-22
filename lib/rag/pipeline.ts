@@ -30,6 +30,7 @@ import {
 import { getConfig, listSyncedConfigIds } from "@/lib/rag/configStore";
 import { embedTexts } from "@/lib/rag/embeddings";
 import { labelFor, loadDocument, type LoadInput } from "@/lib/rag/loader";
+import { getActiveBatchSavings } from "@/lib/rag/batchStore";
 import { retrieve, retrieveForQuery } from "@/lib/rag/retriever";
 import {
   semanticCacheLookup,
@@ -356,8 +357,11 @@ export async function syncRemoveDocFromConfigs(
 // cascade:
 //   1. Semantic cache (docs/semantic-caching-plan.md) — a past question close
 //      enough in embedding space serves its banked answer, skipping retrieval AND
-//      generation. Transparent: disabled or its table unmigrated → behaves as if
-//      absent.
+//      generation. Whether a close match is actually SERVED is the per-config
+//      "Serve cached answers" toggle (Settings → Savings); the cache is POPULATED
+//      regardless, so flipping serving on later has data to hit against.
+//      Transparent: the mechanism disabled or its table unmigrated → behaves as
+//      if absent.
 //   2. Generation cascade (answerWithCascade) — the actual answer, cheap-model
 //      first with axis-2 escalation when saver mode is on.
 export async function ask(question: string): Promise<CachedResult> {
@@ -369,11 +373,14 @@ export async function ask(question: string): Promise<CachedResult> {
     return answerWithCascade(question, await retrieve(question));
   }
 
-  const probe = await semanticCacheLookup(trimmed);
+  const serve = (await getActiveBatchSavings()).semanticCache.serve;
+  const probe = await semanticCacheLookup(trimmed, serve);
   if (probe.hit) return probe.result;
 
-  // Miss: reuse the vector the cache already embedded (banked in embedding_cache)
-  // so we don't pay to embed the query twice, run the cascade, and bank it.
+  // Miss (or would-hit with serving off): reuse the vector the cache already
+  // embedded (banked in embedding_cache) so we don't pay to embed the query
+  // twice, run the cascade, and always bank the result — so the cache fills even
+  // while serving is off.
   const sources = await retrieveForQuery(trimmed, probe.vector);
   const result = await answerWithCascade(question, sources);
   await semanticCacheStore(trimmed, probe.vector, result);

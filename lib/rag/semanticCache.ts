@@ -114,9 +114,15 @@ async function resolveThreshold(model: string): Promise<number> {
 
 // Find a cached answer for `question`. Embeds the query (cached in 0020) and,
 // among entries valid for the current fingerprint and same embedding model,
-// returns the nearest one IF it clears the per-space threshold. Always returns
-// the query vector so the caller can retrieve without re-embedding on a miss.
-export async function semanticCacheLookup(question: string): Promise<CacheProbe> {
+// finds the nearest one. A match that clears the per-space threshold is only
+// RETURNED AS A HIT when `serve` is true (the Settings → Savings toggle); with
+// serving off it's logged as a "would-hit" shadow and reported as a miss, so
+// the caller recomputes a fresh answer. Either way the query vector is returned
+// so the caller can retrieve without re-embedding.
+export async function semanticCacheLookup(
+  question: string,
+  serve: boolean,
+): Promise<CacheProbe> {
   const cfg = activeConfig();
   // Embed first: retrieval needs this vector regardless, so a provider error
   // here surfaces exactly as it would without the cache.
@@ -144,14 +150,23 @@ export async function semanticCacheLookup(question: string): Promise<CacheProbe>
     const threshold = await resolveThreshold(cfg.embeddingModel);
 
     if (match && isHit(match.sim, threshold)) {
+      if (serve) {
+        console.log(
+          `[rag:semantic-cache] HIT sim=${match.sim.toFixed(4)} ≥ ${threshold} — ` +
+            `served cached answer, skipped retrieval. new="${truncate(question)}" ` +
+            `matched="${truncate(match.value.text)}"`,
+        );
+        // Fire-and-forget telemetry bump; a failure here must not fail the answer.
+        void bumpHit(cfg.id, cfg.embeddingModel, fingerprint, match.value.text);
+        return { hit: true, result: match.value.result, sim: match.sim, matchedQuery: match.value.text, vector };
+      }
+      // Serving is off (Settings → Savings): shadow-log the would-be hit for
+      // threshold validation, then report a miss so a fresh answer is computed.
       console.log(
-        `[rag:semantic-cache] HIT sim=${match.sim.toFixed(4)} ≥ ${threshold} — ` +
-          `served cached answer, skipped retrieval. new="${truncate(question)}" ` +
-          `matched="${truncate(match.value.text)}"`,
+        `[rag:semantic-cache] would-hit sim=${match.sim.toFixed(4)} ≥ ${threshold} but ` +
+          `serving is OFF — recomputing. new="${truncate(question)}" matched="${truncate(match.value.text)}"`,
       );
-      // Fire-and-forget telemetry bump; a failure here must not fail the answer.
-      void bumpHit(cfg.id, cfg.embeddingModel, fingerprint, match.value.text);
-      return { hit: true, result: match.value.result, sim: match.sim, matchedQuery: match.value.text, vector };
+      return { hit: false, vector };
     }
 
     if (match) {

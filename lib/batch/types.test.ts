@@ -35,6 +35,7 @@ test("effectiveChoice: BULK mode reads the leg and ignores per-job values", () =
       cluster_labeling: "standard",
       ingest_embedding: "batch",
     },
+    semanticCache: { serve: false },
   };
   assert.equal(effectiveChoice(s, "question_generation"), "batch"); // llm leg
   assert.equal(effectiveChoice(s, "cluster_labeling"), "batch"); // llm leg
@@ -53,6 +54,7 @@ test("effectiveChoice: INDIVIDUAL mode reads per-job and ignores the bulk legs",
       cluster_labeling: "batch",
       ingest_embedding: "standard",
     },
+    semanticCache: { serve: false },
   };
   assert.equal(effectiveChoice(s, "question_generation"), "batch");
   assert.equal(effectiveChoice(s, "ndcg_ranking"), "standard");
@@ -74,6 +76,14 @@ test("coerceBatchSavings: tolerant of junk, missing, and partial input", () => {
   assert.equal(c.bulk.embedding, "standard"); // 'nonsense' rejected
   assert.equal(c.jobs.question_generation, "batch");
   assert.equal(c.jobs.ndcg_ranking, "standard"); // filled from default
+  assert.equal(c.semanticCache.serve, false); // absent → serving off
+
+  // serve is a STRICT boolean: only literal true enables it, everything else
+  // (missing, "yes", 1, null) coerces to off — a wrong served answer is worse
+  // than a missed cache, so the default must never be surprised on.
+  assert.equal(coerceBatchSavings({ semanticCache: { serve: true } }).semanticCache.serve, true);
+  assert.equal(coerceBatchSavings({ semanticCache: { serve: "yes" } }).semanticCache.serve, false);
+  assert.equal(coerceBatchSavings({ semanticCache: {} }).semanticCache.serve, false);
 });
 
 test("coerceBatchSavings preserves BOTH mode maps so flipping the dropdown loses nothing", () => {

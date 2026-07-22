@@ -59,6 +59,7 @@ const Body = z.object({
   // Saver-mode toggle (0032) — the FrugalGPT cascade on/off for this config. Not
   // part of BatchSavings; written to configs.cascade_enabled separately.
   cascadeEnabled: z.boolean().optional(),
+  semanticCache: z.object({ serve: z.boolean().optional() }).optional(),
 });
 
 export async function PATCH(request: Request) {

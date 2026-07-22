@@ -50,6 +50,12 @@ export type BatchSavings = {
   // Individual mode: one choice per job. Both maps persist so flipping the mode
   // dropdown never discards the other view's values.
   jobs: Record<JobKind, BatchChoice>;
+  // Semantic answer cache (docs/semantic-caching-plan.md): serve a stored answer
+  // for a near-duplicate question, skipping retrieval/generation. Note this only
+  // governs whether a HIT is SERVED — the cache is always populated regardless,
+  // so turning `serve` on later has data to hit against. Opt-in (default off): a
+  // served hit can be wrong if the proximity threshold is loose.
+  semanticCache: { serve: boolean };
 };
 
 export const DEFAULT_BATCH_SAVINGS: BatchSavings = {
@@ -61,6 +67,7 @@ export const DEFAULT_BATCH_SAVINGS: BatchSavings = {
     cluster_labeling: "standard",
     ingest_embedding: "standard",
   },
+  semanticCache: { serve: false },
 };
 
 // The effective choice for a kind: individual mode reads the per-job value;
@@ -93,6 +100,8 @@ export function coerceBatchSavings(raw: unknown): BatchSavings {
       cluster_labeling: choice(r.jobs?.cluster_labeling, d.jobs.cluster_labeling),
       ingest_embedding: choice(r.jobs?.ingest_embedding, d.jobs.ingest_embedding),
     },
+    // Absent (old rows) or non-boolean → the safe default (don't serve).
+    semanticCache: { serve: r.semanticCache?.serve === true },
   };
 }
 
