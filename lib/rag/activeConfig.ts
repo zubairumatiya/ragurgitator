@@ -36,6 +36,7 @@ export type ResolvedConfig = {
   // model to position fusion ranks. null = auto (max(top_k * 4, 50)).
   fusionPool: number | null;
   llmModel: string;
+  cascadeEnabled: boolean; // saver-mode toggle (0032): cheap-first cascade vs. single llmModel
   dimension: number; // embedding dimension of the base model
   chunksTable: string; // chunks_<model>_<dim> table this config's vectors live in
 };
@@ -56,6 +57,7 @@ function toResolved(row: ConfigRow): ResolvedConfig {
     topK: row.top_k,
     fusionPool: row.retrieval_fusion_pool,
     llmModel: row.llm_model,
+    cascadeEnabled: row.cascade_enabled,
     dimension,
     chunksTable: chunksTable(row.base_model, dimension),
   };
@@ -71,6 +73,7 @@ type ConfigRow = {
   top_k: number;
   retrieval_fusion_pool: number | null;
   llm_model: string;
+  cascade_enabled: boolean;
 };
 
 // Config ids always come from our DB (uuids). Guard string lookups with this so
@@ -87,7 +90,7 @@ export async function resolveConfig(configId: string): Promise<ResolvedConfig | 
   if (!isUuid(configId)) return null;
   const rows = await sql<ConfigRow[]>`
     select id, corpus_id, corpus_sync, base_model, chunk_size, chunk_overlap, top_k,
-           retrieval_fusion_pool, llm_model
+           retrieval_fusion_pool, llm_model, cascade_enabled
     from configs
     where id = ${configId}
     limit 1
@@ -101,7 +104,7 @@ export async function resolveConfig(configId: string): Promise<ResolvedConfig | 
 export async function resolveDefaultConfig(): Promise<ResolvedConfig> {
   const rows = await sql<ConfigRow[]>`
     select id, corpus_id, corpus_sync, base_model, chunk_size, chunk_overlap, top_k,
-           retrieval_fusion_pool, llm_model
+           retrieval_fusion_pool, llm_model, cascade_enabled
     from configs
     order by created_at
     limit 1

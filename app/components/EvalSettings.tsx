@@ -101,6 +101,9 @@ export function EvalSettings() {
   const [savings, setSavings] = useState<BatchSavings>(DEFAULT_BATCH_SAVINGS);
   const [emailReady, setEmailReady] = useState(false);
   const [inFlightCount, setInFlightCount] = useState(0);
+  // Saver mode (0032): the FrugalGPT cascade on/off for this config (its own
+  // column, configs.cascade_enabled — separate from the BatchSavings blob).
+  const [cascadeEnabled, setCascadeEnabled] = useState(false);
   const setLeg = (leg: BatchLeg, v: BatchChoice) =>
     setSavings((s) => ({ ...s, bulk: { ...s.bulk, [leg]: v } }));
   const setJob = (kind: JobKind, v: BatchChoice) =>
@@ -157,12 +160,18 @@ export function EvalSettings() {
       try {
         const bres = await apiFetch("/api/batch");
         const bdata = (await bres.json().catch(() => null)) as
-          | { savings?: BatchSavings; emailConfigured?: boolean; inFlight?: unknown[] }
+          | {
+              savings?: BatchSavings;
+              emailConfigured?: boolean;
+              inFlight?: unknown[];
+              cascadeEnabled?: boolean;
+            }
           | null;
         if (bres.ok && bdata?.savings) {
           setSavings(bdata.savings);
           setEmailReady(Boolean(bdata.emailConfigured));
           setInFlightCount(bdata.inFlight?.length ?? 0);
+          setCascadeEnabled(Boolean(bdata.cascadeEnabled));
         }
       } catch {
         /* leave defaults — the Savings section still renders */
@@ -248,7 +257,12 @@ export function EvalSettings() {
       const bres = await apiFetch("/api/batch", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: savings.mode, bulk: savings.bulk, jobs: savings.jobs }),
+        body: JSON.stringify({
+          mode: savings.mode,
+          bulk: savings.bulk,
+          jobs: savings.jobs,
+          cascadeEnabled,
+        }),
       });
       if (!bres.ok) {
         const bdata = (await bres.json().catch(() => null)) as { error?: string } | null;
@@ -590,6 +604,30 @@ export function EvalSettings() {
             {/* SAVINGS (Phase E1 — batch API: −50% Anthropic / −33% Voyage) */}
             <p className="mb-1 mt-3 border-t border-zinc-200 pt-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:border-zinc-800">
               Savings
+            </p>
+            <div className="flex items-center justify-between gap-2 py-0.5">
+              <Tooltip
+                align="left"
+                text={
+                  "Saver mode (FrugalGPT cascade): answer with a cheap model first, " +
+                  "then escalate to this config's model only when the answer looks weak " +
+                  "(refused or poorly grounded). Off = always this config's model. Saves " +
+                  "on easy questions with no quality change on the hard ones."
+                }
+              >
+                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                  Saver mode (cascade)
+                </span>
+              </Tooltip>
+              <input
+                type="checkbox"
+                checked={cascadeEnabled}
+                onChange={(e) => setCascadeEnabled(e.target.checked)}
+                className="cursor-pointer"
+              />
+            </div>
+            <p className="mb-1 mt-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
+              Batch API
             </p>
             <label className="flex items-center justify-between gap-2 py-0.5">
               <Tooltip

@@ -28,11 +28,11 @@ export const config = {
   // only SAVES on easy ones. Every number below is tunable; efficacyThreshold is
   // the exact knob a "sweep" would optimize.
   cascade: {
-    // Opt-in saver mode. OFF (default) = today's behaviour: one answer from the
-    // config's llmModel, no gate, zero extra cost. ON = Haiku-first + gate +
-    // escalation. Seed of the "Savings" settings surface (alongside batch API +
-    // the semantic answer cache); a persisted/UI toggle can later override this.
-    enabled: false,
+    // Saver mode is a PER-CONFIG toggle: configs.cascade_enabled (migration 0032),
+    // read via activeConfig().cascadeEnabled and flipped in Settings → Savings.
+    // OFF (default) = today's behaviour: one answer from the config's llmModel, no
+    // gate, zero extra cost. ON = Haiku-first + gate + escalation. The knobs below
+    // are the (still global) cascade parameters.
     cheapModel: "claude-haiku-4-5", // cheap first tier; strong tier = activeConfig().llmModel
     // Rung 1 (AXIS 1, pre-generation): retrieval cosine below which context is too
     // weak to answer from. A stronger model can't fix missing context, so below

@@ -21,6 +21,7 @@ import {
   listBatchJobs,
   updateBatchSavings,
 } from "@/lib/rag/batchStore";
+import { setCascadeEnabled } from "@/lib/rag/configStore";
 import { emailConfigured } from "@/lib/batch/notify";
 
 export async function GET(request: Request) {
@@ -31,7 +32,14 @@ export async function GET(request: Request) {
       getBatchSavings(configId),
       inFlightForConfig(configId),
     ]);
-    return Response.json({ jobs, savings, inFlight, emailConfigured: emailConfigured() });
+    return Response.json({
+      jobs,
+      savings,
+      inFlight,
+      emailConfigured: emailConfigured(),
+      // Saver-mode toggle (0032) — seeds the Savings section's cascade switch.
+      cascadeEnabled: activeConfig().cascadeEnabled,
+    });
   });
 }
 
@@ -48,6 +56,9 @@ const Body = z.object({
       ingest_embedding: Choice.optional(),
     })
     .optional(),
+  // Saver-mode toggle (0032) — the FrugalGPT cascade on/off for this config. Not
+  // part of BatchSavings; written to configs.cascade_enabled separately.
+  cascadeEnabled: z.boolean().optional(),
 });
 
 export async function PATCH(request: Request) {
@@ -55,8 +66,21 @@ export async function PATCH(request: Request) {
   if (body.response) return body.response;
 
   return withRequestConfig(request, async () => {
-    const savings = await updateBatchSavings(activeConfig().id, body.data);
+    const configId = activeConfig().id;
+    // Saver-mode toggle rides in the same Savings patch; write it separately from
+    // the BatchSavings blob (updateBatchSavings ignores the extra field).
+    if (body.data.cascadeEnabled !== undefined) {
+      if ((await setCascadeEnabled(configId, body.data.cascadeEnabled)) === null) {
+        return Response.json({ error: "Config not found." }, { status: 404 });
+      }
+    }
+    const savings = await updateBatchSavings(configId, body.data);
     if (!savings) return Response.json({ error: "Config not found." }, { status: 404 });
-    return Response.json({ savings });
+    return Response.json({
+      savings,
+      // activeConfig() is loaded at request start (stale after the write), so echo
+      // the value we just set when present.
+      cascadeEnabled: body.data.cascadeEnabled ?? activeConfig().cascadeEnabled,
+    });
   });
 }

@@ -388,11 +388,13 @@ async function answerWithCascade(
   question: string,
   sources: RetrievedChunk[],
 ): Promise<CachedResult> {
-  const strongModel = activeConfig().llmModel;
+  const cfg = activeConfig();
+  const strongModel = cfg.llmModel;
 
   // Saver mode off (default) → today's behaviour: one answer from the config's
-  // model, no gate, no extra cost.
-  if (!config.cascade.enabled) {
+  // model, no gate, no extra cost. Per-config toggle (0032), read from the
+  // already-loaded ResolvedConfig — no extra query on the hot path.
+  if (!cfg.cascadeEnabled) {
     const answer = await generateAnswer(question, sources, strongModel);
     return { answer, sources, model: strongModel, efficacy: null, escalated: false };
   }

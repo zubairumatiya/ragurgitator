@@ -268,6 +268,22 @@ export async function setCorpusSync(
   return rows.length > 0 ? getConfig(id) : null;
 }
 
+// Saver-mode toggle (0032): flip the per-config cascade_enabled flag from
+// Settings → Savings. Read on the hot path via activeConfig().cascadeEnabled;
+// this is the writer. Returns the new value, or null when the config is gone.
+export async function setCascadeEnabled(
+  id: string,
+  enabled: boolean,
+): Promise<boolean | null> {
+  if (!isUuid(id)) return null;
+  const rows = await sql`
+    update configs set cascade_enabled = ${enabled}, updated_at = now()
+    where id = ${id}
+    returning id
+  `;
+  return rows.length > 0 ? enabled : null;
+}
+
 // Update a config's processing settings IN PLACE (the bulk-actions "change this
 // config" flow). Pure row update — the caller (lib/rag/reconfigure) owns the
 // re-embed + eval-label remap that a model/size change requires.
