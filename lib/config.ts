@@ -76,6 +76,30 @@ export const config = {
     defaultThreshold: 0.95,
     // Safety cap on cached queries scored (in JS) per lookup for one config.
     maxCandidates: 500,
+    // --- Phase 2 calibration (docs/semantic-caching-plan.md) ---------------
+    // Shadow logging floor: a lookup records the best match at or above this
+    // cosine as an (unjudged) semantic_cache_shadow row, INDEPENDENT of whether
+    // the match clears the serving threshold. It MUST sit well below
+    // defaultThreshold — to calibrate the threshold DOWNWARD we need judged
+    // examples below today's 0.95, which the serving path would never surface.
+    shadowLogFloor: 0.8,
+    // Collision-floor calibration: recommend a threshold this far above the
+    // eval-bank distinct-question collision floor (safety margin over "no false
+    // hits on the eval bank"), and keep it at least this far below the lowest
+    // same-answer pair when a safe band exists.
+    collisionMargin: 0.01,
+    // Shadow-judge acceptance target: the sweep picks the lowest threshold τ
+    // whose P(accept | sim ≥ τ) stays at or above this, given enough samples.
+    acceptTarget: 0.99,
+    // Minimum judged events required before the sweep will recommend a τ.
+    minCalibrationSamples: 20,
+    // Default judge models (UI-selectable per run). Bulk labels the easy
+    // majority cheaply; boundary re-judges the sim band where acceptance
+    // crosses the target, where a wrong label moves τ. Kept on the models this
+    // app already runs; add options in judgeModelOptions to offer more.
+    judgeBulkModel: "claude-haiku-4-5",
+    judgeBoundaryModel: "claude-sonnet-4-6",
+    judgeModelOptions: ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-8"],
   },
 } as const;
 

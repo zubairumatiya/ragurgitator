@@ -151,6 +151,22 @@ export async function semanticCacheLookup(
     const match = bestMatch(vector, entries);
     const threshold = await resolveThreshold(cfg.embeddingModel);
 
+    // Shadow-log the nearest match for threshold calibration (Phase 2 — see
+    // docs/semantic-caching-plan.md). Recorded whenever it clears the low
+    // shadowLogFloor, INDEPENDENT of the serving threshold and the serve toggle,
+    // so calibration has judged examples BELOW today's threshold. Fire-and-
+    // forget: a failure here must never affect the answer.
+    if (match && match.sim >= config.semanticCache.shadowLogFloor) {
+      void recordShadow(
+        cfg,
+        fingerprint,
+        question,
+        match.value.text,
+        match.value.result.answer,
+        match.sim,
+      );
+    }
+
     if (match && isHit(match.sim, threshold)) {
       if (serve) {
         console.log(
@@ -225,6 +241,34 @@ async function recordSemanticSaving(result: CachedResult, question: string): Pro
   const outTokens = estimateTokens(result.answer);
   const saved = costLlm(result.model, inTokens, outTokens);
   await recordSaving("semantic_cache", saved, inTokens + outTokens);
+}
+
+// Bank a shadow event for calibration (best-effort). Deduped by the unique
+// (config, fingerprint, query_hash) constraint, so a repeated question under
+// the same validity key records once and doesn't swamp the judged set.
+async function recordShadow(
+  cfg: ResolvedConfig,
+  fingerprint: string,
+  newQuery: string,
+  matchedQuery: string,
+  servedAnswer: string,
+  sim: number,
+): Promise<void> {
+  try {
+    await sql`
+      insert into semantic_cache_shadow
+        (config_id, embedding_model, space, fingerprint,
+         new_query, new_query_hash, matched_query, served_answer, sim)
+      values
+        (${cfg.id}, ${cfg.embeddingModel}, ${spaceOf(cfg.embeddingModel)}, ${fingerprint},
+         ${newQuery}, ${sha256(newQuery)}, ${matchedQuery}, ${servedAnswer}, ${sim})
+      on conflict (config_id, fingerprint, new_query_hash) do nothing
+    `;
+  } catch (err) {
+    if (isMissingTable(err)) return;
+    // Telemetry only — swallow so a shadow-log failure never breaks a lookup.
+    console.warn(`[rag:semantic-cache] shadow log failed: ${(err as Error).message}`);
+  }
 }
 
 async function bumpHit(

@@ -5,6 +5,7 @@
 // per metric highlighted within each group. Standalone (outside /c/[configId]),
 // so no per-config banner/sub-nav. Dynamic — it reads the DB per request.
 import Link from "next/link";
+import { AppraiseNav } from "@/app/components/AppraiseNav";
 import { listConfigComparisons, type ConfigComparison } from "@/lib/rag/appraiseStore";
 import { getCostsReport } from "@/lib/rag/savingsStore";
 import CostsSection from "@/app/components/CostsSection";
@@ -52,6 +53,8 @@ export default async function AppraisePage() {
             <em>Re-score</em> on a config&apos;s Eval tab to populate or refresh its row.
           </p>
         </header>
+
+        <AppraiseNav />
 
         {!anyScored && (
           <div className="rounded-lg border border-dashed border-zinc-300 p-6 text-center text-sm text-zinc-500 dark:border-zinc-700">
