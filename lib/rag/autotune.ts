@@ -502,6 +502,23 @@ export async function applyAutotuneCandidate(
 // The run itself — driven by the streamed POST /api/eval/autotune route.
 export async function runAutotune(emit: Emit = () => {}): Promise<void> {
   const t0 = performance.now();
+  // Per-phase wall-clock accounting on top of the total (durationMs): where the
+  // run's time actually goes, so an optimization can be aimed before it's built.
+  //   search  — the fusedTrialRanks dry-runs (Stages 1-3), incl. their embeds.
+  //   confirm — applyAutotuneCandidate: persist + real-retrieval re-score/revert
+  //             (+ the kept-trial snapshot). The confirm's own rescore lives here.
+  //   rescore — the run-end dirty-set ripple re-score (rescoreAffectedQuestions).
+  // These are diagnostic and need not sum to durationMs (getSummary/splitText/etc.
+  // are the unaccounted remainder).
+  const phase = { search: 0, confirm: 0, rescore: 0 };
+  const timed = async <T>(bucket: keyof typeof phase, fn: () => Promise<T>): Promise<T> => {
+    const s = performance.now();
+    try {
+      return await fn();
+    } finally {
+      phase[bucket] += performance.now() - s;
+    }
+  };
   const cfg = activeConfig();
   // Run-start override state, for the final dirty-set re-score: only chunks
   // whose override changed between here and the end can affect other
@@ -690,7 +707,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       cand: AutotuneCandidate,
       mode: "clear" | "improve" = "clear",
     ): Promise<boolean> => {
-      const res = await applyAutotuneCandidate(chunkId, cand, mode);
+      const res = await timed("confirm", () => applyAutotuneCandidate(chunkId, cand, mode));
       if (res.status === "kept") {
         applied.set(chunkId, {
           kind: cand.family,
@@ -727,13 +744,8 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       rungs += 1;
       const overlap = overlapFor(size);
       const pieces = await splitText(chunkText, size, overlap);
-      const ranks = await fusedTrialRanks(
-        chunkTargets,
-        chunkId,
-        pieces,
-        "size",
-        cfg.embeddingModel,
-        trialPool,
+      const ranks = await timed("search", () =>
+        fusedTrialRanks(chunkTargets, chunkId, pieces, "size", cfg.embeddingModel, trialPool),
       );
       attempts += chunkTargets.length;
       emit({ type: "attempt", chunkId, stage: "size", detail: `size ${size}`, attempts });
@@ -764,13 +776,8 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       rungs += 2;
       const rungCands: AutotuneCandidate[] = [];
 
-      const ranksB = await fusedTrialRanks(
-        chunkTargets,
-        chunkId,
-        [chunkText],
-        "model",
-        model,
-        trialPool,
+      const ranksB = await timed("search", () =>
+        fusedTrialRanks(chunkTargets, chunkId, [chunkText], "model", model, trialPool),
       );
       attempts += chunkTargets.length;
       emit({ type: "attempt", chunkId, stage: "model", detail: model, attempts });
@@ -779,13 +786,8 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
 
       if (bestSize !== null) {
         const pieces = await splitText(chunkText, bestSize.size!, bestSize.overlap ?? 0);
-        const ranksA = await fusedTrialRanks(
-          chunkTargets,
-          chunkId,
-          pieces,
-          "size+model",
-          model,
-          trialPool,
+        const ranksA = await timed("search", () =>
+          fusedTrialRanks(chunkTargets, chunkId, pieces, "size+model", model, trialPool),
         );
         attempts += chunkTargets.length;
         emit({
@@ -822,13 +824,8 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
         for (const model of models) {
           if (rungs >= rungCap) break outer;
           rungs += 1;
-          const ranks = await fusedTrialRanks(
-            chunkTargets,
-            chunkId,
-            pieces,
-            "size+model",
-            model,
-            trialPool,
+          const ranks = await timed("search", () =>
+            fusedTrialRanks(chunkTargets, chunkId, pieces, "size+model", model, trialPool),
           );
           attempts += chunkTargets.length;
           emit({
@@ -925,12 +922,14 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
     finalModel: endOverrides.get(id)?.model ?? null,
     startOverridden: startOverrides.has(id),
   }));
-  const { skipped } = await rescoreAffectedQuestions(changed, startState, (e) => {
-    if (e.type === "score-start") emit({ type: "rescore-start", total: e.total });
-    if (e.type === "score-result") {
-      emit({ type: "rescore-progress", done: e.done, total: e.total });
-    }
-  });
+  const { skipped } = await timed("rescore", () =>
+    rescoreAffectedQuestions(changed, startState, (e) => {
+      if (e.type === "score-start") emit({ type: "rescore-start", total: e.total });
+      if (e.type === "score-result") {
+        emit({ type: "rescore-progress", done: e.done, total: e.total });
+      }
+    }),
+  );
 
   // ---- OUTCOMES + RUN HEADER ----------------------------------------------
   const final = await getSummary();
@@ -1004,7 +1003,9 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
   console.log(
     `[rag:autotune] done: targeted=${targets.length} resolved=${resolved} ` +
       `improved=${improved} pendingChoice=${pendingChoice} attempts=${attempts} ` +
-      `rescoreSkipped=${skipped} in ${durationMs}ms`,
+      `rescoreSkipped=${skipped} in ${durationMs}ms ` +
+      `(search=${Math.round(phase.search)}ms confirm=${Math.round(phase.confirm)}ms ` +
+      `rescore=${Math.round(phase.rescore)}ms)`,
   );
   emit({
     type: "autotune-done",
