@@ -23,7 +23,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { config, rankingAggregateModels } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
-import { anthropicClient } from "@/lib/llm/client";
+import { meteredMessage } from "@/lib/rag/meter";
 import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
 import { listRuns, missingDocumentsByRun } from "@/lib/rag/clusterStore";
 import { scoreQuestionNow, scoreQuestions, type EvalEvent } from "@/lib/rag/eval";
@@ -35,6 +35,7 @@ import {
 } from "@/lib/rag/evalStore";
 import { ndcg } from "@/lib/rag/evalMetrics";
 import {
+  countCorpusChunks,
   getQuestionScope,
   getRankingChunks,
   getRetrievedOrder,
@@ -47,6 +48,8 @@ import {
   type RankingKind,
   type StoredRanking,
 } from "@/lib/rag/rankingStore";
+import { costEmbed, estimateTokensAll } from "@/lib/rag/pricing";
+import { recordSaving } from "@/lib/rag/savingsStore";
 
 // One chunk in a ranking, resolved for display in ideal order.
 export type RankingItem = {
@@ -327,11 +330,37 @@ export async function buildAggregateRanking(
     },
   });
 
+  // Structural saving: the pool we just embedded under each non-base model is a
+  // small bucket slice; the naive aggregate embeds the WHOLE corpus per model
+  // (docs/savings-accounting-plan.md §2 #5). Fire-and-forget telemetry.
+  void recordBucketSaving(pool.map((p) => p.text));
+
   console.log(
     `[rag:ranking] aggregate q=${questionId.slice(0, 8)} pool=${pool.length} ` +
       `models=${rankingAggregateModels.length} in ${Math.round(performance.now() - t0)}ms`,
   );
   return resolve(await pickStored(questionId, id));
+}
+
+// Price the embeds this build AVOIDED by pooling: for each non-base aggregate
+// model, the corpus chunks outside the pool × the pool's average tokens × that
+// model's embed price. Averaged token size comes from the pool we actually
+// have. Best-effort; a missing corpus count / price just yields 0.
+async function recordBucketSaving(poolTexts: string[]): Promise<void> {
+  if (poolTexts.length === 0) return;
+  const baseModel = activeConfig().embeddingModel;
+  const nonBase = rankingAggregateModels.filter((m) => m !== baseModel);
+  if (nonBase.length === 0) return;
+
+  const corpusChunks = await countCorpusChunks();
+  const skipped = corpusChunks - poolTexts.length;
+  if (skipped <= 0) return;
+
+  const avgTokens = estimateTokensAll(poolTexts) / poolTexts.length;
+  const skippedTokens = skipped * avgTokens;
+  let saved = 0;
+  for (const m of nonBase) saved += costEmbed(m, skippedTokens);
+  await recordSaving("bucket_ndcg", saved, skippedTokens * nonBase.length);
 }
 
 const LlmOrder = z.array(z.number().int().positive());
@@ -379,7 +408,7 @@ export async function buildLlmRanking(
     return `${i + 1}. (${c?.fileName ?? "?"}#${c?.position ?? "?"}) ${text}`;
   });
 
-  const response = await anthropicClient.messages.create({
+  const response = await meteredMessage("ndcg_ranking", {
     model: activeConfig().llmModel,
     max_tokens: 512,
     system: LLM_SYSTEM_PROMPT,

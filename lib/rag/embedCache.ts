@@ -16,8 +16,29 @@ import { createHash } from "node:crypto";
 
 import { sql } from "@/lib/db";
 import { embedQuery, embedTexts } from "@/lib/rag/embeddings";
+import { costEmbed, estimateTokens, estimateTokensAll } from "@/lib/rag/pricing";
+import { recordSaving, recordSpend } from "@/lib/rag/savingsStore";
 
 const uniq = (xs: string[]): string[] => [...new Set(xs)];
+
+// USD to embed these texts under `model` (char/4 token estimate). One place so
+// the cache-hit saving and the miss spend price identically.
+const embedCost = (model: string, texts: string[]): number =>
+  texts.reduce((sum, t) => sum + costEmbed(model, estimateTokens(t)), 0);
+
+// A cache HIT is an avoided embed — bank it as an embed_cache saving. A MISS
+// paid the provider — bank it as embed spend. Both are one upsert for the whole
+// batch (recordSaving/Spend add aggregates), and both are fire-and-forget.
+function meterEmbeds(model: string, hits: string[], misses: string[]): void {
+  if (hits.length > 0) {
+    void recordSaving("embed_cache", embedCost(model, hits), estimateTokensAll(hits), {
+      events: hits.length,
+    });
+  }
+  if (misses.length > 0) {
+    void recordSpend("embed", embedCost(model, misses), estimateTokensAll(misses));
+  }
+}
 
 // Cosine similarity. Voyage vectors are already unit-length (so this reduces to
 // a dot product), but normalize defensively so a non-unit vector can't skew a
@@ -106,9 +127,9 @@ export async function embedDocsCached(
   texts: string[],
   model: string,
 ): Promise<number[][]> {
-  const notInMemory = uniq(
-    texts.filter((t) => !memory.has(memKey(model, "document", t))),
-  );
+  const unique = uniq(texts);
+  const l1hits = unique.filter((t) => memory.has(memKey(model, "document", t)));
+  const notInMemory = unique.filter((t) => !memory.has(memKey(model, "document", t)));
   const persisted = await readPersisted(model, "document", notInMemory);
   for (const [t, vec] of persisted) memory.set(memKey(model, "document", t), vec);
 
@@ -122,6 +143,7 @@ export async function embedDocsCached(
       missing.map((t, i) => ({ text: t, vector: vecs[i] })),
     );
   }
+  meterEmbeds(model, [...l1hits, ...persisted.keys()], missing);
   return texts.map((t) => memory.get(memKey(model, "document", t))!);
 }
 
@@ -145,6 +167,9 @@ export async function cachedDocVectors(
     memory.set(memKey(model, "document", t), vec);
     out.set(t, vec);
   }
+  // Cache-only: every vector found is an avoided embed; texts NOT found are left
+  // un-embedded (no provider call), so there's nothing to charge.
+  meterEmbeds(model, [...out.keys()], []);
   return out;
 }
 
@@ -169,6 +194,8 @@ export async function cachedQueryVectors(
     memory.set(memKey(model, "query", t), vec);
     out.set(t, vec);
   }
+  // Cache-only (see cachedDocVectors): found vectors are avoided embeds.
+  meterEmbeds(model, [...out.keys()], []);
   return out;
 }
 
@@ -176,13 +203,19 @@ export async function cachedQueryVectors(
 export async function embedQueryCached(text: string, model: string): Promise<number[]> {
   const key = memKey(model, "query", text);
   let vec = memory.get(key);
-  if (vec) return vec;
+  if (vec) {
+    meterEmbeds(model, [text], []);
+    return vec;
+  }
 
   const persisted = await readPersisted(model, "query", [text]);
   vec = persisted.get(text);
   if (!vec) {
     vec = await embedQuery(text, model);
     await writePersisted(model, "query", [{ text, vector: vec }]);
+    meterEmbeds(model, [], [text]);
+  } else {
+    meterEmbeds(model, [text], []);
   }
   memory.set(key, vec);
   return vec;

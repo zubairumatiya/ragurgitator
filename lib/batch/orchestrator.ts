@@ -111,6 +111,8 @@ async function applyJob(job: BatchJob): Promise<BatchJob> {
       job.providerBatchId!,
       job.providerOutputFileId,
     );
+    // handler.apply banks the batch discount itself (it runs in the job's config
+    // scope and owns the token counts) — docs/savings-accounting-plan.md §2 #4.
     const run = () => handler.apply(job.input, results);
     const resolved = job.configId ? await resolveConfig(job.configId) : null;
     const applied = resolved ? await withConfig(resolved, run) : await run();

@@ -12,6 +12,7 @@
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { labelRequestParams, parseBucketLabels, type BucketSamples } from "@/lib/rag/clusterLabeler";
 import { representativeChunksForRun, saveClusterLabels } from "@/lib/rag/clusterStore";
+import { bankAnthropicBatchSaving } from "@/lib/batch/savings";
 import type { BuiltBatch, JobHandler } from "@/lib/batch/jobs/registry";
 
 export type ClusterLabelScope = { runId: string };
@@ -47,6 +48,7 @@ export const clusterLabelingHandler: JobHandler = {
     const labels = parseBucketLabels(res.body as MessageBody, asked);
     if (labels.length === 0) return 0;
     await saveClusterLabels(runId, labels);
+    bankAnthropicBatchSaving(results);
     return labels.length;
   },
 };

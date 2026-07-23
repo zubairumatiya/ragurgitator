@@ -19,6 +19,8 @@ import { activeConfig, type ResolvedConfig } from "@/lib/rag/activeConfig";
 import { embedQueryCached } from "@/lib/rag/embedCache";
 import type { EfficacyResult } from "@/lib/rag/efficacyGate";
 import { retrievalStateFingerprint } from "@/lib/rag/overrideStore";
+import { costLlm, estimateTokens, estimateTokensAll } from "@/lib/rag/pricing";
+import { recordSaving } from "@/lib/rag/savingsStore";
 import {
   bestMatch,
   fingerprintFrom,
@@ -158,6 +160,7 @@ export async function semanticCacheLookup(
         );
         // Fire-and-forget telemetry bump; a failure here must not fail the answer.
         void bumpHit(cfg.id, cfg.embeddingModel, fingerprint, match.value.text);
+        void recordSemanticSaving(match.value.result, question);
         return { hit: true, result: match.value.result, sim: match.sim, matchedQuery: match.value.text, vector };
       }
       // Serving is off (Settings → Savings): shadow-log the would-be hit for
@@ -210,6 +213,18 @@ export async function semanticCacheStore(
     if (isMissingTable(err)) return;
     throw err;
   }
+}
+
+// A served hit skipped the GENERATION for this question (docs §2 #3). The query
+// embed is NOT counted here — the lookup embeds it regardless, so it isn't
+// avoided; only the answer model call is. Tokens are estimated from the banked
+// result (context chunks in, answer out) under the model that produced it.
+async function recordSemanticSaving(result: CachedResult, question: string): Promise<void> {
+  const contextText = result.sources.map((s) => s.chunk.chunk.text);
+  const inTokens = estimateTokensAll(contextText) + estimateTokens(question);
+  const outTokens = estimateTokens(result.answer);
+  const saved = costLlm(result.model, inTokens, outTokens);
+  await recordSaving("semantic_cache", saved, inTokens + outTokens);
 }
 
 async function bumpHit(

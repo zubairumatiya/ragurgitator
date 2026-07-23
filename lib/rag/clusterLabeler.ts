@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { anthropicClient } from "@/lib/llm/client";
+import { meteredMessage } from "@/lib/rag/meter";
 import { activeConfig } from "@/lib/rag/activeConfig";
 
 export type BucketSamples = { ordinal: number; chunks: string[] };
@@ -80,7 +80,8 @@ export function parseBucketLabels(
 
 export async function labelBuckets(buckets: BucketSamples[]): Promise<BucketLabel[]> {
   if (buckets.length === 0) return [];
-  const response = await anthropicClient.messages.create(
+  const response = await meteredMessage(
+    "cluster_label",
     labelRequestParams(buckets, activeConfig().llmModel),
   );
   return parseBucketLabels(response, buckets);

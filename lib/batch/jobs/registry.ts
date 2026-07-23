@@ -17,6 +17,7 @@ import type { BatchProvider, BatchRequest, BatchResultRow, JobKind } from "@/lib
 import type { SubmitMeta } from "@/lib/batch/providers";
 import { questionGenerationHandler } from "@/lib/batch/jobs/questionGeneration";
 import { clusterLabelingHandler } from "@/lib/batch/jobs/clusterLabeling";
+import { ingestEmbeddingHandler } from "@/lib/batch/jobs/ingestEmbedding";
 
 export type BuiltBatch = {
   requests: BatchRequest[];
@@ -35,7 +36,8 @@ export interface JobHandler {
 const HANDLERS: Partial<Record<JobKind, JobHandler>> = {
   question_generation: questionGenerationHandler,
   cluster_labeling: clusterLabelingHandler,
-  // ndcg_ranking, ingest_embedding — recognized, submit guarded (plan doc phasing).
+  ingest_embedding: ingestEmbeddingHandler,
+  // ndcg_ranking — recognized, submit guarded (plan doc phasing).
 };
 
 export function handlerFor(kind: JobKind): JobHandler | null {

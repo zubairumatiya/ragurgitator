@@ -34,7 +34,7 @@ import {
   type OverrideEmbedding,
 } from "@/lib/rag/overrideStore";
 import type Anthropic from "@anthropic-ai/sdk";
-import { anthropicClient } from "@/lib/llm/client";
+import { meteredMessage } from "@/lib/rag/meter";
 import { splitText, tokenizeWithOffsets } from "@/lib/rag/chunker";
 import {
   cachedQueryVectors,
@@ -286,7 +286,8 @@ async function authorQuestions(
   count: number,
   difficulty?: Difficulty,
 ): Promise<GeneratedQuestion[]> {
-  const response = await anthropicClient.messages.create(
+  const response = await meteredMessage(
+    "question_gen",
     questionRequestParams(text, count, difficulty, activeConfig().llmModel),
   );
   return parseQuestions(response, count);

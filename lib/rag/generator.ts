@@ -11,10 +11,19 @@
 //   - each chunk is labeled with its source so the model can cite if asked,
 //     and so a future re-ranker can use the same labels
 // ---------------------------------------------------------------------------
-import { anthropicClient } from "@/lib/llm/client";
 import { config } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
+import { meteredMessage } from "@/lib/rag/meter";
 import type { RetrievedChunk } from "@/types/rag";
+
+// The answer plus the REAL token usage the call reported. Usage is what makes the
+// saver-cascade saving exact (pipeline.answerWithCascade prices the cheap-vs-strong
+// delta from these counts) — it was previously thrown away here.
+export type GeneratedAnswer = {
+  answer: string;
+  inputTokens: number;
+  outputTokens: number;
+};
 
 const SYSTEM_PROMPT = `You are a helpful assistant answering questions about a user-provided document set.
 
@@ -27,10 +36,11 @@ export async function generateAnswer(
   question: string,
   chunks: RetrievedChunk[],
   model: string = activeConfig().llmModel,
-): Promise<string> {
+): Promise<GeneratedAnswer> {
   const userMessage = buildUserMessage(question, chunks);
 
-  const response = await anthropicClient.messages.create({
+  // meteredMessage records this call's gross spend against the "chat" surface.
+  const response = await meteredMessage("chat", {
     model,
     max_tokens: config.maxAnswerTokens,
     system: SYSTEM_PROMPT,
@@ -41,7 +51,11 @@ export async function generateAnswer(
   // non-streaming call there's a single text block.
   const block = response.content.find((b) => b.type === "text");
   if (!block) throw new Error("LLM returned no text content.");
-  return block.text;
+  return {
+    answer: block.text,
+    inputTokens: response.usage?.input_tokens ?? 0,
+    outputTokens: response.usage?.output_tokens ?? 0,
+  };
 }
 
 function buildUserMessage(question: string, chunks: RetrievedChunk[]): string {

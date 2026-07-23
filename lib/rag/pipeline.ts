@@ -20,7 +20,9 @@ import {
   responseEfficacyGate,
   retrievalFloor,
 } from "@/lib/rag/efficacyGate";
-import { generateAnswer } from "@/lib/rag/generator";
+import { generateAnswer, type GeneratedAnswer } from "@/lib/rag/generator";
+import { costEmbed, costLlm, estimateTokens } from "@/lib/rag/pricing";
+import { recordSaving } from "@/lib/rag/savingsStore";
 import {
   addDocumentToCorpus,
   dedupCorporaDocuments,
@@ -403,10 +405,17 @@ async function answerWithCascade(
 
   // Saver mode off (default) → today's behaviour: one answer from the config's
   // model, no gate, no extra cost. Per-config toggle (0032), read from the
-  // already-loaded ResolvedConfig — no extra query on the hot path.
+  // already-loaded ResolvedConfig — no extra query on the hot path. This is the
+  // cascade's BASELINE, so it records no saving (its cost is the chat spend).
   if (!cfg.cascadeEnabled) {
-    const answer = await generateAnswer(question, sources, strongModel);
-    return { answer, sources, model: strongModel, efficacy: null, escalated: false };
+    const gen = await generateAnswer(question, sources, strongModel);
+    return {
+      answer: gen.answer,
+      sources,
+      model: strongModel,
+      efficacy: null,
+      escalated: false,
+    };
   }
 
   const cheapModel = config.cascade.cheapModel;
@@ -418,7 +427,8 @@ async function answerWithCascade(
     retrievalFloor(sources) >= config.cascade.retrievalHardFloor;
 
   let model: string = cheapModel;
-  let answer = await generateAnswer(question, sources, model);
+  const cheap = await generateAnswer(question, sources, model);
+  let answer = cheap.answer;
   let efficacy = await responseEfficacyGate(question, answer, sources);
 
   // Escalate only on an AXIS-2 failure (refusal / weak groundedness) AND only
@@ -428,12 +438,56 @@ async function answerWithCascade(
     efficacy.verdict === "escalate" &&
     strongModel !== cheapModel;
 
+  let strong: GeneratedAnswer | null = null;
   if (escalated) {
     model = strongModel;
-    answer = await generateAnswer(question, sources, model);
+    strong = await generateAnswer(question, sources, model);
+    answer = strong.answer;
     // Re-score so the returned efficacy describes the answer we actually return.
     efficacy = await responseEfficacyGate(question, answer, sources);
   }
 
+  // Record the NET cascade saving vs. the baseline (strong model every time). The
+  // efficacy gate embeds the answer once per generation (rung 2) — priced here as
+  // the one bit of overhead the cheap-first path adds. docs §2 #2.
+  void recordCascadeSaving({
+    strongModel,
+    cheapModel,
+    embeddingModel: cfg.embeddingModel,
+    cheap,
+    strong,
+    escalated,
+    answer,
+  });
+
   return { answer, sources, model, efficacy, escalated };
+}
+
+// The cascade's saved dollars, honest and signed (docs §2 #2):
+//   accept   → we ran cheap instead of strong: saved = cost(strong@cheapTokens)
+//              − cost(cheap) − one gate embed.  POSITIVE.
+//   escalate → we ran cheap + gate + strong + gate but the baseline is strong
+//              ONCE, so the cheap attempt and the extra gate were wasted:
+//              saved = −cost(cheap) − two gate embeds.  NEGATIVE.
+// The running total over real traffic is therefore the true net.
+async function recordCascadeSaving(a: {
+  strongModel: string;
+  cheapModel: string;
+  embeddingModel: string;
+  cheap: GeneratedAnswer;
+  strong: GeneratedAnswer | null;
+  escalated: boolean;
+  answer: string;
+}): Promise<void> {
+  const gateEmbed = costEmbed(a.embeddingModel, estimateTokens(a.answer));
+  if (!a.escalated) {
+    const saved =
+      costLlm(a.strongModel, a.cheap.inputTokens, a.cheap.outputTokens) -
+      costLlm(a.cheapModel, a.cheap.inputTokens, a.cheap.outputTokens) -
+      gateEmbed;
+    await recordSaving("cascade", saved, a.cheap.inputTokens + a.cheap.outputTokens);
+  } else {
+    const wasted = costLlm(a.cheapModel, a.cheap.inputTokens, a.cheap.outputTokens);
+    await recordSaving("cascade", -(wasted + 2 * gateEmbed), 0);
+  }
 }

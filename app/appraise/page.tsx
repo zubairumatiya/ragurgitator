@@ -6,11 +6,16 @@
 // so no per-config banner/sub-nav. Dynamic — it reads the DB per request.
 import Link from "next/link";
 import { listConfigComparisons, type ConfigComparison } from "@/lib/rag/appraiseStore";
+import { getCostsReport } from "@/lib/rag/savingsStore";
+import CostsSection from "@/app/components/CostsSection";
 
 export const dynamic = "force-dynamic";
 
 export default async function AppraisePage() {
-  const rows = await listConfigComparisons();
+  const [rows, costs] = await Promise.all([
+    listConfigComparisons(),
+    getCostsReport(),
+  ]);
 
   // Group by corpus, preserving the store's (corpus, tab) ordering.
   // Detached configs (corpus deleted) group together under "No corpus".
@@ -59,6 +64,10 @@ export default async function AppraisePage() {
         {groups.map((g) => (
           <CorpusGroup key={g.corpusId} name={g.corpusName} configs={g.configs} />
         ))}
+
+        <div className="mt-2 border-t border-zinc-200 pt-6 dark:border-zinc-800">
+          <CostsSection report={costs} />
+        </div>
       </main>
     </div>
   );

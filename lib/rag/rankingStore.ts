@@ -47,6 +47,19 @@ async function activeChunksTable(): Promise<string | null> {
   return rows.length > 0 ? cfg.chunksTable : null;
 }
 
+// Total chunks under the active config — the denominator for the bucket-nDCG
+// saving (docs/savings-accounting-plan.md §2 #5): a naive aggregate would embed
+// ALL of these under each non-base model, vs. the small bucket pool we actually
+// embed. 0 when nothing is ingested yet.
+export async function countCorpusChunks(): Promise<number> {
+  const table = await activeChunksTable();
+  if (!table) return 0;
+  const [row] = await sql<{ n: number }[]>`
+    select count(*)::int as n from ${sql(table)} where config_id = ${activeConfig().id}
+  `;
+  return row?.n ?? 0;
+}
+
 export type QuestionScope = {
   documentEmbeddingId: string; // active-config embedding run a ranking is filed under
   question: string; // the question text — embedded + sent to the LLM ranker

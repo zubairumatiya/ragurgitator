@@ -15,6 +15,7 @@ import { activeConfig } from "@/lib/rag/activeConfig";
 import type { Difficulty } from "@/lib/rag/eval";
 import { parseQuestions, questionRequestParams } from "@/lib/rag/eval";
 import { chunksNeedingQuestionsByDifficulty, insertQuestionWithLabel } from "@/lib/rag/evalStore";
+import { bankAnthropicBatchSaving } from "@/lib/batch/savings";
 import type { BatchResultRow } from "@/lib/batch/types";
 import type { BuiltBatch, JobHandler } from "@/lib/batch/jobs/registry";
 
@@ -92,6 +93,7 @@ export const questionGenerationHandler: JobHandler = {
       });
       applied += 1;
     }
+    bankAnthropicBatchSaving(results);
     return applied;
   },
 };
