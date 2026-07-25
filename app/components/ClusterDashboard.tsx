@@ -257,6 +257,9 @@ function RunCard({
   const [detail, setDetail] = useState<ClusterRunDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [labeling, setLabeling] = useState(false);
+  // Set when labeling produced no labels to show inline — a batch submission or
+  // a route error.
+  const [notice, setNotice] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -296,15 +299,31 @@ function RunCard({
     onChanged();
   }
 
-  // Claude-name each bucket. The route returns the updated detail, so swap it in
-  // and open the card to reveal the new labels.
+  // Claude-name each bucket. Normally the route returns the updated detail, so
+  // swap it in and open the card to reveal the new labels. But when Settings →
+  // Savings routes cluster labeling through the batch API it returns { batch }
+  // instead and nothing lands now — say where to track it rather than swapping
+  // that object in as a detail.
   async function label() {
     setLabeling(true);
+    setNotice(null);
     try {
       const res = await apiFetch(`/api/clusters/${run.id}/label`, { method: "POST" });
-      const data = await res.json();
-      if (!data.error) {
-        setDetail(data as ClusterRunDetail);
+      const data = (await res.json()) as
+        | { error: string }
+        | { batch: { jobId: string; bucketCount: number } }
+        | ClusterRunDetail;
+      if ("error" in data) {
+        setNotice(data.error);
+      } else if ("batch" in data) {
+        setNotice(
+          `Submitted ${data.batch.bucketCount} bucket${
+            data.batch.bucketCount === 1 ? "" : "s"
+          } as a batch — it runs in the background. Track it under “Batches”; ` +
+            `the labels appear here once it lands.`,
+        );
+      } else {
+        setDetail(data);
         setOpen(true);
       }
     } catch {
@@ -388,6 +407,8 @@ function RunCard({
           </button>
         </div>
       )}
+
+      {notice && <p className="pl-6 text-xs text-amber-600 dark:text-amber-400">{notice}</p>}
 
       {open && loading && (
         <p className="animate-pulse pl-6 text-xs text-zinc-400">Loading buckets…</p>

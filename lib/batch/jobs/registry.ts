@@ -37,7 +37,10 @@ const HANDLERS: Partial<Record<JobKind, JobHandler>> = {
   question_generation: questionGenerationHandler,
   cluster_labeling: clusterLabelingHandler,
   ingest_embedding: ingestEmbeddingHandler,
-  // ndcg_ranking — recognized, submit guarded (plan doc phasing).
+  // ndcg_ranking — recognized, submit guarded. Not just an unwritten handler:
+  // there is no bulk LLM ranking to batch. The bulk nDCG flow builds the
+  // cross-model AGGREGATE truth (embeddings, no LLM), and llm_pool/llm_rerank
+  // are per-question and interactive. See the plan doc.
 };
 
 export function handlerFor(kind: JobKind): JobHandler | null {

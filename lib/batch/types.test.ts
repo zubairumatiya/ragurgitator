@@ -24,30 +24,8 @@ test("legOfKind / providerOfKind: only ingest_embedding is the embedding/voyage 
   }
 });
 
-test("effectiveChoice: BULK mode reads the leg and ignores per-job values", () => {
+test("effectiveChoice: each job stands alone — one choice never moves another", () => {
   const s: BatchSavings = {
-    mode: "bulk",
-    bulk: { embedding: "standard", llm: "batch" },
-    // Per-job values are the OPPOSITE, to prove bulk mode ignores them.
-    jobs: {
-      question_generation: "standard",
-      ndcg_ranking: "standard",
-      cluster_labeling: "standard",
-      ingest_embedding: "batch",
-    },
-    semanticCache: { serve: false },
-  };
-  assert.equal(effectiveChoice(s, "question_generation"), "batch"); // llm leg
-  assert.equal(effectiveChoice(s, "cluster_labeling"), "batch"); // llm leg
-  assert.equal(effectiveChoice(s, "ingest_embedding"), "standard"); // embedding leg
-  assert.equal(isBatchEnabled(s, "ndcg_ranking"), true);
-  assert.equal(isBatchEnabled(s, "ingest_embedding"), false);
-});
-
-test("effectiveChoice: INDIVIDUAL mode reads per-job and ignores the bulk legs", () => {
-  const s: BatchSavings = {
-    mode: "individual",
-    bulk: { embedding: "batch", llm: "batch" }, // opposite of the per-job values
     jobs: {
       question_generation: "batch",
       ndcg_ranking: "standard",
@@ -58,24 +36,24 @@ test("effectiveChoice: INDIVIDUAL mode reads per-job and ignores the bulk legs",
   };
   assert.equal(effectiveChoice(s, "question_generation"), "batch");
   assert.equal(effectiveChoice(s, "ndcg_ranking"), "standard");
+  // Same provider/leg as question_generation, and still independent of it.
   assert.equal(effectiveChoice(s, "cluster_labeling"), "batch");
-  assert.equal(effectiveChoice(s, "ingest_embedding"), "standard"); // NOT the bulk 'batch'
+  assert.equal(effectiveChoice(s, "ingest_embedding"), "standard");
+  assert.equal(isBatchEnabled(s, "question_generation"), true);
+  assert.equal(isBatchEnabled(s, "ingest_embedding"), false);
 });
 
 test("coerceBatchSavings: tolerant of junk, missing, and partial input", () => {
   assert.deepEqual(coerceBatchSavings(undefined), DEFAULT_BATCH_SAVINGS);
   assert.deepEqual(coerceBatchSavings({}), DEFAULT_BATCH_SAVINGS);
-  // Unknown mode falls back to bulk; bad choices fall back to the default.
+  // A bad choice falls back to the default ('standard'), never to an invented
+  // value and never to 'batch' — a surprise batch would stall an inline flow.
   const c = coerceBatchSavings({
-    mode: "sideways",
-    bulk: { llm: "batch", embedding: "nonsense" },
-    jobs: { question_generation: "batch" },
+    jobs: { question_generation: "batch", cluster_labeling: "nonsense" },
   });
-  assert.equal(c.mode, "bulk");
-  assert.equal(c.bulk.llm, "batch");
-  assert.equal(c.bulk.embedding, "standard"); // 'nonsense' rejected
   assert.equal(c.jobs.question_generation, "batch");
-  assert.equal(c.jobs.ndcg_ranking, "standard"); // filled from default
+  assert.equal(c.jobs.cluster_labeling, "standard"); // 'nonsense' rejected
+  assert.equal(c.jobs.ndcg_ranking, "standard"); // absent → default
   assert.equal(c.semanticCache.serve, false); // absent → serving off
 
   // serve is a STRICT boolean: only literal true enables it, everything else
@@ -86,15 +64,67 @@ test("coerceBatchSavings: tolerant of junk, missing, and partial input", () => {
   assert.equal(coerceBatchSavings({ semanticCache: {} }).semanticCache.serve, false);
 });
 
-test("coerceBatchSavings preserves BOTH mode maps so flipping the dropdown loses nothing", () => {
+// --- migration off the two leg-grouped shapes ------------------------------
+// Old rows keep their jsonb until something saves over them, so every one of
+// these has to land on the same EFFECTIVE choice the config was running with.
+
+test("coerceBatchSavings migrates legacy mode:'bulk' — the leg wins, dead jobs map ignored", () => {
+  const s = coerceBatchSavings({
+    mode: "bulk",
+    bulk: { embedding: "standard", llm: "batch" },
+    // Under mode:'bulk' these were never in force. Merging them would silently
+    // flip three jobs off batch, so they must be ignored outright.
+    jobs: {
+      question_generation: "standard",
+      ndcg_ranking: "standard",
+      cluster_labeling: "standard",
+      ingest_embedding: "batch",
+    },
+  });
+  assert.deepEqual(s.jobs, {
+    question_generation: "batch", // from the llm leg, as before
+    ndcg_ranking: "batch",
+    cluster_labeling: "batch",
+    ingest_embedding: "standard", // from the embedding leg, as before
+  });
+});
+
+test("coerceBatchSavings migrates legacy mode:'individual' — the jobs map wins", () => {
   const s = coerceBatchSavings({
     mode: "individual",
-    bulk: { embedding: "batch", llm: "standard" },
-    jobs: { cluster_labeling: "batch" },
+    bulk: { embedding: "batch", llm: "batch" }, // dead under this mode
+    jobs: {
+      question_generation: "batch",
+      ndcg_ranking: "standard",
+      cluster_labeling: "batch",
+      ingest_embedding: "standard",
+    },
   });
-  // Both the bulk legs and the per-job map survive the round-trip.
-  assert.equal(s.bulk.embedding, "batch");
-  assert.equal(s.jobs.cluster_labeling, "batch");
+  assert.deepEqual(s.jobs, {
+    question_generation: "batch",
+    ndcg_ranking: "standard",
+    cluster_labeling: "batch",
+    ingest_embedding: "standard", // NOT the stale 'batch' leg
+  });
+});
+
+test("coerceBatchSavings migrates the legs+overrides shape — override, else leg", () => {
+  // No `mode`; nullable `jobs` layered over `bulk`.
+  const s = coerceBatchSavings({
+    bulk: { embedding: "batch", llm: "standard" },
+    jobs: {
+      question_generation: "batch", // an override
+      ndcg_ranking: null, // inherit
+      cluster_labeling: null, // inherit
+      ingest_embedding: null, // inherit
+    },
+  });
+  assert.deepEqual(s.jobs, {
+    question_generation: "batch", // the override
+    ndcg_ranking: "standard", // the llm leg
+    cluster_labeling: "standard",
+    ingest_embedding: "batch", // the embedding leg
+  });
 });
 
 test("status predicates", () => {

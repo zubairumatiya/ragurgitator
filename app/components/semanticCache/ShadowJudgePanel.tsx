@@ -73,8 +73,11 @@ export function ShadowJudgePanel() {
     if (space) loadSpaceData(space);
   }, [space, loadSpaceData]);
 
+  // Reload from the space loadSpaces actually RESOLVED, not the captured one:
+  // if the kept space no longer exists it falls back to list[0], and reusing the
+  // stale `space` here would then load data for a space we're no longer showing.
   const refresh = useCallback(() => {
-    loadSpaces(space).then(() => loadSpaceData(space));
+    loadSpaces(space).then((next) => next && loadSpaceData(next));
   }, [loadSpaces, loadSpaceData, space]);
 
   const runJudge = (label: string, body: Record<string, unknown>) => {

@@ -26,7 +26,6 @@ import {
   JOB_KINDS,
   JOB_LABELS,
   type BatchChoice,
-  type BatchLeg,
   type BatchSavings,
   type JobKind,
 } from "@/lib/batch/types";
@@ -38,6 +37,27 @@ import type { AutotuneScopeDocument } from "@/lib/rag/evalStore";
 // Fired (on window) after a successful save so config-scoped views (the eval
 // dashboard) can re-pull data that depends on the criteria.
 export const EVAL_CRITERIA_CHANGED = "eval:criteria-changed";
+
+// Per-job wording for the "batch" option. Batching only ever applies to the
+// offline/bulk entry point of a job — the interactive one-at-a-time path (a
+// single chunk's question, a live query embed) always runs inline, since a
+// batch that lands hours later is worse than just doing the work. Say so on the
+// rows where a same-named interactive path exists to be confused with.
+const BATCH_OPTION_LABELS: Partial<Record<JobKind, string>> = {
+  question_generation: "Batch API (bulk actions)",
+};
+
+// Recognized everywhere (preference, status panel) but not submittable —
+// lib/batch/jobs/registry.ts has no handler, so POST /api/batch/submit 501s.
+//
+// ndcg_ranking has nothing to batch today: "Bulk actions → Add nDCG rankings"
+// builds the CROSS-MODEL AGGREGATE ground truth (embeddings only, no LLM), and
+// the LLM rankings (llm_pool / llm_rerank) are per-question, launched one at a
+// time from the ranking panel — interactive, so batching is the wrong fit. A
+// batched LLM nDCG needs a bulk LLM-ranking flow to exist first.
+//
+// Shown disabled rather than hidden so the roster of jobs stays honest.
+const UNIMPLEMENTED_KINDS = new Set<JobKind>(["ndcg_ranking"]);
 
 // "" / invalid => null (the metric falls back to the config's top_k, A1).
 function parseKOrNull(s: string): number | null {
@@ -104,8 +124,6 @@ export function EvalSettings() {
   // Saver mode (0032): the FrugalGPT cascade on/off for this config (its own
   // column, configs.cascade_enabled — separate from the BatchSavings blob).
   const [cascadeEnabled, setCascadeEnabled] = useState(false);
-  const setLeg = (leg: BatchLeg, v: BatchChoice) =>
-    setSavings((s) => ({ ...s, bulk: { ...s.bulk, [leg]: v } }));
   const setJob = (kind: JobKind, v: BatchChoice) =>
     setSavings((s) => ({ ...s, jobs: { ...s.jobs, [kind]: v } }));
 
@@ -258,8 +276,6 @@ export function EvalSettings() {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          mode: savings.mode,
-          bulk: savings.bulk,
           jobs: savings.jobs,
           cascadeEnabled,
           semanticCache: savings.semanticCache,
@@ -630,50 +646,18 @@ export function EvalSettings() {
             <p className="mb-1 mt-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
               Batch API
             </p>
-            <label className="flex items-center justify-between gap-2 py-0.5">
-              <Tooltip
-                align="left"
-                text={
-                  "Bulk sets one choice for the whole embedding leg and one for the " +
-                  "whole LLM leg. Individual lets you choose per job (question " +
-                  "generation, nDCG ranking, cluster labeling, ingest/re-embedding)."
-                }
-              >
-                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
-                  Adjust
-                </span>
-              </Tooltip>
-              <select
-                value={savings.mode}
-                onChange={(e) =>
-                  setSavings((s) => ({ ...s, mode: e.target.value as BatchSavings["mode"] }))
-                }
-                className="w-32 rounded border border-zinc-300 bg-transparent px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
-              >
-                <option value="bulk">Bulk</option>
-                <option value="individual">Individual</option>
-              </select>
-            </label>
-
-            {savings.mode === "bulk" ? (
-              <>
-                <ChoiceRow
-                  label="Embedding"
-                  value={savings.bulk.embedding}
-                  onChange={(v) => setLeg("embedding", v)}
-                />
-                <ChoiceRow label="LLM" value={savings.bulk.llm} onChange={(v) => setLeg("llm", v)} />
-              </>
-            ) : (
-              JOB_KINDS.map((kind) => (
-                <ChoiceRow
-                  key={kind}
-                  label={JOB_LABELS[kind]}
-                  value={savings.jobs[kind]}
-                  onChange={(v) => setJob(kind, v)}
-                />
-              ))
-            )}
+            {/* One row per job — there are only four, so any grouping above them
+                is a layer to reason through for nothing. */}
+            {JOB_KINDS.map((kind) => (
+              <ChoiceRow
+                key={kind}
+                label={JOB_LABELS[kind]}
+                value={savings.jobs[kind]}
+                batchLabel={BATCH_OPTION_LABELS[kind]}
+                unavailable={UNIMPLEMENTED_KINDS.has(kind)}
+                onChange={(v) => setJob(kind, v)}
+              />
+            ))}
 
             <p className="mt-1 text-xs text-zinc-400 dark:text-zinc-500">
               Batch API is cheaper but asynchronous.{" "}
@@ -1025,27 +1009,38 @@ function ModelScopeChecklist({
 
 // A small segmented-control button used by the autotuning apply/search toggles.
 // One Savings row: a label + a Standard/Batch API <select> (a dropdown, not a
-// checkbox — matches the requested UX). Used for both the two bulk legs and the
-// four individual jobs.
+// checkbox — matches the requested UX). Used for both the two legs and the
+// per-job overrides.
+//
+// `unavailable` greys the row out for a job that has no batch handler yet — the
+// value still round-trips, so whatever is stored is honored the moment one lands.
 function ChoiceRow({
   label,
   value,
+  batchLabel,
+  unavailable,
   onChange,
 }: {
   label: string;
   value: BatchChoice;
+  batchLabel?: string;
+  unavailable?: boolean;
   onChange: (v: BatchChoice) => void;
 }) {
   return (
     <label className="flex items-center justify-between gap-2 py-0.5">
-      <span className="truncate text-zinc-600 dark:text-zinc-400">{label}</span>
+      <span className={`truncate text-zinc-600 dark:text-zinc-400 ${unavailable ? "opacity-50" : ""}`}>
+        {label}
+        {unavailable && " (coming soon)"}
+      </span>
       <select
         value={value}
+        disabled={unavailable}
         onChange={(e) => onChange(e.target.value as BatchChoice)}
-        className="w-32 shrink-0 rounded border border-zinc-300 bg-transparent px-2 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900"
+        className="w-40 shrink-0 rounded border border-zinc-300 bg-transparent px-2 py-1 text-xs disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900"
       >
         <option value="standard">Standard</option>
-        <option value="batch">Batch API</option>
+        <option value="batch">{batchLabel ?? "Batch API"}</option>
       </select>
     </label>
   );

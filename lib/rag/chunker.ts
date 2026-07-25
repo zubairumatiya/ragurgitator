@@ -115,13 +115,27 @@ export async function tokenizeWithOffsets(
   return { tokenCount: ids.length, offsets };
 }
 
-export async function chunkDocument(doc: SourceDocument): Promise<Chunk[]> {
+// Chunking parameters, when the caller must NOT read them from the live config.
+// Only the async batch path supplies these: it chunks at build() time and again
+// at apply() time hours later, and the two must agree even if the config was
+// edited in between (see lib/batch/jobs/ingestEmbedding.ts). Every other caller
+// omits it and gets today's active config, exactly as before.
+export type ChunkParams = {
+  embeddingModel: string;
+  chunkSize: number;
+  chunkOverlap: number;
+};
+
+export async function chunkDocument(
+  doc: SourceDocument,
+  params?: ChunkParams,
+): Promise<Chunk[]> {
   const t0 = performance.now();
-  const tokenizer = await getTokenizer(activeConfig().embeddingModel);
+  const tokenizer = await getTokenizer(params?.embeddingModel ?? activeConfig().embeddingModel);
   // Special tokens belong at the document boundary, not at every chunk seam.
   const tokenIds = tokenizer.encode(doc.text, { add_special_tokens: false });
 
-  const { chunkSize, chunkOverlap } = activeConfig();
+  const { chunkSize, chunkOverlap } = params ?? activeConfig();
   const chunks: Chunk[] = decodeWindows(
     tokenizer,
     tokenIds,

@@ -45,9 +45,8 @@ export async function GET(request: Request) {
 
 const Choice = z.enum(["standard", "batch"]);
 
+// One choice per job; an omitted key means "unchanged".
 const Body = z.object({
-  mode: z.enum(["bulk", "individual"]).optional(),
-  bulk: z.object({ embedding: Choice.optional(), llm: Choice.optional() }).optional(),
   jobs: z
     .object({
       question_generation: Choice.optional(),

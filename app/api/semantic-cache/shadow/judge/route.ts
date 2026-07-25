@@ -13,7 +13,11 @@ import { z } from "zod";
 
 import { config } from "@/lib/config";
 import { parseBody } from "@/lib/http/body";
-import { judgeShadowEvents, setHumanVerdict } from "@/lib/rag/semanticCacheCalibration";
+import {
+  JudgeAlreadyRunningError,
+  judgeShadowEvents,
+  setHumanVerdict,
+} from "@/lib/rag/semanticCacheCalibration";
 
 const Body = z.discriminatedUnion("mode", [
   z.object({
@@ -60,6 +64,11 @@ export async function POST(request: Request) {
     });
     return Response.json({ result });
   } catch (err) {
+    // A second run over the same space while one is in flight is a conflict, not
+    // a server fault — 409 so the UI can say "already running" rather than fail.
+    if (err instanceof JudgeAlreadyRunningError) {
+      return Response.json({ error: err.message }, { status: 409 });
+    }
     const message = err instanceof Error ? err.message : "Judging failed.";
     return Response.json({ error: message }, { status: 500 });
   }

@@ -17,6 +17,7 @@ export type Surface =
   | "ndcg_ranking" // ranking.ts — the LLM ideal-ranking judge
   | "question_gen" // eval.ts — eval question synthesis
   | "cluster_label" // clusterLabeler.ts — bucket naming
+  | "judge" // semanticCacheCalibration.ts — the shadow-judge verdict pass
   | "embed"; // embedCache.ts miss — a paid embedding call
 
 export const SURFACE_LABELS: Record<Surface, string> = {
@@ -24,6 +25,7 @@ export const SURFACE_LABELS: Record<Surface, string> = {
   ndcg_ranking: "nDCG LLM ranking",
   question_gen: "Question generation",
   cluster_label: "Cluster labeling",
+  judge: "Semantic-cache judge",
   embed: "Embeddings",
 };
 
@@ -54,7 +56,11 @@ export const LEVERS: Record<
 
 type LlmPrice = { inputPerM: number; outputPerM: number };
 
+// Keyed on the DATE-LESS alias. Real responses may echo a resolved dated ID
+// (e.g. "claude-haiku-4-5-20251001"), so lookup strips a trailing -YYYYMMDD —
+// see costLlm. Add the alias here, never the dated form.
 const LLM_PRICES: Record<string, LlmPrice> = {
+  "claude-opus-4-8": { inputPerM: 5, outputPerM: 25 },
   "claude-sonnet-4-6": { inputPerM: 3, outputPerM: 15 },
   "claude-haiku-4-5": { inputPerM: 1, outputPerM: 5 },
 };
@@ -88,9 +94,27 @@ function warnUnknown(kind: string, model: string): void {
   console.warn(`[rag:pricing] no ${kind} price for "${model}" — costing it as $0`);
 }
 
+// Look a model up in a price table, tolerating a VERSIONED id. Providers may
+// echo back a resolved dated id ("claude-haiku-4-5-20251001") where we only
+// store the alias ("claude-haiku-4-5") — without this, a batch result would
+// price at $0 forever and the lever would silently accrue nothing. Exact match
+// first, then the longest table key that the id extends at a "-" boundary, so
+// "claude-opus-4-8-20260101" can never match a shorter unrelated prefix.
+function priceFor<T>(table: Record<string, T>, model: string): T | undefined {
+  const exact = table[model];
+  if (exact !== undefined) return exact;
+
+  let bestKey: string | null = null;
+  for (const key of Object.keys(table)) {
+    if (!model.startsWith(`${key}-`)) continue;
+    if (bestKey === null || key.length > bestKey.length) bestKey = key;
+  }
+  return bestKey === null ? undefined : table[bestKey];
+}
+
 // USD cost of one LLM call given token counts. Unknown model → 0 (+ one warn).
 export function costLlm(model: string, inputTokens: number, outputTokens: number): number {
-  const p = LLM_PRICES[model];
+  const p = priceFor(LLM_PRICES, model);
   if (!p) {
     warnUnknown("llm", model);
     return 0;
@@ -100,7 +124,7 @@ export function costLlm(model: string, inputTokens: number, outputTokens: number
 
 // USD cost of embedding `tokens` under `model`. Unknown model → 0 (+ one warn).
 export function costEmbed(model: string, tokens: number): number {
-  const perM = EMBED_PRICES[model];
+  const perM = priceFor(EMBED_PRICES, model);
   if (perM === undefined) {
     warnUnknown("embed", model);
     return 0;

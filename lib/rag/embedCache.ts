@@ -167,9 +167,12 @@ export async function cachedDocVectors(
     memory.set(memKey(model, "document", t), vec);
     out.set(t, vec);
   }
-  // Cache-only: every vector found is an avoided embed; texts NOT found are left
-  // un-embedded (no provider call), so there's nothing to charge.
-  meterEmbeds(model, [...out.keys()], []);
+  // NOT metered as a saving. A hit here avoids nothing: the no-cache
+  // counterfactual for a cache-only reader is "skip the chunk" (retriever drops
+  // an unfound text from the pool), not "pay to embed it". Banking here would
+  // also re-credit the SAME vector on every read of a hot path, inflating
+  // embed_cache without bound. The paid paths (embedDocsCached /
+  // embedQueryCached) are where a real avoided embed is counted.
   return out;
 }
 
@@ -194,8 +197,9 @@ export async function cachedQueryVectors(
     memory.set(memKey(model, "query", t), vec);
     out.set(t, vec);
   }
-  // Cache-only (see cachedDocVectors): found vectors are avoided embeds.
-  meterEmbeds(model, [...out.keys()], []);
+  // NOT metered as a saving (see cachedDocVectors): a miss here just marks the
+  // question dirty for re-scoring, which embeds it on the paid path and meters
+  // it there — so a hit avoided nothing that would otherwise have been bought.
   return out;
 }
 

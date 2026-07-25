@@ -235,12 +235,21 @@ export async function semanticCacheStore(
 // embed is NOT counted here — the lookup embeds it regardless, so it isn't
 // avoided; only the answer model call is. Tokens are estimated from the banked
 // result (context chunks in, answer out) under the model that produced it.
+// Called fire-and-forget on the serve hot path, so the WHOLE body is guarded:
+// `result` is a jsonb row read back from the DB and its shape is trusted, not
+// checked — a malformed row would throw inside the .map() before any inner
+// try/catch could see it, and an unhandled rejection takes the process down.
 async function recordSemanticSaving(result: CachedResult, question: string): Promise<void> {
-  const contextText = result.sources.map((s) => s.chunk.chunk.text);
-  const inTokens = estimateTokensAll(contextText) + estimateTokens(question);
-  const outTokens = estimateTokens(result.answer);
-  const saved = costLlm(result.model, inTokens, outTokens);
-  await recordSaving("semantic_cache", saved, inTokens + outTokens);
+  try {
+    const contextText = result.sources.map((s) => s.chunk.chunk.text);
+    const inTokens = estimateTokensAll(contextText) + estimateTokens(question);
+    const outTokens = estimateTokens(result.answer);
+    const saved = costLlm(result.model, inTokens, outTokens);
+    await recordSaving("semantic_cache", saved, inTokens + outTokens);
+  } catch (err) {
+    // Telemetry only — swallow so a savings-record failure never breaks a hit.
+    console.warn(`[rag:semantic-cache] savings record failed: ${(err as Error).message}`);
+  }
 }
 
 // Bank a shadow event for calibration (best-effort). Deduped by the unique

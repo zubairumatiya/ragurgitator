@@ -28,9 +28,25 @@ import type { SourceDocument } from "@/types/rag";
 
 export type IngestEmbeddingScope = { corpusIds?: string[]; documentIds?: string[] };
 
-// Only the document ids need to survive to apply — the chunks (texts + positions)
-// are re-derived deterministically, and the model picks the physical table.
-type IngestEmbeddingInput = { embeddingModel: string; documentIds: string[] };
+// The chunk TEXTS don't need to survive to apply — they're re-derived
+// deterministically. But "deterministically" only holds against the settings
+// build() used, and this batch is async (hours), so the config can be edited
+// while it's in flight. Hence the SNAPSHOT: apply() re-chunks with these, not
+// with whatever activeConfig() says by then. Without it, a changed chunk
+// size/overlap silently skips every doc (positions stop matching → complete =
+// false → applied: 0, no error), and a changed embedding model is worse — the
+// old-space vectors get written under the new model's name.
+//
+// chunkSize/chunkOverlap/dimension are OPTIONAL for backward compatibility:
+// jobs enqueued before this field existed have no snapshot and fall back to the
+// live config, i.e. exactly the old behavior.
+type IngestEmbeddingInput = {
+  embeddingModel: string;
+  documentIds: string[];
+  chunkSize?: number;
+  chunkOverlap?: number;
+  dimension?: number;
+};
 
 // Voyage result body (parseVoyageResults): the response's data array. One text
 // per request → one embedding.
@@ -73,12 +89,20 @@ export const ingestEmbeddingHandler: JobHandler = {
     const docIds = await resolveDocIds(scope as IngestEmbeddingScope);
     if (docIds.length === 0) return null;
 
+    // The settings this batch is chunked under, snapshotted into `input` below
+    // and passed explicitly here so build() and apply() demonstrably agree.
+    const snapshot = {
+      embeddingModel: cfg.embeddingModel,
+      chunkSize: cfg.chunkSize,
+      chunkOverlap: cfg.chunkOverlap,
+    };
+
     const docs = await documentsForEmbedding(docIds);
     const requests: BatchRequest[] = [];
     const included: string[] = [];
     for (const d of docs) {
       if (await hasEmbeddingRun(d.id)) continue; // already embedded under this config
-      const chunks = await chunkDocument(toSourceDoc(d));
+      const chunks = await chunkDocument(toSourceDoc(d), snapshot);
       if (chunks.length === 0) continue;
       included.push(d.id);
       for (const c of chunks) {
@@ -90,8 +114,11 @@ export const ingestEmbeddingHandler: JobHandler = {
     if (requests.length === 0) return null;
 
     const input: IngestEmbeddingInput = {
-      embeddingModel: cfg.embeddingModel,
+      ...snapshot,
       documentIds: included,
+      // Completes the snapshot: dimension isn't a chunking input, but apply()
+      // needs it to resolve the physical table these vectors belong in.
+      dimension: cfg.dimension,
     };
     return {
       requests,
@@ -105,7 +132,49 @@ export const ingestEmbeddingHandler: JobHandler = {
   },
 
   async apply(input, results) {
-    const { embeddingModel, documentIds } = input as IngestEmbeddingInput;
+    const { embeddingModel, documentIds, chunkSize, chunkOverlap, dimension } =
+      input as IngestEmbeddingInput;
+    const cfg = activeConfig();
+
+    // Resolve the settings these vectors were actually produced under. A job
+    // predating the snapshot has none, so it falls back to the live config —
+    // the old behavior, no worse than before.
+    const snapshot = {
+      embeddingModel,
+      chunkSize: chunkSize ?? cfg.chunkSize,
+      chunkOverlap: chunkOverlap ?? cfg.chunkOverlap,
+      dimension: dimension ?? cfg.dimension,
+    };
+
+    // The one inconsistency re-chunking CANNOT reconcile: if the snapshot's
+    // dimension doesn't belong to the snapshot's model, we can't tell which
+    // space these vectors are in, and writing them anywhere would corrupt
+    // retrieval silently. Fail the job loudly instead. In practice the snapshot
+    // is internally consistent (both fields come from one config read at
+    // build()), so this only trips on a genuinely malformed job record.
+    const specDimension = modelSpec(snapshot.embeddingModel).dimension;
+    if (snapshot.dimension !== specDimension) {
+      throw new Error(
+        `ingest_embedding: snapshot is inconsistent — model "${snapshot.embeddingModel}" ` +
+          `is ${specDimension}-dimensional but the job recorded ${snapshot.dimension}. ` +
+          `Refusing to write vectors whose space can't be determined.`,
+      );
+    }
+
+    if (
+      snapshot.embeddingModel !== cfg.embeddingModel ||
+      snapshot.chunkSize !== cfg.chunkSize ||
+      snapshot.chunkOverlap !== cfg.chunkOverlap
+    ) {
+      console.warn(
+        `[batch:ingest_embedding] config changed while this batch was in flight — ` +
+          `applying under the SNAPSHOT (model=${snapshot.embeddingModel}, ` +
+          `size=${snapshot.chunkSize}, overlap=${snapshot.chunkOverlap}); ` +
+          `live config is (model=${cfg.embeddingModel}, size=${cfg.chunkSize}, ` +
+          `overlap=${cfg.chunkOverlap}). These vectors belong to the snapshot's space.`,
+      );
+    }
+
     const byId = new Map<string, BatchResultRow>(results.map((r) => [r.customId, r]));
     let embeddedChunks = 0;
     const bankedTexts: string[] = [];
@@ -114,7 +183,7 @@ export const ingestEmbeddingHandler: JobHandler = {
       if (await hasEmbeddingRun(documentId)) continue; // idempotency
       const [d] = await documentsForEmbedding([documentId]);
       if (!d) continue; // stored text gone
-      const chunks = await chunkDocument(toSourceDoc(d));
+      const chunks = await chunkDocument(toSourceDoc(d), snapshot);
       if (chunks.length === 0) continue;
 
       // Require every chunk to have a vector — a partial run is worse than none.
@@ -132,7 +201,13 @@ export const ingestEmbeddingHandler: JobHandler = {
       }
       if (!complete) continue;
 
-      const chunkIds = await insertEmbeddingRunWithChunks({ documentId, chunks: inserts });
+      // Label the run with the SNAPSHOT, not the live config: these vectors were
+      // produced under it, and it also picks the physical chunks table.
+      const chunkIds = await insertEmbeddingRunWithChunks({
+        documentId,
+        chunks: inserts,
+        settings: snapshot,
+      });
       // Same post-insert invariant as the inline embed paths (pipeline.ts, 0033):
       // top up saved cluster runs with the newly ingested chunks.
       await topUpSavedRuns(chunkIds);

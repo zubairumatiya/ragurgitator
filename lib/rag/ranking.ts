@@ -346,21 +346,34 @@ export async function buildAggregateRanking(
 // model, the corpus chunks outside the pool × the pool's average tokens × that
 // model's embed price. Averaged token size comes from the pool we actually
 // have. Best-effort; a missing corpus count / price just yields 0.
+//
+// The counterfactual is the ULTRA-NAIVE baseline — embed the whole corpus under
+// every model FOR THIS QUESTION, rank, forget, repeat — with no vector storage.
+// That's why this banks per build rather than once per corpus, and it's the same
+// baseline embed_cache measures against, so the two levers stay consistent.
+// Called fire-and-forget, so the WHOLE body is guarded: countCorpusChunks runs
+// raw queries that can throw, and an unhandled rejection takes the process down
+// under Node ≥15. Mirrors the internal catch on every other telemetry call.
 async function recordBucketSaving(poolTexts: string[]): Promise<void> {
-  if (poolTexts.length === 0) return;
-  const baseModel = activeConfig().embeddingModel;
-  const nonBase = rankingAggregateModels.filter((m) => m !== baseModel);
-  if (nonBase.length === 0) return;
+  try {
+    if (poolTexts.length === 0) return;
+    const baseModel = activeConfig().embeddingModel;
+    const nonBase = rankingAggregateModels.filter((m) => m !== baseModel);
+    if (nonBase.length === 0) return;
 
-  const corpusChunks = await countCorpusChunks();
-  const skipped = corpusChunks - poolTexts.length;
-  if (skipped <= 0) return;
+    const corpusChunks = await countCorpusChunks();
+    const skipped = corpusChunks - poolTexts.length;
+    if (skipped <= 0) return;
 
-  const avgTokens = estimateTokensAll(poolTexts) / poolTexts.length;
-  const skippedTokens = skipped * avgTokens;
-  let saved = 0;
-  for (const m of nonBase) saved += costEmbed(m, skippedTokens);
-  await recordSaving("bucket_ndcg", saved, skippedTokens * nonBase.length);
+    const avgTokens = estimateTokensAll(poolTexts) / poolTexts.length;
+    const skippedTokens = skipped * avgTokens;
+    let saved = 0;
+    for (const m of nonBase) saved += costEmbed(m, skippedTokens);
+    await recordSaving("bucket_ndcg", saved, skippedTokens * nonBase.length);
+  } catch (err) {
+    // Telemetry only — swallow so a savings-record failure never breaks a build.
+    console.warn(`[rag:ranking] bucket saving record failed: ${(err as Error).message}`);
+  }
 }
 
 const LlmOrder = z.array(z.number().int().positive());

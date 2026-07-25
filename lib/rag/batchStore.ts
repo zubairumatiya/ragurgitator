@@ -41,8 +41,6 @@ export async function getActiveBatchSavings(): Promise<BatchSavings> {
 // A nested partial — the Settings UI sends only what it changed. Merged over the
 // current (already coerced) value, then written back whole.
 export type BatchSavingsPatch = {
-  mode?: BatchSavings["mode"];
-  bulk?: Partial<BatchSavings["bulk"]>;
   jobs?: Partial<BatchSavings["jobs"]>;
   semanticCache?: Partial<BatchSavings["semanticCache"]>;
 };
@@ -52,12 +50,16 @@ export async function updateBatchSavings(
   patch: BatchSavingsPatch,
 ): Promise<BatchSavings | null> {
   if (!isUuid(configId)) return null;
+  // Reading coerces, so a legacy (leg-grouped) blob is already migrated here and
+  // this write-back persists the flat shape.
   const cur = await getBatchSavings(configId);
+  // Drop keys the caller left undefined before spreading — undefined means
+  // "untouched", and a raw spread would let it erase the current value.
+  const defined = <T extends object>(o: T | undefined): Partial<T> =>
+    Object.fromEntries(Object.entries(o ?? {}).filter(([, v]) => v !== undefined)) as Partial<T>;
   const next: BatchSavings = coerceBatchSavings({
-    mode: patch.mode ?? cur.mode,
-    bulk: { ...cur.bulk, ...patch.bulk },
-    jobs: { ...cur.jobs, ...patch.jobs },
-    semanticCache: { ...cur.semanticCache, ...patch.semanticCache },
+    jobs: { ...cur.jobs, ...defined(patch.jobs) },
+    semanticCache: { ...cur.semanticCache, ...defined(patch.semanticCache) },
   });
   const done = await sql`
     update configs set batch_savings = ${sql.json(next)}, updated_at = now()

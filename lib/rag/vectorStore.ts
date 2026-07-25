@@ -146,25 +146,48 @@ export type ChunkInsert = {
   embedding: number[];
 };
 
+// The settings a run is LABELLED with. Supplied only when the caller produced
+// its vectors under settings that may no longer match the live config — the
+// async batch path, whose vectors are generated hours before they're written
+// (see lib/batch/jobs/ingestEmbedding.ts). The config still selects the run's
+// config_id; these override only what the vectors were actually made with.
+export type EmbeddingRunSettings = {
+  embeddingModel: string;
+  dimension: number;
+  chunkSize: number;
+  chunkOverlap: number;
+};
+
 // Persist one embedding run + its chunks under the ACTIVE config. Model,
 // dimension, chunk size/overlap and the physical table all come from the config,
 // so the caller only supplies the document and its chunks. Returns the new chunk
 // ids so the caller can top them into saved cluster presets (clusterStore
 // .topUpSavedRuns) — done by the caller, not here, because re-chunking an
 // existing config must NOT top up (see the note on that function).
+//
+// `settings` overrides those four labels (and the physical table, which is
+// derived from model+dimension). Omit it for today's behavior.
 export async function insertEmbeddingRunWithChunks(args: {
   documentId: string;
   chunks: ChunkInsert[];
+  settings?: EmbeddingRunSettings;
 }): Promise<string[]> {
   const cfg = activeConfig();
+  const model = args.settings?.embeddingModel ?? cfg.embeddingModel;
+  const dimension = args.settings?.dimension ?? cfg.dimension;
+  const chunkSize = args.settings?.chunkSize ?? cfg.chunkSize;
+  const chunkOverlap = args.settings?.chunkOverlap ?? cfg.chunkOverlap;
+  // Vectors must land in the table for the space they were PRODUCED in, so the
+  // table follows the overridden model/dimension rather than the live config.
+  const table = args.settings ? chunksTable(model, dimension) : cfg.chunksTable;
 
   return await sql.begin(async (tx) => {
     const [run] = await tx<{ id: string }[]>`
       insert into document_embeddings
         (config_id, document_id, model, dimension, chunk_size, chunk_overlap, chunk_count)
       values
-        (${cfg.id}, ${args.documentId}, ${cfg.embeddingModel}, ${cfg.dimension},
-         ${cfg.chunkSize}, ${cfg.chunkOverlap}, ${args.chunks.length})
+        (${cfg.id}, ${args.documentId}, ${model}, ${dimension},
+         ${chunkSize}, ${chunkOverlap}, ${args.chunks.length})
       returning id
     `;
 
@@ -180,7 +203,7 @@ export async function insertEmbeddingRunWithChunks(args: {
     }));
 
     const inserted = await tx<{ id: string }[]>`
-      insert into ${tx(cfg.chunksTable)} ${tx(rows)} returning id
+      insert into ${tx(table)} ${tx(rows)} returning id
     `;
     return inserted.map((r) => r.id);
   });

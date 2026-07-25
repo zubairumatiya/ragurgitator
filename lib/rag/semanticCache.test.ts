@@ -184,6 +184,36 @@ test("calibrateFromJudged: tolerates a dip that recovers (aggregate guarantee)",
   assert.equal(r.recommended, 0.8); // most inclusive prefix still ≥ 0.8
 });
 
+test("calibrateFromJudged: a tie group is judged whole, not part-way through", () => {
+  // Three events share sim 0.90 and straddle the target crossing: accept,
+  // accept, reject. Mid-group the prefix is 4/4 = 1.0 ≥ target, but serving
+  // `sim >= 0.90` also admits the reject, giving 4/5 = 0.80 < target. τ must
+  // therefore fall back to 0.95, above the tie group entirely.
+  const events = [
+    { sim: 0.98, verdict: "accept" as const },
+    { sim: 0.95, verdict: "accept" as const },
+    { sim: 0.9, verdict: "accept" as const },
+    { sim: 0.9, verdict: "accept" as const },
+    { sim: 0.9, verdict: "reject" as const },
+  ];
+  const r = calibrateFromJudged(events, 1.0, 1);
+  assert.equal(r.recommended, 0.95);
+});
+
+test("calibrateFromJudged: a tie group that clears the target as a whole is usable", () => {
+  // Same tie group, but the aggregate over [0.90,1] is 4/5 = 0.80 ≥ target, so
+  // the boundary sim IS a valid τ — folding must not reject it outright.
+  const events = [
+    { sim: 0.98, verdict: "accept" as const },
+    { sim: 0.95, verdict: "accept" as const },
+    { sim: 0.9, verdict: "accept" as const },
+    { sim: 0.9, verdict: "accept" as const },
+    { sim: 0.9, verdict: "reject" as const },
+  ];
+  const r = calibrateFromJudged(events, 0.8, 1);
+  assert.equal(r.recommended, 0.9);
+});
+
 test("calibrateFromJudged: no recommendation below the minimum sample size", () => {
   const events = [
     { sim: 0.98, verdict: "accept" as const },

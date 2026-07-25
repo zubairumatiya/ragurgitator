@@ -219,7 +219,13 @@ export function calibrateFromJudged(
     const n = k + 1;
     const rate = accepts / n;
     curve.push({ sim: sorted[k].sim, acceptRateAtOrAbove: rate, n });
-    if (rate >= target && n >= minSamples) recommended = sorted[k].sim;
+    // Only consider τ at the END of a run of equal sims. Mid-run, the prefix
+    // covers only PART of the tie group, but serving `sim >= τ` would admit the
+    // whole group — so a rate measured there doesn't hold for what we'd serve.
+    // Real cosines rarely tie exactly, so this is a correctness guarantee rather
+    // than a behavior change on live data.
+    const isTieBoundary = k === sorted.length - 1 || sorted[k + 1].sim !== sorted[k].sim;
+    if (isTieBoundary && rate >= target && n >= minSamples) recommended = sorted[k].sim;
   }
 
   return {

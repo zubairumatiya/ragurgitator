@@ -41,14 +41,11 @@ export function providerOfKind(kind: JobKind): BatchProvider {
 // --- the per-config preference (configs.batch_savings) ---------------------
 
 export type BatchChoice = "standard" | "batch";
-export type BatchMode = "bulk" | "individual";
 
 export type BatchSavings = {
-  mode: BatchMode;
-  // Bulk mode: one choice per leg, applied to every job in that leg.
-  bulk: Record<BatchLeg, BatchChoice>;
-  // Individual mode: one choice per job. Both maps persist so flipping the mode
-  // dropdown never discards the other view's values.
+  // One choice per job, full stop. There are only four, so grouping them behind
+  // per-leg settings (which earlier versions did, see coerceBatchSavings) bought
+  // nothing but a layer to reason through.
   jobs: Record<JobKind, BatchChoice>;
   // Semantic answer cache (docs/semantic-caching-plan.md): serve a stored answer
   // for a near-duplicate question, skipping retrieval/generation. Note this only
@@ -59,8 +56,6 @@ export type BatchSavings = {
 };
 
 export const DEFAULT_BATCH_SAVINGS: BatchSavings = {
-  mode: "bulk",
-  bulk: { embedding: "standard", llm: "standard" },
   jobs: {
     question_generation: "standard",
     ndcg_ranking: "standard",
@@ -70,35 +65,59 @@ export const DEFAULT_BATCH_SAVINGS: BatchSavings = {
   semanticCache: { serve: false },
 };
 
-// The effective choice for a kind: individual mode reads the per-job value;
-// bulk mode reads the kind's leg. This is THE resolver every launch point calls
-// to decide "submit a batch or run inline?".
+// The effective choice for a kind. This is THE resolver every launch point calls
+// to decide "submit a batch or run inline?" — now a plain lookup, but kept as a
+// function so launch points don't have to care that it stopped being one.
 export function effectiveChoice(pref: BatchSavings, kind: JobKind): BatchChoice {
-  return pref.mode === "individual" ? pref.jobs[kind] : pref.bulk[legOfKind(kind)];
+  return pref.jobs[kind];
 }
 export function isBatchEnabled(pref: BatchSavings, kind: JobKind): boolean {
   return effectiveChoice(pref, kind) === "batch";
 }
 
+// Older persisted shapes this still has to read. Both grouped jobs under two
+// per-leg settings; see the migration note on coerceBatchSavings.
+type LegacyBatchSavings = {
+  mode?: unknown; // 'bulk' | 'individual' in the oldest shape, absent after
+  bulk?: Partial<Record<BatchLeg, unknown>>;
+  jobs?: Partial<Record<JobKind, unknown>>;
+  semanticCache?: { serve?: unknown };
+};
+
 // Tolerant coercion of an unknown jsonb blob (or a partial patch) into a full
 // preference — missing/invalid fields fall back to the default. Used on read
 // (old rows, hand-edited jsonb) and on patch-merge in the store.
+//
+// Also MIGRATES the two shapes that predate the flat per-job map. There is no
+// SQL migration: old rows keep their jsonb until something saves over them, and
+// this converts on every read, preserving each job's EFFECTIVE choice.
+//
+//   1. `{ mode, bulk, jobs }` — `mode` picked WHICH map to read, leaving the
+//      other one dead. Under mode:'bulk' the jobs map holds stale values that
+//      were never in force, so it must be ignored rather than merged.
+//   2. `{ bulk, jobs }` with nullable jobs — legs as a base, jobs as an
+//      override layer on top (null = inherit). Resolved by `jobs[k] ?? leg`.
+//
+// Both collapse to: mode:'bulk' → the leg wins outright; otherwise the job's own
+// value wins when it has one, else its leg.
 export function coerceBatchSavings(raw: unknown): BatchSavings {
-  const r = (raw ?? {}) as Partial<BatchSavings>;
-  const choice = (v: unknown, fb: BatchChoice): BatchChoice =>
-    v === "batch" || v === "standard" ? v : fb;
+  const r = (raw ?? {}) as LegacyBatchSavings;
+  const choice = (v: unknown): BatchChoice | null =>
+    v === "batch" || v === "standard" ? v : null;
   const d = DEFAULT_BATCH_SAVINGS;
+  const legWins = r.mode === "bulk";
+
+  const resolve = (kind: JobKind): BatchChoice => {
+    const own = legWins ? null : choice(r.jobs?.[kind]);
+    return own ?? choice(r.bulk?.[legOfKind(kind)]) ?? d.jobs[kind];
+  };
+
   return {
-    mode: r.mode === "individual" ? "individual" : "bulk",
-    bulk: {
-      embedding: choice(r.bulk?.embedding, d.bulk.embedding),
-      llm: choice(r.bulk?.llm, d.bulk.llm),
-    },
     jobs: {
-      question_generation: choice(r.jobs?.question_generation, d.jobs.question_generation),
-      ndcg_ranking: choice(r.jobs?.ndcg_ranking, d.jobs.ndcg_ranking),
-      cluster_labeling: choice(r.jobs?.cluster_labeling, d.jobs.cluster_labeling),
-      ingest_embedding: choice(r.jobs?.ingest_embedding, d.jobs.ingest_embedding),
+      question_generation: resolve("question_generation"),
+      ndcg_ranking: resolve("ndcg_ranking"),
+      cluster_labeling: resolve("cluster_labeling"),
+      ingest_embedding: resolve("ingest_embedding"),
     },
     // Absent (old rows) or non-boolean → the safe default (don't serve).
     semanticCache: { serve: r.semanticCache?.serve === true },
