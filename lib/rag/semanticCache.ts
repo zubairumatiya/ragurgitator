@@ -98,32 +98,61 @@ async function currentFingerprint(cfg: ResolvedConfig): Promise<string> {
   ]);
 }
 
-// The cosine threshold governing hits for this model's vector-space: a
-// calibrated value if one exists (semantic_cache_thresholds), else the
-// conservative default. Missing table → default.
-async function resolveThreshold(model: string): Promise<number> {
+// Where an effective threshold came from — surfaced to the UI so a number is
+// never shown without saying which layer set it.
+export type ThresholdSource = "config" | "calibrated" | "default";
+
+export type EffectiveThreshold = {
+  space: string;
+  threshold: number;
+  source: ThresholdSource;
+};
+
+// The cosine threshold governing hits, INHERITED for this model's vector-space:
+// a calibrated value if one exists (semantic_cache_thresholds), else the
+// conservative default. Missing table → default. This is what a config with no
+// override of its own runs at, and what the Settings input shows as its
+// placeholder.
+export async function inheritedThreshold(model: string): Promise<EffectiveThreshold> {
   const space = spaceOf(model);
   try {
     const [row] = await sql<{ threshold: number }[]>`
       select threshold from semantic_cache_thresholds where space = ${space}
     `;
-    if (row) return Number(row.threshold);
+    if (row) return { space, threshold: Number(row.threshold), source: "calibrated" };
   } catch (err) {
     if (!isMissingTable(err)) throw err;
   }
-  return config.semanticCache.defaultThreshold;
+  return { space, threshold: config.semanticCache.defaultThreshold, source: "default" };
+}
+
+// Full resolution for a lookup: the config's own override wins outright, else
+// the inherited (space or default) value. `override` is null for the common case
+// of a config that hasn't set one — see BatchSavings.semanticCache.threshold.
+async function resolveThreshold(
+  model: string,
+  override: number | null,
+): Promise<EffectiveThreshold> {
+  if (override !== null) {
+    return { space: spaceOf(model), threshold: override, source: "config" };
+  }
+  return inheritedThreshold(model);
 }
 
 // Find a cached answer for `question`. Embeds the query (cached in 0020) and,
 // among entries valid for the current fingerprint and same embedding model,
-// finds the nearest one. A match that clears the per-space threshold is only
-// RETURNED AS A HIT when `serve` is true (the Settings → Savings toggle); with
-// serving off it's logged as a "would-hit" shadow and reported as a miss, so
-// the caller recomputes a fresh answer. Either way the query vector is returned
-// so the caller can retrieve without re-embedding.
+// finds the nearest one. A match that clears the threshold is only RETURNED AS A
+// HIT when `serve` is true (the Settings → Savings toggle); with serving off it's
+// logged as a "would-hit" shadow and reported as a miss, so the caller recomputes
+// a fresh answer. Either way the query vector is returned so the caller can
+// retrieve without re-embedding.
+//
+// Both settings come from the CALLER (pipeline reads configs.batch_savings)
+// rather than being read here, so this stays a pure function of its inputs and
+// one lookup can't disagree with another about which config it's serving.
 export async function semanticCacheLookup(
   question: string,
-  serve: boolean,
+  { serve, threshold: override }: { serve: boolean; threshold: number | null },
 ): Promise<CacheProbe> {
   const cfg = activeConfig();
   // Embed first: retrieval needs this vector regardless, so a provider error
@@ -149,7 +178,9 @@ export async function semanticCacheLookup(
       (r) => ({ vector: r.query_vector, value: { text: r.query_text, result: r.result } }),
     );
     const match = bestMatch(vector, entries);
-    const threshold = await resolveThreshold(cfg.embeddingModel);
+    // `source` rides along into the logs: when a hit looks wrong, the first
+    // question is always which layer set the floor it cleared.
+    const { threshold, source } = await resolveThreshold(cfg.embeddingModel, override);
 
     // Shadow-log the nearest match for threshold calibration (Phase 2 — see
     // docs/semantic-caching-plan.md). Recorded whenever it clears the low
@@ -170,7 +201,7 @@ export async function semanticCacheLookup(
     if (match && isHit(match.sim, threshold)) {
       if (serve) {
         console.log(
-          `[rag:semantic-cache] HIT sim=${match.sim.toFixed(4)} ≥ ${threshold} — ` +
+          `[rag:semantic-cache] HIT sim=${match.sim.toFixed(4)} ≥ ${threshold} (${source}) — ` +
             `served cached answer, skipped retrieval. new="${truncate(question)}" ` +
             `matched="${truncate(match.value.text)}"`,
         );
@@ -182,7 +213,7 @@ export async function semanticCacheLookup(
       // Serving is off (Settings → Savings): shadow-log the would-be hit for
       // threshold validation, then report a miss so a fresh answer is computed.
       console.log(
-        `[rag:semantic-cache] would-hit sim=${match.sim.toFixed(4)} ≥ ${threshold} but ` +
+        `[rag:semantic-cache] would-hit sim=${match.sim.toFixed(4)} ≥ ${threshold} (${source}) but ` +
           `serving is OFF — recomputing. new="${truncate(question)}" matched="${truncate(match.value.text)}"`,
       );
       return { hit: false, vector };
@@ -190,7 +221,7 @@ export async function semanticCacheLookup(
 
     if (match) {
       console.log(
-        `[rag:semantic-cache] miss (nearest sim=${match.sim.toFixed(4)} < ${threshold}) for "${truncate(question)}"`,
+        `[rag:semantic-cache] miss (nearest sim=${match.sim.toFixed(4)} < ${threshold} (${source})) for "${truncate(question)}"`,
       );
     }
     return { hit: false, vector };

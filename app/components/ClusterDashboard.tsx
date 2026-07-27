@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "@/lib/http/client";
 import { DriftBadge } from "@/app/components/DriftBadge";
+import { InfoDot } from "@/app/components/InfoDot";
 import type {
   BucketChunk,
   ClusterBucket,
@@ -25,6 +26,13 @@ import type {
 } from "@/lib/rag/clusterStore";
 
 const fmt = (n: number) => n.toFixed(3);
+
+// What a side-by-side compare can and can't tell you — the caveat belongs with
+// the modal's heading, not as a footnote under the columns.
+const COMPARE_ABOUT =
+  "Buckets aren't aligned across runs (numbering is arbitrary and k differs), " +
+  "so this compares headline metrics and each run's sorted cohesion profile — " +
+  "not bucket-to-bucket.";
 
 type Progress = { phase: "load" } | { phase: "restart"; index: number; total: number };
 
@@ -536,8 +544,9 @@ function CompareModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
+          <h2 className="flex items-center gap-1.5 text-sm font-medium uppercase tracking-wide text-zinc-500">
             Compare {runs.length} runs
+            <InfoDot text={COMPARE_ABOUT} />
           </h2>
           <button
             type="button"
@@ -575,12 +584,6 @@ function CompareModal({
             </div>
           ))}
         </div>
-
-        <p className="text-xs text-zinc-400">
-          Buckets aren&apos;t aligned across runs (numbering is arbitrary and k differs), so
-          this compares headline metrics and each run&apos;s sorted cohesion profile — not
-          bucket-to-bucket.
-        </p>
       </div>
     </div>
   );

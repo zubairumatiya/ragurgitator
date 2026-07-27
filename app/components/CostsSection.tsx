@@ -1,19 +1,46 @@
 "use client";
 
-// Costs — the savings "spreadsheet" on /appraise (docs/savings-accounting-plan.md).
-// Server-computed CostsReport comes in as a prop; the only client state is which
-// VIEW is selected. Realized = toggle-attributable levers (cascade, semantic
-// cache, batch); Structural = always-on ones (embed cache, bucket-nDCG); Naive =
-// both. Switching the view filters the lever rows and the headline total — no
-// refetch, all three totals are already in the report.
+// Costs — the savings "spreadsheet" on /appraise/costs (docs/savings-accounting-plan.md).
+// Server-computed CostsReport comes in as a prop (already scoped to all configs
+// or one, by the page); the only client state is which VIEW is selected.
+// Realized = toggle-attributable levers (cascade, semantic cache, batch);
+// Structural = always-on ones (embed cache, bucket-nDCG); Naive = both.
+// Switching the view filters the lever rows and the headline total — no refetch,
+// all three totals are already in the report.
 import { useState } from "react";
 
-import type { CostsReport, LeverRow, SavingsView } from "@/lib/rag/savingsStore";
+import { InfoDot } from "@/app/components/InfoDot";
+import type {
+  CostsReport,
+  LeverRow,
+  SavingsView,
+} from "@/lib/rag/savingsStore";
+
+const ABOUT =
+  "Money saved by each savings lever, itemized into one total. Pick a view: " +
+  "what the toggles bought you (Realized), what the architecture saves for " +
+  "free (Structural), or both (Naive).\n\n" +
+  "Levers marked ~ use estimated token counts (≈4 chars/token); the rest use " +
+  "real provider usage. Totals sum per-lever savings measured independently, " +
+  "so they don't equal a single controlled experiment.";
 
 const VIEWS: { id: SavingsView; label: string; blurb: string }[] = [
-  { id: "naive", label: "Naive", blurb: "vs. an app with none of these optimizations" },
-  { id: "realized", label: "Realized", blurb: "savings from toggles you turned on" },
-  { id: "structural", label: "Structural", blurb: "always-on architectural savings" },
+  {
+    id: "naive",
+    label: "Naive",
+    blurb:
+      "vs. an app with none of these optimizations — no caches, no dedup, no pooling, etc",
+  },
+  {
+    id: "realized",
+    label: "Realized",
+    blurb: "savings from toggles you turned on",
+  },
+  {
+    id: "structural",
+    label: "Structural",
+    blurb: "always-on architectural savings",
+  },
 ];
 
 function fmtUsd(n: number): string {
@@ -24,7 +51,10 @@ function fmtUsd(n: number): string {
   return `${sign}$${body}`;
 }
 
-const compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
+const compact = new Intl.NumberFormat("en-US", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
 
 export default function CostsSection({ report }: { report: CostsReport }) {
   const [view, setView] = useState<SavingsView>("naive");
@@ -37,22 +67,15 @@ export default function CostsSection({ report }: { report: CostsReport }) {
 
   return (
     <section className="flex flex-col gap-3">
-      <header className="flex flex-col gap-1">
-        <h2 className="text-lg font-semibold tracking-tight text-black dark:text-zinc-50">
-          💰 Costs
-        </h2>
-        <p className="text-sm text-zinc-600 dark:text-zinc-400">
-          Money saved by each savings lever, across all configs, itemized into one
-          total. Pick a view: what the toggles bought you (<em>Realized</em>), what
-          the architecture saves for free (<em>Structural</em>), or both
-          (<em>Naive</em>).
-        </p>
-      </header>
+      <h2 className="flex items-center gap-1.5 text-lg font-semibold tracking-tight text-black dark:text-zinc-50">
+        💰 Costs
+        <InfoDot text={ABOUT} />
+      </h2>
 
       {!report.hasData ? (
         <div className="rounded-lg border border-dashed border-zinc-300 p-6 text-center text-sm text-zinc-500 dark:border-zinc-700">
-          No costs recorded yet. Once you chat, run evals, or ingest with the 0034
-          tables applied, spend and savings start accruing here.
+          No costs recorded yet. Once you chat, run evals, or ingest with the
+          0034 tables applied, spend and savings start accruing here.
         </div>
       ) : (
         <>
@@ -82,7 +105,11 @@ export default function CostsSection({ report }: { report: CostsReport }) {
               value={fmtUsd(savedTotal)}
               accent={savedTotal >= 0 ? "green" : "red"}
             />
-            <Tile label="Spent" value={fmtUsd(report.totalSpentUsd)} accent="zinc" />
+            <Tile
+              label="Spent"
+              value={fmtUsd(report.totalSpentUsd)}
+              accent="zinc"
+            />
           </div>
 
           {/* Itemized savings */}
@@ -169,13 +196,6 @@ export default function CostsSection({ report }: { report: CostsReport }) {
               </div>
             </div>
           )}
-
-          <p className="text-xs text-zinc-400 dark:text-zinc-500">
-            Levers marked <span className="text-zinc-500 dark:text-zinc-400">~</span>{" "}
-            use estimated token counts (≈4 chars/token); the rest use real provider
-            usage. Totals sum per-lever savings measured independently, so they
-            don&apos;t equal a single controlled experiment.
-          </p>
         </>
       )}
     </section>
@@ -234,12 +254,26 @@ function Tile({
         : "text-zinc-900 dark:text-zinc-100";
   return (
     <div className="rounded-lg border border-zinc-200 px-4 py-3 dark:border-zinc-800">
-      <div className="text-xs capitalize text-zinc-500 dark:text-zinc-400">{label}</div>
-      <div className={`text-xl font-semibold tabular-nums ${color}`}>{value}</div>
+      <div className="text-xs capitalize text-zinc-500 dark:text-zinc-400">
+        {label}
+      </div>
+      <div className={`text-xl font-semibold tabular-nums ${color}`}>
+        {value}
+      </div>
     </div>
   );
 }
 
-function Th({ children, right }: { children: React.ReactNode; right?: boolean }) {
-  return <th className={`px-3 py-2 font-medium ${right ? "text-right" : ""}`}>{children}</th>;
+function Th({
+  children,
+  right,
+}: {
+  children: React.ReactNode;
+  right?: boolean;
+}) {
+  return (
+    <th className={`px-3 py-2 font-medium ${right ? "text-right" : ""}`}>
+      {children}
+    </th>
+  );
 }

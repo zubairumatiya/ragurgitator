@@ -6,6 +6,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { CorpusDeleteButton } from "@/app/components/CorpusDeleteButton";
 import { CorpusDocsPanel } from "@/app/components/CorpusDocsPanel";
+import { InfoDot } from "@/app/components/InfoDot";
 import {
   getCorpus,
   listCorpusConfigs,
@@ -14,6 +15,13 @@ import {
 } from "@/lib/rag/corpusStore";
 
 export const dynamic = "force-dynamic";
+
+// Legend for the ⟳ marker on the config chips. Each chip already carries its own
+// hover title, so this only has to exist where you'd go looking for it: on the
+// "Configs:" label. Rendered only when something below is actually synced.
+const SYNC_ABOUT =
+  "⟳ = auto-synced: documents added here are embedded into that config (this " +
+  "costs embedding calls), and documents removed here are removed from it.";
 
 export default async function CorpusDetailPage({
   params,
@@ -61,8 +69,9 @@ export default async function CorpusDetailPage({
           {/* Attached configs, auto-synced ones marked. */}
           {configs.length > 0 ? (
             <div className="flex flex-wrap items-center gap-1.5 pt-1">
-              <span className="text-xs uppercase tracking-wide text-zinc-400">
+              <span className="flex items-center gap-1.5 text-xs uppercase tracking-wide text-zinc-400">
                 Configs:
+                {syncedCount > 0 && <InfoDot text={SYNC_ABOUT} />}
               </span>
               {configs.map((c) => (
                 <Link
@@ -89,13 +98,6 @@ export default async function CorpusDetailPage({
             <p className="pt-1 text-xs text-zinc-400">
               No configs attached. Create one over this corpus from the + tab (Existing
               corpora → {corpus.name}).
-            </p>
-          )}
-          {syncedCount > 0 && (
-            <p className="text-xs text-zinc-500">
-              ⟳ = auto-synced: documents added here are embedded into that config
-              (this costs embedding calls), and documents removed here are removed
-              from it.
             </p>
           )}
         </header>

@@ -2,10 +2,19 @@
 // recorded would-hit events — a bulk LLM pass, a boundary re-judge, and a human
 // Accept/Reject queue — then sweep the labels into a threshold. Judging is
 // on-demand (the Run buttons), never inline.
+//
+// Last panel on the page: it needs real would-hit traffic to have accrued and
+// costs judge tokens to run, so it refines a threshold the collision floor (top
+// of the page) already put in the right neighbourhood.
+//
+// Judging writes VERDICTS, never a threshold: the swept recommendation is
+// broadcast to ApplyThresholdPanel — on the Thresholds heading row, the section
+// ABOVE this one — which owns every threshold write.
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
 
+import { InfoDot } from "@/app/components/InfoDot";
 import { config } from "@/lib/config";
 import { apiFetch } from "@/lib/http/client";
 import type {
@@ -15,7 +24,13 @@ import type {
   ShadowSpace,
 } from "@/lib/rag/semanticCacheCalibration";
 
-import { SC_CHANGED } from "./ThresholdsPanel";
+import { emitRecommendation } from "./events";
+
+const ABOUT =
+  "Judge recorded would-hit events — does the stored answer acceptably answer " +
+  "the new question? — then sweep the labels for the lowest threshold whose " +
+  `served set keeps acceptance ≥ ${config.semanticCache.acceptTarget}.\n\n` +
+  "Events are judged on demand, not as they arrive.";
 
 const btn =
   "rounded-md border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800";
@@ -62,7 +77,22 @@ export function ShadowJudgePanel() {
       .catch((e) => setError(String(e)));
     apiFetch(`/api/semantic-cache/shadow/calibration?space=${encodeURIComponent(s)}`)
       .then((r) => r.json())
-      .then((d) => setCurve(d.report ?? null))
+      .then((d) => {
+        const report: CalibrationReport | null = d.report ?? null;
+        setCurve(report);
+        // Offer the swept τ upward. Re-emitted whenever the curve reloads (space
+        // switch, fresh verdicts) so the apply box tracks what's on screen; it
+        // ignores the value if the user has typed one of their own.
+        if (report?.recommended !== null && report !== null) {
+          emitRecommendation({
+            value: report.recommended,
+            space: s,
+            origin: "Shadow judge",
+            notes: `shadow-judge n=${report.totalJudged} target=${report.target}`,
+            sampleSize: report.totalJudged,
+          });
+        }
+      })
       .catch((e) => setError(String(e)));
   }, []);
 
@@ -120,43 +150,15 @@ export function ShadowJudgePanel() {
       .catch((e) => setError(String(e)));
   };
 
-  const applyCalibrated = () => {
-    if (!curve || curve.recommended === null) return;
-    setBusy("apply");
-    setError(null);
-    apiFetch("/api/semantic-cache/thresholds", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        space,
-        threshold: curve.recommended,
-        sampleSize: curve.totalJudged,
-        notes: `shadow-judge n=${curve.totalJudged} target=${curve.target}`,
-      }),
-    })
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.error) setError(d.error);
-        else window.dispatchEvent(new Event(SC_CHANGED));
-      })
-      .catch((e) => setError(String(e)))
-      .finally(() => setBusy(null));
-  };
-
   const current = spaces.find((s) => s.space === space);
   const rec = curve?.recommended ?? null;
 
   return (
     <section className="flex flex-col gap-3 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
-      <div className="flex flex-col gap-1">
-        <h2 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Shadow judge</h2>
-        <p className="text-xs text-zinc-500 dark:text-zinc-400">
-          Judge recorded would-hit events — does the stored answer acceptably answer the
-          new question? — then sweep the labels for the lowest threshold whose served set
-          keeps acceptance ≥ {config.semanticCache.acceptTarget}. Events are judged on
-          demand, not as they arrive.
-        </p>
-      </div>
+      <h2 className="flex items-center gap-1.5 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+        Shadow judge
+        <InfoDot text={ABOUT} />
+      </h2>
 
       {spaces.length === 0 ? (
         <p className="text-xs text-zinc-400">
@@ -262,14 +264,14 @@ export function ShadowJudgePanel() {
                 </span>
               )}
             </span>
-            <button
-              type="button"
-              className={btn}
-              disabled={busy !== null || rec === null}
-              onClick={applyCalibrated}
-            >
-              {busy === "apply" ? "Applying…" : `Apply calibrated to ${space}`}
-            </button>
+            {/* Points UP to the apply box: the Thresholds heading row that carries
+                the apply control is the section directly above this panel. */}
+            {rec !== null && (
+              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                Sent to the <strong className="font-medium">Threshold</strong> box above, on
+                the Thresholds heading row — nothing is live until you apply it there.
+              </span>
+            )}
           </div>
 
           <HumanQueue events={events} onVerdict={humanVerdict} />

@@ -80,6 +80,30 @@ function parseRateOrNull(s: string): number | null {
   return Math.min(1, Math.max(0, rate));
 }
 
+// The semantic-cache threshold field. "" => null, meaning INHERIT (the space's
+// calibrated value, else the conservative default) — that's the normal state, so
+// clearing the box has to be the way back rather than an error. Accepts the same
+// forms as the metric minimums above (0.94, 94, 94%) since a cosine is a 0..1
+// rate too. `undefined` means unparseable, which BLOCKS the save instead of
+// falling back to null: silently inheriting after a typo would move the floor
+// answers are served at without telling anyone.
+function parseThreshold(s: string): number | null | undefined {
+  const t = s.trim();
+  if (t === "") return null;
+  const pct = t.endsWith("%");
+  const n = Number(pct ? t.slice(0, -1) : t);
+  if (!Number.isFinite(n)) return undefined;
+  const rate = pct || n > 1 ? n / 100 : n;
+  return rate >= 0 && rate <= 1 ? rate : undefined;
+}
+
+// What the config falls back to with no override of its own (GET /api/batch).
+type InheritedThreshold = {
+  space: string;
+  threshold: number;
+  source: "calibrated" | "default";
+};
+
 export function EvalSettings() {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -107,10 +131,14 @@ export function EvalSettings() {
   const [scopeDocs, setScopeDocs] = useState<AutotuneScopeDocument[]>([]);
   const [scopeSel, setScopeSel] = useState<Set<string> | null>(null);
   const [scopeExpanded, setScopeExpanded] = useState<Set<string>>(new Set());
-  // Autotune model scope (0030): the keyed alternate models a run could try,
-  // and which are allowed. null = all of them (also covers models keyed later).
+  // Autotune model scope (0030): the alternate models a run could try (keyed
+  // ones plus unkeyed ones shown greyed out), and which are allowed. null = all
+  // the keyed ones (also covers models keyed later). The checklist is long
+  // enough to bury the sections below it, so it lives behind a disclosure that
+  // starts collapsed and pops open when a bulk action changes it.
   const [modelOpts, setModelOpts] = useState<AutotuneModelOption[]>([]);
   const [modelSel, setModelSel] = useState<Set<string> | null>(null);
+  const [modelsOpen, setModelsOpen] = useState(false);
   const [sync, setSync] = useState(false);
   const [savedSync, setSavedSync] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -121,6 +149,11 @@ export function EvalSettings() {
   const [savings, setSavings] = useState<BatchSavings>(DEFAULT_BATCH_SAVINGS);
   const [emailReady, setEmailReady] = useState(false);
   const [inFlightCount, setInFlightCount] = useState(0);
+  // Cache threshold override, held as TEXT (like the metric minimums) so an
+  // in-progress "0." isn't rounded out from under the cursor; parsed on save.
+  // Empty = no override. `inherited` is what that empty box resolves to.
+  const [threshold, setThreshold] = useState("");
+  const [inherited, setInherited] = useState<InheritedThreshold | null>(null);
   // Saver mode (0032): the FrugalGPT cascade on/off for this config (its own
   // column, configs.cascade_enabled — separate from the BatchSavings blob).
   const [cascadeEnabled, setCascadeEnabled] = useState(false);
@@ -172,6 +205,7 @@ export function EvalSettings() {
       setScopeExpanded(new Set());
       setModelOpts(data.autotuneModels ?? []);
       setModelSel(c.autotune.modelScope === null ? null : new Set(c.autotune.modelScope));
+      setModelsOpen(false);
       setSync(data.config.corpusSync);
       setSavedSync(data.config.corpusSync);
       // Savings preference + email/in-flight state (its own store; non-fatal).
@@ -183,6 +217,7 @@ export function EvalSettings() {
               emailConfigured?: boolean;
               inFlight?: unknown[];
               cascadeEnabled?: boolean;
+              inheritedThreshold?: InheritedThreshold;
             }
           | null;
         if (bres.ok && bdata?.savings) {
@@ -190,6 +225,11 @@ export function EvalSettings() {
           setEmailReady(Boolean(bdata.emailConfigured));
           setInFlightCount(bdata.inFlight?.length ?? 0);
           setCascadeEnabled(Boolean(bdata.cascadeEnabled));
+          setInherited(bdata.inheritedThreshold ?? null);
+          // Re-seeded on every open, so an override applied from the
+          // collision-floor panel meanwhile shows up here.
+          const t = bdata.savings.semanticCache.threshold;
+          setThreshold(t === null ? "" : String(t));
         }
       } catch {
         /* leave defaults — the Savings section still renders */
@@ -220,7 +260,12 @@ export function EvalSettings() {
     // Model scope: all-selected saves as null ("all", so models keyed later are
     // included too); a partial selection keeps only ids that still exist as
     // options ([] when the user allowed none = size-only tuning).
-    const allModelIds = modelOpts.map((m) => m.id);
+    //
+    // Only SELECTABLE (keyed) options count on either side: the greyed rows are
+    // there to explain a missing space, not to be picked, so they must never
+    // land in the saved array — and they must not block the all-checked → null
+    // collapse either (with them counted, "all" could never save as null).
+    const allModelIds = modelOpts.filter((m) => m.selectable).map((m) => m.id);
     const modelScope =
       modelSel === null || allModelIds.every((id) => modelSel.has(id))
         ? null
@@ -272,13 +317,18 @@ export function EvalSettings() {
         }
       }
       // Savings preference lives in its own store (configs.batch_savings).
+      const parsedThreshold = parseThreshold(threshold);
+      if (parsedThreshold === undefined) {
+        setErr("Match threshold must be a cosine between 0 and 1 (e.g. 0.94), or empty to inherit.");
+        return;
+      }
       const bres = await apiFetch("/api/batch", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           jobs: savings.jobs,
           cascadeEnabled,
-          semanticCache: savings.semanticCache,
+          semanticCache: { ...savings.semanticCache, threshold: parsedThreshold },
         }),
       });
       if (!bres.ok) {
@@ -295,6 +345,13 @@ export function EvalSettings() {
       setSaving(false);
     }
   }
+
+  // The collapsed "Models" summary: how many models a run would actually try.
+  // Counts only keyed options, so the greyed rows can't inflate it, and treats
+  // null ("all") as every keyed option — the same set the save path collapses.
+  const modelsSelected = modelOpts.filter(
+    (m) => m.selectable && (modelSel === null || modelSel.has(m.id)),
+  ).length;
 
   return (
     <div className="relative">
@@ -522,34 +579,59 @@ export function EvalSettings() {
                 align="left"
                 text={
                   "Which alternate embedding models autotune may try as per-chunk " +
-                  "overrides (only models with a key are listed). Models in the base " +
-                  "model's own vector space rank directly against it — no extra fusion " +
-                  "lane, no extra query embedding per live retrieval. A model in a " +
-                  "separate space adds a fusion lane. Uncheck all to tune chunk size only."
+                  "overrides. Models in the base model's own vector space rank " +
+                  "directly against it — no extra fusion lane, no extra query " +
+                  "embedding per live retrieval. A model in a separate space adds a " +
+                  "fusion lane. Models whose provider has no key are listed greyed " +
+                  "out with the env var that would enable them. Uncheck all to tune " +
+                  "chunk size only."
                 }
               >
                 <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
                   Models
                 </span>
               </Tooltip>
-              <div className="flex gap-2 text-[11px]">
+              {/* Bulk actions open the disclosure: a count changing behind a
+                  collapsed panel gives no clue WHICH models moved. */}
+              <div className="flex items-center gap-2 text-[11px]">
                 <button
                   type="button"
-                  onClick={() => setModelSel(null)}
+                  onClick={() => {
+                    setModelSel(null);
+                    setModelsOpen(true);
+                  }}
                   className="cursor-pointer text-zinc-500 hover:underline"
                 >
                   all
                 </button>
                 <button
                   type="button"
-                  onClick={() => setModelSel(new Set())}
+                  onClick={() => {
+                    setModelSel(new Set());
+                    setModelsOpen(true);
+                  }}
                   className="cursor-pointer text-zinc-500 hover:underline"
                 >
                   none
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setModelsOpen((v) => !v)}
+                  aria-expanded={modelsOpen}
+                  title={modelsOpen ? "Hide the model list" : "Show the model list"}
+                  className="cursor-pointer rounded border border-zinc-300 px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                >
+                  {modelsSelected} selected {modelsOpen ? "▾" : "▸"}
+                </button>
               </div>
             </div>
-            <ModelScopeChecklist models={modelOpts} selected={modelSel} setSelected={setModelSel} />
+            {modelsOpen && (
+              <ModelScopeChecklist
+                models={modelOpts}
+                selected={modelSel}
+                setSelected={setModelSel}
+              />
+            )}
 
             {/* RETRIEVAL (live fusion pool, 0027) */}
             <p className="mb-1 mt-3 border-t border-zinc-200 pt-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:border-zinc-800">
@@ -692,6 +774,69 @@ export function EvalSettings() {
                 className="h-4 w-4 shrink-0 cursor-pointer accent-black dark:accent-white"
               />
             </label>
+
+            {/* The floor a match must clear to be served. Only shown once serving
+                is on — with serving off the number governs nothing, and offering
+                it there just invites tuning a knob that isn't connected. */}
+            {savings.semanticCache.serve && (
+              <div className="mt-2 flex flex-col gap-1 pl-3">
+                <div className="flex items-center justify-between gap-2">
+                  <Tooltip
+                    align="left"
+                    text={
+                      "Cosine similarity a new question must reach against a cached " +
+                      "one before its answer is reused. Higher = fewer hits but safer; " +
+                      "lower = more savings and more risk of serving the wrong answer. " +
+                      "Leave empty to inherit the calibrated value for this embedding space."
+                    }
+                  >
+                    <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                      Match threshold
+                    </span>
+                  </Tooltip>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={threshold}
+                      onChange={(e) => setThreshold(e.target.value)}
+                      placeholder={inherited ? inherited.threshold.toFixed(3) : "0.950"}
+                      className="w-20 rounded-md border border-zinc-300 bg-white px-2 py-0.5 text-right text-xs tabular-nums text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setThreshold("")}
+                      disabled={threshold.trim() === ""}
+                      className="rounded px-1 text-xs text-zinc-400 cursor-pointer transition-colors hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-30 dark:hover:text-zinc-200"
+                    >
+                      Reset
+                    </button>
+                  </div>
+                </div>
+                <p className="text-xs text-zinc-400 dark:text-zinc-500">
+                  {threshold.trim() === "" ? (
+                    <>
+                      Inheriting{" "}
+                      <span className="tabular-nums">
+                        {inherited ? inherited.threshold.toFixed(3) : "—"}
+                      </span>{" "}
+                      {inherited?.source === "calibrated" ? "calibrated for" : "(default) for"}{" "}
+                      <span className="font-mono">{inherited?.space ?? "this space"}</span>. Calibrate
+                      it on Appraise → Semantic caching.
+                    </>
+                  ) : (
+                    <>
+                      Overrides the{" "}
+                      <span className="font-mono">{inherited?.space ?? "space"}</span> value (
+                      <span className="tabular-nums">
+                        {inherited ? inherited.threshold.toFixed(3) : "—"}
+                      </span>
+                      ) for this config only. Reset to inherit again.
+                    </>
+                  )}
+                </p>
+              </div>
+            )}
 
             {inFlightCount > 0 && (
               <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
@@ -897,9 +1042,9 @@ const PROVIDER_LABEL: Record<string, string> = {
   local: "Local",
 };
 
-// The autotune "Models" checklist: the keyed alternate models a run may try,
-// grouped by VECTOR SPACE — provider-agnostic, so any model shows up the moment
-// its provider key is set. The base model's own space heads the list under a
+// The autotune "Models" checklist: the alternate models a run may try, grouped
+// by VECTOR SPACE — provider-agnostic, so any model shows up the moment its
+// provider key is set. The base model's own space heads the list under a
 // "no fusion" label (an override under those models ranks directly against the
 // base, so live retrieval opens no extra fusion lane). Every OTHER distinct
 // space is its own subsection and costs one fusion lane at retrieval (each
@@ -908,6 +1053,14 @@ const PROVIDER_LABEL: Record<string, string> = {
 // dims of one OpenAI/Cohere model — cluster into a single subsection and share
 // that one lane. `selected === null` = all allowed (the default, and what a
 // fully-checked list saves back as); nothing checked = size-only tuning.
+//
+// Models whose provider has no key are LISTED under their own space heading,
+// disabled, with the env var that would enable them. Hiding them was the bug
+// this fixes: with only VOYAGE_API_KEY set the whole list collapsed to the base
+// model's own space, so the UI read as "fusion isn't a thing here" instead of
+// "the other spaces need a key". A disabled row is never checked, never
+// toggleable, and never counted — not in the fusion-lane footer, not in the
+// header's "N selected", and (see save()) never in the saved scope.
 function ModelScopeChecklist({
   models,
   selected,
@@ -920,18 +1073,22 @@ function ModelScopeChecklist({
   if (models.length === 0) {
     return (
       <p className="mt-1 rounded border border-zinc-200 p-2 text-xs text-zinc-400 dark:border-zinc-800">
-        No other keyed models available — add a provider key (OpenAI, Cohere, …)
-        to widen autotune.
+        No alternate models in the ladder — autotune can only tune chunk size.
       </p>
     );
   }
 
-  const allIds = models.map((m) => m.id);
-  const isChecked = (id: string) => selected === null || selected.has(id);
-  const toggle = (id: string) => {
-    const next = new Set(selected ?? allIds);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
+  // "All" only ever means the KEYED models: an unkeyed one can't be embedded
+  // with, so it stays unchecked whatever the selection is, and toggling starts
+  // from the keyed set so a disabled id can't slip into it.
+  const usableIds = models.filter((m) => m.selectable).map((m) => m.id);
+  const isChecked = (m: AutotuneModelOption) =>
+    m.selectable && (selected === null || selected.has(m.id));
+  const toggle = (m: AutotuneModelOption) => {
+    if (!m.selectable) return;
+    const next = new Set(selected ?? usableIds);
+    if (next.has(m.id)) next.delete(m.id);
+    else next.add(m.id);
     setSelected(next);
   };
 
@@ -944,17 +1101,25 @@ function ModelScopeChecklist({
     if (list) list.push(m);
     else groups.set(spaceKey(m), [m]);
   }
-  // Base space first (its members carry sameSpaceAsBase), the rest in ladder order.
-  const orderedKeys = [...groups.keys()].sort(
-    (a, b) =>
-      Number(groups.get(b)![0].sameSpaceAsBase) - Number(groups.get(a)![0].sameSpaceAsBase),
-  );
+  // Base space first (its members carry sameSpaceAsBase), then the keyed spaces,
+  // then the greyed ones — actionable choices above aspirational ones. A space's
+  // members share a provider, so availability is uniform within a group. Sort is
+  // stable, so ladder (cheapest-first) order survives inside each band.
+  const orderedKeys = [...groups.keys()].sort((a, b) => {
+    const [ga, gb] = [groups.get(a)![0], groups.get(b)![0]];
+    return (
+      Number(gb.sameSpaceAsBase) - Number(ga.sameSpaceAsBase) ||
+      Number(gb.selectable) - Number(ga.selectable)
+    );
+  });
 
   // Fusion lanes the CURRENT selection implies = distinct NON-base spaces with a
-  // checked member (base-space picks are free).
+  // checked member (base-space picks are free; greyed rows are never checked, so
+  // an unkeyed space never inflates the count).
   const lanes = new Set(
-    models.filter((m) => isChecked(m.id) && !m.sameSpaceAsBase).map(spaceKey),
+    models.filter((m) => isChecked(m) && !m.sameSpaceAsBase).map(spaceKey),
   ).size;
+  const checkedCount = models.filter(isChecked).length;
 
   const header = (group: AutotuneModelOption[]) => {
     if (group[0].sameSpaceAsBase) return "Same space as base — no fusion";
@@ -966,7 +1131,7 @@ function ModelScopeChecklist({
 
   return (
     <>
-      <div className="mt-1 max-h-44 overflow-y-auto rounded border border-zinc-200 dark:border-zinc-800">
+      <div className="mt-1 max-h-52 overflow-y-auto rounded border border-zinc-200 dark:border-zinc-800">
         {orderedKeys.map((key) => {
           const group = groups.get(key)!;
           return (
@@ -980,16 +1145,35 @@ function ModelScopeChecklist({
               {group.map((m) => (
                 <label
                   key={m.id}
-                  className="flex cursor-pointer items-center gap-1.5 px-1.5 py-0.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                  title={m.reason ?? undefined}
+                  className={`flex items-start gap-1.5 px-1.5 py-0.5 ${
+                    m.selectable
+                      ? "cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/50"
+                      : "cursor-not-allowed"
+                  }`}
                 >
                   <input
                     type="checkbox"
-                    checked={isChecked(m.id)}
-                    onChange={() => toggle(m.id)}
-                    className="cursor-pointer"
+                    checked={isChecked(m)}
+                    disabled={!m.selectable}
+                    onChange={() => toggle(m)}
+                    className="mt-0.5 cursor-pointer disabled:cursor-not-allowed"
                   />
-                  <span className="min-w-0 flex-1 truncate text-xs text-zinc-700 dark:text-zinc-300">
-                    {m.id}
+                  <span className="min-w-0 flex-1">
+                    <span
+                      className={`block truncate text-xs ${
+                        m.selectable
+                          ? "text-zinc-700 dark:text-zinc-300"
+                          : "text-zinc-400 dark:text-zinc-600"
+                      }`}
+                    >
+                      {m.id}
+                    </span>
+                    {m.reason && (
+                      <span className="block truncate text-[10px] text-zinc-400 dark:text-zinc-500">
+                        {m.reason}
+                      </span>
+                    )}
                   </span>
                   <span className="shrink-0 text-[10px] text-zinc-400">{m.provider}</span>
                 </label>
@@ -999,9 +1183,11 @@ function ModelScopeChecklist({
         })}
       </div>
       <p className="mt-0.5 text-[10px] text-zinc-400">
-        {lanes === 0
-          ? "All picks stay in the base space — no fusion lanes."
-          : `${lanes} fusion lane${lanes > 1 ? "s" : ""} at retrieval (1 per extra space).`}
+        {checkedCount === 0
+          ? "No models checked — autotune will tune chunk size only."
+          : lanes === 0
+            ? "All picks stay in the base space — no fusion lanes."
+            : `${lanes} fusion lane${lanes > 1 ? "s" : ""} at retrieval (1 per extra space).`}
       </p>
     </>
   );

@@ -1,15 +1,21 @@
 // Sub-nav for the Appraise section (a peer group of the config tabs). Turns
-// /appraise into a small section with its own pages: the cross-config metrics
-// table and the semantic-cache calibration page. Client Component so it can
+// /appraise into a small section with its own pages: costs, semantic-cache
+// calibration, and the cross-config metrics table. Client Component so it can
 // highlight the active tab from the pathname.
+//
+// Every tab is a real leaf route — bare /appraise redirects to the first one, so
+// the exact-pathname match below never has to cope with an index page that also
+// renders a tab's content.
 "use client";
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+// Order = display order. Money first: it's the page you open Appraise for.
 const TABS = [
-  { href: "/appraise", label: "Config metrics" },
+  { href: "/appraise/costs", label: "Costs" },
   { href: "/appraise/semantic-cache", label: "Semantic caching" },
+  { href: "/appraise/configs", label: "Config metrics" },
 ];
 
 export function AppraiseNav() {

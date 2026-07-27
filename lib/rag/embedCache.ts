@@ -29,7 +29,14 @@ const embedCost = (model: string, texts: string[]): number =>
 // A cache HIT is an avoided embed — bank it as an embed_cache saving. A MISS
 // paid the provider — bank it as embed spend. Both are one upsert for the whole
 // batch (recordSaving/Spend add aggregates), and both are fire-and-forget.
-function meterEmbeds(model: string, hits: string[], misses: string[]): void {
+//
+// Exported because two paid embed paths cache OUTSIDE this module and would
+// otherwise go unpriced against the no-cache counterfactual: the eval
+// query-vector cache (eval_question_embeddings, keyed by question id — see
+// eval.scoreQuestions) and live chat retrieval (retriever.retrieve, which has
+// no cache at all, so it only ever reports spend). They own their storage; this
+// owns what an embed costs.
+export function meterEmbeds(model: string, hits: string[], misses: string[]): void {
   if (hits.length > 0) {
     void recordSaving("embed_cache", embedCost(model, hits), estimateTokensAll(hits), {
       events: hits.length,

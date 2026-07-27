@@ -228,6 +228,50 @@ export async function listRankings(questionId: string): Promise<StoredRanking[]>
   }));
 }
 
+// listRankings for MANY questions in one round-trip, as questionId -> rankings
+// (newest first, same as the single-question form). The bulk LLM pass needs every
+// question's aggregate + llm_rerank row just to decide who to skip, and doing
+// that one query per question is an N+1 over the whole labeled set. Questions
+// with no rankings are simply absent from the map.
+export async function listRankingsByQuestions(
+  questionIds: string[],
+): Promise<Map<string, StoredRanking[]>> {
+  if (questionIds.length === 0) return new Map();
+  const rows = await sql<
+    {
+      eval_question_id: string;
+      id: string;
+      kind: RankingKind;
+      is_truth: boolean;
+      chunk_ids: string[];
+      details: Record<string, unknown>;
+      created_at: Date;
+    }[]
+  >`
+    select r.eval_question_id, r.id, r.kind, r.is_truth, r.chunk_ids, r.details,
+           r.created_at
+    from eval_rankings r
+    join document_embeddings de on de.id = r.document_embedding_id
+    where r.eval_question_id = any(${questionIds}::uuid[])
+      and de.config_id = ${activeConfig().id}
+    order by r.created_at desc
+  `;
+  const byQuestion = new Map<string, StoredRanking[]>();
+  for (const r of rows) {
+    const list = byQuestion.get(r.eval_question_id) ?? [];
+    list.push({
+      id: r.id,
+      kind: r.kind,
+      isTruth: r.is_truth,
+      chunkIds: r.chunk_ids,
+      details: r.details,
+      createdAt: r.created_at.getTime(),
+    });
+    byQuestion.set(r.eval_question_id, list);
+  }
+  return byQuestion;
+}
+
 // Insert or replace one ranking of a given kind (one per question/config/kind).
 // is_truth is left untouched on update and defaults false on insert — promotion
 // goes through setTruth so the single-truth invariant holds. Returns the row id.

@@ -5,11 +5,20 @@
 // (outside /c/[configId]) like Appraise, so no per-config banner/sub-nav.
 // Dynamic — it reads the DB per request.
 import Link from "next/link";
+import { BackToConfigs } from "@/app/components/BackToConfigs";
 import { CorpusCreateForm } from "@/app/components/CorpusCreateForm";
 import { CorpusDeleteButton } from "@/app/components/CorpusDeleteButton";
+import { InfoDot } from "@/app/components/InfoDot";
 import { listCorpora } from "@/lib/rag/corpusStore";
 
 export const dynamic = "force-dynamic";
+
+const ABOUT =
+  "A corpus is a reusable, named selection of documents — a quick way to pick " +
+  "a doc set when creating configs.\n\n" +
+  "Corpora and configs are independent: deleting a corpus never touches a " +
+  "config's documents. A config can auto-sync with its corpus so membership " +
+  "changes flow both ways.";
 
 export default async function CorporaPage() {
   const corpora = await listCorpora({ includeEmpty: true });
@@ -17,23 +26,13 @@ export default async function CorporaPage() {
   return (
     <div className="flex flex-1 flex-col items-center bg-zinc-50 font-sans dark:bg-black">
       <main className="flex w-full max-w-3xl flex-1 flex-col gap-6 px-8 py-12">
-        <Link
-          href="/"
-          className="self-start text-sm text-zinc-500 transition-colors hover:text-zinc-900 dark:hover:text-zinc-100"
-        >
-          ← Back to configs
-        </Link>
+        <BackToConfigs />
 
         <header className="flex flex-col gap-2">
-          <h1 className="text-2xl font-semibold tracking-tight text-black dark:text-zinc-50">
+          <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight text-black dark:text-zinc-50">
             My corpora
+            <InfoDot text={ABOUT} />
           </h1>
-          <p className="text-sm text-zinc-600 dark:text-zinc-400">
-            A corpus is a reusable, named selection of documents — a quick way to pick a
-            doc set when creating configs. Corpora and configs are independent: deleting
-            a corpus never touches a config&apos;s documents. A config can{" "}
-            <em>auto-sync</em> with its corpus so membership changes flow both ways.
-          </p>
         </header>
 
         <CorpusCreateForm corpora={corpora} />

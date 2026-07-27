@@ -6,8 +6,9 @@
 //      running total. Called fire-and-forget from the savings sites (embed cache,
 //      cascade, semantic cache, batch apply, aggregate ranking) and the metered
 //      LLM wrapper. saved_usd is SIGNED so the cascade nets escalations.
-//   2. READ — getCostsReport: roll the two tables up account-wide and hand the
-//      /appraise Costs section its itemized spreadsheet + the three view totals.
+//   2. READ — getCostsReport: roll the two tables up (account-wide, or scoped to
+//      one config) and hand the Costs page its itemized spreadsheet + the three
+//      view totals.
 //
 // Best-effort throughout, matching embedCache / semanticCache: a missing table
 // (42P01, pre-migration) makes writes no-op and the read return an empty report,
@@ -127,10 +128,14 @@ const EMPTY: CostsReport = {
   hasData: false,
 };
 
-// Account-wide rollup (summed across every config) for the /appraise Costs
-// section. Unknown lever/surface rows (hand-edited, or a lever retired from the
+// Rollup for the /appraise/costs page. Both tables are keyed by
+// (config_id, lever|surface), so scoping to one config is just a WHERE clause —
+// `configId` omitted/null keeps the account-wide sum across every config.
+// Unknown lever/surface rows (hand-edited, or a lever retired from the
 // registry) are skipped rather than shown label-less. Missing tables → EMPTY.
-export async function getCostsReport(): Promise<CostsReport> {
+export async function getCostsReport(configId?: string | null): Promise<CostsReport> {
+  // One fragment reused by both queries: an empty fragment is a no-op WHERE.
+  const scope = configId ? sql`where config_id = ${configId}` : sql``;
   try {
     const [savingsRows, spendRows] = await Promise.all([
       sql<{ lever: string; events: string; tokens: string; saved: string }[]>`
@@ -139,6 +144,7 @@ export async function getCostsReport(): Promise<CostsReport> {
                sum(tokens_saved) as tokens,
                sum(saved_usd)    as saved
         from savings_totals
+        ${scope}
         group by lever
       `,
       sql<{ surface: string; tokens: string; spent: string }[]>`
@@ -146,6 +152,7 @@ export async function getCostsReport(): Promise<CostsReport> {
                sum(tokens)    as tokens,
                sum(spent_usd) as spent
         from spend_totals
+        ${scope}
         group by surface
       `,
     ]);

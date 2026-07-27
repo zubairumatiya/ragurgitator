@@ -126,6 +126,31 @@ export async function deleteEmbeddingRunFor(
   });
 }
 
+// The SIZE of a document's existing run under the active config: how many chunks
+// it has and how many characters they total — i.e. what an ingest SKIP avoided
+// paying for. Null when there are no chunk rows.
+//
+// PRICING ONLY. hasEmbeddingRun stays the gate (it reads document_embeddings,
+// the authoritative run row); this runs inside the skip branch it already chose,
+// so a run row that somehow had no chunks would cost us a savings line, never a
+// duplicate embed. Chars rather than text keeps a large document off the wire
+// just to price it — the caller converts via estimateTokensFromChars. Counts
+// chunk rows, not the source document: chunk overlap means the run really did
+// embed more text than the document holds, and that was genuinely paid for.
+export async function embeddedRunSize(
+  documentId: string,
+): Promise<{ chunks: number; chars: number } | null> {
+  const cfg = activeConfig();
+  const [row] = await sql<{ chunks: string; chars: string | null }[]>`
+    select count(*) as chunks, sum(length(text)) as chars
+    from ${sql(cfg.chunksTable)}
+    where config_id = ${cfg.id}
+      and document_id = ${documentId}
+  `;
+  const chunks = Number(row?.chunks ?? 0);
+  return chunks === 0 ? null : { chunks, chars: Number(row?.chars ?? 0) };
+}
+
 // Has this document already been embedded under the ACTIVE config? (config_id +
 // document_id uniquely identify a run, given the config fixes model/size/overlap.)
 export async function hasEmbeddingRun(documentId: string): Promise<boolean> {

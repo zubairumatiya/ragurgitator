@@ -16,6 +16,7 @@
 // ---------------------------------------------------------------------------
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { RememberConfigRoute } from "@/app/components/BackToConfigs";
 import { ConfigTabs } from "@/app/components/ConfigTabs";
 import { Nav } from "@/app/components/Nav";
 import { getConfig, listClosedConfigs, listConfigs } from "@/lib/rag/configStore";
@@ -37,6 +38,10 @@ export default async function ConfigLayout({
 
   return (
     <div className="flex flex-1 flex-col bg-zinc-50 font-sans dark:bg-black">
+      {/* Renders nothing — records this route so Appraise/Corpora's
+          "← Back to configs" can return you to the view you left. */}
+      <RememberConfigRoute />
+
       <ConfigTabs open={open} closed={closed} activeId={active.id} />
 
       <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 px-8 py-10">

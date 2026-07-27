@@ -23,6 +23,7 @@ import { sql } from "@/lib/db";
 import { resolveConfig, withConfig, type ResolvedConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";
 import { updateConfigSettings } from "@/lib/rag/configStore";
+import { meterEmbeds } from "@/lib/rag/embedCache";
 import { isProviderAvailable, modelSpec } from "@/lib/rag/embeddingModels";
 import { embedTexts } from "@/lib/rag/embeddings";
 import {
@@ -167,9 +168,14 @@ export async function reconfigureConfig(
         chunkDocument({ id: doc.id, text: content, metadata: { fileName } }),
       );
       onEvent({ type: "step", index, fileName, step: "embed" });
-      const vectors = await withConfig(next, () =>
-        embedTexts(chunks.map((c) => c.text)),
-      );
+      // Metered inside the NEW config's scope so the re-embed cost lands on the
+      // config that actually incurred it. Uncached base-table embed = pure spend.
+      const vectors = await withConfig(next, async () => {
+        const texts = chunks.map((c) => c.text);
+        const vecs = await embedTexts(texts);
+        meterEmbeds(next.embeddingModel, [], texts);
+        return vecs;
+      });
       onEvent({ type: "step", index, fileName, step: "store" });
       await withConfig(next, () =>
         insertEmbeddingRunWithChunks({

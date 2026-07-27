@@ -41,6 +41,7 @@ import {
   cosine,
   embedDocsCached,
   embedQueryCached,
+  meterEmbeds,
 } from "@/lib/rag/embedCache";
 import { embedQuery } from "@/lib/rag/embeddings";
 import { screenStoredResult, type ChangedChunkSims } from "@/lib/rag/dirtyScreen";
@@ -124,7 +125,18 @@ export type EvalEvent =
   // Bulk nDCG grading (ranking.bulkBuildRankings): one aggregate ranking built +
   // promoted per question. `ok: false` carries the per-question failure so one
   // bad question doesn't abort the run.
-  | { type: "ranking-start"; total: number }
+  //
+  // The bulk LLM pass (ranking.bulkBuildLlmRankings) reuses both events, and
+  // reports what it decided NOT to spend on up front: `total` is only the
+  // questions that will actually hit the LLM, and the two skip counts explain
+  // the rest — no aggregate to re-rank, or a cached (fresh) llm_rerank already
+  // on file. Absent for the aggregate pass, which skips nothing silently.
+  | {
+      type: "ranking-start";
+      total: number;
+      skippedNoAggregate?: number;
+      skippedCached?: number;
+    }
   | {
       type: "ranking-progress";
       done: number;
@@ -142,6 +154,12 @@ export type EvalEvent =
       ndcg: number | null;
       // Bulk nDCG grading only: questions that got a new ground-truth ranking.
       graded?: number;
+      // Bulk LLM nDCG only: llm_rerank rankings built (comparison candidates —
+      // nothing was promoted to ground truth), plus the two skip tallies so the
+      // dashboard's summary line can explain the questions we didn't spend on.
+      llmRanked?: number;
+      skippedNoAggregate?: number;
+      skippedCached?: number;
     }
   // Emitted instead of the inline generate/score events when the config's
   // Savings preference routes question generation through the batch API: the
@@ -417,12 +435,22 @@ export async function scoreQuestions(
   const results: ResultInsert[] = new Array<ResultInsert>(questions.length);
   let done = 0;
   let nextIndex = 0;
+  // Cost accounting for the query-vector cache (eval_question_embeddings). It's
+  // a PAID path — the no-cache counterfactual re-embeds every question on every
+  // re-score — so hits are avoided embeds and misses are real spend, priced the
+  // same way embedCache prices its own. Tallied across the batch and metered
+  // once below (one upsert, not one per question).
+  const qHits: string[] = [];
+  const qMisses: string[] = [];
   const worker = async () => {
     for (let i = nextIndex++; i < questions.length; i = nextIndex++) {
       const q = questions[i];
       let vector = cached.get(q.questionId);
-      if (!vector) {
+      if (vector) {
+        qHits.push(q.question);
+      } else {
         vector = await embedQuery(q.question);
+        qMisses.push(q.question);
         await putCachedQueryEmbedding(q.questionId, cfg.embeddingModel, vector);
       }
       // Pass the question text too: override configs embed it under the override
@@ -459,6 +487,7 @@ export async function scoreQuestions(
   await Promise.all(
     Array.from({ length: Math.min(SCORE_CONCURRENCY, questions.length) }, worker),
   );
+  meterEmbeds(cfg.embeddingModel, qHits, qMisses);
 
   await insertResults(results);
   return results.length;
@@ -836,7 +865,16 @@ async function rankExperiment(
   ctx: ExperimentContext,
   subTexts: string[],
 ): Promise<RechunkResult> {
-  const queryVector = ctx.queryVector ?? (await embedQuery(ctx.question));
+  // ctx.queryVector IS the eval query-vector cache (getExperimentContext reads
+  // eval_question_embeddings), so the two branches are a hit and a miss — meter
+  // them like any other paid embed path.
+  const cachedQV = ctx.queryVector;
+  const queryVector = cachedQV ?? (await embedQuery(ctx.question));
+  meterEmbeds(
+    activeConfig().embeddingModel,
+    cachedQV ? [ctx.question] : [],
+    cachedQV ? [] : [ctx.question],
+  );
   // Cached: repeat experiments at the same size (and any later autotune rung or
   // promoted override over these pieces) reuse the vectors for free.
   const subVectors = await embedDocsCached(subTexts, activeConfig().embeddingModel);

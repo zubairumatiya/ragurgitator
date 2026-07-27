@@ -1,19 +1,31 @@
-// Appraise → Semantic caching: the per-space threshold + stats table. Reads
-// GET /api/semantic-cache/thresholds and refreshes whenever a calibration panel
-// applies a new threshold (the SC_CHANGED window event).
+// Appraise → Semantic caching: the per-space threshold + stats table. Read-only.
+// Reads GET /api/semantic-cache/thresholds and re-pulls whenever the apply panel
+// writes a threshold (the SC_CHANGED window event).
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 
+import { InfoDot } from "@/app/components/InfoDot";
 import { apiFetch } from "@/lib/http/client";
 import type { ThresholdReport } from "@/lib/rag/semanticCacheCalibration";
 
-// Fired by the calibration panels after an Apply so this table re-pulls.
-export const SC_CHANGED = "sc:thresholds-changed";
+import { SC_CHANGED } from "./events";
 
 const fmtDate = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString() : "—");
 
-export function ThresholdsPanel() {
+const ABOUT =
+  "The cosine threshold each embedding space is calibrated to. A match at or " +
+  "above it is served (when serving is on); uncalibrated spaces fall back to " +
+  "the conservative default.\n\n" +
+  "Individual configs can override these, in which case their own value wins " +
+  "over the row here.";
+
+// `action` is the apply control, rendered on this section's heading row: the
+// table that shows thresholds is the natural home for the one thing that sets
+// them, and sharing the row costs no vertical space. This section sits second on
+// the page, so that row is also the midpoint between the collision-floor panel
+// above and the shadow-judge panel below, both of which recommend into it.
+export function ThresholdsPanel({ action }: { action?: ReactNode }) {
   const [rows, setRows] = useState<ThresholdReport[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -38,14 +50,13 @@ export function ThresholdsPanel() {
 
   return (
     <section className="flex flex-col gap-2">
-      <h2 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
-        Thresholds by vector-space
-      </h2>
-      <p className="text-xs text-zinc-500 dark:text-zinc-400">
-        The active cosine threshold for each embedding space, across every config.
-        A match at or above it is served (when serving is on). Uncalibrated spaces
-        fall back to the conservative default.
-      </p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="flex items-center gap-1.5 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+          Thresholds by vector-space
+          <InfoDot text={ABOUT} />
+        </h2>
+        {action}
+      </div>
 
       {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
 
@@ -74,7 +85,8 @@ export function ThresholdsPanel() {
             {rows?.length === 0 && (
               <tr>
                 <td colSpan={8} className="px-3 py-4 text-center text-xs text-zinc-400">
-                  No spaces yet — populate a cache and calibrate below.
+                  No spaces yet — populate a cache, then calibrate with the collision
+                  floor above or the shadow judge below.
                 </td>
               </tr>
             )}

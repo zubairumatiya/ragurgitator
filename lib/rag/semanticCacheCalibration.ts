@@ -19,6 +19,8 @@ import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { allLabeledQuestions, getCachedQueryEmbeddings } from "@/lib/rag/evalStore";
 import { meteredMessage } from "@/lib/rag/meter";
+import { costEmbed, estimateTokensAll } from "@/lib/rag/pricing";
+import { recordSaving } from "@/lib/rag/savingsStore";
 import {
   calibrateFromJudged,
   collisionFloor,
@@ -47,14 +49,52 @@ export type CollisionFloorReport = CollisionFloorResult & {
   questionsTotal: number; // labeled questions before dropping any without a cached vector
 };
 
+// Lever #10 — EVAL-EMBEDDING REUSE. The collision floor is an all-pairs sweep
+// over every labeled question's query vector, so the naive version of this
+// calibration re-embeds the whole eval bank on every run. We read the vectors
+// the eval bank already banked (eval_question_embeddings) and embed nothing.
+// Structural + estimate, priced like the other estimate levers: char/4 tokens
+// through costEmbed for the config's embedding model (unknown model → $0 with
+// pricing.ts's one-time warn — an under-count, never a fabricated price).
+//
+// Credited per vector ACTUALLY served from the cache, not per requested id: a
+// question with no banked vector is dropped by collisionFloor, so it avoided
+// nothing. Disjoint from embed_cache, which banks hits on the PAID eval path
+// (eval.scoreQuestions meters its own hits/misses); this read has no paid leg
+// at all — a miss here doesn't embed, it just shrinks the sample.
+//
+// Best-effort and synchronous-by-void, like meterEmbeds: telemetry must never
+// be the reason a calibration fails to return its report.
+function recordEvalEmbedReuse(
+  model: string,
+  questionText: Map<string, string>,
+  vectors: Map<string, number[]>,
+): void {
+  try {
+    const served = [...vectors.keys()].map((id) => questionText.get(id) ?? "");
+    if (served.length === 0) return;
+    const tokens = estimateTokensAll(served);
+    void recordSaving("eval_embed_reuse", costEmbed(model, tokens), tokens, {
+      events: served.length,
+    });
+  } catch (err) {
+    console.warn(`[rag:savings] eval-embed-reuse record failed: ${(err as Error).message}`);
+  }
+}
+
 // Compute the collision floor for the active config's vector-space from its
 // labeled eval questions and their already-cached query embeddings. Does NOT
 // write — the caller applies the recommendation explicitly.
 export async function computeCollisionFloor(): Promise<CollisionFloorReport> {
   const cfg = activeConfig();
   const labels = await allLabeledQuestions();
-  const ids = [...new Set(labels.map((l) => l.questionId))];
+  // One row per (question, label), so a question with several ground-truth
+  // chunks repeats — dedupe to unique questions for both the fetch and the
+  // token estimate, or a multi-label question would be priced twice.
+  const questionText = new Map(labels.map((l) => [l.questionId, l.question]));
+  const ids = [...questionText.keys()];
   const vectors = await getCachedQueryEmbeddings(ids, cfg.embeddingModel);
+  recordEvalEmbedReuse(cfg.embeddingModel, questionText, vectors);
   const result = collisionFloor(
     labels.map((l) => ({ questionId: l.questionId, sourceChunkId: l.sourceChunkId })),
     vectors,

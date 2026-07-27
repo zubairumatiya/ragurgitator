@@ -20,6 +20,7 @@ import { chunkDocument } from "@/lib/rag/chunker";
 import { topUpSavedRuns } from "@/lib/rag/clusterStore";
 import { dedupCorporaDocuments, documentsForEmbedding } from "@/lib/rag/corpusStore";
 import { modelSpec } from "@/lib/rag/embeddingModels";
+import { recordIngestSkip } from "@/lib/rag/ingestSavings";
 import { hasEmbeddingRun, insertEmbeddingRunWithChunks } from "@/lib/rag/vectorStore";
 import { bankVoyageBatchSaving } from "@/lib/batch/savings";
 import type { BatchRequest, BatchResultRow } from "@/lib/batch/types";
@@ -101,7 +102,10 @@ export const ingestEmbeddingHandler: JobHandler = {
     const requests: BatchRequest[] = [];
     const included: string[] = [];
     for (const d of docs) {
-      if (await hasEmbeddingRun(d.id)) continue; // already embedded under this config
+      if (await hasEmbeddingRun(d.id)) {
+        void recordIngestSkip(d.id); // already embedded under this config — avoided embed
+        continue;
+      }
       const chunks = await chunkDocument(toSourceDoc(d), snapshot);
       if (chunks.length === 0) continue;
       included.push(d.id);
@@ -180,7 +184,10 @@ export const ingestEmbeddingHandler: JobHandler = {
     const bankedTexts: string[] = [];
 
     for (const documentId of documentIds) {
-      if (await hasEmbeddingRun(documentId)) continue; // idempotency
+      // Idempotency, NOT a saving: this skip means a re-poll or a racing inline
+      // embed already landed the run. The avoided embed (if any) was banked at
+      // submit; banking here too would double-count our own retry.
+      if (await hasEmbeddingRun(documentId)) continue;
       const [d] = await documentsForEmbedding([documentId]);
       if (!d) continue; // stored text gone
       const chunks = await chunkDocument(toSourceDoc(d), snapshot);

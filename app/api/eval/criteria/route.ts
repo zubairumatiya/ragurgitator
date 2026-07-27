@@ -33,8 +33,10 @@ export async function GET(request: Request) {
         listAutotuneScopeOptions(),
       ]);
       if (!config) return Response.json({ error: "Config not found." }, { status: 404 });
-      // The alternate models a run could try right now (keyed, ladder order),
-      // grouped by shared vector space in the Settings checklist.
+      // The alternate models a run could try (ladder order), grouped by shared
+      // vector space in the Settings checklist. Includes models whose provider
+      // has no key — flagged unselectable with a reason, so the checklist can
+      // grey them out instead of hiding whole spaces without explanation.
       const autotuneModels = listAutotuneModelOptions(
         autotuneModelLadder,
         activeConfig().embeddingModel,

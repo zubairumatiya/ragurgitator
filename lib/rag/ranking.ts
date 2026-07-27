@@ -40,6 +40,7 @@ import {
   getRankingChunks,
   getRetrievedOrder,
   listRankings,
+  listRankingsByQuestions,
   nearestBuckets,
   poolFromBuckets,
   setTruth,
@@ -626,6 +627,129 @@ export async function bulkBuildRankings(
     graded: gradedIds.size,
   });
   return { graded: gradedIds.size, scored };
+}
+
+// "Bulk actions → Add LLM nDCG rankings": build the llm_rerank ranking (the
+// aggregate's own top-k, re-ordered by the LLM) for every labeled question in
+// scope, as a COMPARISON candidate. Nothing is promoted to ground truth — that
+// stays an explicit per-question "Set as ground truth" in the panel, so a bulk
+// pass can never silently redefine what nDCG scores against.
+//
+// This one spends real LLM tokens per question, so the plan phase is about NOT
+// spending. Two skips, both counted and streamed so the dashboard can say why:
+//   - no aggregate: llm_rerank re-orders the aggregate's top-k, so with no
+//     aggregate row there is nothing to re-rank (buildLlmRanking would throw).
+//     Run "Add nDCG rankings" first — these questions are simply not candidates.
+//   - cached: an llm_rerank whose stored signature still matches the current
+//     inputs (same llm model, prompt version, question text, and top-k slice).
+//     buildLlmRanking would serve it from cache anyway; skipping up front keeps
+//     the progress bar's total honest about what actually costs money.
+// Everything else runs through buildLlmRanking — the same code path (prompt,
+// parse, cache check, upsert) the per-question panel's "Re-rank top-k" uses.
+//
+// Per-question failures are reported on the stream and skipped rather than
+// aborting: a truncated/garbled LLM reply on one question shouldn't waste the
+// spend already made on the rest.
+//
+// Concurrency is deliberately low — these are LLM calls, not embeds, and they
+// go through the same metered client as everything else.
+const BULK_LLM_RANKING_CONCURRENCY = 2;
+
+export async function bulkBuildLlmRankings(
+  emit: (event: EvalEvent) => void = () => {},
+  documentIds?: string[],
+): Promise<{ built: number; skippedNoAggregate: number; skippedCached: number }> {
+  const t0 = performance.now();
+  const questions = await allLabeledQuestions(documentIds);
+  const rankingsByQuestion = await listRankingsByQuestions(
+    questions.map((q) => q.questionId),
+  );
+
+  // Plan: partition into "will call the LLM" vs. the two skip reasons. The
+  // freshness test re-derives the signature exactly as getRankingContext's
+  // llmStatus does, so the bulk pass and the per-question panel agree on which
+  // rankings are cached.
+  const pending: typeof questions = [];
+  let skippedNoAggregate = 0;
+  let skippedCached = 0;
+  for (const q of questions) {
+    const rows = rankingsByQuestion.get(q.questionId) ?? [];
+    const aggregate = rows.find((r) => r.kind === "aggregate");
+    if (!aggregate) {
+      skippedNoAggregate += 1;
+      continue;
+    }
+    const existing = rows.find((r) => r.kind === "llm_rerank");
+    const expected = llmSignature(
+      "rerank",
+      q.question,
+      llmPoolIds(aggregate.chunkIds, "rerank"),
+    );
+    if (existing && existing.details.signature === expected) {
+      skippedCached += 1;
+      continue;
+    }
+    pending.push(q);
+  }
+
+  emit({
+    type: "ranking-start",
+    total: pending.length,
+    skippedNoAggregate,
+    skippedCached,
+  });
+
+  let built = 0;
+  let done = 0;
+  let nextIndex = 0;
+  const worker = async () => {
+    for (let i = nextIndex++; i < pending.length; i = nextIndex++) {
+      const q = pending[i];
+      let ok = true;
+      let error: string | undefined;
+      try {
+        await buildLlmRanking(q.questionId, "rerank");
+        built += 1;
+      } catch (err) {
+        ok = false;
+        error = err instanceof Error ? err.message : "LLM ranking build failed.";
+      }
+      done += 1;
+      emit({
+        type: "ranking-progress",
+        done,
+        total: pending.length,
+        questionId: q.questionId,
+        ok,
+        error,
+      });
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(BULK_LLM_RANKING_CONCURRENCY, pending.length) }, worker),
+  );
+
+  // No scoring and no run snapshot: an llm_rerank is a candidate, not a truth,
+  // so no question's nDCG moved. The headline numbers ride along unchanged only
+  // so the dashboard's summary line can render the same shape as the other runs.
+  const summary = await getSummary();
+  console.log(
+    `[rag:ranking] bulk llm_rerank built=${built}/${pending.length} ` +
+      `skipped(no-aggregate)=${skippedNoAggregate} skipped(cached)=${skippedCached} ` +
+      `in ${Math.round(performance.now() - t0)}ms`,
+  );
+  emit({
+    type: "done",
+    generated: 0,
+    scored: 0,
+    recall: summary.recall,
+    mrr: summary.mrr,
+    ndcg: summary.ndcg,
+    llmRanked: built,
+    skippedNoAggregate,
+    skippedCached,
+  });
+  return { built, skippedNoAggregate, skippedCached };
 }
 
 // Re-read a freshly upserted ranking by id (the store returns lists, not single

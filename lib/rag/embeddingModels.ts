@@ -158,12 +158,24 @@ export type AutotuneModelOption = {
   // Shares the base model's embedding space → an override under it needs no
   // extra fusion lane. Drives the checklist's "same space" subsection.
   sameSpaceAsBase: boolean;
+  // selectable = its provider is keyed, so a run could actually use it today.
+  // Same `selectable`/`reason` pair as BaseModelOption, for the same reason: an
+  // unkeyed model is LISTED (greyed out) rather than dropped, so the checklist
+  // explains why a space is missing instead of silently showing one group.
+  selectable: boolean;
+  // Why it's NOT selectable ("set OPENAI_API_KEY to enable"); null when it is.
+  reason: string | null;
 };
 
-// The alternate models the autotune engine could pick, for the Settings
-// checklist. Mirrors autotune's usableModelLadder eligibility: cheapest-first
-// ladder order, minus the base model and any provider without a key/weights —
-// so the checklist only offers models a run could actually use right now.
+// The alternate models the autotune checklist offers. Cheapest-first ladder
+// order, minus the config's own base model. Everything else in the ladder is
+// returned — the keyed models a run could use now (selectable), plus the ones
+// whose provider has no key/weights, flagged with the env var that would enable
+// them so the UI can grey them out with a reason.
+//
+// The ENGINE keeps its own eligibility check (autotune.usableModelLadder
+// intersects the saved scope with the keyed ladder), so a stale unkeyed id in a
+// saved scope can never be run; this list is purely what the picker shows.
 // `baseModel` is the config's base (its space defines sameSpaceAsBase). The
 // caller passes the ladder (lib/config.autotuneModelLadder) to avoid a
 // config → registry import cycle.
@@ -176,13 +188,16 @@ export function listAutotuneModelOptions(
   for (const id of ladder) {
     if (id === baseModel) continue;
     const spec = EMBEDDING_MODELS[id];
-    if (!spec || !isProviderAvailable(spec.provider)) continue;
+    if (!spec) continue; // not in the registry — nothing to embed with
+    const available = isProviderAvailable(spec.provider);
     const space = spec.vectorSpace ?? null;
     options.push({
       id,
       provider: spec.provider,
       vectorSpace: space,
       sameSpaceAsBase: space !== null && space === baseSpace,
+      selectable: available,
+      reason: available ? null : `set ${PROVIDER_KEY_ENV[spec.provider]} to enable`,
     });
   }
   return options;

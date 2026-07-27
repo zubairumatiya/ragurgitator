@@ -31,7 +31,9 @@ import {
 } from "@/lib/rag/corpusStore";
 import { topUpSavedRuns } from "@/lib/rag/clusterStore";
 import { getConfig, listSyncedConfigIds } from "@/lib/rag/configStore";
+import { meterEmbeds } from "@/lib/rag/embedCache";
 import { embedTexts } from "@/lib/rag/embeddings";
+import { recordIngestSkip } from "@/lib/rag/ingestSavings";
 import { labelFor, loadDocument, type LoadInput } from "@/lib/rag/loader";
 import { getActiveBatchSavings } from "@/lib/rag/batchStore";
 import { retrieve, retrieveForQuery } from "@/lib/rag/retriever";
@@ -81,12 +83,14 @@ async function ingestOne(
     await addDocumentToCorpus(cfg.corpusId, documentId);
   }
 
-  // Already embedded under the active config? Nothing to do.
+  // Already embedded under the active config? Nothing to do — but the embed we
+  // just avoided is the ingest_skip lever, so price it before returning.
   if (await hasEmbeddingRun(documentId)) {
     console.log(
       `[rag:pipeline] skip embed: ${doc.metadata.fileName} already embedded under ` +
         `config=${cfg.id.slice(0, 8)} (${cfg.embeddingModel} size=${cfg.chunkSize} overlap=${cfg.chunkOverlap})`,
     );
+    void recordIngestSkip(documentId);
     return 0;
   }
 
@@ -95,7 +99,12 @@ async function ingestOne(
   if (chunks.length === 0) return 0;
 
   onStep("embed");
-  const vectors = await embedTexts(chunks.map((c) => c.text));
+  const chunkTexts = chunks.map((c) => c.text);
+  const vectors = await embedTexts(chunkTexts);
+  // Ingest buys these outright (no cache in front of the base-table embed), so
+  // they're pure spend. Without this the Batch API lever would show ingest
+  // savings with no matching cost line to have saved against.
+  meterEmbeds(cfg.embeddingModel, [], chunkTexts);
 
   onStep("store");
   const chunkIds = await insertEmbeddingRunWithChunks({
@@ -191,6 +200,7 @@ async function embedStoredDocs(
     let result: IngestResult;
     try {
       if (await hasEmbeddingRun(d.id)) {
+        void recordIngestSkip(d.id); // avoided embed — same lever as ingestOne's skip
         result = { fileName, chunksAdded: 0 };
       } else {
         const doc: SourceDocument = {
@@ -201,7 +211,9 @@ async function embedStoredDocs(
         onEvent({ type: "step", index, fileName, step: "chunk" });
         const chunks = await chunkDocument(doc);
         onEvent({ type: "step", index, fileName, step: "embed" });
-        const vectors = await embedTexts(chunks.map((c) => c.text));
+        const texts = chunks.map((c) => c.text);
+        const vectors = await embedTexts(texts);
+        meterEmbeds(activeConfig().embeddingModel, [], texts); // paid outright, as above
         onEvent({ type: "step", index, fileName, step: "store" });
         const chunkIds = await insertEmbeddingRunWithChunks({
           documentId: d.id,
@@ -378,8 +390,8 @@ export async function ask(question: string): Promise<CachedResult> {
     return answerWithCascade(question, await retrieve(question));
   }
 
-  const serve = (await getActiveBatchSavings()).semanticCache.serve;
-  const probe = await semanticCacheLookup(trimmed, serve);
+  const { serve, threshold } = (await getActiveBatchSavings()).semanticCache;
+  const probe = await semanticCacheLookup(trimmed, { serve, threshold });
   if (probe.hit) return probe.result;
 
   // Miss (or would-hit with serving off): reuse the vector the cache already

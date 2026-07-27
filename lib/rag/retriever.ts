@@ -48,6 +48,7 @@ import {
   cosine,
   embedDocsCached,
   embedQueryCached,
+  meterEmbeds,
 } from "@/lib/rag/embedCache";
 import { embedQuery } from "@/lib/rag/embeddings";
 import { sameVectorSpace } from "@/lib/rag/embeddingModels";
@@ -142,7 +143,12 @@ export async function buildRetrievalContext(): Promise<RetrievalContext> {
 export async function retrieve(question: string): Promise<RetrievedChunk[]> {
   const trimmed = question.trim();
   if (!trimmed) throw new Error("Cannot retrieve for an empty question.");
+  // Live chat's base query embed — deliberately UNCACHED (a repeat question is
+  // the semantic cache's job, upstream of here), so this is always a miss and
+  // only ever reports spend. Metered so the chat surface's embed cost isn't
+  // invisible next to its generation cost.
   const vector = await embedQuery(trimmed);
+  meterEmbeds(activeConfig().embeddingModel, [], [trimmed]);
   return retrieveForQuery(trimmed, vector);
 }
 

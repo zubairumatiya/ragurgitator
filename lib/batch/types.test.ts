@@ -32,7 +32,7 @@ test("effectiveChoice: each job stands alone — one choice never moves another"
       cluster_labeling: "batch",
       ingest_embedding: "standard",
     },
-    semanticCache: { serve: false },
+    semanticCache: { serve: false, threshold: null },
   };
   assert.equal(effectiveChoice(s, "question_generation"), "batch");
   assert.equal(effectiveChoice(s, "ndcg_ranking"), "standard");
@@ -62,6 +62,27 @@ test("coerceBatchSavings: tolerant of junk, missing, and partial input", () => {
   assert.equal(coerceBatchSavings({ semanticCache: { serve: true } }).semanticCache.serve, true);
   assert.equal(coerceBatchSavings({ semanticCache: { serve: "yes" } }).semanticCache.serve, false);
   assert.equal(coerceBatchSavings({ semanticCache: {} }).semanticCache.serve, false);
+});
+
+test("coerceBatchSavings: threshold override only survives as a real cosine", () => {
+  const th = (raw: unknown) => coerceBatchSavings({ semanticCache: { threshold: raw } })
+    .semanticCache.threshold;
+
+  assert.equal(th(0.94), 0.94);
+  // The endpoints are legal values, and 0 must not be mistaken for "unset" —
+  // it's a real (if reckless) setting meaning "serve any nearest match".
+  assert.equal(th(0), 0);
+  assert.equal(th(1), 1);
+
+  // Everything unusable means INHERIT, never a number the serving gate could
+  // act on: absent (every row written before this field existed), explicit null,
+  // strings from a hand-edited blob, NaN, and out-of-range cosines.
+  assert.equal(coerceBatchSavings({ semanticCache: { serve: true } }).semanticCache.threshold, null);
+  assert.equal(th(null), null);
+  assert.equal(th("0.94"), null);
+  assert.equal(th(Number.NaN), null);
+  assert.equal(th(1.5), null);
+  assert.equal(th(-0.1), null);
 });
 
 // --- migration off the two leg-grouped shapes ------------------------------

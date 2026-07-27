@@ -120,11 +120,20 @@ function groupByChunk(questions: QuestionDetail[]): ChunkGroup[] {
 
 // Live progress for an in-flight process/rescore run. "generate" has no recall
 // yet; "score" tracks a running hit count so the panel can show recall climbing;
-// "ranking" (bulk nDCG grading) tracks per-question build failures.
+// "ranking" (bulk nDCG grading) tracks per-question build failures, plus — for
+// the bulk LLM pass, which spends per question — how many questions the run
+// declined to spend on and why.
 type EvalProgress =
   | { phase: "generate"; done: number; total: number }
   | { phase: "score"; done: number; total: number; hits: number }
-  | { phase: "ranking"; done: number; total: number; failed: number };
+  | {
+      phase: "ranking";
+      done: number;
+      total: number;
+      failed: number;
+      skippedNoAggregate: number;
+      skippedCached: number;
+    };
 
 type RunResult = {
   generated: number;
@@ -134,6 +143,11 @@ type RunResult = {
   ndcg: number | null;
   // Bulk nDCG grading only: questions that got a new ground-truth ranking.
   graded?: number;
+  // Bulk LLM nDCG only: llm_rerank rankings built as comparison candidates, and
+  // the questions skipped for want of an aggregate / for an already-cached one.
+  llmRanked?: number;
+  skippedNoAggregate?: number;
+  skippedCached?: number;
 };
 
 // Lazy-loaded "why did it miss?" detail for an expanded question.
@@ -364,6 +378,10 @@ export function EvalDashboard() {
       let buffer = "";
       let hits = 0;
       let failed = 0;
+      // Skip tallies arrive once, on ranking-start; keep them so every later
+      // ranking-progress can re-render the bar without losing them.
+      let skippedNoAggregate = 0;
+      let skippedCached = 0;
       let final: RunResult | null = null;
 
       for (;;) {
@@ -408,11 +426,15 @@ export function EvalDashboard() {
               break;
             case "ranking-start":
               failed = 0;
+              skippedNoAggregate = event.skippedNoAggregate ?? 0;
+              skippedCached = event.skippedCached ?? 0;
               setProgress({
                 phase: "ranking",
                 done: 0,
                 total: event.total,
                 failed: 0,
+                skippedNoAggregate,
+                skippedCached,
               });
               break;
             case "ranking-progress":
@@ -422,6 +444,8 @@ export function EvalDashboard() {
                 done: event.done,
                 total: event.total,
                 failed,
+                skippedNoAggregate,
+                skippedCached,
               });
               break;
             case "done":
@@ -432,6 +456,9 @@ export function EvalDashboard() {
                 mrr: event.mrr,
                 ndcg: event.ndcg,
                 graded: event.graded,
+                llmRanked: event.llmRanked,
+                skippedNoAggregate: event.skippedNoAggregate,
+                skippedCached: event.skippedCached,
               };
               break;
             case "batch-submitted":
@@ -506,6 +533,30 @@ export function EvalDashboard() {
         `${rebuild ? "Rebuilt" : "Graded"} ${r.graded ?? 0} question(s), scored ${r.scored}. ` +
         `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
       { clusterRunId, documentIds: documentIds ?? undefined, rebuild },
+    );
+
+  // Bulk actions → Add LLM nDCG rankings: for every question in scope that
+  // already has an aggregate, ask the LLM to re-order its top-k (the panel's
+  // "Re-rank top-k", run in bulk). The result is a COMPARISON candidate — the
+  // notice says so, because nothing here changes nDCG until a ranking is
+  // promoted to ground truth by hand. Same NDJSON stream.
+  const onBulkLlmNdcg = (documentIds: string[] | null) =>
+    runStream(
+      "/api/eval/bulk-llm-ndcg",
+      (r) => {
+        const skips = [
+          r.skippedNoAggregate
+            ? `${r.skippedNoAggregate} skipped (no aggregate yet)`
+            : null,
+          r.skippedCached ? `${r.skippedCached} already cached` : null,
+        ].filter(Boolean);
+        return (
+          `Built ${r.llmRanked ?? 0} LLM re-ranking(s)` +
+          `${skips.length > 0 ? ` · ${skips.join(" · ")}` : ""}. ` +
+          "They're comparison candidates — open a question to set one as ground truth."
+        );
+      },
+      { documentIds: documentIds ?? undefined },
     );
 
   async function saveEdit(id: string) {
@@ -664,6 +715,7 @@ export function EvalDashboard() {
           busy={busy}
           onAddDifficulty={onBulkAdd}
           onAddNdcg={onBulkNdcg}
+          onAddLlmNdcg={onBulkLlmNdcg}
           onChangeConfig={(docIds, docNames) =>
             setChangeScope({ docIds, docNames })
           }
@@ -1334,6 +1386,7 @@ function BulkActions({
   busy,
   onAddDifficulty,
   onAddNdcg,
+  onAddLlmNdcg,
   onChangeConfig,
   onRescore,
   canRescore,
@@ -1346,6 +1399,7 @@ function BulkActions({
     documentIds: string[] | null,
     rebuild: boolean,
   ) => void;
+  onAddLlmNdcg: (documentIds: string[] | null) => void;
   onChangeConfig: (
     documentIds: string[] | null,
     documentNames: string[] | null,
@@ -1360,10 +1414,17 @@ function BulkActions({
   // aggregate builds from, fetched on first expand (like the document scope).
   const [ndcgOpen, setNdcgOpen] = useState(false);
   const [presets, setPresets] = useState<ClusterRunSummary[] | null>(null);
+  // Which preset the run will use. Clicking a preset only SELECTS it (radio, like
+  // the per-question panel's PresetCard) — the separate Run button is the only
+  // thing that starts a run, so nothing expensive fires from browsing the list.
+  const [ndcgPresetId, setNdcgPresetId] = useState<string>("");
   // When on, the preset also refreshes already-graded (aggregate-truth) questions
   // against the current buckets and re-scores them — clears the headline's
   // corpus-drift badge. Off = the original "grade only ungraded" pass.
   const [ndcgRebuild, setNdcgRebuild] = useState(false);
+  // "Add LLM nDCG rankings": its own collapsed section, so its cost warning and
+  // Run button read as deliberately as the aggregate one.
+  const [llmNdcgOpen, setLlmNdcgOpen] = useState(false);
   // Document scope: collapsed to an "Apply to: …" summary by default (all
   // documents). Expanding reveals a toggle list — clicking a document flips it
   // in/out of the selection and the menu STAYS open, so several can be picked.
@@ -1375,6 +1436,7 @@ function BulkActions({
     setOpen(false);
     setSubOpen(false);
     setNdcgOpen(false);
+    setLlmNdcgOpen(false);
     setDocsOpen(false);
   };
 
@@ -1532,16 +1594,17 @@ function BulkActions({
                 ))}
               </div>
             )}
-            {/* Bulk nDCG grading: pick a saved cluster preset, then every question
-                in scope WITHOUT a ground truth gets the aggregate ranking built
-                and promoted (existing truths are left alone). */}
+            {/* Bulk nDCG grading: select a saved cluster preset, then hit Run —
+                every question in scope WITHOUT a ground truth gets the aggregate
+                ranking built and promoted (existing truths are left alone).
+                Selecting a preset never starts anything on its own. */}
             <button
               type="button"
               onClick={toggleNdcgSection}
               disabled={!canRescore}
               title={
                 canRescore
-                  ? "Build + promote the aggregate ranking for every question in scope that has no ground truth yet"
+                  ? "Pick a preset, then Run: builds + promotes the aggregate ranking for every question in scope that has no ground truth yet"
                   : "No labeled questions to grade yet"
               }
               className="flex w-full cursor-pointer items-center justify-between px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
@@ -1579,56 +1642,138 @@ function BulkActions({
                     <span className="font-mono">/clusters</span> first.
                   </span>
                 ) : (
-                  presets.map((p) => (
-                    <div key={p.id} className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          close();
-                          onAddNdcg(p.id, scopeIds, ndcgRebuild);
-                        }}
-                        title={
-                          ndcgRebuild
-                            ? "Seed each question's candidate pool from this preset; refresh aggregate-truth questions and re-score them too"
-                            : "Seed each question's candidate pool from this preset"
-                        }
-                        className="flex min-w-0 flex-1 cursor-pointer items-center justify-between gap-2 rounded border border-zinc-300 px-2 py-0.5 text-left font-medium text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                      >
-                        <span className="truncate">{p.name ?? "unnamed"}</span>
-                        <span className="shrink-0 font-normal tabular-nums text-[10px] text-zinc-400">
-                          k={p.k} · {p.chunkCount} chunks · sil{" "}
-                          {p.silhouette.toFixed(2)}
-                        </span>
-                      </button>
-                      {/* Two warnings, both riding outside the button so they
-                          can't force it to wrap: missing-docs (a preset that
-                          predates some documents — their questions are skipped)
-                          and drift (top-up pushed the centroids off-center). */}
-                      {p.missingDocuments.length > 0 && (
-                        <Tooltip
-                          align="right"
-                          text={
-                            `This preset predates ${p.missingDocuments.length} document` +
-                            `${p.missingDocuments.length === 1 ? "" : "s"} — their questions ` +
-                            "are skipped (their pools would come from the wrong documents). " +
-                            `Not clustered: ${p.missingDocuments.map((d) => d.fileName).join(", ")}. ` +
-                            "Re-run clustering and save a new preset to cover them."
-                          }
-                        >
-                          <span className="shrink-0 font-medium text-amber-600 dark:text-amber-400">
-                            ⚠
-                          </span>
-                        </Tooltip>
-                      )}
-                      <DriftBadge
-                        align="right"
-                        toppedUpCount={p.toppedUpCount}
-                        driftRatio={p.driftRatio}
-                        chunkCount={p.chunkCount}
-                      />
-                    </div>
-                  ))
+                  <>
+                    {presets.map((p) => {
+                      const selected = p.id === ndcgPresetId;
+                      return (
+                        <div key={p.id} className="flex items-center gap-1">
+                          {/* Selection only — a click here costs nothing. The
+                              radio + label mirrors the per-question panel's
+                              PresetCard so the two read the same way. */}
+                          <label
+                            title={
+                              ndcgRebuild
+                                ? "Seed each question's candidate pool from this preset; the run also refreshes aggregate-truth questions and re-scores them"
+                                : "Seed each question's candidate pool from this preset"
+                            }
+                            className={`flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded border px-2 py-0.5 text-left font-medium ${
+                              selected
+                                ? "border-zinc-400 bg-zinc-50 text-zinc-800 dark:border-zinc-500 dark:bg-zinc-800/50 dark:text-zinc-100"
+                                : "border-zinc-300 text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                            }`}
+                          >
+                            <input
+                              type="radio"
+                              name="bulk-ndcg-preset"
+                              checked={selected}
+                              onChange={() => setNdcgPresetId(p.id)}
+                              className="shrink-0 cursor-pointer"
+                            />
+                            <span className="min-w-0 flex-1 truncate">
+                              {p.name ?? "unnamed"}
+                            </span>
+                            <span className="shrink-0 font-normal tabular-nums text-[10px] text-zinc-400">
+                              k={p.k} · {p.chunkCount} chunks · sil{" "}
+                              {p.silhouette.toFixed(2)}
+                            </span>
+                          </label>
+                          {/* Two warnings, both riding outside the label so they
+                              can't force it to wrap: missing-docs (a preset that
+                              predates some documents — their questions are skipped)
+                              and drift (top-up pushed the centroids off-center). */}
+                          {p.missingDocuments.length > 0 && (
+                            <Tooltip
+                              align="right"
+                              text={
+                                `This preset predates ${p.missingDocuments.length} document` +
+                                `${p.missingDocuments.length === 1 ? "" : "s"} — their questions ` +
+                                "are skipped (their pools would come from the wrong documents). " +
+                                `Not clustered: ${p.missingDocuments.map((d) => d.fileName).join(", ")}. ` +
+                                "Re-run clustering and save a new preset to cover them."
+                              }
+                            >
+                              <span className="shrink-0 font-medium text-amber-600 dark:text-amber-400">
+                                ⚠
+                              </span>
+                            </Tooltip>
+                          )}
+                          <DriftBadge
+                            align="right"
+                            toppedUpCount={p.toppedUpCount}
+                            driftRatio={p.driftRatio}
+                            chunkCount={p.chunkCount}
+                          />
+                        </div>
+                      );
+                    })}
+                    {/* The only thing that starts the run. */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!ndcgPresetId) return;
+                        close();
+                        onAddNdcg(ndcgPresetId, scopeIds, ndcgRebuild);
+                      }}
+                      disabled={!ndcgPresetId}
+                      title={
+                        !ndcgPresetId
+                          ? "Pick a preset first"
+                          : ndcgRebuild
+                            ? "Build + promote the aggregate ranking for every ungraded question in scope, refresh the aggregate-truth ones, and re-score both"
+                            : "Build + promote the aggregate ranking for every question in scope that has no ground truth yet"
+                      }
+                      className="mt-0.5 cursor-pointer self-start rounded bg-black px-2 py-0.5 font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
+                    >
+                      Run
+                    </button>
+                  </>
                 )}
+              </div>
+            )}
+            {/* Bulk LLM re-ranking: for every question in scope that already has
+                an aggregate, the LLM re-orders its top-k. Spends per question, so
+                the section states what it runs and what it skips, and only the
+                Run button fires it. */}
+            <button
+              type="button"
+              onClick={() => setLlmNdcgOpen((s) => !s)}
+              disabled={!canRescore}
+              title={
+                canRescore
+                  ? "Ask the LLM to re-order the aggregate's top-k for every question in scope (costs LLM calls; skips questions with no aggregate and ones already cached)"
+                  : "No labeled questions to rank yet"
+              }
+              className="flex w-full cursor-pointer items-center justify-between px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              Add LLM nDCG rankings{" "}
+              <span className="text-zinc-400">{llmNdcgOpen ? "▾" : "▸"}</span>
+            </button>
+            {llmNdcgOpen && (
+              <div className="flex flex-col gap-1 px-3 pb-1.5 pt-0.5 text-xs text-zinc-500">
+                <span>
+                  Re-ranks the aggregate’s top-k with the LLM, as a comparison
+                  candidate —{" "}
+                  <span className="text-zinc-400">
+                    it does not become ground truth until you set it on the
+                    question.
+                  </span>
+                </span>
+                <span className="text-amber-600 dark:text-amber-400">
+                  Costs one LLM call per question. Skips questions with no
+                  aggregate ranking yet, and ones whose LLM re-ranking is already
+                  cached.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    close();
+                    onAddLlmNdcg(scopeIds);
+                  }}
+                  title="Runs one LLM re-ranking per question in scope that has an aggregate and no cached re-ranking; everything else is skipped and reported"
+                  className="mt-0.5 cursor-pointer self-start rounded bg-black px-2 py-0.5 font-medium text-white hover:opacity-90 dark:bg-zinc-50 dark:text-black"
+                >
+                  Run
+                </button>
               </div>
             )}
             <button
@@ -2416,6 +2561,16 @@ function RunProgress({ progress, k }: { progress: EvalProgress; k: number }) {
               · {progress.failed} failed
             </span>
           )}
+          {/* Bulk LLM pass only: what this run decided NOT to spend on. */}
+          {ranking &&
+            progress.skippedNoAggregate + progress.skippedCached > 0 && (
+              <span className="ml-2 text-zinc-400">
+                {progress.skippedNoAggregate > 0 &&
+                  `· ${progress.skippedNoAggregate} skipped (no aggregate) `}
+                {progress.skippedCached > 0 &&
+                  `· ${progress.skippedCached} cached`}
+              </span>
+            )}
         </span>
         <span className="tabular-nums">{percent}%</span>
       </div>

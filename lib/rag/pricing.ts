@@ -39,14 +39,22 @@ export type LeverId =
   | "cascade" // #2 FrugalGPT-lite: cheap-first, NET of escalations
   | "semantic_cache" // #3 served answer skips retrieve+generate
   | "batch" // #4 −50% Anthropic / −33% Voyage on offline jobs
-  | "bucket_ndcg"; // #5 aggregate embeds a bucket pool, not the whole corpus
+  | "bucket_ndcg" // #5 aggregate embeds a bucket pool, not the whole corpus
+  | "ingest_skip" // #9 doc already embedded under this config — embed skipped
+  | "eval_embed_reuse"; // #10 calibration reads banked eval vectors — no re-embed
 
 export const LEVERS: Record<
   LeverId,
   { label: string; category: SavingsCategory; basis: SavingsBasis }
 > = {
   embed_cache: { label: "Embedding cache", category: "structural", basis: "estimate" },
+  ingest_skip: { label: "Re-ingest skip (already embedded)", category: "structural", basis: "estimate" },
   bucket_ndcg: { label: "nDCG by bucket (not corpus)", category: "structural", basis: "estimate" },
+  eval_embed_reuse: {
+    label: "Eval-embedding reuse (calibration)",
+    category: "structural",
+    basis: "estimate",
+  },
   cascade: { label: "Saver cascade (FrugalGPT-lite)", category: "realized", basis: "exact" },
   semantic_cache: { label: "Semantic answer cache", category: "realized", basis: "estimate" },
   batch: { label: "Batch API", category: "realized", basis: "exact" },
@@ -137,7 +145,14 @@ export function costEmbed(model: string, tokens: number): number {
 // The embed leg is cents at this corpus size, so char/4 is plenty; the LLM leg
 // uses real `usage` wherever it can (see meter.ts / generator.ts).
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  return estimateTokensFromChars(text.length);
+}
+
+// Same estimate, for callers that have a character COUNT but not the text —
+// the re-ingest skip prices a run it never loads (`select sum(length(text))`),
+// so the 4-chars-per-token constant stays in exactly one place.
+export function estimateTokensFromChars(chars: number): number {
+  return Math.ceil(chars / 4);
 }
 
 export function estimateTokensAll(texts: string[]): number {

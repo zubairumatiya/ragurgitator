@@ -52,7 +52,15 @@ export type BatchSavings = {
   // governs whether a HIT is SERVED — the cache is always populated regardless,
   // so turning `serve` on later has data to hit against. Opt-in (default off): a
   // served hit can be wrong if the proximity threshold is loose.
-  semanticCache: { serve: boolean };
+  //
+  // `threshold` is this config's OVERRIDE of the cosine floor a match must clear
+  // to be served. null = inherit, which is the norm: the calibrated per-space
+  // value (semantic_cache_thresholds) if there is one, else the conservative
+  // config.semanticCache.defaultThreshold. Set it when one config wants to run
+  // looser or tighter than its space-mates — the space table is keyed by
+  // VECTOR-SPACE, so it's shared by every config on the same embedding model and
+  // can't express that. Resolution order lives in semanticCache.resolveThreshold.
+  semanticCache: { serve: boolean; threshold: number | null };
 };
 
 export const DEFAULT_BATCH_SAVINGS: BatchSavings = {
@@ -62,7 +70,7 @@ export const DEFAULT_BATCH_SAVINGS: BatchSavings = {
     cluster_labeling: "standard",
     ingest_embedding: "standard",
   },
-  semanticCache: { serve: false },
+  semanticCache: { serve: false, threshold: null },
 };
 
 // The effective choice for a kind. This is THE resolver every launch point calls
@@ -81,7 +89,7 @@ type LegacyBatchSavings = {
   mode?: unknown; // 'bulk' | 'individual' in the oldest shape, absent after
   bulk?: Partial<Record<BatchLeg, unknown>>;
   jobs?: Partial<Record<JobKind, unknown>>;
-  semanticCache?: { serve?: unknown };
+  semanticCache?: { serve?: unknown; threshold?: unknown };
 };
 
 // Tolerant coercion of an unknown jsonb blob (or a partial patch) into a full
@@ -100,6 +108,15 @@ type LegacyBatchSavings = {
 //
 // Both collapse to: mode:'bulk' → the leg wins outright; otherwise the job's own
 // value wins when it has one, else its leg.
+// A per-config threshold override is only honoured when it's a real cosine in
+// [0,1]. Anything else — absent (every row predating this field), null, a string
+// from a hand-edited blob, NaN — means INHERIT, which is also the safe outcome:
+// the space calibration or the conservative default takes over rather than an
+// unusable number reaching the serving gate.
+function coerceThreshold(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1 ? v : null;
+}
+
 export function coerceBatchSavings(raw: unknown): BatchSavings {
   const r = (raw ?? {}) as LegacyBatchSavings;
   const choice = (v: unknown): BatchChoice | null =>
@@ -120,7 +137,10 @@ export function coerceBatchSavings(raw: unknown): BatchSavings {
       ingest_embedding: resolve("ingest_embedding"),
     },
     // Absent (old rows) or non-boolean → the safe default (don't serve).
-    semanticCache: { serve: r.semanticCache?.serve === true },
+    semanticCache: {
+      serve: r.semanticCache?.serve === true,
+      threshold: coerceThreshold(r.semanticCache?.threshold),
+    },
   };
 }
 
