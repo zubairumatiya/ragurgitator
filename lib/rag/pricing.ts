@@ -18,6 +18,7 @@ export type Surface =
   | "question_gen" // eval.ts — eval question synthesis
   | "cluster_label" // clusterLabeler.ts — bucket naming
   | "judge" // semanticCacheCalibration.ts — the shadow-judge verdict pass
+  | "cache_pairs" // semanticCachePairs.ts — key-model eval pair synthesis
   | "embed"; // embedCache.ts miss — a paid embedding call
 
 export const SURFACE_LABELS: Record<Surface, string> = {
@@ -26,6 +27,7 @@ export const SURFACE_LABELS: Record<Surface, string> = {
   question_gen: "Question generation",
   cluster_label: "Cluster labeling",
   judge: "Semantic-cache judge",
+  cache_pairs: "Cache-key pair generation",
   embed: "Embeddings",
 };
 

@@ -9,6 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  auc,
   bestMatch,
   calibrateFromJudged,
   collisionFloor,
@@ -315,4 +316,99 @@ test("calibrateFromJudged: no recommendation below the minimum sample size", () 
   ];
   const r = calibrateFromJudged(events, 0.9, 20);
   assert.equal(r.recommended, null);
+});
+
+// --- recall (coverage) — the half the sweep never computed -------------------
+
+test("calibrateFromJudged: coverage is the share of ALL accepts the prefix serves", () => {
+  // Four accepts total. At sim 0.95 the prefix holds two of them.
+  const events = [
+    { sim: 0.99, verdict: "accept" as const },
+    { sim: 0.95, verdict: "accept" as const },
+    { sim: 0.9, verdict: "accept" as const },
+    { sim: 0.85, verdict: "accept" as const },
+  ];
+  const r = calibrateFromJudged(events, 1.0, 1);
+  assert.equal(r.totalAccepts, 4);
+  assert.equal(r.curve[1].coverageAtOrAbove, 0.5);
+  // Precision holds at 1.0 all the way down, so τ walks to the bottom and
+  // recall reaches 1 — the "no rejects to protect against" case.
+  assert.equal(r.recommended, 0.85);
+  assert.equal(r.coverageAtRecommended, 1);
+});
+
+test("calibrateFromJudged: coverageAtRecommended is τ's recall, not the tightest prefix's", () => {
+  // The reject at 0.90 caps τ at 0.95, which serves 2 of the 3 accepts. The
+  // number that matters is the one τ achieves — 2/3 — not the 1/3 at the top of
+  // the curve, which is what a naive "first qualifying point" read would give.
+  const events = [
+    { sim: 0.99, verdict: "accept" as const },
+    { sim: 0.95, verdict: "accept" as const },
+    { sim: 0.9, verdict: "reject" as const },
+    { sim: 0.85, verdict: "accept" as const },
+  ];
+  const r = calibrateFromJudged(events, 1.0, 1);
+  assert.equal(r.recommended, 0.95);
+  assert.equal(r.totalAccepts, 3);
+  assert.equal(r.coverageAtRecommended, 2 / 3);
+});
+
+test("calibrateFromJudged: no recommendation means no recall to report", () => {
+  const r = calibrateFromJudged([{ sim: 0.9, verdict: "reject" as const }], 0.99, 1);
+  assert.equal(r.recommended, null);
+  assert.equal(r.coverageAtRecommended, null);
+  assert.equal(r.totalAccepts, 0);
+});
+
+// --- AUC ---------------------------------------------------------------------
+
+test("auc: perfect separation is 1, inverted is 0, and it's rank-based only", () => {
+  const perfect = [
+    { sim: 0.9, label: "same" as const },
+    { sim: 0.8, label: "same" as const },
+    { sim: 0.3, label: "different" as const },
+    { sim: 0.1, label: "different" as const },
+  ];
+  assert.equal(auc(perfect), 1);
+
+  // Same ORDER, wildly different scale — AUC must not move. This is the whole
+  // reason it's here: cosine magnitudes aren't comparable across models.
+  const rescaled = perfect.map((p) => ({ ...p, sim: p.sim * 0.1 + 0.5 }));
+  assert.equal(auc(rescaled), 1);
+
+  const inverted = perfect.map((p) => ({
+    ...p,
+    label: p.label === "same" ? ("different" as const) : ("same" as const),
+  }));
+  assert.equal(auc(inverted), 0);
+});
+
+test("auc: a full tie is 0.5 — ties split the win rather than going to sort order", () => {
+  const allTied = [
+    { sim: 0.9, label: "same" as const },
+    { sim: 0.9, label: "same" as const },
+    { sim: 0.9, label: "different" as const },
+    { sim: 0.9, label: "different" as const },
+  ];
+  assert.equal(auc(allTied), 0.5);
+  // And the answer can't depend on input order.
+  assert.equal(auc([...allTied].reverse()), 0.5);
+});
+
+test("auc: one misordered pair costs exactly its share", () => {
+  // 2 same × 2 different = 4 comparisons; the 0.5 "same" loses to the 0.8
+  // "different" only. 3 wins out of 4.
+  const pairs = [
+    { sim: 0.9, label: "same" as const },
+    { sim: 0.8, label: "different" as const },
+    { sim: 0.5, label: "same" as const },
+    { sim: 0.1, label: "different" as const },
+  ];
+  assert.equal(auc(pairs), 0.75);
+});
+
+test("auc: null when either class is missing", () => {
+  assert.equal(auc([]), null);
+  assert.equal(auc([{ sim: 0.9, label: "same" }]), null);
+  assert.equal(auc([{ sim: 0.9, label: "different" }]), null);
 });

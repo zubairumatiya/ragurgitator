@@ -18,6 +18,7 @@ import type { SubmitMeta } from "@/lib/batch/providers";
 import { questionGenerationHandler } from "@/lib/batch/jobs/questionGeneration";
 import { clusterLabelingHandler } from "@/lib/batch/jobs/clusterLabeling";
 import { ingestEmbeddingHandler } from "@/lib/batch/jobs/ingestEmbedding";
+import { pairGenerationHandler } from "@/lib/batch/jobs/pairGeneration";
 
 export type BuiltBatch = {
   requests: BatchRequest[];
@@ -37,6 +38,7 @@ const HANDLERS: Partial<Record<JobKind, JobHandler>> = {
   question_generation: questionGenerationHandler,
   cluster_labeling: clusterLabelingHandler,
   ingest_embedding: ingestEmbeddingHandler,
+  cache_pair_generation: pairGenerationHandler,
   // ndcg_ranking — recognized, submit guarded. Not just an unwritten handler:
   // there is no bulk LLM ranking to batch. The bulk nDCG flow builds the
   // cross-model AGGREGATE truth (embeddings, no LLM), and llm_pool/llm_rerank

@@ -18,7 +18,12 @@ import {
 test("legOfKind / providerOfKind: only ingest_embedding is the embedding/voyage leg", () => {
   assert.equal(legOfKind("ingest_embedding"), "embedding");
   assert.equal(providerOfKind("ingest_embedding"), "voyage");
-  for (const k of ["question_generation", "ndcg_ranking", "cluster_labeling"] as const) {
+  for (const k of [
+    "question_generation",
+    "ndcg_ranking",
+    "cluster_labeling",
+    "cache_pair_generation",
+  ] as const) {
     assert.equal(legOfKind(k), "llm");
     assert.equal(providerOfKind(k), "anthropic");
   }
@@ -31,8 +36,9 @@ test("effectiveChoice: each job stands alone — one choice never moves another"
       ndcg_ranking: "standard",
       cluster_labeling: "batch",
       ingest_embedding: "standard",
+      cache_pair_generation: "standard",
     },
-    semanticCache: { serve: false, threshold: null },
+    semanticCache: { serve: false, threshold: null, keyModel: null },
   };
   assert.equal(effectiveChoice(s, "question_generation"), "batch");
   assert.equal(effectiveChoice(s, "ndcg_ranking"), "standard");
@@ -85,9 +91,38 @@ test("coerceBatchSavings: threshold override only survives as a real cosine", ()
   assert.equal(th(-0.1), null);
 });
 
+test("coerceBatchSavings: keyModel override only survives as a non-empty string", () => {
+  const km = (raw: unknown) => coerceBatchSavings({ semanticCache: { keyModel: raw } })
+    .semanticCache.keyModel;
+
+  assert.equal(km("voyage-4-large"), "voyage-4-large");
+  assert.equal(km("  voyage-4  "), "voyage-4"); // trimmed, so padding can't miss the registry
+
+  // Everything else means INHERIT the global default: absent (every row written
+  // before this field existed), explicit null, blank, and non-strings.
+  assert.equal(
+    coerceBatchSavings({ semanticCache: { serve: true } }).semanticCache.keyModel,
+    null,
+  );
+  assert.equal(km(null), null);
+  assert.equal(km(""), null);
+  assert.equal(km("   "), null);
+  assert.equal(km(42), null);
+
+  // An UNKNOWN id is deliberately kept here rather than nulled: this module has
+  // no registry to check against (it's import-free by design), so validation is
+  // the write path's job and the read path's fallback is resolveKeyModel's.
+  assert.equal(km("not-a-real-model"), "not-a-real-model");
+});
+
 // --- migration off the two leg-grouped shapes ------------------------------
 // Old rows keep their jsonb until something saves over them, so every one of
 // these has to land on the same EFFECTIVE choice the config was running with.
+//
+// A job kind added AFTER a legacy blob was written (cache_pair_generation) has
+// no entry in either map, so it resolves through its leg like any other — a row
+// that said "all LLM jobs → batch" gets batch for it too. That's the intent the
+// leg expressed, and the stake is async-vs-inline, never a wrong answer.
 
 test("coerceBatchSavings migrates legacy mode:'bulk' — the leg wins, dead jobs map ignored", () => {
   const s = coerceBatchSavings({
@@ -107,6 +142,7 @@ test("coerceBatchSavings migrates legacy mode:'bulk' — the leg wins, dead jobs
     ndcg_ranking: "batch",
     cluster_labeling: "batch",
     ingest_embedding: "standard", // from the embedding leg, as before
+    cache_pair_generation: "batch", // added later; resolves through the llm leg
   });
 });
 
@@ -126,6 +162,7 @@ test("coerceBatchSavings migrates legacy mode:'individual' — the jobs map wins
     ndcg_ranking: "standard",
     cluster_labeling: "batch",
     ingest_embedding: "standard", // NOT the stale 'batch' leg
+    cache_pair_generation: "batch", // no entry in either map → the llm leg
   });
 });
 
@@ -145,6 +182,7 @@ test("coerceBatchSavings migrates the legs+overrides shape — override, else le
     ndcg_ranking: "standard", // the llm leg
     cluster_labeling: "standard",
     ingest_embedding: "batch", // the embedding leg
+    cache_pair_generation: "standard", // the llm leg
   });
 });
 

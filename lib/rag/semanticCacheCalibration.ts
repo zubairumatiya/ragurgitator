@@ -17,10 +17,12 @@
 import { config } from "@/lib/config";
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
+import { getBatchSavings } from "@/lib/rag/batchStore";
 import { allLabeledQuestions, getCachedQueryEmbeddings } from "@/lib/rag/evalStore";
 import { meteredMessage } from "@/lib/rag/meter";
 import { costEmbed, estimateTokensAll } from "@/lib/rag/pricing";
 import { recordSaving } from "@/lib/rag/savingsStore";
+import { resolveKeyModel } from "@/lib/rag/semanticCache";
 import {
   calibrateFromJudged,
   collisionFloor,
@@ -82,19 +84,31 @@ function recordEvalEmbedReuse(
   }
 }
 
-// Compute the collision floor for the active config's vector-space from its
-// labeled eval questions and their already-cached query embeddings. Does NOT
-// write — the caller applies the recommendation explicitly.
+// Compute the collision floor for the active config's CACHE-KEY vector-space
+// from its labeled eval questions and their already-cached query embeddings.
+// Does NOT write — the caller applies the recommendation explicitly.
+//
+// The key model, not the config's retrieval model (docs/semantic-cache-key-
+// model-plan.md, Phase 1): the floor is a recommendation for
+// semantic_cache_thresholds, which is keyed by the space the CACHE matches in.
+// Computing it in the retrieval space would file a number against a space the
+// cache never consults.
+//
+// getCachedQueryEmbeddings never embeds — it reads what the eval bank already
+// banked. So a key model the eval bank has never run under yields no vectors and
+// an honest empty sample (`questionsTotal` vs the dropped count says so), rather
+// than a surprise embedding bill from opening a panel.
 export async function computeCollisionFloor(): Promise<CollisionFloorReport> {
-  const cfg = activeConfig();
+  const savings = await getBatchSavings(activeConfig().id);
+  const keyModel = resolveKeyModel(savings.semanticCache.keyModel);
   const labels = await allLabeledQuestions();
   // One row per (question, label), so a question with several ground-truth
   // chunks repeats — dedupe to unique questions for both the fetch and the
   // token estimate, or a multi-label question would be priced twice.
   const questionText = new Map(labels.map((l) => [l.questionId, l.question]));
   const ids = [...questionText.keys()];
-  const vectors = await getCachedQueryEmbeddings(ids, cfg.embeddingModel);
-  recordEvalEmbedReuse(cfg.embeddingModel, questionText, vectors);
+  const vectors = await getCachedQueryEmbeddings(ids, keyModel);
+  recordEvalEmbedReuse(keyModel, questionText, vectors);
   const result = collisionFloor(
     labels.map((l) => ({ questionId: l.questionId, sourceChunkId: l.sourceChunkId })),
     vectors,
@@ -102,8 +116,8 @@ export async function computeCollisionFloor(): Promise<CollisionFloorReport> {
   );
   return {
     ...result,
-    space: spaceOf(cfg.embeddingModel),
-    embeddingModel: cfg.embeddingModel,
+    space: spaceOf(keyModel),
+    embeddingModel: keyModel,
     questionsTotal: ids.length,
   };
 }

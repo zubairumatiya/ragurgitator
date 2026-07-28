@@ -74,6 +74,22 @@ export const config = {
   // the table not existing degrades it to a no-op too.
   semanticCache: {
     enabled: true,
+    // The CACHE-KEY model (docs/semantic-cache-key-model-plan.md, Phase 1) —
+    // the global default, overridable per config via
+    // configs.batch_savings.semanticCache.keyModel. Deliberately its OWN
+    // setting rather than the config's embeddingModel: the cache-key vector
+    // never touches a chunks_* table, so nothing forced the coupling, and the
+    // two are different tasks — retrieval is asymmetric query↔document, cache
+    // matching is symmetric query↔query. It's also paid per incoming question
+    // (~10 tokens), not per corpus chunk, so the best question model is
+    // affordable here regardless of what a config retrieves with.
+    //
+    // Kept at voyage-4-lite (= the historical cfg.embeddingModel) so every
+    // judged semantic_cache_shadow row stays in its captured space and keeps
+    // funding that space's calibration. Changing this moves every config that
+    // holds no override into a NEW space, which falls back to
+    // defaultThreshold — see resolveKeyModel / assertKeyModelCalibrated.
+    keyModel: "voyage-4-lite",
     // Conservative cosine trigger for any vector-space without a calibrated
     // value in semantic_cache_thresholds. High on purpose: in RAG a false hit
     // is a wrong answer (see the plan doc). Phase 2 calibration lowers it per
@@ -113,6 +129,37 @@ export const config = {
     judgeBulkModel: "claude-haiku-4-5",
     judgeBoundaryModel: "claude-sonnet-4-6",
     judgeModelOptions: ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-8"],
+    // --- Cache-key model sweep (docs/semantic-cache-key-model-plan.md, Ph. 2) -
+    // Which model belongs on `keyModel`, decided by measurement rather than
+    // argument. Deliberately NOT autotune: ~9 models is small enough to sweep
+    // exhaustively, so this is a table you sort, not a search you run.
+    keyModelSweep: {
+      // Every registered model is a candidate — the cache-key vector never
+      // touches a chunks_* table, so `ingestable` is irrelevant here. The sweep
+      // filters out providers with no key/weights at run time (a listed model
+      // whose provider is unavailable is REPORTED as unavailable, not dropped,
+      // so a missing space is explained rather than silently absent).
+      candidates: [
+        "voyage-4-lite",
+        "voyage-4",
+        "voyage-4-large",
+        "voyage-code-3",
+        "voyage-code-2",
+        "voyage-finance-2",
+        "voyage-law-2",
+        "text-embedding-3-large",
+        "embed-v4",
+        "mxbai-embed-large",
+        "bge-m3",
+      ],
+      // Per eval question. Hard negatives are the load-bearing half: random
+      // distinct pairs are separated near-perfectly by every model and grade
+      // nothing, so the eval is exactly as good as these.
+      pairsPerQuestion: { paraphrase: 3, hardNegative: 3 },
+      // Cheap model on purpose — this writes question VARIANTS, which is a much
+      // easier task than judging one, and it's a one-off over the whole bank.
+      generateModel: "claude-haiku-4-5",
+    },
   },
 } as const;
 

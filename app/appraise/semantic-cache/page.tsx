@@ -11,6 +11,9 @@
 //   2. Thresholds by vector-space — what's live now, read-only.
 //   3. Shadow judge — needs real would-hit traffic and costs judge tokens, so
 //      it's the refinement you reach for after (1), not the starting point.
+//   4. Cache key model — the only panel that isn't about a threshold's VALUE:
+//      it changes WHICH SPACE a config reads its threshold from. Last, because
+//      it only makes sense once you've seen the spaces and what they serve at.
 //
 // The page frame is a Server Component; the panels are self-fetching Client
 // Components (they read the /api/semantic-cache/* routes and talk to each other
@@ -26,6 +29,7 @@ import { BackToConfigs } from "@/app/components/BackToConfigs";
 import { InfoDot } from "@/app/components/InfoDot";
 import { ApplyThresholdPanel } from "@/app/components/semanticCache/ApplyThresholdPanel";
 import { CollisionFloorPanel } from "@/app/components/semanticCache/CollisionFloorPanel";
+import { KeyModelPanel } from "@/app/components/semanticCache/KeyModelPanel";
 import { ShadowJudgePanel } from "@/app/components/semanticCache/ShadowJudgePanel";
 import { ThresholdsPanel } from "@/app/components/semanticCache/ThresholdsPanel";
 
@@ -60,6 +64,10 @@ export default function SemanticCachePage() {
         <ThresholdsPanel />
 
         <ShadowJudgePanel />
+
+        <div className="border-t border-zinc-200 pt-4 dark:border-zinc-800">
+          <KeyModelPanel />
+        </div>
       </main>
     </div>
   );

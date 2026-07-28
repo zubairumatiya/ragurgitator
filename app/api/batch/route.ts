@@ -24,26 +24,35 @@ import {
   updateBatchSavings,
 } from "@/lib/rag/batchStore";
 import { setCascadeEnabled } from "@/lib/rag/configStore";
-import { inheritedThreshold } from "@/lib/rag/semanticCache";
+import {
+  keyModelStatus,
+  resolveKeyModel,
+  uncalibratedKeyModelSpace,
+} from "@/lib/rag/semanticCache";
 import { emailConfigured } from "@/lib/batch/notify";
 
 export async function GET(request: Request) {
   return withRequestConfig(request, async () => {
     const configId = activeConfig().id;
-    const [jobs, savings, inFlight, inherited] = await Promise.all([
+    const savings = await getBatchSavings(configId);
+    const [jobs, inFlight, keyModel] = await Promise.all([
       listBatchJobs(),
-      getBatchSavings(configId),
       inFlightForConfig(configId),
-      // What this config's cache threshold falls back to when it sets no override
-      // of its own — the Settings input shows it as the placeholder, so an empty
-      // field still tells you the number actually in force.
-      inheritedThreshold(activeConfig().embeddingModel),
+      // The CACHE-KEY model in force for this config, its candidates, and what
+      // that model's space serves at. The threshold rides inside: it's keyed by
+      // the KEY model's space, not the retrieval model's, so the two can't be
+      // read independently without one of them being wrong.
+      keyModelStatus(savings.semanticCache.keyModel),
     ]);
     return Response.json({
       jobs,
       savings,
       inFlight,
-      inheritedThreshold: inherited,
+      // What this config's cache threshold falls back to when it sets no override
+      // of its own — the Settings input shows it as the placeholder, so an empty
+      // field still tells you the number actually in force.
+      inheritedThreshold: keyModel.threshold,
+      keyModel,
       emailConfigured: emailConfigured(),
       // Saver-mode toggle (0032) — seeds the Savings section's cascade switch.
       cascadeEnabled: activeConfig().cascadeEnabled,
@@ -66,15 +75,19 @@ const Body = z.object({
   // Saver-mode toggle (0032) — the FrugalGPT cascade on/off for this config. Not
   // part of BatchSavings; written to configs.cascade_enabled separately.
   cascadeEnabled: z.boolean().optional(),
-  // `threshold` is tri-state and the distinction matters: omitted = leave the
-  // override as it is, null = clear it (fall back to the space/default value), a
-  // number = pin this config to that cosine floor.
+  // `threshold` and `keyModel` are both tri-state and the distinction matters:
+  // omitted = leave the override as it is, null = clear it (fall back to the
+  // global/space value), a value = pin this config to it.
   semanticCache: z
     .object({
       serve: z.boolean().optional(),
       threshold: z.number().min(0).max(1).nullable().optional(),
+      keyModel: z.string().min(1).nullable().optional(),
     })
     .optional(),
+  // Acknowledges the uncalibrated-space refusal below. Only meaningful
+  // alongside a keyModel change; ignored otherwise.
+  forceKeyModel: z.boolean().optional(),
 });
 
 export async function PATCH(request: Request) {
@@ -83,6 +96,46 @@ export async function PATCH(request: Request) {
 
   return withRequestConfig(request, async () => {
     const configId = activeConfig().id;
+
+    // --- the cache-key model switch, guarded ---------------------------------
+    // Thresholds are keyed by vector-space, so changing the key model can move
+    // this config into a space with no calibrated row — silently dropping it
+    // back to the conservative default (or, the other way, silently loosening
+    // it). Refuse rather than flip: the client must either calibrate the target
+    // space first, or say `forceKeyModel` and own the fallback.
+    const keyModelPatch = body.data.semanticCache?.keyModel;
+    if (keyModelPatch !== undefined) {
+      const current = (await getBatchSavings(configId)).semanticCache.keyModel;
+      const target = resolveKeyModel(keyModelPatch);
+      // resolveKeyModel silently falls back on an unknown id — right for the
+      // read path (never break an answer over a stale blob), wrong for a write:
+      // saving a typo'd model that quietly means something else is exactly the
+      // silent flip this guard exists to prevent.
+      if (keyModelPatch !== null && target !== keyModelPatch) {
+        return Response.json(
+          { error: `Unknown embedding model "${keyModelPatch}".` },
+          { status: 400 },
+        );
+      }
+      // Only a real CHANGE is gated. Re-saving the Savings form with the model
+      // it already runs on must not fail just because that space is uncalibrated.
+      if (target !== resolveKeyModel(current) && !body.data.forceKeyModel) {
+        const blocked = await uncalibratedKeyModelSpace(target);
+        if (blocked) {
+          return Response.json(
+            {
+              error:
+                `"${target}" has no calibrated threshold — its space ` +
+                `"${blocked.space}" would fall back to ${blocked.fallbackThreshold.toFixed(3)}. ` +
+                `Calibrate it on Appraise → Semantic caching first, or confirm the switch.`,
+              uncalibratedSpace: blocked,
+            },
+            { status: 409 },
+          );
+        }
+      }
+    }
+
     // Saver-mode toggle rides in the same Savings patch; write it separately from
     // the BatchSavings blob (updateBatchSavings ignores the extra field).
     if (body.data.cascadeEnabled !== undefined) {

@@ -18,6 +18,7 @@ export const JOB_KINDS = [
   "ndcg_ranking",
   "cluster_labeling",
   "ingest_embedding",
+  "cache_pair_generation",
 ] as const;
 export type JobKind = (typeof JOB_KINDS)[number];
 
@@ -26,10 +27,11 @@ export const JOB_LABELS: Record<JobKind, string> = {
   ndcg_ranking: "nDCG LLM ranking",
   cluster_labeling: "Cluster labeling",
   ingest_embedding: "Ingest / re-embedding",
+  cache_pair_generation: "Cache-key eval pairs",
 };
 
 // The two "settings" the user groups jobs into: the embedding leg (Voyage) is
-// just ingest_embedding; the LLM leg (Anthropic) is the three Sonnet jobs.
+// just ingest_embedding; the LLM leg (Anthropic) is everything else.
 export type BatchLeg = "embedding" | "llm";
 export function legOfKind(kind: JobKind): BatchLeg {
   return kind === "ingest_embedding" ? "embedding" : "llm";
@@ -60,7 +62,14 @@ export type BatchSavings = {
   // looser or tighter than its space-mates — the space table is keyed by
   // VECTOR-SPACE, so it's shared by every config on the same embedding model and
   // can't express that. Resolution order lives in semanticCache.resolveThreshold.
-  semanticCache: { serve: boolean; threshold: number | null };
+  //
+  // `keyModel` is this config's OVERRIDE of the CACHE-KEY embedding model — the
+  // model incoming questions are embedded under for the proximity match, which
+  // is decoupled from the config's retrieval model (see config.semanticCache.
+  // keyModel and docs/semantic-cache-key-model-plan.md, Phase 1). null =
+  // inherit the global default, which is the norm. Resolution order lives in
+  // semanticCache.resolveKeyModel.
+  semanticCache: { serve: boolean; threshold: number | null; keyModel: string | null };
 };
 
 export const DEFAULT_BATCH_SAVINGS: BatchSavings = {
@@ -69,8 +78,9 @@ export const DEFAULT_BATCH_SAVINGS: BatchSavings = {
     ndcg_ranking: "standard",
     cluster_labeling: "standard",
     ingest_embedding: "standard",
+    cache_pair_generation: "standard",
   },
-  semanticCache: { serve: false, threshold: null },
+  semanticCache: { serve: false, threshold: null, keyModel: null },
 };
 
 // The effective choice for a kind. This is THE resolver every launch point calls
@@ -89,7 +99,7 @@ type LegacyBatchSavings = {
   mode?: unknown; // 'bulk' | 'individual' in the oldest shape, absent after
   bulk?: Partial<Record<BatchLeg, unknown>>;
   jobs?: Partial<Record<JobKind, unknown>>;
-  semanticCache?: { serve?: unknown; threshold?: unknown };
+  semanticCache?: { serve?: unknown; threshold?: unknown; keyModel?: unknown };
 };
 
 // Tolerant coercion of an unknown jsonb blob (or a partial patch) into a full
@@ -117,6 +127,17 @@ function coerceThreshold(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1 ? v : null;
 }
 
+// Same tri-state shape for the cache-key model override: anything that isn't a
+// non-empty string means INHERIT the global default. Whether the string names a
+// REGISTERED model isn't decided here — this file is deliberately import-free
+// (it's read from client code too) and the registry lives server-side. The
+// write path validates the id (app/api/batch), and semanticCache.resolveKeyModel
+// falls back to the global default on an unknown one, so a hand-edited blob
+// degrades to the default rather than to a provider error on the hot path.
+function coerceKeyModel(v: unknown): string | null {
+  return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
+}
+
 export function coerceBatchSavings(raw: unknown): BatchSavings {
   const r = (raw ?? {}) as LegacyBatchSavings;
   const choice = (v: unknown): BatchChoice | null =>
@@ -135,11 +156,13 @@ export function coerceBatchSavings(raw: unknown): BatchSavings {
       ndcg_ranking: resolve("ndcg_ranking"),
       cluster_labeling: resolve("cluster_labeling"),
       ingest_embedding: resolve("ingest_embedding"),
+      cache_pair_generation: resolve("cache_pair_generation"),
     },
     // Absent (old rows) or non-boolean → the safe default (don't serve).
     semanticCache: {
       serve: r.semanticCache?.serve === true,
       threshold: coerceThreshold(r.semanticCache?.threshold),
+      keyModel: coerceKeyModel(r.semanticCache?.keyModel),
     },
   };
 }

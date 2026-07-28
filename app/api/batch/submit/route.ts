@@ -27,6 +27,7 @@ const Body = z.object({
     "ndcg_ranking",
     "cluster_labeling",
     "ingest_embedding",
+    "cache_pair_generation",
   ]),
   scope: z.record(z.string(), z.unknown()).optional(),
 });

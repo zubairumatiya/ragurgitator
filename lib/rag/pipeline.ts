@@ -390,17 +390,25 @@ export async function ask(question: string): Promise<CachedResult> {
     return answerWithCascade(question, await retrieve(question));
   }
 
-  const { serve, threshold } = (await getActiveBatchSavings()).semanticCache;
-  const probe = await semanticCacheLookup(trimmed, { serve, threshold });
+  const { serve, threshold, keyModel } = (await getActiveBatchSavings()).semanticCache;
+  const probe = await semanticCacheLookup(trimmed, { serve, threshold, keyModel });
   if (probe.hit) return probe.result;
 
   // Miss (or would-hit with serving off): reuse the vector the cache already
   // embedded (banked in embedding_cache) so we don't pay to embed the query
   // twice, run the cascade, and always bank the result — so the cache fills even
   // while serving is off.
-  const sources = await retrieveForQuery(trimmed, probe.vector);
+  //
+  // `queryVector` is null when the CACHE-KEY model differs from this config's
+  // retrieval model (docs/semantic-cache-key-model-plan.md, Phase 1): the key
+  // vector is then in a foreign space and useless to the retriever, so retrieve()
+  // embeds under the config's own model as it would with no cache at all. The
+  // key vector still goes to the store, which banks under the key model.
+  const sources = probe.queryVector
+    ? await retrieveForQuery(trimmed, probe.queryVector)
+    : await retrieve(trimmed);
   const result = await answerWithCascade(question, sources);
-  await semanticCacheStore(trimmed, probe.vector, result);
+  await semanticCacheStore(trimmed, probe.key, result);
   return result;
 }
 

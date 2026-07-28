@@ -278,9 +278,21 @@ export type CalibrationResult = {
   minSamples: number;
   totalJudged: number;
   overallAcceptRate: number | null;
+  // Accept-labeled events in the whole set — recall's DENOMINATOR. Without it
+  // the sweep can say "when I serve, I'm right 99% of the time" but not "…and
+  // I'm walking past 60% of the available savings to get there".
+  totalAccepts: number;
+  // Recall at the recommended τ: the share of ALL accept-labeled pairs that τ
+  // actually serves. This is the business metric — savings captured at the
+  // safety level we committed to — and the number models are ranked by, because
+  // each model gets its OWN τ at the same precision target, which is what makes
+  // them comparable across spaces whose cosine scales differ. null when there's
+  // no recommendation (or nothing to recall).
+  coverageAtRecommended: number | null;
   // Acceptance rate over every event AT OR ABOVE each sim — the calibration
-  // curve. Points are ordered by descending sim (n grows left→right).
-  curve: { sim: number; acceptRateAtOrAbove: number; n: number }[];
+  // curve — plus the recall that prefix achieves. Points are ordered by
+  // descending sim (n grows left→right).
+  curve: { sim: number; acceptRateAtOrAbove: number; coverageAtOrAbove: number; n: number }[];
 };
 
 // Precision-at-threshold sweep over judged shadow events. Sort by sim desc; for
@@ -297,21 +309,32 @@ export function calibrateFromJudged(
 ): CalibrationResult {
   const sorted = [...events].sort((a, b) => b.sim - a.sim);
   const curve: CalibrationResult["curve"] = [];
+  // Recall's denominator, needed BEFORE the sweep so each prefix can report the
+  // share of all accepts it covers rather than only the count it contains.
+  const totalAccepts = sorted.reduce((n, e) => n + (e.verdict === "accept" ? 1 : 0), 0);
   let accepts = 0;
   let recommended: number | null = null;
+  let coverageAtRecommended: number | null = null;
 
   for (let k = 0; k < sorted.length; k++) {
     if (sorted[k].verdict === "accept") accepts++;
     const n = k + 1;
     const rate = accepts / n;
-    curve.push({ sim: sorted[k].sim, acceptRateAtOrAbove: rate, n });
+    const coverage = totalAccepts === 0 ? 0 : accepts / totalAccepts;
+    curve.push({ sim: sorted[k].sim, acceptRateAtOrAbove: rate, coverageAtOrAbove: coverage, n });
     // Only consider τ at the END of a run of equal sims. Mid-run, the prefix
     // covers only PART of the tie group, but serving `sim >= τ` would admit the
     // whole group — so a rate measured there doesn't hold for what we'd serve.
     // Real cosines rarely tie exactly, so this is a correctness guarantee rather
     // than a behavior change on live data.
     const isTieBoundary = k === sorted.length - 1 || sorted[k + 1].sim !== sorted[k].sim;
-    if (isTieBoundary && rate >= target && n >= minSamples) recommended = sorted[k].sim;
+    if (isTieBoundary && rate >= target && n >= minSamples) {
+      recommended = sorted[k].sim;
+      // Moves WITH `recommended`: τ walks downward to the most inclusive value
+      // that still clears the target, and the recall reported must be the one
+      // that τ achieves, not the tighter prefix's.
+      coverageAtRecommended = totalAccepts === 0 ? null : coverage;
+    }
   }
 
   return {
@@ -320,6 +343,53 @@ export function calibrateFromJudged(
     minSamples,
     totalJudged: sorted.length,
     overallAcceptRate: sorted.length ? accepts / sorted.length : null,
+    totalAccepts,
+    coverageAtRecommended,
     curve,
   };
+}
+
+// AUC — P(a random SAME pair outranks a random DIFFERENT pair). 0.5 is a coin
+// flip, 1.0 is perfect separation. Computed as the Mann-Whitney U statistic with
+// AVERAGE ranks for ties, which is exactly equivalent and needs no thresholding.
+//
+// Purely RANK-based, so it's immune to cosine-scale differences across models by
+// construction — the reason it's here at all, since raw similarity magnitudes
+// can never be compared between embedding spaces.
+//
+// SECONDARY to recall@τ, deliberately. AUC grades the WHOLE ranking, and a cache
+// only ever serves from the very top of it: a model can win on AUC by ordering
+// the middle of the distribution well and still be worse where it counts. Use it
+// as a sanity check and a tiebreak, not as the objective.
+//
+// null when either class is missing — with no same pairs or no different pairs
+// there is no ordering question to ask, and any number would be an artifact.
+export function auc(
+  pairs: { sim: number; label: "same" | "different" }[],
+): number | null {
+  const nSame = pairs.filter((p) => p.label === "same").length;
+  const nDiff = pairs.length - nSame;
+  if (nSame === 0 || nDiff === 0) return null;
+
+  // Ascending by sim, then averaged ranks within each run of equal sims. Ties
+  // MUST share a rank: a tie contributes half a "win", and integer ranks would
+  // silently award the whole win to whichever side sorted first.
+  const sorted = [...pairs].sort((a, b) => a.sim - b.sim);
+  const ranks = new Array<number>(sorted.length);
+  for (let i = 0; i < sorted.length; ) {
+    let j = i;
+    while (j + 1 < sorted.length && sorted[j + 1].sim === sorted[i].sim) j++;
+    // 1-based ranks i+1..j+1, averaged over the run.
+    const avg = (i + 1 + (j + 1)) / 2;
+    for (let k = i; k <= j; k++) ranks[k] = avg;
+    i = j + 1;
+  }
+
+  let rankSumSame = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    if (sorted[i].label === "same") rankSumSame += ranks[i];
+  }
+  // U = R_same − n_same(n_same+1)/2; AUC = U / (n_same · n_diff).
+  const u = rankSumSame - (nSame * (nSame + 1)) / 2;
+  return u / (nSame * nDiff);
 }

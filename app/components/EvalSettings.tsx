@@ -104,6 +104,18 @@ type InheritedThreshold = {
   source: "calibrated" | "default";
 };
 
+// The CACHE-KEY model in force for this config (GET /api/batch → keyModel; see
+// semanticCache.keyModelStatus). Mirrors the server type structurally rather
+// than importing it — this is a client component, and the server module pulls
+// in the DB client.
+type KeyModelStatus = {
+  keyModel: string; // resolved: the override, else the global default
+  override: string | null; // this config's own, null when it inherits
+  globalDefault: string;
+  threshold: InheritedThreshold; // what the RESOLVED model's space serves at
+  candidates: { id: string; space: string; dimension: number; provider: string }[];
+};
+
 export function EvalSettings() {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -154,6 +166,22 @@ export function EvalSettings() {
   // Empty = no override. `inherited` is what that empty box resolves to.
   const [threshold, setThreshold] = useState("");
   const [inherited, setInherited] = useState<InheritedThreshold | null>(null);
+  // Cache-KEY model: the status the server resolved, plus the picker's value
+  // ("" = inherit the global default). Held separately from `savings` because
+  // the two are read back together after a save — a key-model change moves
+  // which SPACE's threshold applies, so `inherited` is stale until the server
+  // re-resolves it.
+  const [keyModelInfo, setKeyModelInfo] = useState<KeyModelStatus | null>(null);
+  const [keyModel, setKeyModel] = useState("");
+  // Set when the server REFUSED a switch into an uncalibrated space (409). The
+  // switch is offered again explicitly rather than being retried silently — the
+  // whole point of the refusal is that the user sees the fallback first.
+  const [keyModelBlock, setKeyModelBlock] = useState<{
+    space: string;
+    fallbackThreshold: number;
+  } | null>(null);
+  const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
+  const [backfilling, setBackfilling] = useState(false);
   // Saver mode (0032): the FrugalGPT cascade on/off for this config (its own
   // column, configs.cascade_enabled — separate from the BatchSavings blob).
   const [cascadeEnabled, setCascadeEnabled] = useState(false);
@@ -218,6 +246,7 @@ export function EvalSettings() {
               inFlight?: unknown[];
               cascadeEnabled?: boolean;
               inheritedThreshold?: InheritedThreshold;
+              keyModel?: KeyModelStatus;
             }
           | null;
         if (bres.ok && bdata?.savings) {
@@ -226,6 +255,10 @@ export function EvalSettings() {
           setInFlightCount(bdata.inFlight?.length ?? 0);
           setCascadeEnabled(Boolean(bdata.cascadeEnabled));
           setInherited(bdata.inheritedThreshold ?? null);
+          setKeyModelInfo(bdata.keyModel ?? null);
+          setKeyModel(bdata.savings.semanticCache.keyModel ?? "");
+          setKeyModelBlock(null);
+          setBackfillMsg(null);
           // Re-seeded on every open, so an override applied from the
           // collision-floor panel meanwhile shows up here.
           const t = bdata.savings.semanticCache.threshold;
@@ -243,7 +276,9 @@ export function EvalSettings() {
     }
   }
 
-  async function save() {
+  // `force` acknowledges the uncalibrated-space refusal on a key-model switch
+  // (409). Only ever true from the explicit "Switch anyway" button.
+  async function save(force = false) {
     const ladderArr = ladder
       .split(/[\s,]+/)
       .map((s) => Math.floor(Number(s)))
@@ -328,11 +363,26 @@ export function EvalSettings() {
         body: JSON.stringify({
           jobs: savings.jobs,
           cascadeEnabled,
-          semanticCache: { ...savings.semanticCache, threshold: parsedThreshold },
+          semanticCache: {
+            ...savings.semanticCache,
+            threshold: parsedThreshold,
+            // "" = inherit the global default.
+            keyModel: keyModel === "" ? null : keyModel,
+          },
+          forceKeyModel: force,
         }),
       });
       if (!bres.ok) {
-        const bdata = (await bres.json().catch(() => null)) as { error?: string } | null;
+        const bdata = (await bres.json().catch(() => null)) as {
+          error?: string;
+          uncalibratedSpace?: { space: string; fallbackThreshold: number };
+        } | null;
+        // 409 = the key model would move this config into an uncalibrated
+        // space. Keep the panel open and offer the switch again explicitly,
+        // rather than dropping the user's other edits over it.
+        if (bres.status === 409 && bdata?.uncalibratedSpace) {
+          setKeyModelBlock(bdata.uncalibratedSpace);
+        }
         setErr(bdata?.error ?? `Savings update failed (${bres.status}).`);
         return;
       }
@@ -345,6 +395,49 @@ export function EvalSettings() {
       setSaving(false);
     }
   }
+
+  // Eagerly re-key this config's already-cached questions under the SAVED key
+  // model, so a switch has something to hit against without waiting for users to
+  // re-ask. Deliberately a separate button from Save: it spends provider tokens.
+  async function runBackfill() {
+    setBackfilling(true);
+    setBackfillMsg(null);
+    try {
+      const res = await apiFetch("/api/semantic-cache/key-model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "backfill" }),
+      });
+      const d = (await res.json().catch(() => null)) as {
+        keyModel?: string;
+        candidates?: number;
+        inserted?: number;
+        failed?: number;
+        error?: string;
+      } | null;
+      if (!res.ok || !d || d.error) {
+        setBackfillMsg(d?.error ?? `Backfill failed (${res.status}).`);
+        return;
+      }
+      setBackfillMsg(
+        d.candidates === 0
+          ? `Nothing to re-key — every cached question already has a ${d.keyModel} vector.`
+          : `Re-keyed ${d.inserted ?? 0} of ${d.candidates} cached questions under ${d.keyModel}` +
+            (d.failed ? `; ${d.failed} failed to embed.` : "."),
+      );
+    } catch (e) {
+      setBackfillMsg(e instanceof Error ? e.message : "Network error.");
+    } finally {
+      setBackfilling(false);
+    }
+  }
+
+  // The picker's value resolved through the same two layers the server uses, so
+  // the line under it names the model that would actually be in force.
+  const resolvedKeyModel = keyModel === "" ? keyModelInfo?.globalDefault ?? "" : keyModel;
+  // A pending change: backfill acts on the SAVED model, so it must not be
+  // offered while the picker shows something else.
+  const keyModelDirty = keyModel !== (keyModelInfo?.override ?? "");
 
   // The collapsed "Models" summary: how many models a run would actually try.
   // Counts only keyed options, so the greyed rows can't inflate it, and treats
@@ -775,6 +868,96 @@ export function EvalSettings() {
               />
             </label>
 
+            {/* The CACHE-KEY model. Shown regardless of the serve toggle — unlike
+                the threshold, it governs how the cache is POPULATED too, so it's
+                connected to something either way. */}
+            <div className="mt-2 flex flex-col gap-1">
+              <div className="flex items-center justify-between gap-2">
+                <Tooltip
+                  align="left"
+                  text={
+                    "Which embedding model incoming questions are keyed under for the " +
+                    "cache match. Independent of this config's retrieval model: the " +
+                    "cache-key vector never touches a vector table, and question↔question " +
+                    "matching is a different task from question↔document retrieval. " +
+                    "It's paid per question (~10 tokens), not per corpus chunk.\n\n" +
+                    "Changing it moves this config into a different vector-space, which " +
+                    "has its own calibrated threshold."
+                  }
+                >
+                  <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                    Cache key model
+                  </span>
+                </Tooltip>
+                <select
+                  value={keyModel}
+                  onChange={(e) => {
+                    setKeyModel(e.target.value);
+                    setKeyModelBlock(null);
+                    setBackfillMsg(null);
+                  }}
+                  className="max-w-52 rounded-md border border-zinc-300 bg-white px-1.5 py-0.5 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
+                >
+                  <option value="">Default ({keyModelInfo?.globalDefault ?? "—"})</option>
+                  {(keyModelInfo?.candidates ?? []).map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.id} · {c.dimension}d
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <p className="text-xs text-zinc-400 dark:text-zinc-500">
+                Keying questions under{" "}
+                <span className="font-mono">{resolvedKeyModel || "—"}</span>
+                {keyModel === "" ? " (global default)." : " for this config only."}{" "}
+                {keyModelDirty
+                  ? "Save to apply, then re-key past questions."
+                  : "Past questions keyed under another model won't match until they're re-keyed."}
+              </p>
+
+              {!keyModelDirty && (
+                <div className="flex items-center justify-end gap-2">
+                  {backfillMsg && (
+                    <span className="text-xs text-zinc-500 dark:text-zinc-400">{backfillMsg}</span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={runBackfill}
+                    disabled={backfilling}
+                    className="rounded-md border border-zinc-300 px-2 py-0.5 text-xs text-zinc-600 cursor-pointer transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                  >
+                    {backfilling ? "Re-keying…" : "Re-key cached questions"}
+                  </button>
+                </div>
+              )}
+
+              {/* The refusal, made explicit. An uncalibrated target space falls
+                  back to the conservative default, which silently changes the
+                  floor answers are served at — so the switch is offered again
+                  with the number named rather than retried behind the scenes. */}
+              {keyModelBlock && (
+                <div className="flex flex-col items-end gap-1 rounded-md border border-amber-300 bg-amber-50 p-1.5 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+                  <p className="text-left">
+                    <span className="font-mono">{keyModelBlock.space}</span> has no calibrated
+                    threshold — this config would serve at{" "}
+                    <span className="tabular-nums">
+                      {keyModelBlock.fallbackThreshold.toFixed(3)}
+                    </span>{" "}
+                    (the default). Calibrate it on Appraise → Semantic caching, or switch anyway.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => save(true)}
+                    disabled={saving}
+                    className="rounded-md border border-amber-400 px-2 py-0.5 font-medium cursor-pointer transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-amber-700 dark:hover:bg-amber-900/40"
+                  >
+                    Switch anyway
+                  </button>
+                </div>
+              )}
+            </div>
+
             {/* The floor a match must clear to be served. Only shown once serving
                 is on — with serving off the number governs nothing, and offering
                 it there just invites tuning a knob that isn't connected. */}
@@ -851,7 +1034,7 @@ export function EvalSettings() {
             <div className="mt-3 flex justify-end border-t border-zinc-200 pt-2 dark:border-zinc-800">
               <button
                 type="button"
-                onClick={save}
+                onClick={() => save()}
                 disabled={saving || !config}
                 className="rounded-md bg-black px-3 py-1 text-xs font-medium text-white cursor-pointer transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
               >
