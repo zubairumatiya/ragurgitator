@@ -4,7 +4,7 @@
 // Server-computed CostsReport comes in as a prop (already scoped to all configs
 // or one, by the page); the only client state is which VIEW is selected.
 // Realized = toggle-attributable levers (cascade, semantic cache, batch);
-// Structural = always-on ones (embed cache, bucket-nDCG); Naive = both.
+// Structural = always-on ones (embed cache, re-ingest skip); Naive = both.
 // Switching the view filters the lever rows and the headline total — no refetch,
 // all three totals are already in the report.
 import { useState } from "react";
@@ -29,7 +29,7 @@ const VIEWS: { id: SavingsView; label: string; blurb: string }[] = [
     id: "naive",
     label: "Naive",
     blurb:
-      "vs. an app with none of these optimizations — no caches, no dedup, no pooling, etc",
+      "vs. an app with none of these optimizations — no caches, no dedup, no batching, etc",
   },
   {
     id: "realized",

@@ -3,7 +3,7 @@
 // writes a threshold (the SC_CHANGED window event).
 "use client";
 
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { InfoDot } from "@/app/components/InfoDot";
 import { apiFetch } from "@/lib/http/client";
@@ -20,12 +20,9 @@ const ABOUT =
   "Individual configs can override these, in which case their own value wins " +
   "over the row here.";
 
-// `action` is the apply control, rendered on this section's heading row: the
-// table that shows thresholds is the natural home for the one thing that sets
-// them, and sharing the row costs no vertical space. This section sits second on
-// the page, so that row is also the midpoint between the collision-floor panel
-// above and the shadow-judge panel below, both of which recommend into it.
-export function ThresholdsPanel({ action }: { action?: ReactNode }) {
+// Display only — the apply control lives on the collision-floor heading row
+// above, next to the recommendation it applies.
+export function ThresholdsPanel() {
   const [rows, setRows] = useState<ThresholdReport[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -50,13 +47,10 @@ export function ThresholdsPanel({ action }: { action?: ReactNode }) {
 
   return (
     <section className="flex flex-col gap-2">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="flex items-center gap-1.5 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
-          Thresholds by vector-space
-          <InfoDot text={ABOUT} />
-        </h2>
-        {action}
-      </div>
+      <h2 className="flex items-center gap-1.5 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+        Thresholds by vector-space
+        <InfoDot text={ABOUT} />
+      </h2>
 
       {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
 

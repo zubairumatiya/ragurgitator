@@ -3,10 +3,10 @@
 // siblings under a Server Component page with no shared parent state, so they
 // talk over the window rather than through props.
 //
-// Only ONE panel writes thresholds (ApplyThresholdPanel, on the Thresholds
-// heading row). The calibration panels either side of it — collision floor
-// above, shadow judge below — compute recommendations and broadcast them;
-// nothing they do is live until the apply panel is used.
+// Only ONE panel writes thresholds (ApplyThresholdPanel, on the Collision floor
+// heading row). The calibration panels — collision floor itself and the shadow
+// judge lower down — compute recommendations and broadcast them; nothing they
+// do is live until the apply panel is used.
 //
 // The wiring doesn't care about panel order: recommendations are emitted from
 // fetch callbacks, so every listener has long since mounted.

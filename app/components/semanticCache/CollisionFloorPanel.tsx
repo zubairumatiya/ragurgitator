@@ -14,11 +14,11 @@
 //
 // READ-ONLY as far as thresholds go: this panel writes nothing that is served
 // from (the saved report is a display cache). The recommendation is broadcast to
-// ApplyThresholdPanel — on the Thresholds heading row, the section BELOW this
-// one — which owns every write.
+// ApplyThresholdPanel, which rides this panel's own heading row (the `action`
+// slot) and owns every write.
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { InfoDot } from "@/app/components/InfoDot";
 import { Tooltip } from "@/app/components/Tooltip";
@@ -76,7 +76,10 @@ type Loaded = {
   questionsNow: number | null;
 };
 
-export function CollisionFloorPanel() {
+// `action` is the apply control, rendered on this section's heading row: the
+// recommendation computed here is what you'd apply, so the control sits with it
+// and costs no vertical space.
+export function CollisionFloorPanel({ action }: { action?: ReactNode }) {
   const [configs, setConfigs] = useState<ConfigSummary[]>([]);
   const [configId, setConfigId] = useState("");
   // Stamped rather than cleared on switch: nothing is set synchronously in an
@@ -164,11 +167,17 @@ export function CollisionFloorPanel() {
     view.questionsNow !== view.report.questionsTotal;
 
   return (
-    <section className="flex flex-col gap-3 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
-      <h2 className="flex items-center gap-1.5 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
-        Collision floor
-        <InfoDot text={ABOUT} />
-      </h2>
+    // Unboxed, with a rule underneath instead: the section reads as part of the
+    // page rather than a card, and the border is all the separation it needs
+    // from the Thresholds table that follows.
+    <section className="flex flex-col gap-3 border-b border-zinc-200 pb-4 dark:border-zinc-800">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="flex items-center gap-1.5 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+          Collision floor
+          <InfoDot text={ABOUT} />
+        </h2>
+        {action}
+      </div>
 
       <div className="flex flex-wrap items-center gap-2">
         <select
@@ -243,15 +252,6 @@ export function CollisionFloorPanel() {
             <p className="text-xs text-zinc-500 dark:text-zinc-400">
               Not enough labeled questions with cached embeddings to calibrate this
               space — score more eval questions on this config first.
-            </p>
-          )}
-
-          {/* Points DOWN to the apply box: this panel leads the page, and the
-              Thresholds heading row that carries the apply control is next. */}
-          {report.recommended !== null && (
-            <p className="border-t border-zinc-200 pt-3 text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-              Sent to the <strong className="font-medium">Threshold</strong> box below, on
-              the Thresholds heading row — nothing is live until you apply it there.
             </p>
           )}
         </div>

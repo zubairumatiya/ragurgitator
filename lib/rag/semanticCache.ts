@@ -23,6 +23,7 @@ import { costLlm, estimateTokens, estimateTokensAll } from "@/lib/rag/pricing";
 import { recordSaving } from "@/lib/rag/savingsStore";
 import {
   bestMatch,
+  entityGuardPasses,
   fingerprintFrom,
   isHit,
   spaceOf,
@@ -182,11 +183,25 @@ export async function semanticCacheLookup(
     // question is always which layer set the floor it cleared.
     const { threshold, source } = await resolveThreshold(cfg.embeddingModel, override);
 
+    // Entity/number guard (docs/semantic-cache-key-model-plan.md, Phase 0): a
+    // match that disagrees with the question on a numeral, acronym or quoted
+    // span is refused NO MATTER how high its cosine, because that's precisely
+    // where cosine can't tell "2023 revenue" from "2024 revenue". Evaluated
+    // before the hit decision, and recorded either way — see below.
+    const guardBlocked =
+      config.semanticCache.entityGuard.enabled &&
+      match !== null &&
+      !entityGuardPasses(question, match.value.text);
+
     // Shadow-log the nearest match for threshold calibration (Phase 2 — see
     // docs/semantic-caching-plan.md). Recorded whenever it clears the low
     // shadowLogFloor, INDEPENDENT of the serving threshold and the serve toggle,
     // so calibration has judged examples BELOW today's threshold. Fire-and-
     // forget: a failure here must never affect the answer.
+    //
+    // Guard-blocked matches are logged too, flagged: the guard trades recall for
+    // safety, and the only way to know what that trade cost is to judge the
+    // rows it rejected.
     if (match && match.sim >= config.semanticCache.shadowLogFloor) {
       void recordShadow(
         cfg,
@@ -195,7 +210,21 @@ export async function semanticCacheLookup(
         match.value.text,
         match.value.result.answer,
         match.sim,
+        guardBlocked,
       );
+    }
+
+    // Only announce the guard when it CHANGED the outcome. A blocked match that
+    // wouldn't have cleared the threshold anyway is an ordinary miss, and gets
+    // the ordinary miss log below — the guard flag still rides into the shadow
+    // row above, so a later sweep at a lower τ can still see it was blocked.
+    if (match && guardBlocked && isHit(match.sim, threshold)) {
+      console.log(
+        `[rag:semantic-cache] guard-blocked sim=${match.sim.toFixed(4)} ≥ ${threshold} (${source}) — ` +
+          `entity/number mismatch, reporting a miss. new="${truncate(question)}" ` +
+          `matched="${truncate(match.value.text)}"`,
+      );
+      return { hit: false, vector };
     }
 
     if (match && isHit(match.sim, threshold)) {
@@ -293,6 +322,40 @@ async function recordShadow(
   matchedQuery: string,
   servedAnswer: string,
   sim: number,
+  guardBlocked: boolean,
+): Promise<void> {
+  try {
+    await sql`
+      insert into semantic_cache_shadow
+        (config_id, embedding_model, space, fingerprint,
+         new_query, new_query_hash, matched_query, served_answer, sim, guard_blocked)
+      values
+        (${cfg.id}, ${cfg.embeddingModel}, ${spaceOf(cfg.embeddingModel)}, ${fingerprint},
+         ${newQuery}, ${sha256(newQuery)}, ${matchedQuery}, ${servedAnswer}, ${sim}, ${guardBlocked})
+      on conflict (config_id, fingerprint, new_query_hash) do nothing
+    `;
+  } catch (err) {
+    if (isMissingTable(err)) return;
+    // Migration 0038 not applied yet (undefined_column) → log the event without
+    // the flag rather than losing shadow coverage entirely, same spirit as the
+    // missing-table tolerance above. Drop this fallback once 0038 is applied.
+    if ((err as { code?: string }).code === "42703") {
+      await recordShadowPreGuard(cfg, fingerprint, newQuery, matchedQuery, servedAnswer, sim);
+      return;
+    }
+    // Telemetry only — swallow so a shadow-log failure never breaks a lookup.
+    console.warn(`[rag:semantic-cache] shadow log failed: ${(err as Error).message}`);
+  }
+}
+
+// Pre-0038 insert shape, used only when guard_blocked doesn't exist yet.
+async function recordShadowPreGuard(
+  cfg: ResolvedConfig,
+  fingerprint: string,
+  newQuery: string,
+  matchedQuery: string,
+  servedAnswer: string,
+  sim: number,
 ): Promise<void> {
   try {
     await sql`
@@ -306,7 +369,6 @@ async function recordShadow(
     `;
   } catch (err) {
     if (isMissingTable(err)) return;
-    // Telemetry only — swallow so a shadow-log failure never breaks a lookup.
     console.warn(`[rag:semantic-cache] shadow log failed: ${(err as Error).message}`);
   }
 }

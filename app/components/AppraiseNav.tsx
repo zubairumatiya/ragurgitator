@@ -10,19 +10,13 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-
-// Order = display order. Money first: it's the page you open Appraise for.
-const TABS = [
-  { href: "/appraise/costs", label: "Costs" },
-  { href: "/appraise/semantic-cache", label: "Semantic caching" },
-  { href: "/appraise/configs", label: "Config metrics" },
-];
+import { APPRAISE_TABS } from "@/app/components/appraiseTabs";
 
 export function AppraiseNav() {
   const pathname = usePathname();
   return (
     <nav className="flex gap-1 border-b border-zinc-200 dark:border-zinc-800">
-      {TABS.map((t) => {
+      {APPRAISE_TABS.map((t) => {
         const active = pathname === t.href;
         return (
           <Link

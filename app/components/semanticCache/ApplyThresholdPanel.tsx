@@ -2,10 +2,10 @@
 // Appraise → Semantic caching: THE place a threshold gets written. Every other
 // panel on the page only computes and displays; a number goes live here or
 // nowhere, so there's one control to reason about instead of an apply button per
-// calibration method. Rendered into the Thresholds section's heading row (its
-// `action` slot) — one shared action, kept to heading height rather than given a
-// section of its own. That section sits second on the page, between the two
-// panels that recommend into it (collision floor above, shadow judge below).
+// calibration method. Rendered into the Collision floor section's heading row
+// (its `action` slot) — one shared action, kept to heading height rather than
+// given a section of its own, and sitting with the first recommendation you'd
+// apply. The shadow judge, further down the page, recommends into it too.
 //
 // The target dropdown picks which LAYER the value lands in:
 //   • a vector-space → semantic_cache_thresholds, inherited by every config on
@@ -205,7 +205,7 @@ export function ApplyThresholdPanel() {
   };
 
   return (
-    // Sits on the Thresholds heading row, so it has to stay heading-height: the
+    // Sits on the Collision floor heading row, so it has to stay heading-height: the
     // border hugs the controls, and the status lines hang below without adding
     // padding of their own (pb-0 + a text block that carries its own leading).
     <section className="flex w-fit max-w-full flex-col self-end rounded-md border border-zinc-200 p-1.5 dark:border-zinc-800">
@@ -277,9 +277,9 @@ export function ApplyThresholdPanel() {
           </p>
         )}
 
-        {/* Recommendations arrive from the calibration panels either side of this
-            section — collision floor above, shadow judge below. Nothing is live
-            until Apply, so this is a suggestion to take, edit, or ignore. */}
+        {/* Recommendations arrive from the calibration panels — the collision
+            floor this row belongs to, and the shadow judge below. Nothing is
+            live until Apply, so this is a suggestion to take, edit, or ignore. */}
         {rec && parsed !== rec.value && (
           <p className="text-zinc-500 dark:text-zinc-400">
             {rec.origin} suggests{" "}

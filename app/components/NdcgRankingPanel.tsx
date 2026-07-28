@@ -1,12 +1,13 @@
 // ---------------------------------------------------------------------------
 // Per-question graded-nDCG ranking builder, opened from a question row on /eval.
 //
-// Flow (see lib/rag/ranking): pick a saved cluster preset to seed a candidate
-// pool, build the cross-model AGGREGATE ideal ranking, optionally add LLM
-// rankings (pool / re-rank top-k) as comparisons, optionally hand-edit a MANUAL
-// order — then mark ONE ranking as ground truth. nDCG scores the active model's
-// retrieval against whichever is ground truth, so promoting one refreshes the
-// question's chip + the headline via onChange.
+// Flow (see lib/rag/ranking): build the cross-model AGGREGATE ideal ranking —
+// its candidate pool comes straight from a vector query over the corpus, so
+// there's nothing to pick first — optionally add LLM rankings (pool / re-rank
+// top-k) as comparisons, optionally hand-edit a MANUAL order — then mark ONE
+// ranking as ground truth. nDCG scores the active model's retrieval against
+// whichever is ground truth, so promoting one refreshes the question's chip +
+// the headline via onChange.
 // ---------------------------------------------------------------------------
 "use client";
 
@@ -17,7 +18,6 @@ import type {
   RankingCandidate,
   RankingContext,
   RankingItem,
-  RankingPreset,
 } from "@/lib/rag/ranking";
 
 const KIND_LABEL: Record<RankingCandidate["kind"], string> = {
@@ -28,7 +28,7 @@ const KIND_LABEL: Record<RankingCandidate["kind"], string> = {
 };
 
 type Action =
-  | { action: "aggregate"; clusterRunId: string }
+  | { action: "aggregate" }
   | { action: "llm_pool" }
   | { action: "llm_rerank" }
   | { action: "manual"; chunkIds: string[]; derivedFromKind?: RankingCandidate["kind"] }
@@ -46,7 +46,6 @@ export function NdcgRankingPanel({
   const [ctx, setCtx] = useState<RankingContext | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // the running action's key
-  const [presetId, setPresetId] = useState<string>("");
   const [manual, setManual] = useState<RankingItem[] | null>(null);
   // The ranking kind a manual edit was started from, so the save records it and
   // the panel can fold the original in place of the edit.
@@ -67,15 +66,6 @@ export function NdcgRankingPanel({
         }
         setError(null);
         setCtx(data);
-        // Default to the first preset that actually covers this question's
-        // document — an uncovered one builds pools from the wrong documents.
-        setPresetId(
-          (p) =>
-            p ||
-            data.presets.find((x) => x.coversQuestionDoc)?.id ||
-            data.presets[0]?.id ||
-            "",
-        );
       } catch (err) {
         if (alive) setError(err instanceof Error ? err.message : "Failed to load.");
       }
@@ -143,38 +133,18 @@ export function NdcgRankingPanel({
       </div>
       {error && <p className="text-red-600 dark:text-red-400">{error}</p>}
 
-      {/* Step 1-3: seed a pool from a saved cluster preset, build the aggregate.
-          Runs render as collapsed cards (silhouette/cohesion in the header, the
-          per-bucket profile on expand); pick one, then build. */}
-      <div className="flex flex-col gap-1">
-        <span className="text-zinc-500">Seed pool from preset:</span>
-        {ctx && ctx.presets.length > 0 ? (
-          <div className="flex flex-col gap-1">
-            {ctx.presets.map((p) => (
-              <PresetCard
-                key={p.id}
-                preset={p}
-                selected={p.id === presetId}
-                onSelect={() => setPresetId(p.id)}
-              />
-            ))}
-            <button
-              type="button"
-              onClick={() => presetId && act({ action: "aggregate", clusterRunId: presetId })}
-              disabled={busy !== null || !presetId}
-              className="cursor-pointer self-start rounded bg-black px-2 py-0.5 font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
-            >
-              {busy === "aggregate" ? "Building…" : "Build aggregate"}
-            </button>
-          </div>
-        ) : (
-          <span className="text-zinc-400">
-            Save a cluster preset on <span className="font-mono">/clusters</span> first.
-          </span>
-        )}
-      </div>
+      {/* Step 1: build the cross-model aggregate. The candidate pool is a vector
+          query over the corpus, so this needs no input beyond the question. */}
+      <button
+        type="button"
+        onClick={() => act({ action: "aggregate" })}
+        disabled={busy !== null}
+        className="cursor-pointer self-start rounded bg-black px-2 py-0.5 font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
+      >
+        {busy === "aggregate" ? "Building…" : "Build aggregate"}
+      </button>
 
-      {/* Step 4: LLM comparisons — only once a pool (aggregate) exists. A 'fresh'
+      {/* Step 2: LLM comparisons — only once a pool (aggregate) exists. A 'fresh'
           ranking is cached (button disabled, no re-spend); 'stale' offers a rebuild. */}
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-zinc-500">Compare with LLM:</span>
@@ -220,7 +190,7 @@ export function NdcgRankingPanel({
         </div>
       )}
 
-      {/* Step 5: hand-edit an order, then save it as the manual ranking. */}
+      {/* Step 3: hand-edit an order, then save it as the manual ranking. */}
       {manual && (
         <ManualEditor
           items={manual}
@@ -264,70 +234,6 @@ function orderedCandidates(
     { candidate: source, defaultOpen: false },
     ...rest.map((candidate) => ({ candidate, defaultOpen: true })),
   ];
-}
-
-// A saved cluster preset, collapsed to its quality headline (silhouette +
-// cohesion); expand to see the per-bucket sizes/cohesions. Selecting it seeds the
-// aggregate pool.
-function PresetCard({
-  preset,
-  selected,
-  onSelect,
-}: {
-  preset: RankingPreset;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div
-      className={`rounded border p-1.5 ${
-        selected
-          ? "border-zinc-400 bg-zinc-50 dark:border-zinc-500 dark:bg-zinc-800/50"
-          : "border-zinc-200 dark:border-zinc-800"
-      }`}
-    >
-      <div className="flex items-center gap-2">
-        <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2">
-          <input type="radio" checked={selected} onChange={onSelect} className="shrink-0" />
-          <span className="truncate font-medium text-zinc-600 dark:text-zinc-300">
-            {preset.name ?? "unnamed"}
-          </span>
-          <span className="shrink-0 tabular-nums text-[10px] text-zinc-400">
-            k={preset.k} · {preset.chunkCount} chunks · sil {preset.silhouette.toFixed(2)} · coh{" "}
-            {preset.avgCohesion.toFixed(2)}
-          </span>
-          {!preset.coversQuestionDoc && (
-            <span
-              className="shrink-0 text-[10px] font-medium text-amber-600 dark:text-amber-400"
-              title="This question's document was ingested after this preset was clustered, so its chunks aren't in any bucket — an aggregate built from it would rank chunks from the wrong documents. Re-run clustering and save a new preset."
-            >
-              ⚠ doesn’t cover this doc
-            </span>
-          )}
-        </label>
-        <button
-          type="button"
-          onClick={() => setOpen((o) => !o)}
-          title={open ? "Hide buckets" : "Show buckets"}
-          className="shrink-0 cursor-pointer text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
-        >
-          {open ? "▾" : "▸"}
-        </button>
-      </div>
-      {open && (
-        <ol className="mt-1 flex flex-col gap-0.5 pl-6 tabular-nums text-zinc-400">
-          {preset.sizes.map((size, i) => (
-            <li key={i} className="flex items-baseline gap-1.5">
-              <span className="w-6 shrink-0 text-right">#{i}</span>
-              <span>{size} chunks</span>
-              <span>· coh {preset.cohesions[i]?.toFixed(2) ?? "—"}</span>
-            </li>
-          ))}
-        </ol>
-      )}
-    </div>
-  );
 }
 
 // One LLM-ranking button whose label reflects cache state: base label when none

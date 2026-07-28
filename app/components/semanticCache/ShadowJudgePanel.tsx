@@ -8,8 +8,8 @@
 // of the page) already put in the right neighbourhood.
 //
 // Judging writes VERDICTS, never a threshold: the swept recommendation is
-// broadcast to ApplyThresholdPanel — on the Thresholds heading row, the section
-// ABOVE this one — which owns every threshold write.
+// broadcast to ApplyThresholdPanel — on the Collision floor heading row at the
+// top of the page — which owns every threshold write.
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
@@ -264,12 +264,12 @@ export function ShadowJudgePanel() {
                 </span>
               )}
             </span>
-            {/* Points UP to the apply box: the Thresholds heading row that carries
-                the apply control is the section directly above this panel. */}
+            {/* Points UP to the apply box, on the Collision floor heading row at
+                the top of the page. */}
             {rec !== null && (
               <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                Sent to the <strong className="font-medium">Threshold</strong> box above, on
-                the Thresholds heading row — nothing is live until you apply it there.
+                Sent to the <strong className="font-medium">Threshold</strong> box on the
+                Collision floor heading row — nothing is live until you apply it there.
               </span>
             )}
           </div>

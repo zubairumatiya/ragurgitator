@@ -10,7 +10,7 @@
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { retrievalStateFingerprint } from "@/lib/rag/overrideStore";
-import { vectorLiteral } from "@/lib/rag/vectorStore";
+import { EF_SEARCH, vectorLiteral } from "@/lib/rag/vectorStore";
 
 export type RankingKind = "aggregate" | "llm_pool" | "llm_rerank" | "manual";
 
@@ -21,12 +21,6 @@ export type StoredRanking = {
   chunkIds: string[]; // ideal order, best-first
   details: Record<string, unknown>;
   createdAt: number;
-};
-
-export type NearestBucket = {
-  clusterId: string;
-  ordinal: number;
-  similarity: number; // cosine sim of the question to the bucket centroid
 };
 
 export type PoolCandidate = {
@@ -47,23 +41,10 @@ async function activeChunksTable(): Promise<string | null> {
   return rows.length > 0 ? cfg.chunksTable : null;
 }
 
-// Total chunks under the active config — the denominator for the bucket-nDCG
-// saving (docs/savings-accounting-plan.md §2 #5): a naive aggregate would embed
-// ALL of these under each non-base model, vs. the small bucket pool we actually
-// embed. 0 when nothing is ingested yet.
-export async function countCorpusChunks(): Promise<number> {
-  const table = await activeChunksTable();
-  if (!table) return 0;
-  const [row] = await sql<{ n: number }[]>`
-    select count(*)::int as n from ${sql(table)} where config_id = ${activeConfig().id}
-  `;
-  return row?.n ?? 0;
-}
-
 export type QuestionScope = {
   documentEmbeddingId: string; // active-config embedding run a ranking is filed under
   question: string; // the question text — embedded + sent to the LLM ranker
-  documentId: string; // the question's source document — for preset-coverage flags
+  documentId: string; // the question's source document
 };
 
 // The question's text + the active-config embedding run its ground-truth label
@@ -91,59 +72,61 @@ export async function getQuestionScope(
   };
 }
 
-// The `n` cluster buckets whose centroids are nearest the question vector, in a
-// saved cluster run. Centroids are stored as vector(dim) (see clusterStore), so
-// this is an indexed cosine lookup like any other pgvector query.
-export async function nearestBuckets(
-  runId: string,
-  queryVec: number[],
-  n: number,
-): Promise<NearestBucket[]> {
-  const qlit = vectorLiteral(queryVec);
-  const rows = await sql<{ id: string; ordinal: number; similarity: number }[]>`
-    select id, ordinal, 1 - (centroid <=> ${qlit}::vector) as similarity
-    from clusters
-    where cluster_run_id = ${runId}
-    order by centroid <=> ${qlit}::vector
-    limit ${n}
-  `;
-  return rows.map((r) => ({
-    clusterId: r.id,
-    ordinal: r.ordinal,
-    similarity: Number(r.similarity),
-  }));
-}
-
-// The `limit` chunks in the given buckets that sit nearest the question (cosine,
-// active-config scoped). This is the candidate pool the ranking is built from.
-export async function poolFromBuckets(
-  clusterIds: string[],
+// The `limit` chunks in the ACTIVE CONFIG nearest the question vector — the
+// candidate pool a graded ranking is built from. Same HNSW pattern as
+// vectorStore.query: config-filtered ANN with ef_search raised inside the txn,
+// because the config_id predicate would otherwise starve the top-k once several
+// configs share a chunk table (docs/multi-config-plan.md §5.3). Scoping via the
+// chunk table's OWN config_id column — rather than joining document_embeddings
+// for it, the way the old bucket pool did — keeps the scope a plain column
+// predicate the index scan can apply as it walks; a join can't be pushed in
+// there, so it would only filter after the ANN had already picked its rows.
+//
+// This is deliberately the same neighbourhood the retriever searches, so the
+// ideal ranking is drawn from the chunks retrieval could actually return.
+// Empty when nothing is ingested under this config yet.
+export async function poolNearest(
   queryVec: number[],
   limit: number,
 ): Promise<PoolCandidate[]> {
   const table = await activeChunksTable();
-  if (!table || clusterIds.length === 0) return [];
+  if (!table) return [];
   const qlit = vectorLiteral(queryVec);
-  const rows = await sql<
-    {
-      id: string;
-      file_name: string;
-      position: number | null;
-      text: string;
-      similarity: number;
-    }[]
-  >`
-    select c.id, d.file_name, c.position, c.text,
-           1 - (c.embedding <=> ${qlit}::vector) as similarity
-    from chunk_clusters cc
-    join ${sql(table)} c on c.id = cc.chunk_id
-    join documents d on d.id = c.document_id
-    join document_embeddings de on de.id = c.document_embedding_id
-    where cc.cluster_id = any(${clusterIds}::uuid[])
-      and de.config_id = ${activeConfig().id}
-    order by c.embedding <=> ${qlit}::vector
-    limit ${limit}
-  `;
+
+  // HNSW POST-filters: the scan walks ef_search candidates and only then drops
+  // the ones belonging to other configs sharing this table. vectorStore's
+  // EF_SEARCH is sized for topK (5), so reusing it verbatim would starve a pool
+  // an order of magnitude larger — once a few configs share a corpus, 100
+  // candidates may not yield 30 survivors. A short pool doesn't error; it
+  // silently truncates the ideal ranking, which deflates every nDCG scored
+  // against it. So scale the depth with the ask, floored at the shared constant.
+  // Interpolated via unsafe(), hence the integer guard: `limit` is a parameter
+  // here, not a trusted constant like EF_SEARCH.
+  const ef = Math.max(EF_SEARCH, Math.trunc(limit) * 4);
+  if (!Number.isSafeInteger(ef) || ef <= 0) {
+    throw new Error(`poolNearest: invalid ef_search ${ef} for limit ${limit}.`);
+  }
+
+  const rows = await sql.begin(async (tx) => {
+    await tx.unsafe(`set local hnsw.ef_search = ${ef}`);
+    return tx<
+      {
+        id: string;
+        file_name: string;
+        position: number | null;
+        text: string;
+        similarity: number;
+      }[]
+    >`
+      select c.id, d.file_name, c.position, c.text,
+             1 - (c.embedding <=> ${qlit}::vector) as similarity
+      from ${tx(table)} c
+      join documents d on d.id = c.document_id
+      where c.config_id = ${activeConfig().id}
+      order by c.embedding <=> ${qlit}::vector
+      limit ${limit}
+    `;
+  });
   return rows.map((r) => ({
     chunkId: r.id,
     fileName: r.file_name,

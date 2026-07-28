@@ -49,9 +49,7 @@ import { AutotunePanel } from "@/app/components/AutotunePanel";
 import { ConfigChangeDialog } from "@/app/components/ConfigChangeDialog";
 import { EVAL_CRITERIA_CHANGED } from "@/app/components/EvalSettings";
 import { NdcgRankingPanel } from "@/app/components/NdcgRankingPanel";
-import { DriftBadge } from "@/app/components/DriftBadge";
 import { Tooltip } from "@/app/components/Tooltip";
-import type { ClusterRunSummary } from "@/lib/rag/clusterStore";
 import type { IngestedDocument } from "@/lib/rag/vectorStore";
 
 function pct(n: number | null): string {
@@ -517,22 +515,18 @@ export function EvalDashboard() {
       { difficulty, documentIds: documentIds ?? undefined },
     );
 
-  // Bulk actions → Add nDCG rankings → {preset}: for every question in scope
-  // without a ground truth, build the aggregate ranking from that preset and
-  // promote it (the panel's builder, run corpus-wide). Same NDJSON stream.
-  // `rebuild` also refreshes aggregate-truth questions and re-scores them — the
-  // corpus-drift badge's exit.
-  const onBulkNdcg = (
-    clusterRunId: string,
-    documentIds: string[] | null,
-    rebuild: boolean,
-  ) =>
+  // Bulk actions → Add nDCG rankings: for every question in scope without a
+  // ground truth, build the aggregate ranking and promote it (the panel's
+  // builder, run corpus-wide). Same NDJSON stream. `rebuild` also refreshes
+  // aggregate-truth questions and re-scores them, so ideals built before the
+  // latest ingests account for the chunks that arrived since.
+  const onBulkNdcg = (documentIds: string[] | null, rebuild: boolean) =>
     runStream(
       "/api/eval/bulk-ndcg",
       (r) =>
         `${rebuild ? "Rebuilt" : "Graded"} ${r.graded ?? 0} question(s), scored ${r.scored}. ` +
         `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
-      { clusterRunId, documentIds: documentIds ?? undefined, rebuild },
+      { documentIds: documentIds ?? undefined, rebuild },
     );
 
   // Bulk actions → Add LLM nDCG rankings: for every question in scope that
@@ -1394,11 +1388,7 @@ function BulkActions({
 }: {
   busy: boolean;
   onAddDifficulty: (d: Difficulty, documentIds: string[] | null) => void;
-  onAddNdcg: (
-    clusterRunId: string,
-    documentIds: string[] | null,
-    rebuild: boolean,
-  ) => void;
+  onAddNdcg: (documentIds: string[] | null, rebuild: boolean) => void;
   onAddLlmNdcg: (documentIds: string[] | null) => void;
   onChangeConfig: (
     documentIds: string[] | null,
@@ -1410,17 +1400,12 @@ function BulkActions({
 }) {
   const [open, setOpen] = useState(false);
   const [subOpen, setSubOpen] = useState(false);
-  // "Add nDCG rankings" submenu: the saved cluster presets to seed the bulk
-  // aggregate builds from, fetched on first expand (like the document scope).
+  // "Add nDCG rankings" section: its own collapsed block so the rebuild toggle
+  // and the Run button read as deliberately as the LLM one below.
   const [ndcgOpen, setNdcgOpen] = useState(false);
-  const [presets, setPresets] = useState<ClusterRunSummary[] | null>(null);
-  // Which preset the run will use. Clicking a preset only SELECTS it (radio, like
-  // the per-question panel's PresetCard) — the separate Run button is the only
-  // thing that starts a run, so nothing expensive fires from browsing the list.
-  const [ndcgPresetId, setNdcgPresetId] = useState<string>("");
-  // When on, the preset also refreshes already-graded (aggregate-truth) questions
-  // against the current buckets and re-scores them — clears the headline's
-  // corpus-drift badge. Off = the original "grade only ungraded" pass.
+  // When on, the run ALSO rebuilds already-graded (aggregate-truth) questions
+  // against the current corpus and re-scores them — the exit for ideals that
+  // predate later ingests. Off = the original "grade only ungraded" pass.
   const [ndcgRebuild, setNdcgRebuild] = useState(false);
   // "Add LLM nDCG rankings": its own collapsed section, so its cost warning and
   // Run button read as deliberately as the aggregate one.
@@ -1439,18 +1424,6 @@ function BulkActions({
     setLlmNdcgOpen(false);
     setDocsOpen(false);
   };
-
-  function toggleNdcgSection() {
-    const opening = !ndcgOpen;
-    setNdcgOpen(opening);
-    if (!opening || presets !== null) return;
-    apiFetch("/api/clusters")
-      .then((res) => res.json())
-      .then((data: { runs?: ClusterRunSummary[] }) =>
-        setPresets((data.runs ?? []).filter((r) => r.saved)),
-      )
-      .catch(() => setPresets([]));
-  }
 
   const toggleMenu = () => setOpen((o) => !o);
 
@@ -1594,17 +1567,17 @@ function BulkActions({
                 ))}
               </div>
             )}
-            {/* Bulk nDCG grading: select a saved cluster preset, then hit Run —
-                every question in scope WITHOUT a ground truth gets the aggregate
-                ranking built and promoted (existing truths are left alone).
-                Selecting a preset never starts anything on its own. */}
+            {/* Bulk nDCG grading: hit Run and every question in scope
+                WITHOUT a ground truth gets the aggregate ranking built and
+                promoted (existing truths are left alone). Nothing fires until
+                the Run button is clicked. */}
             <button
               type="button"
-              onClick={toggleNdcgSection}
+              onClick={() => setNdcgOpen((s) => !s)}
               disabled={!canRescore}
               title={
                 canRescore
-                  ? "Pick a preset, then Run: builds + promotes the aggregate ranking for every question in scope that has no ground truth yet"
+                  ? "Builds + promotes the aggregate ranking for every question in scope that has no ground truth yet"
                   : "No labeled questions to grade yet"
               }
               className="flex w-full cursor-pointer items-center justify-between px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
@@ -1615,11 +1588,12 @@ function BulkActions({
             {ndcgOpen && (
               <div className="flex flex-col gap-1 px-3 pb-1.5 pt-0.5 text-xs">
                 {/* Rebuild toggle: off grades only ungraded questions; on also
-                    refreshes aggregate-truth questions + re-scores them, the
-                    drift-badge exit. Manual/LLM truths are left alone either way. */}
+                    rebuilds aggregate-truth questions + re-scores them, so ideals
+                    built before the latest ingests account for the chunks that
+                    arrived since. Manual/LLM truths are left alone either way. */}
                 <label
                   className="flex cursor-pointer items-start gap-1.5 pb-0.5 text-zinc-500"
-                  title="Also refresh already-graded questions whose ground truth is the aggregate — rebuilds their ideals against the current buckets and re-scores them. Manual/LLM truths are left untouched."
+                  title="Also refresh already-graded questions whose ground truth is the aggregate — rebuilds their ideals against the current corpus, so documents ingested since are in play, and re-scores them. Manual/LLM truths are left untouched."
                 >
                   <input
                     type="checkbox"
@@ -1632,102 +1606,22 @@ function BulkActions({
                     <span className="text-zinc-400">(re-scores them)</span>
                   </span>
                 </label>
-                {presets === null ? (
-                  <span className="animate-pulse text-zinc-400">
-                    Loading presets…
-                  </span>
-                ) : presets.length === 0 ? (
-                  <span className="text-zinc-400">
-                    Save a cluster preset on{" "}
-                    <span className="font-mono">/clusters</span> first.
-                  </span>
-                ) : (
-                  <>
-                    {presets.map((p) => {
-                      const selected = p.id === ndcgPresetId;
-                      return (
-                        <div key={p.id} className="flex items-center gap-1">
-                          {/* Selection only — a click here costs nothing. The
-                              radio + label mirrors the per-question panel's
-                              PresetCard so the two read the same way. */}
-                          <label
-                            title={
-                              ndcgRebuild
-                                ? "Seed each question's candidate pool from this preset; the run also refreshes aggregate-truth questions and re-scores them"
-                                : "Seed each question's candidate pool from this preset"
-                            }
-                            className={`flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded border px-2 py-0.5 text-left font-medium ${
-                              selected
-                                ? "border-zinc-400 bg-zinc-50 text-zinc-800 dark:border-zinc-500 dark:bg-zinc-800/50 dark:text-zinc-100"
-                                : "border-zinc-300 text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                            }`}
-                          >
-                            <input
-                              type="radio"
-                              name="bulk-ndcg-preset"
-                              checked={selected}
-                              onChange={() => setNdcgPresetId(p.id)}
-                              className="shrink-0 cursor-pointer"
-                            />
-                            <span className="min-w-0 flex-1 truncate">
-                              {p.name ?? "unnamed"}
-                            </span>
-                            <span className="shrink-0 font-normal tabular-nums text-[10px] text-zinc-400">
-                              k={p.k} · {p.chunkCount} chunks · sil{" "}
-                              {p.silhouette.toFixed(2)}
-                            </span>
-                          </label>
-                          {/* Two warnings, both riding outside the label so they
-                              can't force it to wrap: missing-docs (a preset that
-                              predates some documents — their questions are skipped)
-                              and drift (top-up pushed the centroids off-center). */}
-                          {p.missingDocuments.length > 0 && (
-                            <Tooltip
-                              align="right"
-                              text={
-                                `This preset predates ${p.missingDocuments.length} document` +
-                                `${p.missingDocuments.length === 1 ? "" : "s"} — their questions ` +
-                                "are skipped (their pools would come from the wrong documents). " +
-                                `Not clustered: ${p.missingDocuments.map((d) => d.fileName).join(", ")}. ` +
-                                "Re-run clustering and save a new preset to cover them."
-                              }
-                            >
-                              <span className="shrink-0 font-medium text-amber-600 dark:text-amber-400">
-                                ⚠
-                              </span>
-                            </Tooltip>
-                          )}
-                          <DriftBadge
-                            align="right"
-                            toppedUpCount={p.toppedUpCount}
-                            driftRatio={p.driftRatio}
-                            chunkCount={p.chunkCount}
-                          />
-                        </div>
-                      );
-                    })}
-                    {/* The only thing that starts the run. */}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!ndcgPresetId) return;
-                        close();
-                        onAddNdcg(ndcgPresetId, scopeIds, ndcgRebuild);
-                      }}
-                      disabled={!ndcgPresetId}
-                      title={
-                        !ndcgPresetId
-                          ? "Pick a preset first"
-                          : ndcgRebuild
-                            ? "Build + promote the aggregate ranking for every ungraded question in scope, refresh the aggregate-truth ones, and re-score both"
-                            : "Build + promote the aggregate ranking for every question in scope that has no ground truth yet"
-                      }
-                      className="mt-0.5 cursor-pointer self-start rounded bg-black px-2 py-0.5 font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
-                    >
-                      Run
-                    </button>
-                  </>
-                )}
+                {/* The only thing that starts the run. */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    close();
+                    onAddNdcg(scopeIds, ndcgRebuild);
+                  }}
+                  title={
+                    ndcgRebuild
+                      ? "Build + promote the aggregate ranking for every ungraded question in scope, rebuild the aggregate-truth ones, and re-score both"
+                      : "Build + promote the aggregate ranking for every question in scope that has no ground truth yet"
+                  }
+                  className="mt-0.5 cursor-pointer self-start rounded bg-black px-2 py-0.5 font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
+                >
+                  Run
+                </button>
               </div>
             )}
             {/* Bulk LLM re-ranking: for every question in scope that already has
@@ -1882,8 +1776,8 @@ function NdcgStaleBadge({ summary }: { summary: EvalSummary }) {
   if (summary.ndcgStaleRebuild) {
     parts.push(
       "Fix: Bulk actions → Add nDCG rankings → tick “Rebuild already-graded too”, " +
-        "then pick your preset. That folds the new chunks into the ideals and " +
-        "re-scores in one pass.",
+        "then Run. That folds the new chunks into the ideals and re-scores in " +
+        "one pass.",
     );
   } else if (summary.ndcgStaleRescore) {
     parts.push(

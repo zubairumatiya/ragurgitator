@@ -47,8 +47,13 @@ export const config = {
   },
   evalQuestionsPerChunk: 1, // target eval questions per chunk; generation tops up the difference
   // --- Graded-nDCG ranking builder (/eval; see lib/rag/ranking.ts) ----------
-  rankingNearestBuckets: 3, // cluster centroids nearest the question that seed the pool
-  rankingPoolSize: 15, // candidate chunks ranked for the embedding aggregate
+  // HNSW candidate pool: the top-N chunks nearest the question across the whole
+  // active corpus (rankingStore.poolNearest), ranked under every aggregate model.
+  // Widening this mostly costs the FIRST build — pool texts are embedded through
+  // the persistent embedding_cache (lib/rag/embedCache.ts, migration 0020), which
+  // is content-addressed, so the same chunk is paid for once per model across all
+  // questions and restarts rather than once per build.
+  rankingPoolSize: 30,
   rankingLlmPoolSize: 8, // smaller subset sent to the LLM ranker (cost control)
   // --- Cluster preset drift (migration 0033; see clusterStore.topUpSavedRuns) -
   // Fraction of a preset's CURRENT membership that arrived by top-up (nearest
@@ -76,6 +81,14 @@ export const config = {
     defaultThreshold: 0.95,
     // Safety cap on cached queries scored (in JS) per lookup for one config.
     maxCandidates: 500,
+    // Entity/number guard (docs/semantic-cache-key-model-plan.md, Phase 0): a
+    // match whose numerals, ALLCAPS acronyms or quoted spans DIFFER from the
+    // incoming question is refused, however high its cosine. "2023 revenue" vs
+    // "2024 revenue" lands near 0.98 under every embedding model — a lexical
+    // failure that no threshold or model swap fixes. Off restores the pre-guard
+    // behaviour exactly. A blocked match is still shadow-logged (guard_blocked,
+    // migration 0038) so the recall it costs stays measurable.
+    entityGuard: { enabled: true },
     // --- Phase 2 calibration (docs/semantic-caching-plan.md) ---------------
     // Shadow logging floor: a lookup records the best match at or above this
     // cosine as an (unjudged) semantic_cache_shadow row, INDEPENDENT of whether

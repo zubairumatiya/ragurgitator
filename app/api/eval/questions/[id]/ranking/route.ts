@@ -2,10 +2,10 @@
 // API route: /api/eval/questions/[id]/ranking
 //
 // The per-question graded-nDCG ranking builder (see lib/rag/ranking):
-//   - GET  : panel context — the question, saved cluster presets to seed a pool,
-//            and the rankings built so far (with which one is ground truth).
+//   - GET  : panel context — the question and the rankings built so far (with
+//            which one is ground truth).
 //   - POST : one mutation, by `action`:
-//       { action: "aggregate", clusterRunId } — build the cross-model aggregate
+//       { action: "aggregate" }              — build the cross-model aggregate
 //       { action: "llm_pool" } / { action: "llm_rerank" } — LLM comparison ranking
 //       { action: "manual", chunkIds }       — save a hand-edited order
 //       { action: "truth", rankingId }        — promote one ranking to ground truth
@@ -25,12 +25,7 @@ import {
 } from "@/lib/rag/ranking";
 
 const Body = z.discriminatedUnion("action", [
-  z.object({
-    action: z.literal("aggregate"),
-    clusterRunId: z.string({ error: "`clusterRunId` is required." }).min(1, {
-      error: "`clusterRunId` is required.",
-    }),
-  }),
+  z.object({ action: z.literal("aggregate") }),
   z.object({ action: z.literal("llm_pool") }),
   z.object({ action: z.literal("llm_rerank") }),
   z.object({
@@ -85,7 +80,7 @@ export async function POST(
     try {
       switch (data.action) {
         case "aggregate":
-          await buildAggregateRanking(id, data.clusterRunId);
+          await buildAggregateRanking(id);
           break;
         case "llm_pool":
           await buildLlmRanking(id, "pool");

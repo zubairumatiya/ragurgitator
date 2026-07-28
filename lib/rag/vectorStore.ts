@@ -13,7 +13,12 @@ import type { RetrievedChunk } from "@/types/rag";
 // Filtered HNSW search needs a larger candidate list so enough rows survive the
 // config_id predicate to fill the top-k once several configs share a chunk table
 // (see docs/multi-config-plan.md §5.3). Harmless with a single config.
-const EF_SEARCH = 100;
+//
+// Exported so every config-filtered ANN in the app searches at the SAME depth —
+// the graded-nDCG candidate pool (rankingStore.poolNearest) runs the identical
+// pattern outside this module, and two different ef_search values would make the
+// ideal ranking and live retrieval disagree about what the neighbourhood is.
+export const EF_SEARCH = 100;
 
 export type IngestedDocument = {
   id: string;

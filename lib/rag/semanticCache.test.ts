@@ -13,6 +13,8 @@ import {
   calibrateFromJudged,
   collisionFloor,
   cosine,
+  entityGuardPasses,
+  entityTokens,
   fingerprintFrom,
   isHit,
   spaceOf,
@@ -67,6 +69,98 @@ test("spaceOf: same-space models collapse to one threshold key; others are self"
   assert.notEqual(spaceOf("voyage-4-lite"), spaceOf("text-embedding-3-large"));
   // An unknown model id falls back to itself (never throws).
   assert.equal(spaceOf("made-up-model"), "made-up-model");
+});
+
+// --- entity/number guard (Phase 0) -----------------------------------------
+
+test("entityTokens: numerals, years, percentages and currency are captured", () => {
+  const t = entityTokens("Was 2023 revenue $1.2M, up 40% from 4.5?");
+  assert.ok(t.has("n:2023"));
+  assert.ok(t.has("n:1.2m")); // currency sign stripped, scale suffix kept
+  assert.ok(t.has("n:40%")); // % kept — "40%" and "40" are different facts
+  assert.ok(t.has("n:4.5"));
+});
+
+test("entityTokens: thousands separators normalize to the bare number", () => {
+  assert.deepEqual(entityTokens("is the cap 1,200"), entityTokens("is the cap 1200"));
+});
+
+test("entityTokens: ALLCAPS acronyms of length ≥ 2, and quoted spans", () => {
+  const t = entityTokens('What does the PTO policy say about "carry over" days? I asked.');
+  assert.ok(t.has("a:pto"));
+  assert.ok(t.has("q:carry over"));
+  // Single letters aren't acronyms, and ordinary Capitalised words aren't either.
+  assert.ok(!t.has("a:i"));
+  assert.ok(!t.has("a:what"));
+});
+
+test("entityTokens: an ALL-CAPS question yields no acronym tokens", () => {
+  // Every word looks like an acronym there, so extraction is skipped rather
+  // than manufacturing tokens that would block everything.
+  const t = entityTokens("WHAT IS THE PTO POLICY");
+  assert.ok([...t].every((x) => !x.startsWith("a:")));
+});
+
+test("entityGuardPasses: the year case the guard exists for is blocked", () => {
+  assert.equal(
+    entityGuardPasses("what was 2023 revenue", "what was 2024 revenue"),
+    false,
+  );
+});
+
+test("entityGuardPasses: pure paraphrase with no entity tokens passes", () => {
+  assert.equal(
+    entityGuardPasses("how do I request time off", "what's the process to request time off"),
+    true,
+  );
+});
+
+test("entityGuardPasses: same numbers, different phrasing passes", () => {
+  assert.equal(
+    entityGuardPasses("what was 2023 revenue", "tell me the revenue for 2023"),
+    true,
+  );
+});
+
+test("entityGuardPasses: a number present on only one side blocks", () => {
+  // Deliberately conservative — "top 5" may or may not be the same question as
+  // "the benefits", and the guard's worst case is lost savings, not a wrong
+  // answer. Phase 2 measures what this costs.
+  assert.equal(
+    entityGuardPasses("what are the top 5 benefits", "what are the benefits"),
+    false,
+  );
+});
+
+test("entityGuardPasses: acronym CASING is not a factual difference", () => {
+  assert.equal(
+    entityGuardPasses("what is the PTO policy", "what is the pto policy"),
+    true,
+  );
+});
+
+test("entityGuardPasses: genuinely different acronyms still block", () => {
+  assert.equal(entityGuardPasses("what is the PTO policy", "what is the FMLA policy"), false);
+});
+
+test("entityGuardPasses: differing quoted spans block", () => {
+  assert.equal(
+    entityGuardPasses('what does "gross misconduct" mean', 'what does "gross negligence" mean'),
+    false,
+  );
+});
+
+test("entityGuardPasses: apostrophes are not read as quoted spans", () => {
+  assert.equal(
+    entityGuardPasses("what's the company's policy", "what is the company policy"),
+    true,
+  );
+});
+
+test("entityGuardPasses: symmetric in its arguments", () => {
+  const a = "what was 2023 revenue";
+  const b = "what was revenue";
+  assert.equal(entityGuardPasses(a, b), entityGuardPasses(b, a));
 });
 
 test("fingerprintFrom: deterministic for identical inputs", () => {

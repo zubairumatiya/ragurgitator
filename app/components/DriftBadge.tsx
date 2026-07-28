@@ -2,13 +2,14 @@
 // UI: "this cluster preset needs re-fitting" flag.
 //
 // Ingesting a document tops its chunks into every saved preset by nearest
-// EXISTING centroid (clusterStore.topUpSavedRuns) so their questions are
-// gradeable right away. The centroids are never recomputed — that would move
-// the pools out from under already-graded questions — so each top-up leaves the
-// centroid a little further from the true center of its bucket. This badge is
-// where that debt comes due: past config.clusterDriftThreshold the preset is
-// describing too little of the corpus to trust, and only re-running clustering
-// restores a real fit.
+// EXISTING centroid (clusterStore.topUpSavedRuns), so a preset keeps covering
+// the corpus without a re-run. But the centroids stay where the original fit put
+// them: each top-up drops members around a center that was never recomputed,
+// leaving it a little further from the true middle of its bucket. This badge is
+// where that debt comes due: past config.clusterDriftThreshold the preset no
+// longer describes the corpus well enough to read as an observation — its
+// cohesion/silhouette numbers describe the old fit, not what's in the buckets
+// now — and only re-running clustering restores a real fit.
 //
 // Renders nothing below the threshold: under it, top-up is working as intended
 // and there's nothing to act on.
@@ -36,7 +37,8 @@ export function DriftBadge({
         `${toppedUpCount} of ${chunkCount + toppedUpCount} chunks (${pct}%) were added ` +
         "after this preset was fit, assigned to the nearest existing centroid. " +
         "The centroids were never recomputed, so they no longer sit at the center " +
-        "of their buckets — pools built from this preset get looser as the gap grows. " +
+        "of their buckets — the further they drift, the less this preset's shape " +
+        "and its cohesion/silhouette scores say about the corpus you have now. " +
         "Re-run clustering and save a new preset to re-fit."
       }
     >

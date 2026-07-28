@@ -5,9 +5,10 @@
 // chunks (a single ground-truth chunk makes IDCG=1, see evalMetrics). We build
 // that ranking synthetically and let the user pick which one is ground truth:
 //
-//   1. embed the question, find the cluster centroids nearest it (a saved preset)
-//   2. pull a bounded candidate pool — the chunks in those buckets nearest the
-//      question (rankingStore.poolFromBuckets)
+//   1. embed the question under the active model
+//   2. pull a bounded candidate pool — the top-N chunks by config-filtered HNSW
+//      search over the whole active corpus (rankingStore.poolNearest), i.e. the
+//      same neighbourhood live retrieval searches
 //   3. AGGREGATE: rank the pool under several embedding models, average the
 //      per-model ranks -> one ideal order (the cross-model consensus)
 //   4. optional LLM rankings as a comparison: rank the pool ('llm_pool'), or
@@ -16,8 +17,9 @@
 //
 // Each is stored as an eval_rankings row (one per kind per question/config). The
 // user promotes ONE to is_truth via setOfficialRanking; that's what nDCG scores
-// the active model's retrieval against. Pool re-embedding is in-memory only
-// (embedCache) — nothing here touches the chunks_<model>_<dim> tables.
+// the active model's retrieval against. Pool re-embedding goes through embedCache
+// — nothing here touches the chunks_<model>_<dim> tables, so the alternate models
+// never enter the live index.
 // ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
 import { z } from "zod";
@@ -25,7 +27,6 @@ import { config, rankingAggregateModels } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { meteredMessage } from "@/lib/rag/meter";
 import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
-import { listRuns, missingDocumentsByRun } from "@/lib/rag/clusterStore";
 import { scoreQuestionNow, scoreQuestions, type EvalEvent } from "@/lib/rag/eval";
 import {
   allLabeledQuestions,
@@ -35,22 +36,18 @@ import {
 } from "@/lib/rag/evalStore";
 import { ndcg } from "@/lib/rag/evalMetrics";
 import {
-  countCorpusChunks,
   getQuestionScope,
   getRankingChunks,
   getRetrievedOrder,
   listRankings,
   listRankingsByQuestions,
-  nearestBuckets,
-  poolFromBuckets,
+  poolNearest,
   setTruth,
   truthKindByQuestion,
   upsertRanking,
   type RankingKind,
   type StoredRanking,
 } from "@/lib/rag/rankingStore";
-import { costEmbed, estimateTokensAll } from "@/lib/rag/pricing";
-import { recordSaving } from "@/lib/rag/savingsStore";
 
 // One chunk in a ranking, resolved for display in ideal order.
 export type RankingItem = {
@@ -71,7 +68,6 @@ export type RankingCandidate = {
   items: RankingItem[];
   models?: string[]; // aggregate: the models averaged
   llmModel?: string; // llm_*: the model that ranked
-  clusterRunId?: string | null; // which preset seeded the pool
   // nDCG@k the active model's retrieval would score if THIS ranking were ground
   // truth — a preview of promoting it. Null when the question is unscored.
   ndcg?: number | null;
@@ -80,33 +76,18 @@ export type RankingCandidate = {
   derivedFromKind?: RankingKind;
 };
 
-export type RankingPreset = {
-  id: string;
-  name: string | null;
-  k: number;
-  chunkCount: number;
-  silhouette: number; // run-level, in [-1, 1] — higher = better-separated buckets
-  avgCohesion: number; // mean member-to-centroid cosine across all points
-  sizes: number[]; // by ordinal — the per-bucket detail shown when expanded
-  cohesions: number[]; // by ordinal
-  // False when THIS question's document has no chunk in the preset (ingested
-  // after it was clustered) — its pool would come from the wrong documents, so
-  // the panel warns before a build.
-  coversQuestionDoc: boolean;
-};
-
 // Whether an LLM ranking of a given kind exists and is still current. 'fresh' = a
 // cached row whose inputs are unchanged (re-requesting is a no-op, so the panel
 // disables it); 'stale' = inputs changed since it was built (offer a rebuild).
 export type LlmStatus = "none" | "fresh" | "stale";
 
-// Everything the panel needs on open: the question, the saved cluster presets to
-// seed a pool, and the rankings built so far (with which is ground truth).
+// Everything the panel needs on open: the question and the rankings built so far
+// (with which is ground truth). The pool is drawn from the whole active corpus,
+// so there is nothing to pick before building.
 export type RankingContext = {
   questionId: string;
   question: string;
   k: number;
-  presets: RankingPreset[];
   candidates: RankingCandidate[];
   hasAggregate: boolean; // gates the LLM/manual steps, which reuse the aggregate pool
   llmStatus: { pool: LlmStatus; rerank: LlmStatus };
@@ -144,7 +125,6 @@ async function resolve(
     items,
     models: stored.details.models as string[] | undefined,
     llmModel: stored.details.llmModel as string | undefined,
-    clusterRunId: (stored.details.clusterRunId as string | undefined) ?? null,
     ndcg: retrievedOrder.length > 0 ? ndcg(stored.chunkIds, retrievedOrder, activeConfig().topK) : null,
     derivedFromKind: stored.details.derivedFromKind as RankingKind | undefined,
   };
@@ -193,8 +173,7 @@ export async function getRankingContext(
   const scope = await getQuestionScope(questionId);
   if (!scope) return null;
 
-  const [runs, stored, scored] = await Promise.all([
-    listRuns(),
+  const [stored, scored] = await Promise.all([
     listRankings(questionId),
     getRetrievedOrder(questionId),
   ]);
@@ -208,19 +187,6 @@ export async function getRankingContext(
     retrievedOrder = await getRetrievedOrder(questionId);
   }
 
-  const presets: RankingPreset[] = runs
-    .filter((r) => r.saved)
-    .map((r) => ({
-      id: r.id,
-      name: r.name,
-      k: r.k,
-      chunkCount: r.chunkCount,
-      silhouette: r.silhouette,
-      avgCohesion: r.avgCohesion,
-      sizes: r.sizes,
-      cohesions: r.cohesions,
-      coversQuestionDoc: !r.missingDocuments.some((d) => d.id === scope.documentId),
-    }));
   const candidates = await Promise.all(stored.map((s) => resolve(s, retrievedOrder)));
 
   // Per-LLM-kind freshness, by re-deriving the signature from the CURRENT aggregate
@@ -244,41 +210,27 @@ export async function getRankingContext(
     questionId,
     question: scope.question,
     k: activeConfig().topK,
-    presets,
     candidates,
     hasAggregate: candidates.some((c) => c.kind === "aggregate"),
     llmStatus: { pool: llmStatusFor("pool"), rerank: llmStatusFor("rerank") },
   };
 }
 
-// Step 3: build the cross-model aggregate ranking from a saved preset. Throws on
-// a stale question / empty pool / unknown preset so the route can surface it.
+// Step 3: build the cross-model aggregate ranking over the whole active corpus.
+// Throws on a stale question / empty pool so the route can surface it.
 export async function buildAggregateRanking(
   questionId: string,
-  clusterRunId: string,
 ): Promise<RankingCandidate> {
   const t0 = performance.now();
   const scope = await getQuestionScope(questionId);
   if (!scope) throw new Error("Question has no label under the active config.");
 
-  // The active-model question vector drives both the centroid search and the
-  // pool's nearest-to-question ordering (centroids + chunk vectors are active-model).
+  // The active-model question vector drives the ANN itself and the pool's
+  // nearest-to-question ordering (the indexed chunk vectors are active-model).
   const activeVec = await embedQueryCached(scope.question, activeConfig().embeddingModel);
-  const buckets = await nearestBuckets(
-    clusterRunId,
-    activeVec,
-    config.rankingNearestBuckets,
-  );
-  if (buckets.length === 0) {
-    throw new Error("That preset has no buckets — pick another or re-run clustering.");
-  }
-  const pool = await poolFromBuckets(
-    buckets.map((b) => b.clusterId),
-    activeVec,
-    config.rankingPoolSize,
-  );
+  const pool = await poolNearest(activeVec, config.rankingPoolSize);
   if (pool.length === 0) {
-    throw new Error("No candidate chunks found near this question in that preset.");
+    throw new Error("No candidate chunks found — ingest documents under this config first.");
   }
 
   // Rank the pool under each model; accumulate per-chunk rank sums + provenance.
@@ -287,12 +239,16 @@ export async function buildAggregateRanking(
   const activeSim = new Map(pool.map((p) => [p.chunkId, p.similarity]));
   for (const p of pool) perModelRanks[p.chunkId] = {};
 
-  for (const model of rankingAggregateModels) {
-    let scored: { chunkId: string; sim: number }[];
-    if (model === activeConfig().embeddingModel) {
-      // Already have these similarities from poolFromBuckets — no re-embed.
-      scored = pool.map((p) => ({ chunkId: p.chunkId, sim: p.similarity }));
-    } else {
+  // Score every model CONCURRENTLY. Each model is an independent pair of embed
+  // calls (query + pool) against a different provider space, and running them in
+  // series was the dominant latency of a build — the non-base models have nothing
+  // to say to each other.
+  const scoredByModel = await Promise.all(
+    rankingAggregateModels.map(async (model) => {
+      if (model === activeConfig().embeddingModel) {
+        // Already have these similarities from poolNearest — no re-embed.
+        return pool.map((p) => ({ chunkId: p.chunkId, sim: p.similarity }));
+      }
       const [qVec, docVecs] = await Promise.all([
         embedQueryCached(scope.question, model),
         embedDocsCached(
@@ -300,15 +256,25 @@ export async function buildAggregateRanking(
           model,
         ),
       ]);
-      scored = pool.map((p, i) => ({ chunkId: p.chunkId, sim: cosine(qVec, docVecs[i]) }));
-    }
+      return pool.map((p, i) => ({ chunkId: p.chunkId, sim: cosine(qVec, docVecs[i]) }));
+    }),
+  );
+
+  // Accumulate in rankingAggregateModels' DECLARED order, never completion order.
+  // rankSum is the primary sort key below and its ties fall through to a
+  // secondary key, so the same inputs must always fold in the same sequence for
+  // the same ideal to come out — a build whose models finished in a different
+  // order must not produce a different ranking. Promise.all preserves index
+  // order, so scoredByModel[i] is model i's result whenever it resolved.
+  rankingAggregateModels.forEach((model, i) => {
+    const scored = scoredByModel[i];
     scored.sort((a, b) => b.sim - a.sim);
     scored.forEach((s, idx) => {
       const rank = idx + 1;
       perModelRanks[s.chunkId][model] = rank;
       rankSum.set(s.chunkId, (rankSum.get(s.chunkId) ?? 0) + rank);
     });
-  }
+  });
 
   // Ideal order = ascending average rank; ties broken by active-model similarity.
   const order = pool
@@ -324,57 +290,16 @@ export async function buildAggregateRanking(
     kind: "aggregate",
     chunkIds: order,
     details: {
-      clusterRunId,
-      bucketOrdinals: buckets.map((b) => b.ordinal),
       models: rankingAggregateModels,
       perModelRanks,
     },
   });
-
-  // Structural saving: the pool we just embedded under each non-base model is a
-  // small bucket slice; the naive aggregate embeds the WHOLE corpus per model
-  // (docs/savings-accounting-plan.md §2 #5). Fire-and-forget telemetry.
-  void recordBucketSaving(pool.map((p) => p.text));
 
   console.log(
     `[rag:ranking] aggregate q=${questionId.slice(0, 8)} pool=${pool.length} ` +
       `models=${rankingAggregateModels.length} in ${Math.round(performance.now() - t0)}ms`,
   );
   return resolve(await pickStored(questionId, id));
-}
-
-// Price the embeds this build AVOIDED by pooling: for each non-base aggregate
-// model, the corpus chunks outside the pool × the pool's average tokens × that
-// model's embed price. Averaged token size comes from the pool we actually
-// have. Best-effort; a missing corpus count / price just yields 0.
-//
-// The counterfactual is the ULTRA-NAIVE baseline — embed the whole corpus under
-// every model FOR THIS QUESTION, rank, forget, repeat — with no vector storage.
-// That's why this banks per build rather than once per corpus, and it's the same
-// baseline embed_cache measures against, so the two levers stay consistent.
-// Called fire-and-forget, so the WHOLE body is guarded: countCorpusChunks runs
-// raw queries that can throw, and an unhandled rejection takes the process down
-// under Node ≥15. Mirrors the internal catch on every other telemetry call.
-async function recordBucketSaving(poolTexts: string[]): Promise<void> {
-  try {
-    if (poolTexts.length === 0) return;
-    const baseModel = activeConfig().embeddingModel;
-    const nonBase = rankingAggregateModels.filter((m) => m !== baseModel);
-    if (nonBase.length === 0) return;
-
-    const corpusChunks = await countCorpusChunks();
-    const skipped = corpusChunks - poolTexts.length;
-    if (skipped <= 0) return;
-
-    const avgTokens = estimateTokensAll(poolTexts) / poolTexts.length;
-    const skippedTokens = skipped * avgTokens;
-    let saved = 0;
-    for (const m of nonBase) saved += costEmbed(m, skippedTokens);
-    await recordSaving("bucket_ndcg", saved, skippedTokens * nonBase.length);
-  } catch (err) {
-    // Telemetry only — swallow so a savings-record failure never breaks a build.
-    console.warn(`[rag:ranking] bucket saving record failed: ${(err as Error).message}`);
-  }
 }
 
 const LlmOrder = z.array(z.number().int().positive());
@@ -501,29 +426,30 @@ export async function setOfficialRanking(
   return setTruth(questionId, scope.documentEmbeddingId, rankingId);
 }
 
-// "Bulk actions → Add nDCG rankings → {preset}": for every labeled question in
-// scope with NO ground truth yet, run the same aggregate builder the per-question
-// panel uses (seeded from the chosen cluster preset) and promote the result to
-// ground truth, then score whatever is still unscored so the nDCG chips fill in.
-// Questions that already have a truth are untouched — a manual/LLM choice the
-// user made shouldn't be clobbered by a bulk pass. Per-question failures are
-// reported on the stream and skipped rather than aborting the run.
+// "Bulk actions → Add nDCG rankings": for every labeled question in scope with NO
+// ground truth yet, run the same aggregate builder the per-question panel uses
+// and promote the result to ground truth, then score whatever is still unscored
+// so the nDCG chips fill in. Questions that already have a truth are untouched —
+// a manual/LLM choice the user made shouldn't be clobbered by a bulk pass.
+// Per-question failures are reported on the stream and skipped rather than
+// aborting the run.
 //
-// `rebuild` is the exit for the headline's corpus-drift badge: it ALSO refreshes
-// questions whose truth is the aggregate (their ideals were built before newer
-// documents were topped into the buckets, so a rebuild lets those chunks enter
-// the ideal — clusterStore.topUpSavedRuns). A manual/LLM truth is still left
-// alone. To keep the number honest, a rebuild re-scores everything it rebuilt,
-// in that order: the new chunk enters the ideal FIRST, so re-scored retrieval
-// that now surfaces it scores real gain instead of 0 against a stale ideal.
+// `rebuild` means "the CORPUS changed": it ALSO refreshes questions whose truth
+// is the aggregate, so chunks ingested after their ideal was built can enter it.
+// (Each pool is a live ANN over the whole active corpus, so a rebuild simply
+// re-runs that search against today's index.) A manual/LLM truth is still left
+// alone. To keep the number honest, a rebuild re-scores everything it rebuilt, in
+// that order: the new chunk enters the ideal FIRST, so re-scored retrieval that
+// now surfaces it scores real gain instead of 0 against a stale ideal.
 //
-// Modest concurrency: each build fans out to one embed call per aggregate model
-// (pool + query), so this is gentler than SCORE_CONCURRENCY; the shared embed
-// caches upsert idempotently, so races cost at most a duplicate embed.
+// Modest concurrency: each build now fans its aggregate models out in parallel
+// (one embed call per model), so a single build is already several in-flight
+// requests; keeping this low stops a bulk pass from multiplying that into a
+// provider rate-limit. The shared embed caches upsert idempotently, so races
+// cost at most a duplicate embed.
 const BULK_RANKING_CONCURRENCY = 2;
 
 export async function bulkBuildRankings(
-  clusterRunId: string,
   emit: (event: EvalEvent) => void = () => {},
   documentIds?: string[],
   rebuild = false,
@@ -539,15 +465,6 @@ export async function bulkBuildRankings(
     return rebuild && kind === "aggregate";
   });
 
-  // Documents the preset doesn't cover (ingested after it was clustered). Their
-  // questions would get candidate pools drawn from the WRONG documents — a
-  // worthless ground truth — so they're skipped with a streamed reason instead.
-  const missingDocs = new Set(
-    ((await missingDocumentsByRun([clusterRunId])).get(clusterRunId) ?? []).map(
-      (d) => d.id,
-    ),
-  );
-
   emit({ type: "ranking-start", total: pending.length });
 
   const gradedIds = new Set<string>();
@@ -559,12 +476,7 @@ export async function bulkBuildRankings(
       let ok = true;
       let error: string | undefined;
       try {
-        if (missingDocs.has(q.documentId)) {
-          throw new Error(
-            "This question's document isn't in the preset's clusters — re-run clustering and save a new preset.",
-          );
-        }
-        const candidate = await buildAggregateRanking(q.questionId, clusterRunId);
+        const candidate = await buildAggregateRanking(q.questionId);
         if (!(await setOfficialRanking(q.questionId, candidate.id))) {
           throw new Error("Could not promote the ranking to ground truth.");
         }

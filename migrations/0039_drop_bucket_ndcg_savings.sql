@@ -1,0 +1,40 @@
+-- ============================================================================
+-- 0039_drop_bucket_ndcg_savings.sql
+--
+-- RETIRES the 'bucket_ndcg' savings lever and deletes the dollars it banked.
+--
+-- The lever (docs/savings-accounting-plan.md §2 #5, "nDCG by bucket, not
+-- corpus") priced a counterfactual: that the graded-nDCG aggregate ranking
+-- embedded only a small cluster-bucket candidate pool rather than the whole
+-- corpus under each ranking model, and banked the difference. That premise is
+-- gone — the nDCG pool now comes from a direct HNSW query, so there is no
+-- bucket-vs-corpus comparison left to make. The lever is removed from
+-- lib/rag/pricing.LEVERS and its recordSaving call site in lib/rag/ranking.ts
+-- is deleted alongside this migration.
+--
+-- Why a DELETE and not just dropping the registry entry: getCostsReport
+-- (lib/rag/savingsStore) already skips rows whose lever isn't in LEVERS, so the
+-- report would stop showing these the moment the code lands. But savings_totals
+-- holds cumulative RUNNING TOTALS, not events, and these particular totals were
+-- fictional — measured against a mechanism the app no longer has. Left in place
+-- they are latent: a hand-written query, an export, or a future lever id that
+-- happens to reuse the name would resurrect them as if they were real money.
+-- Deleting is the only way the tally stops being wrong.
+--
+-- Scope: savings_totals only. spend_totals is untouched — the nDCG ranking calls
+-- really were made and really were paid for ('ndcg_ranking' surface); what was
+-- never real is the SAVING, not the spend.
+--
+-- CORRECTION TO AN EARLIER MIGRATION: migrations/0034_savings_totals.sql's header
+-- comment still lists 'bucket_ndcg' among the valid savings_totals.lever values.
+-- That line is now out of date. 0034 is NOT edited — applied migrations are
+-- historical records of what was run, and rewriting one would make it disagree
+-- with the databases that already ran it — so this header is where the
+-- correction is recorded. The live list of lever ids is lib/rag/pricing.LEVERS.
+--
+-- No constraint work is needed: savings_totals.lever is plain `text not null`
+-- (0034) with no CHECK and no enum, so retiring an id is purely a data change.
+-- Idempotent, and a no-op on a database that never accrued this lever.
+-- ============================================================================
+
+delete from savings_totals where lever = 'bucket_ndcg';

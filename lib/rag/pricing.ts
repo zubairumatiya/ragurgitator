@@ -39,7 +39,10 @@ export type LeverId =
   | "cascade" // #2 FrugalGPT-lite: cheap-first, NET of escalations
   | "semantic_cache" // #3 served answer skips retrieve+generate
   | "batch" // #4 −50% Anthropic / −33% Voyage on offline jobs
-  | "bucket_ndcg" // #5 aggregate embeds a bucket pool, not the whole corpus
+  // (#5 "nDCG by bucket, not corpus" is RETIRED — the aggregate nDCG pool now
+  // comes from a direct HNSW query, so there is no bucket-vs-corpus saving to
+  // bank. Its historical rows are deleted by migrations/0039. The remaining ids
+  // keep their doc numbers; the gap is intentional.)
   | "ingest_skip" // #9 doc already embedded under this config — embed skipped
   | "eval_embed_reuse"; // #10 calibration reads banked eval vectors — no re-embed
 
@@ -49,7 +52,6 @@ export const LEVERS: Record<
 > = {
   embed_cache: { label: "Embedding cache", category: "structural", basis: "estimate" },
   ingest_skip: { label: "Re-ingest skip (already embedded)", category: "structural", basis: "estimate" },
-  bucket_ndcg: { label: "nDCG by bucket (not corpus)", category: "structural", basis: "estimate" },
   eval_embed_reuse: {
     label: "Eval-embedding reuse (calibration)",
     category: "structural",
@@ -141,7 +143,7 @@ export function costEmbed(model: string, tokens: number): number {
 }
 
 // Cheap token estimate (≈4 chars/token) — used everywhere the provider doesn't
-// hand back a real count (all embeds; the semantic-cache and bucket counterfactuals).
+// hand back a real count (all embeds; the semantic-cache counterfactual).
 // The embed leg is cents at this corpus size, so char/4 is plenty; the LLM leg
 // uses real `usage` wherever it can (see meter.ts / generator.ts).
 export function estimateTokens(text: string): number {

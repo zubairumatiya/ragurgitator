@@ -17,6 +17,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { APPRAISE_LANDING_HREF } from "@/app/components/appraiseTabs";
 import { ConfigCreateDialog } from "@/app/components/ConfigCreateDialog";
 import { apiFetch } from "@/lib/http/client";
 import type { ConfigSummary } from "@/lib/rag/configStore";
@@ -249,9 +250,12 @@ export function ConfigTabs({
           )}
         </div>
 
-        {/* Right: pinned cross-config Appraise tab */}
+        {/* Right: pinned cross-config Appraise tab. Links at the landing LEAF
+            route, not bare /appraise — a redirect-only route can't be
+            prefetched, so going through it cost an extra blocking round trip on
+            every click. */}
         <Link
-          href="/appraise"
+          href={APPRAISE_LANDING_HREF}
           className="mb-1 shrink-0 rounded-md border border-zinc-200 px-3 py-1.5 text-sm text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:border-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
         >
           📊 Appraise

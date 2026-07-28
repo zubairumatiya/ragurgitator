@@ -71,6 +71,92 @@ export function spaceOf(model: string): string {
   return EMBEDDING_MODELS[model]?.vectorSpace ?? model;
 }
 
+// ---------------------------------------------------------------------------
+// ENTITY / NUMBER GUARD — see docs/semantic-cache-key-model-plan.md, Phase 0.
+//
+// Embeddings fail hardest on the tokens that make two identically-phrased
+// questions FACTUALLY different: "what was 2023 revenue" vs "what was 2024
+// revenue" sits near 0.98 cosine under essentially every model, so no threshold
+// that still serves paraphrases can separate them. It's a lexical failure, so
+// it gets a lexical fix rather than a better model.
+//
+// The guard is CONSERVATIVE BY CONSTRUCTION: it can only ever turn a would-be
+// hit into a miss, never the reverse. Its worst case is lost savings — which is
+// exactly why a blocked match is still shadow-logged (guard_blocked, migration
+// 0038), so the recall it costs is measurable instead of arguable.
+//
+// Deliberately NO NER model: a dependency and per-lookup latency for a guard
+// whose whole job is catching a failure mode that regex token sets already
+// catch.
+// ---------------------------------------------------------------------------
+
+// Numerals, with the decorations that change their meaning: an optional
+// currency sign, thousands separators, a decimal part, and a trailing % or
+// scale suffix (1.2M, 401k). The scale letter needs (?![a-z]) so "3rd" yields
+// "3" rather than swallowing a word boundary.
+const NUMERIC_RE = /\$?\d[\d,]*(?:\.\d+)?(?:%|[kmbt](?![a-z]))?/gi;
+
+// ALLCAPS acronyms of length ≥ 2: PTO, EBITDA, Q3, 401K. Must START with a
+// letter — a digit-leading token is a numeral and NUMERIC_RE already has it.
+const ACRONYM_RE = /\b[A-Z][A-Z0-9]+\b/g;
+
+// Quoted spans — an explicit "this exact string" signal. Double and curly
+// quotes ONLY: single quotes would make "what's the company's policy" look like
+// a quoted span ("s the company").
+const QUOTED_RE = /"([^"]{1,120})"|“([^”]{1,120})”/g;
+
+// "$1,200" and "1200" are the same fact; "40%" and "40" are not. So strip the
+// currency sign and thousands separators, keep % and the scale suffix.
+const normalizeNumeric = (raw: string): string =>
+  raw.replace(/[$,]/g, "").toLowerCase();
+
+// The tokens that make two questions factually distinct even when phrased
+// identically. Namespaced by kind ("n:" numeric, "a:" acronym, "q:" quoted) so
+// a quoted span can never collide with an acronym of the same text.
+export function entityTokens(text: string): Set<string> {
+  const tokens = new Set<string>();
+
+  for (const m of text.matchAll(NUMERIC_RE)) tokens.add(`n:${normalizeNumeric(m[0])}`);
+
+  for (const m of text.matchAll(QUOTED_RE)) {
+    const inner = (m[1] ?? m[2]).trim().toLowerCase().replace(/\s+/g, " ");
+    if (inner) tokens.add(`q:${inner}`);
+  }
+
+  // An ALL-CAPS question ("WHAT IS THE PTO POLICY") makes every word look like
+  // an acronym, so acronyms are only extracted from text that has lowercase
+  // somewhere to contrast against. The cost is a missed acronym token, which
+  // can only ever block a hit — never admit one.
+  if (/[a-z]/.test(text)) {
+    for (const m of text.matchAll(ACRONYM_RE)) tokens.add(`a:${m[0].toLowerCase()}`);
+  }
+
+  return tokens;
+}
+
+// Does an acronym token appear in the other text at all, in ANY case? This is
+// the one bit of leniency in the guard, and it exists because acronym CASING is
+// not a factual difference: "what is the PTO policy" and "what is the pto
+// policy" are the same question, but only the first yields an `a:pto` token
+// (see entityTokens — lowercase "pto" is indistinguishable from a word). Without
+// this, ordinary lowercase typing would block its own paraphrase. A genuinely
+// different acronym ("PTO" vs "FMLA") is still absent from the other text, so
+// the failure mode the guard exists for is untouched. Acronym tokens are
+// [a-z0-9]+ after folding, so they're regex-safe to interpolate.
+const mentionedIn = (token: string, text: string): boolean =>
+  token.startsWith("a:") && new RegExp(`\\b${token.slice(2)}\\b`, "i").test(text);
+
+// True when two questions carry the SAME entity/number tokens, i.e. nothing
+// lexical says they're about different facts. False on any asymmetric-difference
+// token — the caller must then treat the match as a miss.
+export function entityGuardPasses(a: string, b: string): boolean {
+  const ta = entityTokens(a);
+  const tb = entityTokens(b);
+  for (const t of ta) if (!tb.has(t) && !mentionedIn(t, b)) return false;
+  for (const t of tb) if (!ta.has(t) && !mentionedIn(t, a)) return false;
+  return true;
+}
+
 // Deterministic fingerprint of everything that determines a cached answer. Two
 // entries with the same fingerprint were produced by the same config shape
 // (embedding model, chunking, top-k, fusion pool, LLM) over the same corpus and
