@@ -14,6 +14,8 @@
 "use client";
 
 import {
+  memo,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -116,6 +118,20 @@ function groupByChunk(questions: QuestionDetail[]): ChunkGroup[] {
   return groups;
 }
 
+// Stable empty array for chunk groups with no saved trials. A fresh `[]` literal
+// per render would hand every such card a new prop and defeat its memo — which,
+// with most chunks having no trials, is nearly all of them.
+const NO_TRIALS: SavedModelTrial[] = [];
+
+// Narrow a dashboard-wide "which row is open" id to one chunk group: the id if it
+// names one of this group's questions, else null. Lets the parent hand each
+// memoized card only the open-state that concerns it, so opening a drill-down
+// re-renders one card instead of all of them.
+function idInGroup(group: ChunkGroup, id: string | null): string | null {
+  if (id === null) return null;
+  return group.questions.some((q) => q.questionId === id) ? id : null;
+}
+
 // Live progress for an in-flight process/rescore run. "generate" has no recall
 // yet; "score" tracks a running hit count so the panel can show recall climbing;
 // "ranking" (bulk nDCG grading) tracks per-question build failures, plus — for
@@ -169,39 +185,59 @@ export function EvalDashboard() {
   const [notice, setNotice] = useState<string | null>(null);
   const [progress, setProgress] = useState<EvalProgress | null>(null);
 
+  // Which row is in edit mode. The draft text itself lives inside QuestionRow —
+  // keeping it here re-rendered all 80 chunk cards on every keystroke.
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editText, setEditText] = useState("");
 
   // Which question's chunk drill-down is expanded, and the per-question detail
   // we lazy-fetch on first expand (cached so re-opening is instant).
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [explains, setExplains] = useState<Record<string, ExplainState>>({});
+  // Mirrors of the two above, so toggleExpand can read them without listing them
+  // as deps — a toggleExpand that changed identity would re-render every
+  // memoized row, which is exactly what the memoization is here to prevent.
+  const expandedIdRef = useRef<string | null>(null);
+  const explainsRef = useRef<Record<string, ExplainState>>({});
+  const putExplain = useCallback((id: string, state: ExplainState) => {
+    explainsRef.current = { ...explainsRef.current, [id]: state };
+    setExplains(explainsRef.current);
+  }, []);
 
   // Which question's nDCG ranking builder is open (independent of the top-k drill-down).
   const [rankingOpenId, setRankingOpenId] = useState<string | null>(null);
+
+  // Saved model trials for every chunk, keyed by chunk id (see the fetch below).
+  // null means "not loaded yet", so the loading flag is derived rather than a
+  // second piece of state that an effect would have to keep in sync.
+  const [trialsByChunk, setTrialsByChunk] = useState<Record<
+    string,
+    SavedModelTrial[]
+  > | null>(null);
+  const trialsLoading = trialsByChunk === null;
 
   // Run history is collapsed by default — it grows over time and sits above the
   // questions table, so keep it out of the way until asked for.
   const [runsOpen, setRunsOpen] = useState(false);
 
-  // Inline "add a question" form: which chunk group it's open for, the synthetic
-  // vs. manual tab, the manual text, and which difficulty (if any) is generating.
+  // Which chunk group has the "add a question" form open, and which difficulty
+  // (if any) is generating. The form's synthetic/manual tab and its draft text
+  // are local to AddQuestionForm, for the same reason as editText above.
   const [addingChunkId, setAddingChunkId] = useState<string | null>(null);
-  const [addMode, setAddMode] = useState<"synthetic" | "manual">("synthetic");
-  const [addText, setAddText] = useState("");
   const [genDifficulty, setGenDifficulty] = useState<Difficulty | null>(null);
 
   // Bump to re-fetch the summary (used after process / edit / delete / add). A
   // reload means questions/scores may have changed, so reset transient UI.
   const [reloadKey, setReloadKey] = useState(0);
-  const reload = () => {
+  const reload = useCallback(() => {
+    explainsRef.current = {};
+    expandedIdRef.current = null;
     setExplains({});
     setExpandedId(null);
     setRankingOpenId(null);
     setAddingChunkId(null);
-    setAddText("");
+    setTrialsByChunk(null);
     setReloadKey((k) => k + 1);
-  };
+  }, []);
 
   // The Settings dropdown lives in the Nav now (EvalSettings.tsx); when it
   // saves, re-pull the summary so criteria-dependent numbers refresh.
@@ -212,26 +248,30 @@ export function EvalDashboard() {
   }, []);
 
   // Toggle a question's drill-down, fetching its detail the first time it opens.
-  function toggleExpand(id: string) {
-    const opening = expandedId !== id;
-    setExpandedId(opening ? id : null);
-    if (!opening || explains[id]) return;
-    setExplains((m) => ({ ...m, [id]: { status: "loading" } }));
-    apiFetch(`/api/eval/questions/${id}/explain`)
-      .then(async (res) => {
-        const data = (await res.json()) as QuestionExplain | { error: string };
-        if (!res.ok || "error" in data) {
-          throw new Error(
-            "error" in data ? data.error : `Request failed (${res.status}).`,
-          );
-        }
-        setExplains((m) => ({ ...m, [id]: { status: "ready", data } }));
-      })
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : "Failed to load.";
-        setExplains((m) => ({ ...m, [id]: { status: "error", message } }));
-      });
-  }
+  const toggleExpand = useCallback(
+    (id: string) => {
+      const opening = expandedIdRef.current !== id;
+      expandedIdRef.current = opening ? id : null;
+      setExpandedId(expandedIdRef.current);
+      if (!opening || explainsRef.current[id]) return;
+      putExplain(id, { status: "loading" });
+      apiFetch(`/api/eval/questions/${id}/explain`)
+        .then(async (res) => {
+          const data = (await res.json()) as QuestionExplain | { error: string };
+          if (!res.ok || "error" in data) {
+            throw new Error(
+              "error" in data ? data.error : `Request failed (${res.status}).`,
+            );
+          }
+          putExplain(id, { status: "ready", data });
+        })
+        .catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : "Failed to load.";
+          putExplain(id, { status: "error", message });
+        });
+    },
+    [putExplain],
+  );
 
   useEffect(() => {
     let alive = true;
@@ -259,10 +299,30 @@ export function EvalDashboard() {
     };
   }, [reloadKey]);
 
+  // Every chunk's saved trials in one read. ChunkExperiments used to fetch its
+  // own on mount, which meant one request per chunk group — 80 of them on the
+  // current corpus, and most came back empty. Owned here because the trial
+  // sections mutate it (optimistic delete, and a new trial from the runner).
+  useEffect(() => {
+    let alive = true;
+    apiFetch("/api/eval/trials")
+      .then((res) => res.json())
+      .then((data: { trialsByChunk?: Record<string, SavedModelTrial[]> }) => {
+        if (alive) setTrialsByChunk(data.trialsByChunk ?? {});
+      })
+      .catch(() => {
+        // best-effort: settle into "loaded, none" so the sections stop pulsing
+        if (alive) setTrialsByChunk({});
+      });
+    return () => {
+      alive = false;
+    };
+  }, [reloadKey]);
+
   // Re-fetch the summary in place (no transient-UI reset), so promoting/editing a
   // ground-truth ranking updates the nDCG chip + headline without collapsing the
   // open ranking panel. Used as the NdcgRankingPanel's onChange.
-  async function refreshSummary() {
+  const refreshSummary = useCallback(async () => {
     try {
       const res = await apiFetch("/api/eval");
       const data = (await res.json()) as EvalSummary | { error: string };
@@ -270,7 +330,7 @@ export function EvalDashboard() {
     } catch {
       // best-effort; the panel surfaces its own action errors
     }
-  }
+  }, []);
 
   // Flip a question's badge in place as its score lands. Only patches rows that
   // are already in the table; brand-new generated questions appear on reload().
@@ -553,126 +613,182 @@ export function EvalDashboard() {
       { documentIds: documentIds ?? undefined },
     );
 
-  async function saveEdit(id: string) {
-    const text = editText.trim();
-    if (!text) return;
-    setBusy(true);
-    try {
-      const res = await apiFetch(`/api/eval/questions/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: text }),
-      });
-      if (!res.ok) {
-        const data = (await res.json()) as { error?: string };
-        setError(data.error ?? `Request failed (${res.status}).`);
-        return;
+  const saveEdit = useCallback(
+    async (id: string, draft: string) => {
+      const text = draft.trim();
+      if (!text) return;
+      setBusy(true);
+      try {
+        const res = await apiFetch(`/api/eval/questions/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question: text }),
+        });
+        if (!res.ok) {
+          const data = (await res.json()) as { error?: string };
+          setError(data.error ?? `Request failed (${res.status}).`);
+          return;
+        }
+        setEditingId(null);
+        reload();
+      } finally {
+        setBusy(false);
       }
-      setEditingId(null);
-      reload();
-    } finally {
-      setBusy(false);
-    }
-  }
+    },
+    [reload],
+  );
 
-  async function remove(id: string) {
-    setBusy(true);
-    try {
-      const res = await apiFetch(`/api/eval/questions/${id}`, {
-        method: "DELETE",
-      });
-      if (!res.ok) {
-        const data = (await res.json()) as { error?: string };
-        setError(data.error ?? `Request failed (${res.status}).`);
-        return;
+  const remove = useCallback(
+    async (id: string) => {
+      setBusy(true);
+      try {
+        const res = await apiFetch(`/api/eval/questions/${id}`, {
+          method: "DELETE",
+        });
+        if (!res.ok) {
+          const data = (await res.json()) as { error?: string };
+          setError(data.error ?? `Request failed (${res.status}).`);
+          return;
+        }
+        reload();
+      } finally {
+        setBusy(false);
       }
-      reload();
-    } finally {
-      setBusy(false);
-    }
-  }
+    },
+    [reload],
+  );
 
   // "Ignore in rates" (§7): config-scoped, reversible; ignoring warns first
   // because it removes the question from Recall/nDCG rates + autotune targeting.
-  async function toggleIgnore(q: QuestionDetail) {
-    if (
-      !q.ignored &&
-      !window.confirm(
-        "Ignore this question in rates?\n\nManually verify it is genuinely a " +
-          "distractor artifact (e.g. answerable from other legitimate chunks) " +
-          "before ignoring — this removes it from your Recall/nDCG rates and " +
-          "from autotune targeting. You can un-ignore it any time.",
-      )
-    ) {
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await apiFetch(`/api/eval/questions/${q.questionId}/ignore`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ignored: !q.ignored }),
-      });
-      if (!res.ok) {
-        const data = (await res.json()) as { error?: string };
-        setError(data.error ?? `Request failed (${res.status}).`);
+  const toggleIgnore = useCallback(
+    async (q: QuestionDetail) => {
+      if (
+        !q.ignored &&
+        !window.confirm(
+          "Ignore this question in rates?\n\nManually verify it is genuinely a " +
+            "distractor artifact (e.g. answerable from other legitimate chunks) " +
+            "before ignoring — this removes it from your Recall/nDCG rates and " +
+            "from autotune targeting. You can un-ignore it any time.",
+        )
+      ) {
         return;
       }
-      reload();
-    } finally {
-      setBusy(false);
-    }
-  }
+      setBusy(true);
+      setError(null);
+      try {
+        const res = await apiFetch(
+          `/api/eval/questions/${q.questionId}/ignore`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ignored: !q.ignored }),
+          },
+        );
+        if (!res.ok) {
+          const data = (await res.json()) as { error?: string };
+          setError(data.error ?? `Request failed (${res.status}).`);
+          return;
+        }
+        reload();
+      } finally {
+        setBusy(false);
+      }
+    },
+    [reload],
+  );
 
   // Add a hand-written question to a chunk. It lands unscored; the next "Process
   // new chunks" / "Re-score all" scores it like any other.
-  async function addQuestion(chunkId: string) {
-    const text = addText.trim();
-    if (!text) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await apiFetch("/api/eval/questions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chunkId, question: text }),
-      });
-      if (!res.ok) {
-        const data = (await res.json()) as { error?: string };
-        setError(data.error ?? `Request failed (${res.status}).`);
-        return;
+  const addQuestion = useCallback(
+    async (chunkId: string, draft: string) => {
+      const text = draft.trim();
+      if (!text) return;
+      setBusy(true);
+      setError(null);
+      try {
+        const res = await apiFetch("/api/eval/questions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chunkId, question: text }),
+        });
+        if (!res.ok) {
+          const data = (await res.json()) as { error?: string };
+          setError(data.error ?? `Request failed (${res.status}).`);
+          return;
+        }
+        reload();
+      } finally {
+        setBusy(false);
       }
-      reload();
-    } finally {
-      setBusy(false);
-    }
-  }
+    },
+    [reload],
+  );
 
   // Author one synthetic question for a chunk at the chosen difficulty. Like a
   // manual add it lands unscored; the next run scores it. The LLM call runs
   // server-side, so this can take a moment — the clicked button shows progress.
-  async function generateQuestion(chunkId: string, difficulty: Difficulty) {
-    setBusy(true);
-    setError(null);
-    setGenDifficulty(difficulty);
-    try {
-      const res = await apiFetch("/api/eval/questions/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chunkId, difficulty }),
-      });
-      if (!res.ok) {
-        const data = (await res.json()) as { error?: string };
-        setError(data.error ?? `Request failed (${res.status}).`);
-        return;
+  const generateQuestion = useCallback(
+    async (chunkId: string, difficulty: Difficulty) => {
+      setBusy(true);
+      setError(null);
+      setGenDifficulty(difficulty);
+      try {
+        const res = await apiFetch("/api/eval/questions/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chunkId, difficulty }),
+        });
+        if (!res.ok) {
+          const data = (await res.json()) as { error?: string };
+          setError(data.error ?? `Request failed (${res.status}).`);
+          return;
+        }
+        reload();
+      } finally {
+        setBusy(false);
+        setGenDifficulty(null);
       }
-      reload();
-    } finally {
-      setBusy(false);
-      setGenDifficulty(null);
-    }
-  }
+    },
+    [reload],
+  );
+
+  // Open/close callbacks for the memoized rows. Identity has to be stable or
+  // every row re-renders whenever any one of them opens.
+  const startEdit = useCallback((id: string) => setEditingId(id), []);
+  const cancelEdit = useCallback(() => setEditingId(null), []);
+  const toggleRanking = useCallback(
+    (id: string) => setRankingOpenId((cur) => (cur === id ? null : id)),
+    [],
+  );
+  const closeRanking = useCallback(() => setRankingOpenId(null), []);
+  const openAdd = useCallback((chunkId: string) => setAddingChunkId(chunkId), []);
+  const closeAdd = useCallback(() => setAddingChunkId(null), []);
+
+  // Trial edits touch one chunk's list, so the other chunks' arrays keep their
+  // identity and their cards stay memo-skipped.
+  const onTrialRemoved = useCallback((chunkId: string, trialId: string) => {
+    setTrialsByChunk((m) => ({
+      ...m,
+      [chunkId]: (m?.[chunkId] ?? NO_TRIALS).filter((t) => t.id !== trialId),
+    }));
+  }, []);
+  const onTrialSaved = useCallback(
+    (chunkId: string, trial: SavedModelTrial) => {
+      setTrialsByChunk((m) => ({
+        ...m,
+        [chunkId]: [trial, ...(m?.[chunkId] ?? NO_TRIALS)],
+      }));
+    },
+    [],
+  );
+
+  // Group the questions by source chunk once per summary, not once per render —
+  // this used to run inline in the JSX, so every keystroke re-grouped all 164
+  // questions before re-rendering all 80 cards.
+  const groups = useMemo(
+    () => (summary === null ? [] : groupByChunk(summary.questions)),
+    [summary],
+  );
 
   // Disable the actions when they'd be no-ops. "Process" generates questions for
   // chunks below target and scores unscored/edited ones; "Re-score" re-runs every
@@ -883,373 +999,561 @@ export function EvalDashboard() {
                 Questions
               </h2>
               <div className="flex flex-col gap-3">
-                {groupByChunk(summary.questions).map((group) => {
-                  // Same inclusion rule as the headline rates: retrieval-stale
-                  // scores still count, edit-stale ones don't.
-                  const scored = group.questions.filter(
-                    (q) => q.hit !== null && !q.editStale && !q.ignored,
-                  );
-                  const hits = scored.filter((q) => q.hit === true).length;
-                  // Mean retrieved rank under the chunk's CURRENT retrieval
-                  // (delegate or baseline); a miss counts as k+1 (just past the
-                  // cutoff). Lower is better — the bar a trial must beat for
-                  // its green title.
-                  const chunkAvgRank =
-                    scored.length > 0
-                      ? scored.reduce(
-                          (sum, q) =>
-                            sum +
-                            (q.hit && q.foundRank !== null
-                              ? q.foundRank
-                              : summary.recallK + 1),
-                          0,
-                        ) / scored.length
-                      : null;
-                  // Mean stored sim of the ground-truth chunk across this chunk's
-                  // scored questions — same read as a trial's "avg sim", but for
-                  // the live (baseline/delegate) retrieval.
-                  const sims = scored
-                    .map((q) => q.storedSim)
-                    .filter((s): s is number => s !== null);
-                  const avgSim =
-                    sims.length > 0
-                      ? sims.reduce((sum, s) => sum + s, 0) / sims.length
-                      : null;
-                  const override = summary.overrides.find(
-                    (o) => o.chunkId === group.chunkId,
-                  );
-                  // A model-kind override = this chunk's DELEGATE model: retrieval
-                  // ranks it there instead of the config's base model.
-                  const delegateModel =
-                    override && override.kind !== "size"
-                      ? override.model
-                      : null;
-                  return (
-                    <div
-                      key={group.chunkId}
-                      className="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800"
-                    >
-                      {/* Which chunk these questions belong to */}
-                      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-50 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900/40">
-                        <span className="flex min-w-0 items-center gap-1.5 font-mono text-xs text-zinc-600 dark:text-zinc-400">
-                          {override && <OverrideBadge info={override} />}
-                          <span className="truncate">
-                            {group.fileName} · chunk #{group.position ?? "?"}
-                          </span>
-                          {delegateModel && (
-                            <span
-                              title="Delegate model: this chunk is embedded and ranked under this model (not the config's base model). Its questions count toward config metrics under it after a re-score."
-                              className="shrink-0 rounded bg-blue-100 px-1.5 py-0.5 font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-400"
-                            >
-                              {delegateModel}
-                            </span>
-                          )}
-                        </span>
-                        <span className="shrink-0 text-xs text-zinc-500">
-                          {scored.length > 0
-                            ? `${hits}/${scored.length} hit${scored.length === 1 ? "" : "s"}`
-                            : "unscored"}
-                          {avgSim !== null && (
-                            <span className="text-zinc-400">
-                              {" "}
-                              · avg sim {avgSim.toFixed(3)}
-                            </span>
-                          )}
-                        </span>
-                      </div>
-
-                      <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800">
-                        {group.questions.map((q) => (
-                          <li
-                            key={q.questionId}
-                            className="flex flex-col gap-1 px-3 py-2 text-sm"
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              {editingId === q.questionId ? (
-                                <input
-                                  value={editText}
-                                  onChange={(e) => setEditText(e.target.value)}
-                                  className="flex-1 rounded border border-zinc-300 bg-transparent px-2 py-1 text-sm dark:border-zinc-700"
-                                  autoFocus
-                                />
-                              ) : (
-                                <span
-                                  className={
-                                    q.ignored
-                                      ? "flex-1 text-zinc-400"
-                                      : "flex-1"
-                                  }
-                                >
-                                  {q.question}
-                                </span>
-                              )}
-                              <span className="flex shrink-0 items-center gap-1.5">
-                                {q.ignored && (
-                                  <span
-                                    title="Ignored in rates — excluded from Recall/nDCG and autotune targeting"
-                                    className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
-                                  >
-                                    ignored
-                                  </span>
-                                )}
-                                {!q.ignored &&
-                                  q.hit === false &&
-                                  q.ndcg !== null &&
-                                  q.ndcg >= HIGH_NDCG && (
-                                    <span
-                                      title={
-                                        "Possible false positive: nDCG is high but recall missed — the ground-truth chunk ranks well against its ideal but was crowded out of the top-k by other relevant chunks. Verify, then consider 'Ignore'."
-                                      }
-                                      className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700 dark:bg-amber-900/40 dark:text-amber-400"
-                                    >
-                                      FP?
-                                    </span>
-                                  )}
-                                {/* Stale is its own pill so the hit/miss badge
-                                    keeps its green/red identity. */}
-                                {q.stale && (
-                                  <span
-                                    title={
-                                      q.editStale
-                                        ? "Edited since its last score — this result is for the old text and doesn't count toward the rates until re-scored"
-                                        : "Scored under a different override/delegate state — still counts toward the rates, re-scored next run"
-                                    }
-                                    className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400"
-                                  >
-                                    stale
-                                  </span>
-                                )}
-                                <Badge hit={q.hit} rank={q.foundRank} />
-                                <MetricChip label="nDCG" value={q.ndcg} />
-                              </span>
-                            </div>
-                            <div className="flex items-center justify-between gap-3 text-xs text-zinc-500">
-                              <span className="flex items-center gap-1.5 font-mono text-zinc-400">
-                                {q.source === "manual" && <span>manual</span>}
-                                {q.difficulty && (
-                                  <span
-                                    className={
-                                      q.difficulty === "hard"
-                                        ? "rounded px-1 capitalize bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400"
-                                        : q.difficulty === "medium"
-                                          ? "rounded px-1 capitalize bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400"
-                                          : "rounded px-1 capitalize bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400"
-                                    }
-                                  >
-                                    {q.difficulty}
-                                  </span>
-                                )}
-                              </span>
-                              <span className="flex shrink-0 items-center gap-2">
-                                {editingId === q.questionId ? (
-                                  <>
-                                    <button
-                                      onClick={() => saveEdit(q.questionId)}
-                                      disabled={busy}
-                                      className="cursor-pointer text-zinc-700 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300"
-                                    >
-                                      Save
-                                    </button>
-                                    <button
-                                      onClick={() => setEditingId(null)}
-                                      className="cursor-pointer hover:underline"
-                                    >
-                                      Cancel
-                                    </button>
-                                  </>
-                                ) : (
-                                  <>
-                                    {/* Retrieval drill-down — only once there's a score to show */}
-                                    {q.hit !== null && (
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          toggleExpand(q.questionId)
-                                        }
-                                        title={
-                                          expandedId === q.questionId
-                                            ? "Hide retrieval detail"
-                                            : "Show what retrieval returned for this question"
-                                        }
-                                        className="cursor-pointer underline decoration-dotted underline-offset-2 hover:text-zinc-700 dark:hover:text-zinc-300"
-                                      >
-                                        top-k
-                                      </button>
-                                    )}
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        setRankingOpenId((id) =>
-                                          id === q.questionId
-                                            ? null
-                                            : q.questionId,
-                                        )
-                                      }
-                                      title={
-                                        rankingOpenId === q.questionId
-                                          ? "Hide the nDCG ranking builder"
-                                          : "Build the graded ideal ranking this question's nDCG scores against"
-                                      }
-                                      className="cursor-pointer underline decoration-dotted underline-offset-2 hover:text-zinc-700 dark:hover:text-zinc-300"
-                                    >
-                                      nDCG
-                                    </button>
-                                    {(q.ignored ||
-                                      failsBar(q, summary.criteria)) && (
-                                      <button
-                                        onClick={() => toggleIgnore(q)}
-                                        disabled={busy}
-                                        title={
-                                          q.ignored
-                                            ? "Count this question in rates again"
-                                            : "Exclude this question from rates and autotune targeting (manual false-positive mode)"
-                                        }
-                                        className="cursor-pointer hover:underline disabled:cursor-not-allowed disabled:opacity-50"
-                                      >
-                                        {q.ignored ? "Unignore" : "Ignore"}
-                                      </button>
-                                    )}
-                                    <button
-                                      onClick={() => {
-                                        setEditingId(q.questionId);
-                                        setEditText(q.question);
-                                      }}
-                                      className="cursor-pointer hover:underline"
-                                    >
-                                      Edit
-                                    </button>
-                                    <button
-                                      onClick={() => remove(q.questionId)}
-                                      disabled={busy}
-                                      className="cursor-pointer text-red-600 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-400"
-                                    >
-                                      Delete
-                                    </button>
-                                  </>
-                                )}
-                              </span>
-                            </div>
-                            {expandedId === q.questionId && (
-                              <ExplainPanel
-                                state={explains[q.questionId]}
-                                k={summary.k}
-                              />
-                            )}
-                            {rankingOpenId === q.questionId && (
-                              <NdcgRankingPanel
-                                questionId={q.questionId}
-                                onChange={refreshSummary}
-                                onClose={() => setRankingOpenId(null)}
-                              />
-                            )}
-                          </li>
-                        ))}
-                      </ul>
-
-                      {/* Saved "Models tried" (above), add-question form, then the
-                          ephemeral "Try a different model" runner. */}
-                      <ChunkExperiments
-                        chunkId={group.chunkId}
-                        baselineModel={summary.config.baseModel}
-                        chunkAvgRank={chunkAvgRank}
-                        overrideInfo={override ?? null}
-                        onDelegateChange={reload}
-                      >
-                        {/* Add a question — synthetic (LLM, graded) or hand-written */}
-                        <div className="border-t border-zinc-200 px-3 py-2 dark:border-zinc-800">
-                          {addingChunkId === group.chunkId ? (
-                            <div className="flex flex-col gap-2">
-                              <div className="flex items-center justify-between gap-2">
-                                <div className="flex gap-2 text-xs">
-                                  <ModeTab
-                                    active={addMode === "synthetic"}
-                                    onClick={() => setAddMode("synthetic")}
-                                  >
-                                    Synthetic
-                                  </ModeTab>
-                                  <ModeTab
-                                    active={addMode === "manual"}
-                                    onClick={() => setAddMode("manual")}
-                                  >
-                                    Manual
-                                  </ModeTab>
-                                </div>
-                                <button
-                                  onClick={() => setAddingChunkId(null)}
-                                  className="cursor-pointer text-xs text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
-                                >
-                                  ✕
-                                </button>
-                              </div>
-
-                              {addMode === "synthetic" ? (
-                                <div className="flex flex-wrap items-center gap-2 text-xs">
-                                  <span className="text-zinc-500">
-                                    Generate one question at:
-                                  </span>
-                                  {(["easy", "medium", "hard"] as const).map(
-                                    (d) => (
-                                      <button
-                                        key={d}
-                                        onClick={() =>
-                                          generateQuestion(group.chunkId, d)
-                                        }
-                                        disabled={busy}
-                                        className="cursor-pointer rounded border border-zinc-300 px-2 py-0.5 font-medium capitalize text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                                      >
-                                        {genDifficulty === d
-                                          ? "Generating…"
-                                          : d}
-                                      </button>
-                                    ),
-                                  )}
-                                </div>
-                              ) : (
-                                <div className="flex items-center gap-2">
-                                  <input
-                                    value={addText}
-                                    onChange={(e) => setAddText(e.target.value)}
-                                    onKeyDown={(e) => {
-                                      if (e.key === "Enter")
-                                        addQuestion(group.chunkId);
-                                      if (e.key === "Escape")
-                                        setAddingChunkId(null);
-                                    }}
-                                    placeholder="A question this chunk should answer…"
-                                    className="flex-1 rounded border border-zinc-300 bg-transparent px-2 py-1 text-sm dark:border-zinc-700"
-                                    autoFocus
-                                  />
-                                  <button
-                                    onClick={() => addQuestion(group.chunkId)}
-                                    disabled={busy || !addText.trim()}
-                                    className="cursor-pointer text-xs font-medium text-zinc-700 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300"
-                                  >
-                                    Add
-                                  </button>
-                                </div>
-                              )}
-                            </div>
-                          ) : (
-                            <button
-                              onClick={() => {
-                                setAddingChunkId(group.chunkId);
-                                setAddText("");
-                              }}
-                              className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-700 hover:underline dark:hover:text-zinc-300"
-                            >
-                              + Add a question
-                            </button>
-                          )}
-                        </div>
-                      </ChunkExperiments>
-                    </div>
-                  );
-                })}
+                {groups.map((group) => (
+                  <ChunkGroupCard
+                    key={group.chunkId}
+                    group={group}
+                    summary={summary}
+                    busy={busy}
+                    // Each "which row is open" prop is narrowed to this group, so
+                    // opening a row in one card leaves the other 79 cards' props
+                    // referentially equal and memo skips re-rendering them.
+                    editingId={idInGroup(group, editingId)}
+                    expandedId={idInGroup(group, expandedId)}
+                    explain={
+                      idInGroup(group, expandedId) === null
+                        ? undefined
+                        : explains[expandedId as string]
+                    }
+                    rankingOpenId={idInGroup(group, rankingOpenId)}
+                    addOpen={addingChunkId === group.chunkId}
+                    genDifficulty={
+                      addingChunkId === group.chunkId ? genDifficulty : null
+                    }
+                    trials={trialsByChunk?.[group.chunkId] ?? NO_TRIALS}
+                    trialsLoading={trialsLoading}
+                    onTrialRemoved={onTrialRemoved}
+                    onTrialSaved={onTrialSaved}
+                    onStartEdit={startEdit}
+                    onCancelEdit={cancelEdit}
+                    onSaveEdit={saveEdit}
+                    onRemove={remove}
+                    onToggleIgnore={toggleIgnore}
+                    onToggleExpand={toggleExpand}
+                    onToggleRanking={toggleRanking}
+                    onCloseRanking={closeRanking}
+                    onRankingChange={refreshSummary}
+                    onOpenAdd={openAdd}
+                    onCloseAdd={closeAdd}
+                    onAddQuestion={addQuestion}
+                    onGenerate={generateQuestion}
+                    onDelegateChange={reload}
+                  />
+                ))}
               </div>
             </section>
           )}
         </>
       )}
+    </div>
+  );
+}
+
+// One chunk group: its header stats, its question rows, the saved-trials section
+// and the add-question form. Memoized, and given only the open-state that names
+// one of its own questions (see idInGroup) — so editing or expanding a row in one
+// group re-renders that group alone, not all 80 of them.
+const ChunkGroupCard = memo(function ChunkGroupCard({
+  group,
+  summary,
+  busy,
+  editingId,
+  expandedId,
+  explain,
+  rankingOpenId,
+  addOpen,
+  genDifficulty,
+  trials,
+  trialsLoading,
+  onTrialRemoved,
+  onTrialSaved,
+  onStartEdit,
+  onCancelEdit,
+  onSaveEdit,
+  onRemove,
+  onToggleIgnore,
+  onToggleExpand,
+  onToggleRanking,
+  onCloseRanking,
+  onRankingChange,
+  onOpenAdd,
+  onCloseAdd,
+  onAddQuestion,
+  onGenerate,
+  onDelegateChange,
+}: {
+  group: ChunkGroup;
+  summary: EvalSummary;
+  busy: boolean;
+  editingId: string | null;
+  expandedId: string | null;
+  explain: ExplainState | undefined;
+  rankingOpenId: string | null;
+  addOpen: boolean;
+  genDifficulty: Difficulty | null;
+  trials: SavedModelTrial[];
+  trialsLoading: boolean;
+  onTrialRemoved: (chunkId: string, trialId: string) => void;
+  onTrialSaved: (chunkId: string, trial: SavedModelTrial) => void;
+  onStartEdit: (id: string) => void;
+  onCancelEdit: () => void;
+  onSaveEdit: (id: string, draft: string) => void;
+  onRemove: (id: string) => void;
+  onToggleIgnore: (q: QuestionDetail) => void;
+  onToggleExpand: (id: string) => void;
+  onToggleRanking: (id: string) => void;
+  onCloseRanking: () => void;
+  onRankingChange: () => void;
+  onOpenAdd: (chunkId: string) => void;
+  onCloseAdd: () => void;
+  onAddQuestion: (chunkId: string, draft: string) => void;
+  onGenerate: (chunkId: string, difficulty: Difficulty) => void;
+  onDelegateChange: () => void;
+}) {
+  // Same inclusion rule as the headline rates: retrieval-stale scores still
+  // count, edit-stale ones don't.
+  const scored = group.questions.filter(
+    (q) => q.hit !== null && !q.editStale && !q.ignored,
+  );
+  const hits = scored.filter((q) => q.hit === true).length;
+  // Mean retrieved rank under the chunk's CURRENT retrieval (delegate or
+  // baseline); a miss counts as k+1 (just past the cutoff). Lower is better —
+  // the bar a trial must beat for its green title.
+  const chunkAvgRank =
+    scored.length > 0
+      ? scored.reduce(
+          (sum, q) =>
+            sum +
+            (q.hit && q.foundRank !== null ? q.foundRank : summary.recallK + 1),
+          0,
+        ) / scored.length
+      : null;
+  // Mean stored sim of the ground-truth chunk across this chunk's scored
+  // questions — same read as a trial's "avg sim", but for the live retrieval.
+  const sims = scored
+    .map((q) => q.storedSim)
+    .filter((s): s is number => s !== null);
+  const avgSim =
+    sims.length > 0 ? sims.reduce((sum, s) => sum + s, 0) / sims.length : null;
+  const override = summary.overrides.find((o) => o.chunkId === group.chunkId);
+  // A model-kind override = this chunk's DELEGATE model: retrieval ranks it
+  // there instead of the config's base model.
+  const delegateModel =
+    override && override.kind !== "size" ? override.model : null;
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
+      {/* Which chunk these questions belong to */}
+      <div className="flex items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-50 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900/40">
+        <span className="flex min-w-0 items-center gap-1.5 font-mono text-xs text-zinc-600 dark:text-zinc-400">
+          {override && <OverrideBadge info={override} />}
+          <span className="truncate">
+            {group.fileName} · chunk #{group.position ?? "?"}
+          </span>
+          {delegateModel && (
+            <span
+              title="Delegate model: this chunk is embedded and ranked under this model (not the config's base model). Its questions count toward config metrics under it after a re-score."
+              className="shrink-0 rounded bg-blue-100 px-1.5 py-0.5 font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-400"
+            >
+              {delegateModel}
+            </span>
+          )}
+        </span>
+        <span className="shrink-0 text-xs text-zinc-500">
+          {scored.length > 0
+            ? `${hits}/${scored.length} hit${scored.length === 1 ? "" : "s"}`
+            : "unscored"}
+          {avgSim !== null && (
+            <span className="text-zinc-400"> · avg sim {avgSim.toFixed(3)}</span>
+          )}
+        </span>
+      </div>
+
+      <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800">
+        {group.questions.map((q) => (
+          <QuestionRow
+            key={q.questionId}
+            q={q}
+            criteria={summary.criteria}
+            k={summary.k}
+            busy={busy}
+            editing={editingId === q.questionId}
+            expanded={expandedId === q.questionId}
+            explain={expandedId === q.questionId ? explain : undefined}
+            rankingOpen={rankingOpenId === q.questionId}
+            onStartEdit={onStartEdit}
+            onCancelEdit={onCancelEdit}
+            onSaveEdit={onSaveEdit}
+            onRemove={onRemove}
+            onToggleIgnore={onToggleIgnore}
+            onToggleExpand={onToggleExpand}
+            onToggleRanking={onToggleRanking}
+            onCloseRanking={onCloseRanking}
+            onRankingChange={onRankingChange}
+          />
+        ))}
+      </ul>
+
+      {/* Saved "Models tried" (above), add-question form, then the ephemeral
+          "Try a different model" runner. */}
+      <ChunkExperiments
+        chunkId={group.chunkId}
+        baselineModel={summary.config.baseModel}
+        chunkAvgRank={chunkAvgRank}
+        overrideInfo={override ?? null}
+        saved={trials}
+        trialsLoading={trialsLoading}
+        onTrialRemoved={onTrialRemoved}
+        onTrialSaved={onTrialSaved}
+        onDelegateChange={onDelegateChange}
+      >
+        <AddQuestionForm
+          chunkId={group.chunkId}
+          open={addOpen}
+          busy={busy}
+          genDifficulty={genDifficulty}
+          onOpen={onOpenAdd}
+          onClose={onCloseAdd}
+          onAdd={onAddQuestion}
+          onGenerate={onGenerate}
+        />
+      </ChunkExperiments>
+    </div>
+  );
+});
+
+// One question row. Memoized, and it owns its own edit draft: the draft used to
+// live in EvalDashboard, so every keystroke re-rendered the whole dashboard.
+const QuestionRow = memo(function QuestionRow({
+  q,
+  criteria,
+  k,
+  busy,
+  editing,
+  expanded,
+  explain,
+  rankingOpen,
+  onStartEdit,
+  onCancelEdit,
+  onSaveEdit,
+  onRemove,
+  onToggleIgnore,
+  onToggleExpand,
+  onToggleRanking,
+  onCloseRanking,
+  onRankingChange,
+}: {
+  q: QuestionDetail;
+  criteria: EvalSummary["criteria"];
+  k: number;
+  busy: boolean;
+  editing: boolean;
+  expanded: boolean;
+  explain: ExplainState | undefined;
+  rankingOpen: boolean;
+  onStartEdit: (id: string) => void;
+  onCancelEdit: () => void;
+  onSaveEdit: (id: string, draft: string) => void;
+  onRemove: (id: string) => void;
+  onToggleIgnore: (q: QuestionDetail) => void;
+  onToggleExpand: (id: string) => void;
+  onToggleRanking: (id: string) => void;
+  onCloseRanking: () => void;
+  onRankingChange: () => void;
+}) {
+  const [draft, setDraft] = useState(q.question);
+  // Re-seed the draft from the row's current text each time editing opens, so an
+  // abandoned draft never resurfaces. This is the "adjusting state when a prop
+  // changes" pattern — done during render rather than in an effect, which would
+  // paint the stale draft first and cost a second render.
+  const [wasEditing, setWasEditing] = useState(editing);
+  if (editing !== wasEditing) {
+    setWasEditing(editing);
+    if (editing) setDraft(q.question);
+  }
+
+  return (
+    <li className="flex flex-col gap-1 px-3 py-2 text-sm">
+      <div className="flex items-start justify-between gap-3">
+        {editing ? (
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            className="flex-1 rounded border border-zinc-300 bg-transparent px-2 py-1 text-sm dark:border-zinc-700"
+            autoFocus
+          />
+        ) : (
+          <span className={q.ignored ? "flex-1 text-zinc-400" : "flex-1"}>
+            {q.question}
+          </span>
+        )}
+        <span className="flex shrink-0 items-center gap-1.5">
+          {q.ignored && (
+            <span
+              title="Ignored in rates — excluded from Recall/nDCG and autotune targeting"
+              className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+            >
+              ignored
+            </span>
+          )}
+          {!q.ignored &&
+            q.hit === false &&
+            q.ndcg !== null &&
+            q.ndcg >= HIGH_NDCG && (
+              <span
+                title={
+                  "Possible false positive: nDCG is high but recall missed — the ground-truth chunk ranks well against its ideal but was crowded out of the top-k by other relevant chunks. Verify, then consider 'Ignore'."
+                }
+                className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700 dark:bg-amber-900/40 dark:text-amber-400"
+              >
+                FP?
+              </span>
+            )}
+          {/* Stale is its own pill so the hit/miss badge keeps its
+              green/red identity. */}
+          {q.stale && (
+            <span
+              title={
+                q.editStale
+                  ? "Edited since its last score — this result is for the old text and doesn't count toward the rates until re-scored"
+                  : "Scored under a different override/delegate state — still counts toward the rates, re-scored next run"
+              }
+              className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400"
+            >
+              stale
+            </span>
+          )}
+          <Badge hit={q.hit} rank={q.foundRank} />
+          <MetricChip label="nDCG" value={q.ndcg} />
+        </span>
+      </div>
+      <div className="flex items-center justify-between gap-3 text-xs text-zinc-500">
+        <span className="flex items-center gap-1.5 font-mono text-zinc-400">
+          {q.source === "manual" && <span>manual</span>}
+          {q.difficulty && (
+            <span
+              className={
+                q.difficulty === "hard"
+                  ? "rounded px-1 capitalize bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400"
+                  : q.difficulty === "medium"
+                    ? "rounded px-1 capitalize bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400"
+                    : "rounded px-1 capitalize bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400"
+              }
+            >
+              {q.difficulty}
+            </span>
+          )}
+        </span>
+        <span className="flex shrink-0 items-center gap-2">
+          {editing ? (
+            <>
+              <button
+                onClick={() => onSaveEdit(q.questionId, draft)}
+                disabled={busy}
+                className="cursor-pointer text-zinc-700 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300"
+              >
+                Save
+              </button>
+              <button
+                onClick={onCancelEdit}
+                className="cursor-pointer hover:underline"
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            <>
+              {/* Retrieval drill-down — only once there's a score to show */}
+              {q.hit !== null && (
+                <button
+                  type="button"
+                  onClick={() => onToggleExpand(q.questionId)}
+                  title={
+                    expanded
+                      ? "Hide retrieval detail"
+                      : "Show what retrieval returned for this question"
+                  }
+                  className="cursor-pointer underline decoration-dotted underline-offset-2 hover:text-zinc-700 dark:hover:text-zinc-300"
+                >
+                  top-k
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => onToggleRanking(q.questionId)}
+                title={
+                  rankingOpen
+                    ? "Hide the nDCG ranking builder"
+                    : "Build the graded ideal ranking this question's nDCG scores against"
+                }
+                className="cursor-pointer underline decoration-dotted underline-offset-2 hover:text-zinc-700 dark:hover:text-zinc-300"
+              >
+                nDCG
+              </button>
+              {(q.ignored || failsBar(q, criteria)) && (
+                <button
+                  onClick={() => onToggleIgnore(q)}
+                  disabled={busy}
+                  title={
+                    q.ignored
+                      ? "Count this question in rates again"
+                      : "Exclude this question from rates and autotune targeting (manual false-positive mode)"
+                  }
+                  className="cursor-pointer hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {q.ignored ? "Unignore" : "Ignore"}
+                </button>
+              )}
+              <button
+                onClick={() => onStartEdit(q.questionId)}
+                className="cursor-pointer hover:underline"
+              >
+                Edit
+              </button>
+              <button
+                onClick={() => onRemove(q.questionId)}
+                disabled={busy}
+                className="cursor-pointer text-red-600 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-400"
+              >
+                Delete
+              </button>
+            </>
+          )}
+        </span>
+      </div>
+      {expanded && <ExplainPanel state={explain} k={k} />}
+      {rankingOpen && (
+        <NdcgRankingPanel
+          questionId={q.questionId}
+          onChange={onRankingChange}
+          onClose={onCloseRanking}
+        />
+      )}
+    </li>
+  );
+});
+
+// Add a question to a chunk — synthetic (LLM, graded) or hand-written. Owns its
+// draft text and its synthetic/manual tab locally, for the same reason
+// QuestionRow owns its edit draft.
+function AddQuestionForm({
+  chunkId,
+  open,
+  busy,
+  genDifficulty,
+  onOpen,
+  onClose,
+  onAdd,
+  onGenerate,
+}: {
+  chunkId: string;
+  open: boolean;
+  busy: boolean;
+  genDifficulty: Difficulty | null;
+  onOpen: (chunkId: string) => void;
+  onClose: () => void;
+  onAdd: (chunkId: string, draft: string) => void;
+  onGenerate: (chunkId: string, difficulty: Difficulty) => void;
+}) {
+  const [mode, setMode] = useState<"synthetic" | "manual">("synthetic");
+
+  return (
+    <div className="border-t border-zinc-200 px-3 py-2 dark:border-zinc-800">
+      {open ? (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex gap-2 text-xs">
+              <ModeTab
+                active={mode === "synthetic"}
+                onClick={() => setMode("synthetic")}
+              >
+                Synthetic
+              </ModeTab>
+              <ModeTab
+                active={mode === "manual"}
+                onClick={() => setMode("manual")}
+              >
+                Manual
+              </ModeTab>
+            </div>
+            <button
+              onClick={onClose}
+              className="cursor-pointer text-xs text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+            >
+              ✕
+            </button>
+          </div>
+
+          {mode === "synthetic" ? (
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-zinc-500">Generate one question at:</span>
+              {(["easy", "medium", "hard"] as const).map((d) => (
+                <button
+                  key={d}
+                  onClick={() => onGenerate(chunkId, d)}
+                  disabled={busy}
+                  className="cursor-pointer rounded border border-zinc-300 px-2 py-0.5 font-medium capitalize text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                >
+                  {genDifficulty === d ? "Generating…" : d}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <ManualAdd
+              chunkId={chunkId}
+              busy={busy}
+              onAdd={onAdd}
+              onClose={onClose}
+            />
+          )}
+        </div>
+      ) : (
+        <button
+          onClick={() => onOpen(chunkId)}
+          className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-700 hover:underline dark:hover:text-zinc-300"
+        >
+          + Add a question
+        </button>
+      )}
+    </div>
+  );
+}
+
+// The manual "type a question" box. Split out so it mounts fresh each time the
+// form opens — that's what keeps an abandoned draft from resurfacing, with no
+// reset effect needed.
+function ManualAdd({
+  chunkId,
+  busy,
+  onAdd,
+  onClose,
+}: {
+  chunkId: string;
+  busy: boolean;
+  onAdd: (chunkId: string, draft: string) => void;
+  onClose: () => void;
+}) {
+  const [text, setText] = useState("");
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onAdd(chunkId, text);
+          if (e.key === "Escape") onClose();
+        }}
+        placeholder="A question this chunk should answer…"
+        className="flex-1 rounded border border-zinc-300 bg-transparent px-2 py-1 text-sm dark:border-zinc-700"
+        autoFocus
+      />
+      <button
+        onClick={() => onAdd(chunkId, text)}
+        disabled={busy || !text.trim()}
+        className="cursor-pointer text-xs font-medium text-zinc-700 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300"
+      >
+        Add
+      </button>
     </div>
   );
 }
@@ -3047,6 +3351,10 @@ function ChunkExperiments({
   baselineModel,
   chunkAvgRank,
   overrideInfo,
+  saved,
+  trialsLoading,
+  onTrialRemoved,
+  onTrialSaved,
   onDelegateChange,
   children,
 }: {
@@ -3058,11 +3366,15 @@ function ChunkExperiments({
   // beats @1+@2).
   chunkAvgRank: number | null;
   overrideInfo: ChunkOverrideInfo | null;
+  // This chunk's saved trials, owned by EvalDashboard: they arrive with every
+  // other chunk's in one /api/eval/trials read, rather than a fetch per chunk.
+  saved: SavedModelTrial[];
+  trialsLoading: boolean;
+  onTrialRemoved: (chunkId: string, trialId: string) => void;
+  onTrialSaved: (chunkId: string, trial: SavedModelTrial) => void;
   onDelegateChange: () => void;
   children: ReactNode;
 }) {
-  const [saved, setSaved] = useState<SavedModelTrial[]>([]);
-  const [trialsLoading, setTrialsLoading] = useState(true);
   const [delegating, setDelegating] = useState(false);
   const [delegateErr, setDelegateErr] = useState<string | null>(null);
 
@@ -3097,27 +3409,8 @@ function ChunkExperiments({
     );
   }
 
-  // Load the chunk's saved trials once on mount (lightweight — no embeddings).
-  // These land after the summary paints, so the section shows a loading pulse
-  // instead of popping in.
-  useEffect(() => {
-    let alive = true;
-    apiFetch(`/api/eval/chunks/${chunkId}/trials`)
-      .then((res) => res.json())
-      .then((data: { trials?: SavedModelTrial[] }) => {
-        if (alive && data.trials) setSaved(data.trials);
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (alive) setTrialsLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [chunkId]);
-
   async function removeSaved(id: string) {
-    setSaved((s) => s.filter((t) => t.id !== id)); // optimistic
+    onTrialRemoved(chunkId, id); // optimistic
     await apiFetch(`/api/eval/chunks/${chunkId}/try-model?trialId=${id}`, {
       method: "DELETE",
     }).catch(() => {});
@@ -3256,7 +3549,7 @@ function ChunkExperiments({
       {children}
       <ModelTrial
         chunkId={chunkId}
-        onSaved={(t) => setSaved((s) => [t, ...s])}
+        onSaved={(t) => onTrialSaved(chunkId, t)}
       />
     </>
   );

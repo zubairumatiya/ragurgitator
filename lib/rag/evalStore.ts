@@ -1396,36 +1396,31 @@ export async function insertModelTrial(args: {
   return { id: row.id, createdAt: row.created_at.getTime() };
 }
 
-export async function listModelTrials(chunkId: string): Promise<SavedModelTrial[]> {
-  const rows = await sql<
-    {
-      id: string;
-      baseline_model: string;
-      trial_model: string;
-      kind: string;
-      chunk_size: number | null;
-      chunk_overlap: number | null;
-      piece_count: number | null;
-      k: number;
-      pool_chunk_ids: string[];
-      question_count: number;
-      hit_count: number;
-      stored_hit_count: number;
-      results: TrialQuestionOutcome[];
-      created_at: Date;
-    }[]
-  >`
-    select id, baseline_model, trial_model, kind, chunk_size, chunk_overlap,
-           piece_count, k, pool_chunk_ids,
-           question_count, hit_count, stored_hit_count, results, created_at
-    from eval_model_trials
-    where source_chunk_id = ${chunkId}
-    order by created_at desc
-  `;
+type ModelTrialRow = {
+  id: string;
+  source_chunk_id: string;
+  baseline_model: string;
+  trial_model: string;
+  kind: string;
+  chunk_size: number | null;
+  chunk_overlap: number | null;
+  piece_count: number | null;
+  k: number;
+  pool_chunk_ids: string[];
+  question_count: number;
+  hit_count: number;
+  stored_hit_count: number;
+  results: TrialQuestionOutcome[];
+  created_at: Date;
+};
 
-  // Resolve every trial's pool to labels/text in one query, then map each id back
-  // in stored order. A stale id (config changed since save) gets a placeholder so
-  // the pool length still reflects what was saved.
+// Resolve every trial's pool to labels/text in ONE query regardless of how many
+// trials came back, then map each id back in stored order. A stale id (config
+// changed since save) gets a placeholder so the pool length still reflects what
+// was saved. Shared by the single-chunk and whole-config reads below.
+async function hydrateModelTrials(
+  rows: ModelTrialRow[],
+): Promise<SavedModelTrial[]> {
   const allPoolIds = [...new Set(rows.flatMap((r) => r.pool_chunk_ids))];
   const poolChunks = await getChunksByIds(allPoolIds);
   const byId = new Map(poolChunks.map((c) => [c.chunkId, c]));
@@ -1451,6 +1446,46 @@ export async function listModelTrials(chunkId: string): Promise<SavedModelTrial[
     results: r.results,
     createdAt: r.created_at.getTime(),
   }));
+}
+
+export async function listModelTrials(chunkId: string): Promise<SavedModelTrial[]> {
+  const rows = await sql<ModelTrialRow[]>`
+    select id, source_chunk_id, baseline_model, trial_model, kind, chunk_size,
+           chunk_overlap, piece_count, k, pool_chunk_ids,
+           question_count, hit_count, stored_hit_count, results, created_at
+    from eval_model_trials
+    where source_chunk_id = ${chunkId}
+    order by created_at desc
+  `;
+  return hydrateModelTrials(rows);
+}
+
+// Every saved trial under the active config, grouped by source chunk. The
+// dashboard renders one "Models tried" section per chunk group, so fetching them
+// per chunk meant one request (and two queries) per group — 80 of them on a
+// corpus this size, most returning nothing. This is the whole set in one.
+export async function listModelTrialsByChunk(): Promise<
+  Record<string, SavedModelTrial[]>
+> {
+  const rows = await sql<ModelTrialRow[]>`
+    select t.id, t.source_chunk_id, t.baseline_model, t.trial_model, t.kind,
+           t.chunk_size, t.chunk_overlap, t.piece_count, t.k, t.pool_chunk_ids,
+           t.question_count, t.hit_count, t.stored_hit_count, t.results,
+           t.created_at
+    from eval_model_trials t
+    join document_embeddings de on de.id = t.document_embedding_id
+    where de.config_id = ${activeConfig().id}
+    order by t.created_at desc
+  `;
+  const trials = await hydrateModelTrials(rows);
+
+  // Same order as the per-chunk read (created_at desc) — rows come back sorted,
+  // so pushing preserves it within each group.
+  const byChunk: Record<string, SavedModelTrial[]> = {};
+  rows.forEach((r, i) => {
+    (byChunk[r.source_chunk_id] ??= []).push(trials[i]);
+  });
+  return byChunk;
 }
 
 export async function deleteModelTrial(id: string): Promise<boolean> {
