@@ -15,8 +15,13 @@
 //      it changes WHICH SPACE a config reads its threshold from. Last, because
 //      it only makes sense once you've seen the spaces and what they serve at.
 //
-// The page frame is a Server Component; the panels are self-fetching Client
-// Components (they read the /api/semantic-cache/* routes and talk to each other
+// The page frame is a Server Component. It reads the config list and the first
+// config's SAVED collision floor (migration 0037) here, on the server, and hands
+// them to CollisionFloorPanel as props: that panel used to fetch the list and
+// then — a second round trip deep — the floor, so opening this tab painted an
+// empty panel and popped the numbers in a moment later. Everything else on the
+// page is still self-fetching Client Components (they read the
+// /api/semantic-cache/* routes and talk to each other
 // over window events — see semanticCache/events.ts: calibration panels
 // `emitRecommendation`, the apply panel listens and prefills, and a write
 // broadcasts SC_CHANGED so the table and apply panel re-pull). Nothing needs
@@ -28,10 +33,16 @@ import { AppraiseNav } from "@/app/components/AppraiseNav";
 import { BackToConfigs } from "@/app/components/BackToConfigs";
 import { InfoDot } from "@/app/components/InfoDot";
 import { ApplyThresholdPanel } from "@/app/components/semanticCache/ApplyThresholdPanel";
-import { CollisionFloorPanel } from "@/app/components/semanticCache/CollisionFloorPanel";
+import {
+  CollisionFloorPanel,
+  type CollisionFloorPreload,
+} from "@/app/components/semanticCache/CollisionFloorPanel";
 import { KeyModelPanel } from "@/app/components/semanticCache/KeyModelPanel";
 import { ShadowJudgePanel } from "@/app/components/semanticCache/ShadowJudgePanel";
 import { ThresholdsPanel } from "@/app/components/semanticCache/ThresholdsPanel";
+import { resolveConfig, withConfig } from "@/lib/rag/activeConfig";
+import { readCollisionFloorState } from "@/lib/rag/collisionFloorStore";
+import { listClosedConfigs, listConfigs } from "@/lib/rag/configStore";
 
 export const dynamic = "force-dynamic";
 
@@ -41,7 +52,32 @@ const ABOUT =
   "Lower it only where it's proven safe: the collision floor from the eval " +
   "bank, or the shadow judge over real would-hit traffic.";
 
-export default function SemanticCachePage() {
+// The saved floor for the config the panel opens on — the FIRST in the picker's
+// order, which is what the panel selects by default. Best-effort, matching
+// collisionFloorStore's contract: if this read fails (or there are no configs
+// yet) the panel gets no preload and falls back to fetching on mount, exactly as
+// it did before. A display cache must never take the page down with it.
+async function preloadFirstFloor(
+  configId: string | undefined,
+): Promise<CollisionFloorPreload | null> {
+  if (!configId) return null;
+  try {
+    const cfg = await resolveConfig(configId);
+    if (!cfg) return null;
+    return { configId, ...(await withConfig(cfg, readCollisionFloorState)) };
+  } catch (err) {
+    console.warn(`[rag:collision-floor] preload failed: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+export default async function SemanticCachePage() {
+  // Same list, in the same order, the panel's picker used to fetch for itself:
+  // open tabs then closed ones.
+  const [open, closed] = await Promise.all([listConfigs(), listClosedConfigs()]);
+  const configs = [...open, ...closed];
+  const preload = await preloadFirstFloor(configs[0]?.id);
+
   return (
     <div className="flex flex-1 flex-col items-center bg-zinc-50 font-sans dark:bg-black">
       <main className="flex w-full max-w-5xl flex-1 flex-col gap-4 px-8 py-8">
@@ -59,7 +95,11 @@ export default function SemanticCachePage() {
             it live share a row, and the page's one write action costs no line of
             its own. Both panels that recommend into it (collision floor here,
             shadow judge below) stay within a screen. */}
-        <CollisionFloorPanel action={<ApplyThresholdPanel />} />
+        <CollisionFloorPanel
+          configs={configs}
+          preload={preload}
+          action={<ApplyThresholdPanel />}
+        />
 
         <ThresholdsPanel />
 

@@ -12,17 +12,25 @@
 // exactly like a fresh one — the only difference is the "Computed …" stamp and,
 // when the config's labeled-question count has moved since, a stale hint.
 //
+// The FIRST config's saved report arrives as a prop, read during the page's
+// server render (see app/appraise/semantic-cache/page.tsx). It used to be
+// fetched here, behind a second fetch for the config list — two round trips
+// deep, so opening the tab painted an empty panel and then popped the numbers
+// in. Now the first paint is complete and the client only fetches when the
+// picker moves to a config the server didn't read.
+//
 // READ-ONLY as far as thresholds go: this panel writes nothing that is served
 // from (the saved report is a display cache). The recommendation is broadcast to
 // ApplyThresholdPanel, which rides this panel's own heading row (the `action`
 // slot) and owns every write.
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { InfoDot } from "@/app/components/InfoDot";
 import { Tooltip } from "@/app/components/Tooltip";
 import { apiFetch } from "@/lib/http/client";
+import type { CollisionFloorState } from "@/lib/rag/collisionFloorStore";
 import type { ConfigSummary } from "@/lib/rag/configStore";
 import type { CollisionFloorReport } from "@/lib/rag/semanticCacheCalibration";
 
@@ -76,35 +84,66 @@ type Loaded = {
   questionsNow: number | null;
 };
 
-// `action` is the apply control, rendered on this section's heading row: the
-// recommendation computed here is what you'd apply, so the control sits with it
-// and costs no vertical space.
-export function CollisionFloorPanel({ action }: { action?: ReactNode }) {
-  const [configs, setConfigs] = useState<ConfigSummary[]>([]);
-  const [configId, setConfigId] = useState("");
+// What the server already read, for the config this panel opens on. A null
+// `report` is a real answer — nothing computed yet for that config — and
+// suppresses the mount fetch exactly like a restored report does; only a preload
+// the server couldn't do at all (`preload` itself null) falls back to fetching.
+export type CollisionFloorPreload = CollisionFloorState & { configId: string };
+
+// `configs` and `preload` come from the page's server render — see the header
+// note. `action` is the apply control, rendered on this section's heading row:
+// the recommendation computed here is what you'd apply, so the control sits with
+// it and costs no vertical space.
+export function CollisionFloorPanel({
+  configs,
+  preload,
+  action,
+}: {
+  configs: ConfigSummary[];
+  preload: CollisionFloorPreload | null;
+  action?: ReactNode;
+}) {
+  const [configId, setConfigId] = useState(preload?.configId ?? configs[0]?.id ?? "");
   // Stamped rather than cleared on switch: nothing is set synchronously in an
   // effect (which would cascade renders), and rendering simply ignores a report
   // belonging to a config that is no longer selected.
-  const [loaded, setLoaded] = useState<Loaded | null>(null);
+  const [loaded, setLoaded] = useState<Loaded | null>(
+    preload?.report
+      ? {
+          configId: preload.configId,
+          report: preload.report,
+          computedAt: preload.computedAt,
+          questionsNow: preload.questionsNow,
+        }
+      : null,
+  );
   const [error, setError] = useState<{ configId: string; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    apiFetch("/api/configs")
-      .then((r) => r.json())
-      .then((d) => {
-        const all: ConfigSummary[] = [...(d.open ?? []), ...(d.closed ?? [])];
-        setConfigs(all);
-        if (all[0]) setConfigId(all[0].id);
-      })
-      .catch(() => setConfigs([]));
-  }, []);
+  // The server's read. In a ref rather than an effect dep so the effect below
+  // still keys on configId alone, and cleared the first time the picker moves
+  // elsewhere: coming BACK then re-fetches, because the floor may have been
+  // recomputed since the page was rendered.
+  const fromServer = useRef(preload);
 
   // Restore the saved report on mount and on every config switch, so coming back
   // to this page shows the last floor instead of an empty panel. `live` drops a
   // response that lands after the picker has moved on.
   useEffect(() => {
     if (!configId) return;
+
+    const pre = fromServer.current;
+    if (pre && pre.configId === configId) {
+      // Already painted from the server render — fetching would only repaint
+      // identical numbers. The recommendation still has to be offered, since
+      // that used to ride the fetch response. Safe here: effects run
+      // child-first, and ApplyThresholdPanel (the `action` slot below) is a
+      // descendant, so it is already listening. Idempotent, so re-running this
+      // effect (StrictMode's double-invoke in dev) costs nothing.
+      if (pre.report) offer(pre.report);
+      return;
+    }
+    fromServer.current = null;
+
     let live = true;
     apiFetch(`/api/semantic-cache/collision-floor?configId=${encodeURIComponent(configId)}`)
       .then((r) => r.json())
@@ -198,7 +237,11 @@ export function CollisionFloorPanel({ action }: { action?: ReactNode }) {
 
         {view?.computedAt && (
           <span className="flex items-center gap-2 text-xs text-zinc-400">
-            <span>Computed {fmtWhen(view.computedAt)}</span>
+            {/* The stamp is now in the SERVER-rendered markup (the preload), and
+                toLocaleString() reads the formatting host's locale + timezone —
+                so a browser configured differently from the node process would
+                otherwise trip a hydration text mismatch on this one node. */}
+            <span suppressHydrationWarning>Computed {fmtWhen(view.computedAt)}</span>
             {stale && (
               <Tooltip
                 align="left"

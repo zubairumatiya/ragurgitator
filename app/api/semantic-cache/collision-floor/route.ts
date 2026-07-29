@@ -21,11 +21,7 @@
 // errors, so the await below can't throw).
 // ---------------------------------------------------------------------------
 import { withRequestConfig } from "@/lib/http/configScope";
-import {
-  countLabeledQuestions,
-  getSavedCollisionFloor,
-  saveCollisionFloor,
-} from "@/lib/rag/collisionFloorStore";
+import { readCollisionFloorState, saveCollisionFloor } from "@/lib/rag/collisionFloorStore";
 import { computeCollisionFloor } from "@/lib/rag/semanticCacheCalibration";
 
 const msg = (err: unknown, fallback: string) =>
@@ -34,15 +30,7 @@ const msg = (err: unknown, fallback: string) =>
 export async function GET(request: Request) {
   return withRequestConfig(request, async () => {
     try {
-      const [saved, questionsNow] = await Promise.all([
-        getSavedCollisionFloor(),
-        countLabeledQuestions(),
-      ]);
-      return Response.json({
-        report: saved?.report ?? null,
-        computedAt: saved?.computedAt ?? null,
-        questionsNow,
-      });
+      return Response.json(await readCollisionFloorState());
     } catch (err) {
       return Response.json(
         { error: msg(err, "Failed to load the saved collision floor.") },

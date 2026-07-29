@@ -93,6 +93,31 @@ export async function getSavedCollisionFloor(): Promise<SavedCollisionFloor | nu
   }
 }
 
+// Everything the panel needs to paint a restored floor: the saved report, when
+// it was computed, and the live labeled-question count its staleness hint
+// compares against. Exactly the GET /collision-floor payload, because the two
+// callers must not drift — the route serves it on a config switch, and the
+// Semantic caching page reads it during the SERVER render so the panel's first
+// paint already has the numbers instead of flashing empty (the client used to
+// wait on /api/configs and only then ask for this).
+export type CollisionFloorState = {
+  report: CollisionFloorReport | null;
+  computedAt: string | null;
+  questionsNow: number | null;
+};
+
+export async function readCollisionFloorState(): Promise<CollisionFloorState> {
+  const [saved, questionsNow] = await Promise.all([
+    getSavedCollisionFloor(),
+    countLabeledQuestions(),
+  ]);
+  return {
+    report: saved?.report ?? null,
+    computedAt: saved?.computedAt ?? null,
+    questionsNow,
+  };
+}
+
 // Upsert the active config's report (one row per config — a recompute replaces).
 // Never throws: the caller has already paid for the computation and must be able
 // to return it whether or not the save landed.
