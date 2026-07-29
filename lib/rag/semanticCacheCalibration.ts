@@ -22,7 +22,7 @@ import { allLabeledQuestions, getCachedQueryEmbeddings } from "@/lib/rag/evalSto
 import { meteredMessage } from "@/lib/rag/meter";
 import { costEmbed, estimateTokensAll } from "@/lib/rag/pricing";
 import { recordSaving } from "@/lib/rag/savingsStore";
-import { resolveKeyModel } from "@/lib/rag/semanticCache";
+import { resolveKeyModel, type EffectiveAcceptTarget } from "@/lib/rag/semanticCache";
 import {
   calibrateFromJudged,
   collisionFloor,
@@ -490,10 +490,24 @@ export async function setHumanVerdict(
     where id = ${id}`;
 }
 
-export type CalibrationReport = CalibrationResult & { space: string };
+export type CalibrationReport = CalibrationResult & {
+  space: string;
+  // Whose precision dial produced this curve. The sweep is per-SPACE (shared by
+  // every config on the same embedding model) but the target is per-CONFIG, so
+  // the answer to "99% according to whom?" has to travel with the report.
+  targetSource: EffectiveAcceptTarget;
+};
 
 // Run the precision-at-threshold sweep over a space's judged shadow events.
-export async function calibrationCurve(space: string): Promise<CalibrationReport> {
+//
+// `targetSource` is passed in, not read here: this runs from a page that isn't
+// config-scoped, so resolving the target deep in the stack would silently mean
+// the Default config's. The route resolves it (scopedAcceptTarget) and the value
+// travels back out on the report so the UI can attribute it.
+export async function calibrationCurve(
+  space: string,
+  targetSource: EffectiveAcceptTarget,
+): Promise<CalibrationReport> {
   const rows = await safe(
     () =>
       sql<{ sim: number; verdict: "accept" | "reject" }[]>`
@@ -503,8 +517,8 @@ export async function calibrationCurve(space: string): Promise<CalibrationReport
   );
   const result = calibrateFromJudged(
     rows.map((r) => ({ sim: Number(r.sim), verdict: r.verdict })),
-    config.semanticCache.acceptTarget,
+    targetSource.target,
     config.semanticCache.minCalibrationSamples,
   );
-  return { ...result, space };
+  return { ...result, space, targetSource };
 }

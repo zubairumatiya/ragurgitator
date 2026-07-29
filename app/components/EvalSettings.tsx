@@ -97,6 +97,22 @@ function parseThreshold(s: string): number | null | undefined {
   return rate >= 0 && rate <= 1 ? rate : undefined;
 }
 
+// The calibration PRECISION TARGET field. Same tri-state as parseThreshold ("" =>
+// inherit the global 0.99, undefined => block the save), but a NARROWER band:
+// coerceAcceptTarget in lib/batch/types.ts rejects anything under 0.5, so a value
+// this box accepts and the store then silently discards would be the worst
+// outcome — the user would see their number vanish on the next open with no
+// explanation. Rejecting it here means the error names the band instead.
+function parseAcceptTarget(s: string): number | null | undefined {
+  const t = s.trim();
+  if (t === "") return null;
+  const pct = t.endsWith("%");
+  const n = Number(pct ? t.slice(0, -1) : t);
+  if (!Number.isFinite(n)) return undefined;
+  const rate = pct || n > 1 ? n / 100 : n;
+  return rate >= 0.5 && rate <= 1 ? rate : undefined;
+}
+
 // What the config falls back to with no override of its own (GET /api/batch).
 type InheritedThreshold = {
   space: string;
@@ -166,6 +182,12 @@ export function EvalSettings() {
   // Empty = no override. `inherited` is what that empty box resolves to.
   const [threshold, setThreshold] = useState("");
   const [inherited, setInherited] = useState<InheritedThreshold | null>(null);
+  // Calibration precision target override, same TEXT-then-parse handling as the
+  // threshold. Empty = inherit the global 0.99. Deliberately NOT gated on
+  // `serve`, unlike the threshold: this governs the CALIBRATION sweeps, which are
+  // how you decide whether serving is safe to switch on in the first place, so
+  // hiding it until serving is on would hide it exactly when it's needed.
+  const [acceptTarget, setAcceptTarget] = useState("");
   // Cache-KEY model: the status the server resolved, plus the picker's value
   // ("" = inherit the global default). Held separately from `savings` because
   // the two are read back together after a save — a key-model change moves
@@ -263,6 +285,8 @@ export function EvalSettings() {
           // collision-floor panel meanwhile shows up here.
           const t = bdata.savings.semanticCache.threshold;
           setThreshold(t === null ? "" : String(t));
+          const at = bdata.savings.semanticCache.acceptTarget;
+          setAcceptTarget(at === null ? "" : String(at));
         }
       } catch {
         /* leave defaults — the Savings section still renders */
@@ -357,6 +381,14 @@ export function EvalSettings() {
         setErr("Match threshold must be a cosine between 0 and 1 (e.g. 0.94), or empty to inherit.");
         return;
       }
+      const parsedTarget = parseAcceptTarget(acceptTarget);
+      if (parsedTarget === undefined) {
+        setErr(
+          "Precision target must be between 0.5 and 1 (e.g. 0.95), or empty to inherit. " +
+            "Below 0.5 would mean accepting that most served answers may be wrong.",
+        );
+        return;
+      }
       const bres = await apiFetch("/api/batch", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -366,6 +398,7 @@ export function EvalSettings() {
           semanticCache: {
             ...savings.semanticCache,
             threshold: parsedThreshold,
+            acceptTarget: parsedTarget,
             // "" = inherit the global default.
             keyModel: keyModel === "" ? null : keyModel,
           },
@@ -1020,6 +1053,67 @@ export function EvalSettings() {
                 </p>
               </div>
             )}
+
+            {/* The precision the CALIBRATION sweeps hold themselves to. Shown
+                whether or not serving is on: it's the dial that decides what τ
+                the sweeps will even recommend, so it's needed before serving is
+                switched on, not after. */}
+            <div className="mt-2 flex flex-col gap-1 pl-3">
+              <div className="flex items-center justify-between gap-2">
+                <Tooltip
+                  align="left"
+                  text={
+                    "Precision the calibration sweeps must hold before they'll " +
+                    "recommend a threshold: of everything served at or above τ, the " +
+                    "share that a judge accepted. Higher = a stricter τ that serves " +
+                    "less; lower = more savings and more wrong answers.\n\n" +
+                    "This is NOT a cosine — it's the rule that DERIVES one. Leave " +
+                    "empty to inherit the global 0.99.\n\n" +
+                    "A high target needs a big judged set to be reachable at all: " +
+                    "clearing 99% while carrying r false positives takes a serve set " +
+                    "of 100r, so on a small set 99% means “zero false positives” " +
+                    "and no threshold gets recommended at all. Appraise → Semantic " +
+                    "caching now says so explicitly when that happens."
+                  }
+                >
+                  <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                    Precision target
+                  </span>
+                </Tooltip>
+                <div className="flex items-center gap-1">
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={acceptTarget}
+                    onChange={(e) => setAcceptTarget(e.target.value)}
+                    placeholder="0.99"
+                    className="w-20 rounded-md border border-zinc-300 bg-white px-2 py-0.5 text-right text-xs tabular-nums text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setAcceptTarget("")}
+                    disabled={acceptTarget.trim() === ""}
+                    className="rounded px-1 text-xs text-zinc-400 cursor-pointer transition-colors hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-30 dark:hover:text-zinc-200"
+                  >
+                    Reset
+                  </button>
+                </div>
+              </div>
+              <p className="text-xs text-zinc-400 dark:text-zinc-500">
+                {acceptTarget.trim() === "" ? (
+                  <>
+                    Inheriting the global <span className="tabular-nums">0.99</span>. Used by the
+                    shadow-judge sweep and the cache-key model leaderboard on Appraise → Semantic
+                    caching.
+                  </>
+                ) : (
+                  <>
+                    Overrides the global <span className="tabular-nums">0.99</span> for this config
+                    only. Reset to inherit again.
+                  </>
+                )}
+              </p>
+            </div>
 
             {inFlightCount > 0 && (
               <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">

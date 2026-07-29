@@ -38,7 +38,7 @@ test("effectiveChoice: each job stands alone — one choice never moves another"
       ingest_embedding: "standard",
       cache_pair_generation: "standard",
     },
-    semanticCache: { serve: false, threshold: null, keyModel: null },
+    semanticCache: { serve: false, threshold: null, keyModel: null, acceptTarget: null },
   };
   assert.equal(effectiveChoice(s, "question_generation"), "batch");
   assert.equal(effectiveChoice(s, "ndcg_ranking"), "standard");
@@ -113,6 +113,36 @@ test("coerceBatchSavings: keyModel override only survives as a non-empty string"
   // no registry to check against (it's import-free by design), so validation is
   // the write path's job and the read path's fallback is resolveKeyModel's.
   assert.equal(km("not-a-real-model"), "not-a-real-model");
+});
+
+test("coerceBatchSavings: acceptTarget override only survives inside [0.5, 1]", () => {
+  const at = (raw: unknown) => coerceBatchSavings({ semanticCache: { acceptTarget: raw } })
+    .semanticCache.acceptTarget;
+
+  assert.equal(at(0.95), 0.95);
+  assert.equal(at(0.9), 0.9);
+  // Both endpoints are real settings. 1 is not "unset" — it demands a perfectly
+  // clean served prefix, which is what a small judged set enforces anyway.
+  assert.equal(at(0.5), 0.5);
+  assert.equal(at(1), 1);
+
+  // Absent (every row written before this field existed) and explicit null mean
+  // INHERIT the global 0.99.
+  assert.equal(
+    coerceBatchSavings({ semanticCache: { serve: true } }).semanticCache.acceptTarget,
+    null,
+  );
+  assert.equal(at(null), null);
+  assert.equal(at("0.95"), null);
+  assert.equal(at(Number.NaN), null);
+
+  // Out of band means INHERIT, not clamp. Below 0.5 the sweep would be told a
+  // majority-wrong served set is acceptable — no caller means that, so the
+  // global target takes over rather than the number reaching the sweep.
+  assert.equal(at(0.4), null);
+  assert.equal(at(0), null);
+  assert.equal(at(1.5), null);
+  assert.equal(at(-1), null);
 });
 
 // --- migration off the two leg-grouped shapes ------------------------------

@@ -26,11 +26,17 @@ import type {
 
 import { emitRecommendation } from "./events";
 
+// Deliberately does NOT name the target: it's a per-config setting now
+// (batch_savings.semanticCache.acceptTarget), so a number baked in here would be
+// wrong for any config holding an override. The live value — and whose it is —
+// travels on the report and is rendered below the curve.
 const ABOUT =
   "Judge recorded would-hit events — does the stored answer acceptably answer " +
   "the new question? — then sweep the labels for the lowest threshold whose " +
-  `served set keeps acceptance ≥ ${config.semanticCache.acceptTarget}.\n\n` +
+  "served set still keeps acceptance at or above the precision target.\n\n" +
   "Events are judged on demand, not as they arrive.";
+
+const pctOf = (n: number) => `${(n * 100).toFixed(1)}%`;
 
 const btn =
   "rounded-md border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800";
@@ -273,6 +279,47 @@ export function ShadowJudgePanel() {
               </span>
             )}
           </div>
+
+          {/* WHY there's no τ. Without this the panel shows a dash and the target
+              line on the chart, leaving "is my data too small or my target too
+              strict?" to be worked out by hand — and those have opposite fixes. */}
+          {curve && rec === null && curve.attainability.blocker !== "no-events" && (
+            <p className="rounded bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+              {curve.attainability.blocker === "below-min-samples" ? (
+                <>
+                  No τ yet: {curve.totalJudged} judged never fills a serve set of{" "}
+                  {curve.minSamples}, so {pctOf(curve.target)} was never tested. Judge more
+                  events.
+                </>
+              ) : (
+                <>
+                  No τ at {pctOf(curve.target)}: the closest serve set held{" "}
+                  <span className="tabular-nums">{curve.attainability.bestRateAt!.n}</span> events
+                  at <span className="tabular-nums">{pctOf(curve.attainability.bestRate!)}</span>{" "}
+                  ({curve.attainability.rejectsInBest} rejected).
+                  {curve.attainability.requiredN !== null ? (
+                    <>
+                      {" "}
+                      Clearing {pctOf(curve.target)} with {curve.attainability.rejectsInBest}{" "}
+                      rejected needs{" "}
+                      <span className="tabular-nums">{curve.attainability.requiredN}</span> events
+                      at or above τ — judge more, or lower the target for{" "}
+                      <span className="font-mono">{curve.targetSource.configLabel}</span> in
+                      Settings → Savings.
+                    </>
+                  ) : (
+                    <>
+                      {" "}
+                      At {pctOf(curve.target)} no serve set size forgives a single reject, so only
+                      a perfectly clean prefix yields a τ. Lower the target for{" "}
+                      <span className="font-mono">{curve.targetSource.configLabel}</span> in
+                      Settings → Savings.
+                    </>
+                  )}
+                </>
+              )}
+            </p>
+          )}
 
           <HumanQueue events={events} onVerdict={humanVerdict} />
         </>

@@ -16,6 +16,8 @@ import { createHash } from "node:crypto";
 import { config } from "@/lib/config";
 import { sql } from "@/lib/db";
 import { activeConfig, type ResolvedConfig } from "@/lib/rag/activeConfig";
+import { getBatchSavings } from "@/lib/rag/batchStore";
+import { getConfig } from "@/lib/rag/configStore";
 import { embedQueryCached } from "@/lib/rag/embedCache";
 import { EMBEDDING_MODELS } from "@/lib/rag/embeddingModels";
 import type { EfficacyResult } from "@/lib/rag/efficacyGate";
@@ -142,6 +144,51 @@ export function resolveKeyModel(override: string | null): string {
     );
   }
   return config.semanticCache.keyModel;
+}
+
+// --- the calibration precision target --------------------------------------
+
+// The precision the calibration sweeps hold themselves to. Two layers, same
+// shape as resolveKeyModel:
+//
+//   configs.batch_savings.semanticCache.acceptTarget  (per-config override)
+//     ?? config.semanticCache.acceptTarget            (global default, 0.99)
+//
+// This is a PROBABILITY, not a cosine: it's the rule that derives τ from judged
+// evidence, where `threshold` is a hand-set τ. Both sweeps take it as a
+// PARAMETER rather than reading it here (see the note on semanticCacheLookup) —
+// the pages that host them are not config-scoped, so a target read deep in the
+// stack would silently be the Default config's. Resolving at the route and
+// passing it down keeps "whose setting is this?" answerable.
+export function resolveAcceptTarget(override: number | null): number {
+  return override ?? config.semanticCache.acceptTarget;
+}
+
+// The target in force plus where it came from, so a sweep can report the number
+// it held itself to AND whose setting that was. Needed because /appraise/
+// semantic-cache is NOT under /c/<configId>: apiFetch sends no configId there
+// (lib/http/client.ts), so the scoped config is the Default one, and a bare
+// "precision held at 99%" would hide which config's dial produced it.
+export type EffectiveAcceptTarget = {
+  target: number;
+  source: "config" | "default";
+  configId: string;
+  configLabel: string;
+};
+
+// Resolve the target for the CURRENTLY SCOPED config. Call this at the route
+// (inside withRequestConfig) and hand the result to the sweep, so the sweep
+// stays a pure function of its inputs and the response can name the owner.
+export async function scopedAcceptTarget(): Promise<EffectiveAcceptTarget> {
+  const { id } = activeConfig();
+  const [savings, cfg] = await Promise.all([getBatchSavings(id), getConfig(id)]);
+  const override = savings.semanticCache.acceptTarget;
+  return {
+    target: resolveAcceptTarget(override),
+    source: override === null ? "default" : "config",
+    configId: id,
+    configLabel: cfg?.label ?? "config",
+  };
 }
 
 // Where an effective threshold came from — surfaced to the UI so a number is

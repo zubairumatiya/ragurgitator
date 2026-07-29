@@ -318,6 +318,133 @@ test("calibrateFromJudged: no recommendation below the minimum sample size", () 
   assert.equal(r.recommended, null);
 });
 
+// --- attainability: WHY there is no τ ---------------------------------------
+// A bare `recommended: null` reads as "this model is bad" when it usually means
+// "the target can't be reached on a set this size". keyModelSweep ranks on
+// recall@τ and silently falls back to AUC when every recall is null, so the
+// distinction has to be reportable rather than inferred.
+
+test("attainability: a recommendation leaves nothing to explain", () => {
+  const events = [
+    { sim: 0.98, verdict: "accept" as const },
+    { sim: 0.95, verdict: "accept" as const },
+    { sim: 0.9, verdict: "accept" as const },
+  ];
+  const r = calibrateFromJudged(events, 0.9, 1);
+  assert.equal(r.recommended, 0.9);
+  assert.equal(r.attainability.blocker, null);
+  // requiredN is only for a FAILED prefix; a clean best prefix has no reject
+  // count to forgive, so there is no size to demand.
+  assert.equal(r.attainability.requiredN, null);
+  assert.equal(r.attainability.rejectsInBest, 0);
+});
+
+test("attainability: nothing judged is distinguished from judged-but-short", () => {
+  const empty = calibrateFromJudged([], 0.99, 20);
+  assert.equal(empty.attainability.blocker, "no-events");
+  assert.equal(empty.attainability.bestRate, null);
+  assert.equal(empty.attainability.bestRateAt, null);
+
+  // Judged, but no prefix ever reaches minSamples — so no prefix was ever
+  // ELIGIBLE. That's a "go label more", not a "the target is too strict".
+  const short = calibrateFromJudged(
+    [
+      { sim: 0.98, verdict: "accept" as const },
+      { sim: 0.95, verdict: "accept" as const },
+    ],
+    0.99,
+    20,
+  );
+  assert.equal(short.attainability.blocker, "below-min-samples");
+  assert.equal(short.attainability.bestRate, null);
+  assert.equal(short.attainability.requiredN, null);
+});
+
+test("attainability: 0.99 on a small set reports the n it would need", () => {
+  // 20 events, one reject: the best eligible prefix is the whole set at 19/20 =
+  // 0.95. To clear 0.99 while still carrying that 1 reject the prefix would have
+  // to hold n ≥ 1/(1−0.99) = 100 events. This is the exact case that makes 0.99
+  // mean "zero false positives" on a small judged set.
+  const events = [
+    ...Array.from({ length: 19 }, (_, i) => ({
+      sim: 0.99 - i * 0.001,
+      verdict: "accept" as const,
+    })),
+    { sim: 0.9, verdict: "reject" as const },
+  ];
+  const r = calibrateFromJudged(events, 0.99, 20);
+  assert.equal(r.recommended, null);
+  assert.equal(r.attainability.blocker, "target-unreachable");
+  assert.ok(Math.abs(r.attainability.bestRate! - 0.95) < 1e-9);
+  assert.equal(r.attainability.bestRateAt!.n, 20);
+  assert.equal(r.attainability.rejectsInBest, 1);
+  assert.equal(r.attainability.requiredN, 100);
+
+  // Same events, looser target: 0.95 is reachable, so the blocker clears and the
+  // recommendation appears. This is the knob the per-config override turns.
+  const looser = calibrateFromJudged(events, 0.95, 20);
+  assert.equal(looser.recommended, 0.9);
+  assert.equal(looser.attainability.blocker, null);
+});
+
+test("attainability: requiredN scales with the reject count, not the set size", () => {
+  // Three rejects at 0.99 → n ≥ 3/(1−0.99) = 300, regardless of how few events
+  // exist. The number answers "how big would this have to get", so it must not
+  // be capped at what's already there.
+  const events = [
+    ...Array.from({ length: 17 }, (_, i) => ({
+      sim: 0.99 - i * 0.001,
+      verdict: "accept" as const,
+    })),
+    { sim: 0.9, verdict: "reject" as const },
+    { sim: 0.89, verdict: "reject" as const },
+    { sim: 0.88, verdict: "reject" as const },
+  ];
+  const r = calibrateFromJudged(events, 0.99, 20);
+  assert.equal(r.attainability.blocker, "target-unreachable");
+  assert.equal(r.attainability.rejectsInBest, 3);
+  assert.equal(r.attainability.requiredN, 300);
+});
+
+test("attainability: target 1.0 states no requiredN — no prefix forgives a reject", () => {
+  // At target 1 the inversion n ≥ r/(1−target) divides by zero. Infinity would be
+  // arithmetically true but useless to render, so it's reported as unstatable.
+  const events = [
+    ...Array.from({ length: 19 }, (_, i) => ({
+      sim: 0.99 - i * 0.001,
+      verdict: "accept" as const,
+    })),
+    { sim: 0.9, verdict: "reject" as const },
+  ];
+  const r = calibrateFromJudged(events, 1, 20);
+  assert.equal(r.recommended, null);
+  assert.equal(r.attainability.blocker, "target-unreachable");
+  assert.equal(r.attainability.rejectsInBest, 1);
+  assert.equal(r.attainability.requiredN, null);
+});
+
+test("attainability: the best prefix is a prefix the sweep would have considered", () => {
+  // A mid-tie-group prefix can show a flattering rate the sweep can never serve
+  // (see the tie-boundary tests above). bestRate must use the same eligibility
+  // predicate, or the explanation would cite an unservable number: here the
+  // three 0.90 events straddle the crossing, so the eligible boundaries are
+  // n=1 (1/1) and n=4 (3/4) — never the 2/2 or 3/3 mid-group prefixes at a sim
+  // whose group also holds a reject.
+  const events = [
+    { sim: 0.98, verdict: "accept" as const },
+    { sim: 0.9, verdict: "accept" as const },
+    { sim: 0.9, verdict: "accept" as const },
+    { sim: 0.9, verdict: "reject" as const },
+  ];
+  const r = calibrateFromJudged(events, 0.99, 2);
+  assert.equal(r.recommended, null);
+  assert.equal(r.attainability.blocker, "target-unreachable");
+  // n=4 (3/4 = 0.75) is the only eligible boundary at minSamples 2 — the n=1
+  // boundary is below it, and no boundary sits mid-group.
+  assert.equal(r.attainability.bestRateAt!.n, 4);
+  assert.ok(Math.abs(r.attainability.bestRate! - 0.75) < 1e-9);
+});
+
 // --- recall (coverage) — the half the sweep never computed -------------------
 
 test("calibrateFromJudged: coverage is the share of ALL accepts the prefix serves", () => {

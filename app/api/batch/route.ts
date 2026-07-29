@@ -75,14 +75,19 @@ const Body = z.object({
   // Saver-mode toggle (0032) — the FrugalGPT cascade on/off for this config. Not
   // part of BatchSavings; written to configs.cascade_enabled separately.
   cascadeEnabled: z.boolean().optional(),
-  // `threshold` and `keyModel` are both tri-state and the distinction matters:
-  // omitted = leave the override as it is, null = clear it (fall back to the
-  // global/space value), a value = pin this config to it.
+  // `threshold`, `keyModel` and `acceptTarget` are all tri-state and the
+  // distinction matters: omitted = leave the override as it is, null = clear it
+  // (fall back to the global/space value), a value = pin this config to it.
   semanticCache: z
     .object({
       serve: z.boolean().optional(),
       threshold: z.number().min(0).max(1).nullable().optional(),
       keyModel: z.string().min(1).nullable().optional(),
+      // Floor of 0.5 matches coerceAcceptTarget in lib/batch/types.ts. Enforcing
+      // it HERE too is what makes a bad value an error instead of a silent
+      // discard: the store would coerce 0.3 to null (inherit) and the number
+      // would just vanish on the next read.
+      acceptTarget: z.number().min(0.5).max(1).nullable().optional(),
     })
     .optional(),
   // Acknowledges the uncalibrated-space refusal below. Only meaningful

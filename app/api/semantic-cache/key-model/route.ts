@@ -40,6 +40,7 @@ import {
   backfillKeyModel,
   keyModelStatus,
   resolveKeyModel,
+  scopedAcceptTarget,
   uncalibratedKeyModelSpace,
 } from "@/lib/rag/semanticCache";
 
@@ -93,7 +94,9 @@ export async function POST(request: Request) {
   return withRequestConfig(request, async () => {
     try {
       if (data.action === "sweep") {
-        return Response.json(await runKeyModelSweep(data.candidates));
+        return Response.json(
+          await runKeyModelSweep(await scopedAcceptTarget(), data.candidates),
+        );
       }
 
       if (data.action === "backfill") {

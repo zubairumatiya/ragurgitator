@@ -69,7 +69,26 @@ export type BatchSavings = {
   // keyModel and docs/semantic-cache-key-model-plan.md, Phase 1). null =
   // inherit the global default, which is the norm. Resolution order lives in
   // semanticCache.resolveKeyModel.
-  semanticCache: { serve: boolean; threshold: number | null; keyModel: string | null };
+  //
+  // `acceptTarget` is this config's OVERRIDE of the PRECISION the calibration
+  // sweeps hold themselves to — P(accept | sim ≥ τ) — not a cosine. null =
+  // inherit config.semanticCache.acceptTarget (0.99). It is the safety dial:
+  // raising it picks a stricter τ that serves less, lowering it serves more and
+  // admits more wrong answers. Separate from `threshold` on purpose — that one
+  // sets τ by hand, this one sets the RULE that derives τ from judged evidence.
+  //
+  // Worth knowing before turning it down: the target is only reachable at all
+  // when the served prefix is big enough for it. Clearing 0.99 with r rejects
+  // in the prefix needs n ≥ 100r, so on a small judged set 0.99 means "zero
+  // false positives" and no τ is recommended at all. calibrateFromJudged
+  // reports that as an attainability blocker rather than a bare null — see
+  // semanticCacheCore.
+  semanticCache: {
+    serve: boolean;
+    threshold: number | null;
+    keyModel: string | null;
+    acceptTarget: number | null;
+  };
 };
 
 export const DEFAULT_BATCH_SAVINGS: BatchSavings = {
@@ -80,7 +99,7 @@ export const DEFAULT_BATCH_SAVINGS: BatchSavings = {
     ingest_embedding: "standard",
     cache_pair_generation: "standard",
   },
-  semanticCache: { serve: false, threshold: null, keyModel: null },
+  semanticCache: { serve: false, threshold: null, keyModel: null, acceptTarget: null },
 };
 
 // The effective choice for a kind. This is THE resolver every launch point calls
@@ -99,7 +118,12 @@ type LegacyBatchSavings = {
   mode?: unknown; // 'bulk' | 'individual' in the oldest shape, absent after
   bulk?: Partial<Record<BatchLeg, unknown>>;
   jobs?: Partial<Record<JobKind, unknown>>;
-  semanticCache?: { serve?: unknown; threshold?: unknown; keyModel?: unknown };
+  semanticCache?: {
+    serve?: unknown;
+    threshold?: unknown;
+    keyModel?: unknown;
+    acceptTarget?: unknown;
+  };
 };
 
 // Tolerant coercion of an unknown jsonb blob (or a partial patch) into a full
@@ -138,6 +162,22 @@ function coerceKeyModel(v: unknown): string | null {
   return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
 }
 
+// A precision-target override is only honoured inside [0.5, 1]. The upper bound
+// is definitional (a probability), but the LOWER bound is a judgement: below 0.5
+// the sweep would be told "most of what you serve may be wrong is acceptable",
+// which no caller means, and the value reaching the sweep silently would collapse
+// τ toward serving everything. Out of band — like every other invalid value here
+// — means INHERIT, so the global 0.99 takes over rather than an unusable number
+// deciding what gets served.
+//
+// 1 IS allowed and is not the same as "unset": it demands a perfectly clean
+// served prefix, which is attainable (and is what a tiny judged set effectively
+// enforces anyway) — it just makes requiredN meaningless, which
+// calibrateFromJudged handles explicitly.
+function coerceAcceptTarget(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0.5 && v <= 1 ? v : null;
+}
+
 export function coerceBatchSavings(raw: unknown): BatchSavings {
   const r = (raw ?? {}) as LegacyBatchSavings;
   const choice = (v: unknown): BatchChoice | null =>
@@ -163,6 +203,7 @@ export function coerceBatchSavings(raw: unknown): BatchSavings {
       serve: r.semanticCache?.serve === true,
       threshold: coerceThreshold(r.semanticCache?.threshold),
       keyModel: coerceKeyModel(r.semanticCache?.keyModel),
+      acceptTarget: coerceAcceptTarget(r.semanticCache?.acceptTarget),
     },
   };
 }

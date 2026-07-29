@@ -50,6 +50,17 @@ const PAIRS_ABOUT =
   "questions. Hard negatives are the point: random distinct questions are " +
   "separated near-perfectly by every model and grade nothing.";
 
+const TARGET_ABOUT =
+  "The precision every model's τ is held to, so their recall numbers are " +
+  "comparable. It's a PER-CONFIG setting (Settings → Savings), but this page " +
+  "isn't scoped to a config tab — so the target shown is the one belonging to " +
+  "the config named here, which is the Default config unless you arrived with " +
+  "one selected.\n\n" +
+  "Raising it picks a stricter τ that serves less; lowering it serves more and " +
+  "admits more wrong answers. Note a high target needs a big judged set to be " +
+  "reachable at all: clearing 99% while carrying r false positives takes a " +
+  "serve set of 100r, so on a small set 99% means “zero false positives”.";
+
 const btn =
   "rounded-md border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 cursor-pointer transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800";
 
@@ -187,13 +198,26 @@ export function KeyModelPanel() {
   // Hard negatives are what makes the table mean anything — a set that's all
   // 'same' grades every model identically at the top of its ranking.
   const noNegatives = pairs !== null && pairs.total > 0 && pairs.different === 0;
-  // NO MODEL PRODUCED A τ. The common cause is a pair set too small for
-  // minSamples, but it also happens on a set that's big enough and simply too
-  // hard — no prefix of it reaches the precision target. Both mean the ranking
-  // has to fall back to AUC, and saying which is the difference between "get
-  // more data" and "your negatives are harder than real traffic".
+  // NO MODEL PRODUCED A τ, which silently demotes the whole table to an AUC
+  // ranking (see the sort in keyModelSweep) — so it has to say WHY. The reason
+  // comes from the sweep's own attainability report rather than being guessed
+  // from the pair count: "too few pairs" and "the target is out of reach on this
+  // set" are the difference between get-more-data and lower-the-target, and only
+  // the sweep knows which prefix it actually got to consider.
   const noThresholds = sweep !== null && sweep.rows.every((r) => r.threshold === null);
-  const tooFewPairs = sweep !== null && sweep.pairs.total < sweep.minSamples;
+  const scoredRows = sweep?.rows.filter((r) => r.calibration !== null) ?? [];
+  // No eligible prefix ANYWHERE means the set never reached minSamples — the
+  // target was never even tested, so pointing at it would be misleading.
+  const tooFewPairs =
+    scoredRows.length > 0 &&
+    scoredRows.every((r) => r.calibration!.attainability.blocker !== "target-unreachable");
+  // The closest any model got, and what the target would have cost it. Ranked by
+  // achieved precision: this is the "you asked for 99%, the best model managed
+  // 95% over 20 pairs, and 99% with that one reject needs n ≥ 100" line.
+  const closest = scoredRows
+    .filter((r) => r.calibration!.attainability.bestRate !== null)
+    .sort((a, b) => b.calibration!.attainability.bestRate! - a.calibration!.attainability.bestRate!)[0];
+  const closestAt = closest?.calibration!.attainability;
 
   return (
     <section className="flex flex-col gap-3">
@@ -275,25 +299,69 @@ export function KeyModelPanel() {
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
             {sweep.pairs.total} pairs ({sweep.pairs.shadow} shadow / {sweep.pairs.generated}{" "}
             generated · {sweep.pairs.same} same / {sweep.pairs.different} different) · precision
-            held at <span className="tabular-nums">{pct(sweep.target)}</span>
+            held at <span className="tabular-nums">{pct(sweep.target)}</span>{" "}
+            <Tooltip align="left" text={TARGET_ABOUT}>
+              <span className="text-zinc-400 underline decoration-dotted underline-offset-2">
+                from{" "}
+                <span className="font-mono">{sweep.targetSource.configLabel}</span>
+                {sweep.targetSource.source === "config" ? " (override)" : " (global default)"}
+              </span>
+            </Tooltip>
           </p>
 
           {noThresholds && (
             <p className="rounded bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
               {tooFewPairs ? (
                 <>
-                  No model produced a τ: {sweep.pairs.total} pairs is under the{" "}
-                  {sweep.minSamples}-sample minimum calibration needs. Generate more pairs —
-                  until then only AUC is meaningful, and it&apos;s the tiebreak, not the
-                  objective.
+                  No model produced a τ: {sweep.pairs.total} pairs never fills a serve set of{" "}
+                  {sweep.minSamples}, the minimum calibration needs, so {pct(sweep.target)} was
+                  never actually tested. Generate more pairs — until then only AUC is meaningful,
+                  and it&apos;s the tiebreak, not the objective.
                 </>
               ) : (
                 <>
                   No model reached {pct(sweep.target)} precision on any serve set of{" "}
-                  {sweep.minSamples}+ pairs. The pair set is hard — likely harder than real
-                  traffic, since every negative was written to sit right next to its origin
-                  question. Rank by AUC for now, and read these as a floor rather than as what
-                  the cache would actually do.
+                  {sweep.minSamples}+ pairs.
+                  {closestAt && (
+                    <>
+                      {" "}
+                      Closest was <span className="font-mono">{closest.model}</span> at{" "}
+                      <span className="tabular-nums">{pct(closestAt.bestRate)}</span> over{" "}
+                      {closestAt.bestRateAt!.n} pairs
+                      {closestAt.rejectsInBest > 0 && (
+                        <>
+                          {" "}
+                          ({closestAt.rejectsInBest} false{" "}
+                          {closestAt.rejectsInBest === 1 ? "positive" : "positives"})
+                        </>
+                      )}
+                      .
+                      {closestAt.requiredN !== null ? (
+                        <>
+                          {" "}
+                          Clearing {pct(sweep.target)} while carrying{" "}
+                          {closestAt.rejectsInBest} needs a serve set of{" "}
+                          <span className="tabular-nums">{closestAt.requiredN}</span> — so at this
+                          size the target means &ldquo;zero false positives&rdquo;. Either grow
+                          the pair set past that, or lower the target for{" "}
+                          <span className="font-mono">{sweep.targetSource.configLabel}</span> in
+                          Settings → Savings.
+                        </>
+                      ) : (
+                        <>
+                          {" "}
+                          At a {pct(sweep.target)} target no serve set size forgives a single
+                          false positive, so only a perfectly clean prefix can ever produce a τ.
+                          Lower the target for{" "}
+                          <span className="font-mono">{sweep.targetSource.configLabel}</span> in
+                          Settings → Savings.
+                        </>
+                      )}
+                    </>
+                  )}{" "}
+                  The pair set is also harder than real traffic — every negative was written to
+                  sit right next to its origin question — so read these as a floor rather than as
+                  what the cache would actually do.
                 </>
               )}
             </p>
