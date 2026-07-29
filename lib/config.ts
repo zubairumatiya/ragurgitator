@@ -207,12 +207,20 @@ export const HIGH_NDCG = 0.7;
 // the config's base model and any provider whose enabling env var is unset
 // (isProviderAvailable — keys for API providers, LOCAL_EMBEDDINGS for local),
 // so entries here are candidates, not guarantees.
+// The domain-tuned Voyage models (code/finance/law) sit in the Voyage band at
+// their own price. Each is its own vector space, so unlike the voyage-4 family
+// an override under one costs a fusion lane at retrieval — the Settings
+// checklist labels that, and unchecking a space is how you opt out.
 export const autotuneModelLadder: string[] = [
   "mxbai-embed-large",
   "bge-m3",
   "voyage-4-lite",
   "voyage-4",
   "voyage-4-large",
+  "voyage-code-2",
+  "voyage-finance-2",
+  "voyage-law-2",
+  "voyage-code-3",
   "text-embedding-3-large",
   "embed-v4",
 ];
