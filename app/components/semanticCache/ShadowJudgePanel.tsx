@@ -14,7 +14,6 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { InfoDot } from "@/app/components/InfoDot";
 import { config } from "@/lib/config";
 import { apiFetch } from "@/lib/http/client";
 import type {
@@ -25,6 +24,7 @@ import type {
 } from "@/lib/rag/semanticCacheCalibration";
 
 import { emitRecommendation } from "./events";
+import { BTN, NOTE_AMBER, Panel, SELECT } from "./Panel";
 
 // Deliberately does NOT name the target: it's a per-config setting now
 // (batch_savings.semanticCache.acceptTarget), so a number baked in here would be
@@ -38,10 +38,6 @@ const ABOUT =
 
 const pctOf = (n: number) => `${(n * 100).toFixed(1)}%`;
 
-const btn =
-  "rounded-md border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800";
-const select =
-  "rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300";
 const MODELS = config.semanticCache.judgeModelOptions;
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 
@@ -160,12 +156,31 @@ export function ShadowJudgePanel() {
   const rec = curve?.recommended ?? null;
 
   return (
-    <section className="flex flex-col gap-3 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
-      <h2 className="flex items-center gap-1.5 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
-        Shadow judge
-        <InfoDot text={ABOUT} />
-      </h2>
-
+    <Panel
+      step={3}
+      title="Shadow judge"
+      about={ABOUT}
+      subtitle="Costs judge tokens — refines a floor that's already in the right neighbourhood."
+      // The space picker doubles as this panel's scope AND its progress readout
+      // ("12/40 judged"), so it belongs on the heading row like the collision
+      // floor's config picker.
+      action={
+        spaces.length > 0 ? (
+          <select
+            value={space}
+            onChange={(e) => setSpace(e.target.value)}
+            aria-label="Space"
+            className={SELECT}
+          >
+            {spaces.map((s) => (
+              <option key={s.space} value={s.space}>
+                {s.space} ({s.judged}/{s.total} judged)
+              </option>
+            ))}
+          </select>
+        ) : undefined
+      }
+    >
       {spaces.length === 0 ? (
         <p className="text-xs text-zinc-400">
           No shadow events yet. They accrue as questions are asked against a populated
@@ -173,30 +188,28 @@ export function ShadowJudgePanel() {
         </p>
       ) : (
         <>
-          <div className="flex flex-wrap items-end gap-3">
-            <Field label="Space">
-              <select value={space} onChange={(e) => setSpace(e.target.value)} className={select}>
-                {spaces.map((s) => (
-                  <option key={s.space} value={s.space}>
-                    {s.space} ({s.judged}/{s.total} judged)
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Bulk model">
-              <select value={bulkModel} onChange={(e) => setBulkModel(e.target.value)} className={select}>
-                {MODELS.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Boundary model">
+          {/* The two judging runs and the model each uses, paired: a button next
+              to the select that governs it, instead of a row of three unlabelled
+              dropdowns above a row of two buttons with no visible link between
+              them. */}
+          <div className="flex flex-col gap-2 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                className={`${BTN} min-w-40`}
+                disabled={busy !== null || !current || current.total === current.judged}
+                onClick={() =>
+                  runJudge("bulk", { mode: "llm", space, model: bulkModel, limit: 100 })
+                }
+              >
+                {busy === "bulk" ? "Judging…" : "Run judge (bulk)"}
+              </button>
+              <span className="text-xs text-zinc-400">with</span>
               <select
-                value={boundaryModel}
-                onChange={(e) => setBoundaryModel(e.target.value)}
-                className={select}
+                value={bulkModel}
+                onChange={(e) => setBulkModel(e.target.value)}
+                aria-label="Bulk model"
+                className={SELECT}
               >
                 {MODELS.map((m) => (
                   <option key={m} value={m}>
@@ -204,79 +217,90 @@ export function ShadowJudgePanel() {
                   </option>
                 ))}
               </select>
-            </Field>
-          </div>
+            </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              className={btn}
-              disabled={busy !== null || !current || current.total === current.judged}
-              onClick={() =>
-                runJudge("bulk", { mode: "llm", space, model: bulkModel, limit: 100 })
-              }
-            >
-              {busy === "bulk" ? "Judging…" : "Run judge (bulk)"}
-            </button>
-            <button
-              type="button"
-              className={btn}
-              disabled={busy !== null || rec === null}
-              title={
-                rec === null
-                  ? "Run the bulk pass first to locate the boundary"
-                  : `Re-judge sim ∈ [${clamp01(rec - 0.03).toFixed(2)}, ${clamp01(rec + 0.03).toFixed(2)}]`
-              }
-              onClick={() =>
-                rec !== null &&
-                runJudge("boundary", {
-                  mode: "llm",
-                  space,
-                  model: boundaryModel,
-                  rejudge: true,
-                  simMin: clamp01(rec - 0.03),
-                  simMax: clamp01(rec + 0.03),
-                  limit: 100,
-                })
-              }
-            >
-              {busy === "boundary" ? "Refining…" : "Refine boundary"}
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                className={`${BTN} min-w-40`}
+                disabled={busy !== null || rec === null}
+                title={
+                  rec === null
+                    ? "Run the bulk pass first to locate the boundary"
+                    : `Re-judge sim ∈ [${clamp01(rec - 0.03).toFixed(2)}, ${clamp01(rec + 0.03).toFixed(2)}]`
+                }
+                onClick={() =>
+                  rec !== null &&
+                  runJudge("boundary", {
+                    mode: "llm",
+                    space,
+                    model: boundaryModel,
+                    rejudge: true,
+                    simMin: clamp01(rec - 0.03),
+                    simMax: clamp01(rec + 0.03),
+                    limit: 100,
+                  })
+                }
+              >
+                {busy === "boundary" ? "Refining…" : "Refine boundary"}
+              </button>
+              <span className="text-xs text-zinc-400">with</span>
+              <select
+                value={boundaryModel}
+                onChange={(e) => setBoundaryModel(e.target.value)}
+                aria-label="Boundary model"
+                className={SELECT}
+              >
+                {MODELS.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             {lastRun && (
-              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
                 {lastRun.model}: {lastRun.accepted} accept · {lastRun.rejected} reject
                 {lastRun.skipped ? ` · ${lastRun.skipped} skipped` : ""}
-              </span>
+              </p>
             )}
           </div>
 
           {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
 
-          <CalibrationCurve curve={curve} />
-
-          <div className="flex flex-wrap items-center gap-3">
-            <span className="text-sm text-zinc-700 dark:text-zinc-300">
-              Recommended τ:{" "}
-              <span className="font-semibold tabular-nums text-green-700 dark:text-green-400">
-                {rec === null ? "—" : rec.toFixed(4)}
+          {/* The curve and the number it produces, in one block: the τ readout
+              was floating as a bare sentence under the chart, reading as a
+              caption rather than as the panel's output. */}
+          <div className="flex flex-col gap-3 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+            <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+              <span className="flex items-baseline gap-2">
+                <span className="text-xs text-zinc-500 dark:text-zinc-400">Recommended τ</span>
+                <span className="text-lg font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
+                  {rec === null ? "—" : rec.toFixed(4)}
+                </span>
               </span>
               {curve && (
-                <span className="ml-2 text-xs text-zinc-400">
-                  ({curve.totalJudged} judged
+                <span className="text-xs text-zinc-400">
+                  {curve.totalJudged} judged
                   {curve.overallAcceptRate !== null
                     ? `, ${(curve.overallAcceptRate * 100).toFixed(0)}% accept`
                     : ""}
-                  ; needs ≥ {curve.minSamples})
+                  ; needs ≥ {curve.minSamples}
                 </span>
               )}
-            </span>
-            {/* Points UP to the apply box, on the Collision floor heading row at
-                the top of the page. */}
+            </div>
+
+            <CalibrationCurve curve={curve} />
+
+            {/* Points UP to the apply box, in the Collision floor panel's footer
+                at the top of the page. */}
             {rec !== null && (
-              <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                Sent to the <strong className="font-medium">Threshold</strong> box on the
-                Collision floor heading row — nothing is live until you apply it there.
-              </span>
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Sent to the <strong className="font-medium">Set threshold</strong> box at the
+                bottom of the Collision floor panel — nothing is live until you apply it
+                there.
+              </p>
             )}
           </div>
 
@@ -284,7 +308,7 @@ export function ShadowJudgePanel() {
               line on the chart, leaving "is my data too small or my target too
               strict?" to be worked out by hand — and those have opposite fixes. */}
           {curve && rec === null && curve.attainability.blocker !== "no-events" && (
-            <p className="rounded bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+            <p className={NOTE_AMBER}>
               {curve.attainability.blocker === "below-min-samples" ? (
                 <>
                   No τ yet: {curve.totalJudged} judged never fills a serve set of{" "}
@@ -324,16 +348,7 @@ export function ShadowJudgePanel() {
           <HumanQueue events={events} onVerdict={humanVerdict} />
         </>
       )}
-    </section>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="flex flex-col gap-1">
-      <span className="text-xs text-zinc-400">{label}</span>
-      {children}
-    </label>
+    </Panel>
   );
 }
 
@@ -426,10 +441,14 @@ function HumanQueue({
       {events.length === 0 && (
         <p className="text-xs text-zinc-400">Nothing unjudged in this space.</p>
       )}
-      {events.map((e) => (
+      {/* Scrolls rather than growing: the queue fetches up to 50 events and each
+          card carries 600 characters of answer, so an unjudged space used to run
+          the page thousands of pixels past the panels below it. */}
+      <div className="flex max-h-[32rem] flex-col gap-2 overflow-y-auto pr-1 empty:hidden">
+        {events.map((e) => (
         <div
           key={e.id}
-          className="flex flex-col gap-2 rounded-md border border-zinc-200 p-3 text-sm dark:border-zinc-800"
+          className="flex shrink-0 flex-col gap-2 rounded-md border border-zinc-200 p-3 text-sm dark:border-zinc-800"
         >
           <div className="flex items-start justify-between gap-3">
             <div className="flex flex-col gap-1">
@@ -467,7 +486,8 @@ function HumanQueue({
             </span>
           </div>
         </div>
-      ))}
+        ))}
+      </div>
     </div>
   );
 }

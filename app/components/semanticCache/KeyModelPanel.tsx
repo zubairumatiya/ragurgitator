@@ -22,13 +22,14 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { InfoDot } from "@/app/components/InfoDot";
 import { Tooltip } from "@/app/components/Tooltip";
+import { config } from "@/lib/config";
 import { apiFetch } from "@/lib/http/client";
 import type { LeaderboardRow, SweepResult } from "@/lib/rag/keyModelSweep";
 import type { PairStats } from "@/lib/rag/semanticCachePairs";
 
 import { SC_CHANGED } from "./events";
+import { BTN, BTN_PRIMARY, NOTE_AMBER, Panel, TABLE_HEAD, TABLE_WRAP, WarnDot } from "./Panel";
 
 const ABOUT =
   "Which embedding model incoming questions are keyed under for the cache " +
@@ -61,11 +62,81 @@ const TARGET_ABOUT =
   "reachable at all: clearing 99% while carrying r false positives takes a " +
   "serve set of 100r, so on a small set 99% means “zero false positives”.";
 
-const btn =
-  "rounded-md border border-zinc-300 px-3 py-1.5 text-sm text-zinc-700 cursor-pointer transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800";
-
 const pct = (n: number | null) => (n === null ? "—" : `${(n * 100).toFixed(1)}%`);
 const num = (n: number | null) => (n === null ? "—" : n.toFixed(4));
+
+// What one origin question costs and yields, so the generate control can price
+// itself before it's clicked. Read from config rather than hard-coded, or the
+// estimate silently lies the day the counts are tuned.
+const PER_Q = config.semanticCache.keyModelSweep.pairsPerQuestion;
+const PAIRS_PER_QUESTION = PER_Q.paraphrase + PER_Q.hardNegative;
+// The inline path's own ceiling (GEN_MAX_LIMIT in semanticCachePairs): a bigger
+// ask is silently clamped there, so the slider must not offer one.
+const GEN_MAX = 200;
+// Its default, and a sane starting position — a run you can watch finish.
+const GEN_DEFAULT = 25;
+
+// The sweep's own account of why the target was out of reach, dug out of the
+// closest model's calibration.
+type Attainability = NonNullable<LeaderboardRow["calibration"]>["attainability"];
+
+// Why no model produced a τ — the whole diagnosis, as tooltip prose.
+//
+// Built as a STRING rather than JSX because it now lives on a hover dot, and
+// deliberately kept in three paragraphs: what happened, what to do about it, and
+// the caveat on reading these numbers at all. "Too few pairs" and "the target is
+// out of reach on this set" have opposite fixes — generate more vs lower the
+// target — which is the entire reason this text exists instead of a bare dash.
+function noThresholdReason(
+  sweep: SweepResult,
+  tooFewPairs: boolean,
+  closest: LeaderboardRow | undefined,
+  at: Attainability | undefined,
+): string {
+  if (tooFewPairs) {
+    return (
+      `No model produced a τ: ${sweep.pairs.total} pairs never fills a serve set of ` +
+      `${sweep.minSamples}, the minimum calibration needs, so ${pct(sweep.target)} was never ` +
+      "actually tested.\n\nGenerate more pairs — until then only AUC is meaningful, and it's " +
+      "the tiebreak, not the objective."
+    );
+  }
+
+  const paras: string[] = [];
+  let headline =
+    `No model reached ${pct(sweep.target)} precision on any serve set of ` +
+    `${sweep.minSamples}+ pairs.`;
+
+  if (closest && at) {
+    const fp =
+      at.rejectsInBest > 0
+        ? ` (${at.rejectsInBest} false ${at.rejectsInBest === 1 ? "positive" : "positives"})`
+        : "";
+    headline +=
+      ` Closest was ${closest.model} at ${pct(at.bestRate)} over ${at.bestRateAt!.n} pairs${fp}.`;
+    paras.push(headline);
+    paras.push(
+      at.requiredN !== null
+        ? `Clearing ${pct(sweep.target)} while carrying ${at.rejectsInBest} needs a serve set ` +
+          `of ${at.requiredN} — so at this size the target means “zero false ` +
+          "positives”. Either grow the pair set past that, or lower the target for " +
+          `${sweep.targetSource.configLabel} in Settings → Savings.`
+        : `At a ${pct(sweep.target)} target no serve set size forgives a single false ` +
+          "positive, so only a perfectly clean prefix can ever produce a τ. Lower the target " +
+          `for ${sweep.targetSource.configLabel} in Settings → Savings.`,
+    );
+  } else {
+    paras.push(headline);
+  }
+
+  paras.push(
+    "The pair set is also harder than real traffic — every negative was written to sit right " +
+      "next to its origin question — so read these as a floor rather than as what the cache " +
+      "would actually do.",
+  );
+
+  return paras.join("\n\n");
+}
 
 type Status = {
   keyModel: string;
@@ -87,6 +158,17 @@ export function KeyModelPanel() {
   const [busy, setBusy] = useState<null | "sweep" | "pairs" | "apply" | "backfill">(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  // How many origin questions the next generate run covers. Null = untouched, so
+  // the default tracks the gap as it shrinks instead of being pinned by an
+  // effect the moment the stats first land.
+  const [genLimit, setGenLimit] = useState<number | null>(null);
+
+  // The generate control's range and current position. Capped at the gap (asking
+  // for more questions than exist just generates the gap) and at the inline
+  // path's own ceiling, so the slider can never promise a run the server will
+  // silently trim.
+  const genMax = Math.min(pairs?.questionsRemaining ?? 0, GEN_MAX);
+  const genQuestions = Math.max(1, Math.min(genLimit ?? GEN_DEFAULT, genMax || 1));
 
   const load = useCallback(() => {
     apiFetch("/api/semantic-cache/key-model")
@@ -151,7 +233,10 @@ export function KeyModelPanel() {
   };
 
   const generate = async () => {
-    const d = await post("pairs", "/api/semantic-cache/pairs", {});
+    // Explicit every time. The route's own default is 25 questions, so the
+    // unlimited-looking button used to quietly do a fraction of the gap and
+    // report a number that looked like a failure.
+    const d = await post("pairs", "/api/semantic-cache/pairs", { limit: genQuestions });
     if (!d) return;
     if (d.mode === "batch") {
       setNote(
@@ -220,65 +305,174 @@ export function KeyModelPanel() {
   const closestAt = closest?.calibration!.attainability;
 
   return (
-    <section className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="flex items-center gap-1.5 text-sm font-semibold text-zinc-700 dark:text-zinc-300">
-          Cache key model
-          <InfoDot text={ABOUT} />
-        </h2>
-        {status && (
+    <Panel
+      step={4}
+      title="Cache key model"
+      about={ABOUT}
+      subtitle="Which space a config reads its threshold FROM — not what it serves at."
+      action={
+        status && (
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            This config keys under <span className="font-mono">{status.keyModel}</span>
+            Keys under <span className="font-mono">{status.keyModel}</span>
             {status.override === null ? " (global default)" : " (override)"} · space{" "}
             <span className="font-mono">{status.threshold.space}</span> serves at{" "}
             <span className="tabular-nums">{status.threshold.threshold.toFixed(3)}</span> (
             {status.threshold.source})
           </p>
-        )}
-      </div>
-
+        )
+      }
+      footer={
+        <>
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="text-zinc-400">Apply</span>
+            <span className="font-mono text-zinc-600 dark:text-zinc-300">
+              {selected ?? "select a row"}
+            </span>
+            <select
+              value={scope}
+              onChange={(e) => setScope(e.target.value as "config" | "all")}
+              aria-label="Apply scope"
+              className="rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
+            >
+              <option value="config">to this config</option>
+              <option value="all">to every config</option>
+            </select>
+            <button
+              type="button"
+              onClick={apply}
+              disabled={busy !== null || !selected}
+              className={BTN_PRIMARY}
+            >
+              {busy === "apply" ? "Applying…" : blocked ? "Apply anyway" : "Apply"}
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-400">
+            <Tooltip
+              align="right"
+              text={
+                "Writes the per-config override. The true global default is " +
+                "config.semanticCache.keyModel in code — “every config” is how you " +
+                "move it without a deploy."
+              }
+            >
+              <span className="underline decoration-dotted underline-offset-2">
+                writes an override
+              </span>
+            </Tooltip>
+            <button
+              type="button"
+              className="underline underline-offset-2 cursor-pointer hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:text-zinc-200"
+              onClick={backfill}
+              disabled={busy !== null}
+              title="Re-embed this config's already-cached questions under the current key model, so they stay matchable after a switch."
+            >
+              {busy === "backfill" ? "Re-keying…" : "Re-key cached questions"}
+            </button>
+          </div>
+        </>
+      }
+    >
       {/* --- the pair set ---------------------------------------------------- */}
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <Tooltip align="left" text={PAIRS_ABOUT}>
-          <span className="text-zinc-500 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
-            Eval pairs
+      {/* The set and the control that grows it, in one bordered block: the two
+          used to be loose rows floating between the heading and the table, which
+          read as page furniture rather than as this panel's inputs. */}
+      <div className="flex flex-col gap-2 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs">
+          <Tooltip align="left" text={PAIRS_ABOUT}>
+            <span className="text-zinc-500 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+              Eval pairs
+            </span>
+          </Tooltip>
+          <span className="tabular-nums text-zinc-600 dark:text-zinc-300">
+            {pairs
+              ? `${pairs.total} generated (${pairs.same} same / ${pairs.different} different)`
+              : "—"}
           </span>
-        </Tooltip>
-        <span className="tabular-nums text-zinc-600 dark:text-zinc-300">
-          {pairs ? `${pairs.total} generated (${pairs.same} same / ${pairs.different} different)` : "—"}
-        </span>
-        {pairs && pairs.questionsRemaining > 0 && (
-          <span className="text-zinc-400">
-            · {pairs.questionsRemaining} eval question
-            {pairs.questionsRemaining === 1 ? "" : "s"} with none yet
-          </span>
+          {pairs && pairs.questionsRemaining > 0 && (
+            <span className="text-zinc-400">
+              · {pairs.questionsRemaining} eval question
+              {pairs.questionsRemaining === 1 ? "" : "s"} with none yet
+            </span>
+          )}
+        </div>
+
+        {/* How MANY questions the next run covers. Generation is the only paid
+            step here, and it's per-question, so the size of the ask is a real
+            decision — one button that took the route's invisible default meant
+            the spend was neither chosen nor visible. */}
+        {genMax > 0 && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <input
+              type="range"
+              min={1}
+              max={genMax}
+              value={genQuestions}
+              onChange={(e) => setGenLimit(Number(e.target.value))}
+              aria-label="Questions to generate pairs for"
+              disabled={busy !== null}
+              className="h-1 w-40 min-w-32 max-w-full cursor-pointer accent-zinc-900 dark:accent-zinc-100"
+            />
+            <span className="text-xs text-zinc-500 dark:text-zinc-400">
+              <span className="font-semibold tabular-nums text-zinc-800 dark:text-zinc-100">
+                {genQuestions}
+              </span>{" "}
+              question{genQuestions === 1 ? "" : "s"} → ~
+              <span className="tabular-nums">{genQuestions * PAIRS_PER_QUESTION}</span> pairs
+            </span>
+            <div className="flex gap-1">
+              {/* The two ends of the range are the answers you actually want —
+                  dragging a slider to its own maximum is a fiddle. */}
+              <button
+                type="button"
+                className="rounded border border-zinc-200 px-1.5 py-0.5 text-[11px] text-zinc-500 cursor-pointer hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                onClick={() => setGenLimit(Math.min(GEN_DEFAULT, genMax))}
+              >
+                {Math.min(GEN_DEFAULT, genMax)}
+              </button>
+              <button
+                type="button"
+                className="rounded border border-zinc-200 px-1.5 py-0.5 text-[11px] text-zinc-500 cursor-pointer hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                onClick={() => setGenLimit(genMax)}
+              >
+                all {genMax}
+              </button>
+            </div>
+            <button
+              type="button"
+              className={BTN}
+              onClick={generate}
+              disabled={busy !== null}
+            >
+              {busy === "pairs" ? "Generating…" : "Generate pairs"}
+            </button>
+          </div>
         )}
-        <button
-          type="button"
-          className={btn}
-          onClick={generate}
-          disabled={busy !== null || (pairs !== null && pairs.questionsRemaining === 0)}
-        >
-          {busy === "pairs" ? "Generating…" : "Generate pairs"}
-        </button>
+        {/* The generate control is gated on knowing the gap, so say so rather
+            than rendering nothing — an empty space where a button was reads as
+            "the feature is gone", not "the count hasn't arrived". */}
+        {pairs === null && <p className="text-xs text-zinc-400">Loading pair stats…</p>}
+        {pairs !== null && pairs.questionsRemaining === 0 && (
+          <p className="text-xs text-zinc-400">
+            Every eval question already has pairs — add eval questions to grow the set.
+          </p>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2 border-t border-zinc-100 pt-2 dark:border-zinc-800">
+          <button type="button" className={BTN} onClick={runSweep} disabled={busy !== null}>
+            {busy === "sweep" ? "Scoring…" : sweep ? "Re-run sweep" : "Run sweep"}
+          </button>
+          <span className="text-xs text-zinc-400">
+            Embedding-only — no LLM calls, and cached, so re-runs are nearly free.
+          </span>
+        </div>
       </div>
 
       {noNegatives && (
-        <p className="rounded bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+        <p className={NOTE_AMBER}>
           Every generated pair is labeled &ldquo;same&rdquo;. Without hard negatives the sweep
           can&apos;t separate models — they&apos;ll all look equally good.
         </p>
       )}
-
-      {/* --- the sweep ------------------------------------------------------- */}
-      <div className="flex flex-wrap items-center gap-2">
-        <button type="button" className={btn} onClick={runSweep} disabled={busy !== null}>
-          {busy === "sweep" ? "Scoring…" : sweep ? "Re-run sweep" : "Run sweep"}
-        </button>
-        <span className="text-xs text-zinc-400">
-          Embedding-only — no LLM calls, and cached, so re-runs are nearly free.
-        </span>
-      </div>
 
       {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
       {note && <p className="text-xs text-green-700 dark:text-green-400">{note}</p>}
@@ -309,72 +503,26 @@ export function KeyModelPanel() {
             </Tooltip>
           </p>
 
+          {/* The τ / Recall@τ / Precision columns are ALL derived from τ, so
+              when no model produces one the table shows three dashed columns and
+              nothing on the page says why. This says why — as a glyph, because
+              the explanation is a paragraph you read once and then have to scroll
+              past on every visit. */}
           {noThresholds && (
-            <p className="rounded bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
-              {tooFewPairs ? (
-                <>
-                  No model produced a τ: {sweep.pairs.total} pairs never fills a serve set of{" "}
-                  {sweep.minSamples}, the minimum calibration needs, so {pct(sweep.target)} was
-                  never actually tested. Generate more pairs — until then only AUC is meaningful,
-                  and it&apos;s the tiebreak, not the objective.
-                </>
-              ) : (
-                <>
-                  No model reached {pct(sweep.target)} precision on any serve set of{" "}
-                  {sweep.minSamples}+ pairs.
-                  {closestAt && (
-                    <>
-                      {" "}
-                      Closest was <span className="font-mono">{closest.model}</span> at{" "}
-                      <span className="tabular-nums">{pct(closestAt.bestRate)}</span> over{" "}
-                      {closestAt.bestRateAt!.n} pairs
-                      {closestAt.rejectsInBest > 0 && (
-                        <>
-                          {" "}
-                          ({closestAt.rejectsInBest} false{" "}
-                          {closestAt.rejectsInBest === 1 ? "positive" : "positives"})
-                        </>
-                      )}
-                      .
-                      {closestAt.requiredN !== null ? (
-                        <>
-                          {" "}
-                          Clearing {pct(sweep.target)} while carrying{" "}
-                          {closestAt.rejectsInBest} needs a serve set of{" "}
-                          <span className="tabular-nums">{closestAt.requiredN}</span> — so at this
-                          size the target means &ldquo;zero false positives&rdquo;. Either grow
-                          the pair set past that, or lower the target for{" "}
-                          <span className="font-mono">{sweep.targetSource.configLabel}</span> in
-                          Settings → Savings.
-                        </>
-                      ) : (
-                        <>
-                          {" "}
-                          At a {pct(sweep.target)} target no serve set size forgives a single
-                          false positive, so only a perfectly clean prefix can ever produce a τ.
-                          Lower the target for{" "}
-                          <span className="font-mono">{sweep.targetSource.configLabel}</span> in
-                          Settings → Savings.
-                        </>
-                      )}
-                    </>
-                  )}{" "}
-                  The pair set is also harder than real traffic — every negative was written to
-                  sit right next to its origin question — so read these as a floor rather than as
-                  what the cache would actually do.
-                </>
-              )}
+            <p className="flex items-center gap-1.5 text-xs text-amber-700 dark:text-amber-400">
+              <WarnDot text={noThresholdReason(sweep, tooFewPairs, closest, closestAt)} />
+              No τ at {pct(sweep.target)} — τ, Recall@τ and Precision are blank below
             </p>
           )}
 
-          <div className="overflow-x-auto">
+          <div className={TABLE_WRAP}>
             <table className="w-full min-w-[46rem] text-left text-sm">
-              <thead className="text-xs uppercase tracking-wide text-zinc-400">
+              <thead className={TABLE_HEAD}>
                 <tr>
-                  <th className="py-1 pr-3 font-medium">Model</th>
-                  <th className="py-1 pr-3 font-medium">Space</th>
-                  <th className="py-1 pr-3 text-right font-medium">τ</th>
-                  <th className="py-1 pr-3 text-right font-medium">
+                  <th className="py-2 pl-4 pr-3 font-medium">Model</th>
+                  <th className="py-2 pr-3 font-medium">Space</th>
+                  <th className="py-2 pr-3 text-right font-medium">τ</th>
+                  <th className="py-2 pr-3 text-right font-medium">
                     <Tooltip
                       align="left"
                       text="Share of servable pairs this model's τ actually catches. The objective."
@@ -384,8 +532,8 @@ export function KeyModelPanel() {
                       </span>
                     </Tooltip>
                   </th>
-                  <th className="py-1 pr-3 text-right font-medium">Precision</th>
-                  <th className="py-1 pr-3 text-right font-medium">
+                  <th className="py-2 pr-3 text-right font-medium">Precision</th>
+                  <th className="py-2 pr-3 text-right font-medium">
                     <Tooltip
                       align="left"
                       text="P(a random same pair outranks a random different pair). Scale-free, so it's the tiebreak — but it grades the whole ranking, and a cache only serves from the top."
@@ -393,8 +541,8 @@ export function KeyModelPanel() {
                       <span className="underline decoration-dotted underline-offset-2">AUC</span>
                     </Tooltip>
                   </th>
-                  <th className="py-1 pr-3 text-right font-medium">Pairs</th>
-                  <th className="py-1 font-medium" />
+                  <th className="py-2 pr-3 text-right font-medium">Pairs</th>
+                  <th className="py-2 pr-4 font-medium" />
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
@@ -417,39 +565,7 @@ export function KeyModelPanel() {
         </div>
       )}
 
-      {/* --- apply / backfill ------------------------------------------------ */}
-      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-zinc-200 pt-2 dark:border-zinc-800">
-        <button type="button" className={btn} onClick={backfill} disabled={busy !== null}>
-          {busy === "backfill" ? "Re-keying…" : "Re-key cached questions"}
-        </button>
-        <span className="text-xs text-zinc-400">Apply</span>
-        <span className="font-mono text-xs text-zinc-600 dark:text-zinc-300">
-          {selected ?? "select a row"}
-        </span>
-        <select
-          value={scope}
-          onChange={(e) => setScope(e.target.value as "config" | "all")}
-          aria-label="Apply scope"
-          className="rounded-md border border-zinc-300 bg-white px-1.5 py-1 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
-        >
-          <option value="config">to this config</option>
-          <option value="all">to every config</option>
-        </select>
-        <button
-          type="button"
-          onClick={apply}
-          disabled={busy !== null || !selected}
-          className="rounded-md bg-black px-3 py-1.5 text-xs font-medium text-white cursor-pointer transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-50 dark:text-black"
-        >
-          {busy === "apply" ? "Applying…" : blocked ? "Apply anyway" : "Apply"}
-        </button>
-      </div>
-      <p className="text-right text-[11px] text-zinc-400">
-        Writes the per-config override. The true global default is{" "}
-        <span className="font-mono">config.semanticCache.keyModel</span> in code — &ldquo;every
-        config&rdquo; is how you move it without a deploy.
-      </p>
-    </section>
+    </Panel>
   );
 }
 
@@ -475,7 +591,7 @@ function Row({
         (dim ? "opacity-50 " : "cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-900 ")
       }
     >
-      <td className="py-1.5 pr-3 font-mono text-xs">
+      <td className="py-1.5 pl-4 pr-3 font-mono text-xs">
         {row.model}
         {current && (
           <span className="ml-1.5 rounded bg-zinc-200 px-1 text-[10px] text-zinc-600 dark:bg-zinc-700 dark:text-zinc-300">
@@ -500,7 +616,7 @@ function Row({
         {row.auc === null ? "—" : row.auc.toFixed(3)}
       </td>
       <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-500">{row.pairsScored}</td>
-      <td className="py-1.5 text-xs text-zinc-400">{row.error ?? row.reason ?? ""}</td>
+      <td className="py-1.5 pr-4 text-xs text-zinc-400">{row.error ?? row.reason ?? ""}</td>
     </tr>
   );
 }

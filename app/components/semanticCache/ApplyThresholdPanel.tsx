@@ -2,10 +2,17 @@
 // Appraise → Semantic caching: THE place a threshold gets written. Every other
 // panel on the page only computes and displays; a number goes live here or
 // nowhere, so there's one control to reason about instead of an apply button per
-// calibration method. Rendered into the Collision floor section's heading row
-// (its `action` slot) — one shared action, kept to heading height rather than
-// given a section of its own, and sitting with the first recommendation you'd
-// apply. The shadow judge, further down the page, recommends into it too.
+// calibration method. Rendered into the Collision floor section's FOOTER (its
+// `action` slot) — one shared action, directly under the first recommendation
+// you'd apply rather than given a section of its own. The shadow judge, further
+// down the page, recommends into it too.
+//
+// A footer strip and not the heading row it used to sit on: there it had to stay
+// heading-height, which meant a nested bordered box wrapped around the controls
+// and every status line ("currently serves at…", the suggestion, a validation
+// complaint) stacked into a narrow right-aligned column above the numbers they
+// were about. Full width instead, controls left and status right, matching the
+// key-model panel's footer so both write controls look and sit the same.
 //
 // The target dropdown picks which LAYER the value lands in:
 //   • a vector-space → semantic_cache_thresholds, inherited by every config on
@@ -27,6 +34,7 @@ import type { ConfigSummary } from "@/lib/rag/configStore";
 import type { ThresholdReport } from "@/lib/rag/semanticCacheCalibration";
 
 import { SC_CHANGED, onRecommendation, type ThresholdRecommendation } from "./events";
+import { BTN_PRIMARY } from "./Panel";
 
 const TARGET_HELP =
   "The cosine a new question must reach against a cached one before its answer " +
@@ -205,14 +213,14 @@ export function ApplyThresholdPanel() {
   };
 
   return (
-    // Sits on the Collision floor heading row, so it has to stay heading-height: the
-    // border hugs the controls, and the status lines hang below without adding
-    // padding of their own (pb-0 + a text block that carries its own leading).
-    <section className="flex w-fit max-w-full flex-col self-end rounded-md border border-zinc-200 p-1.5 dark:border-zinc-800">
+    // A fragment, not a box: the two halves are direct children of the Panel
+    // footer's `justify-between` row, so the controls sit left and the status
+    // text right, on ONE line whenever the card is wide enough for it.
+    <>
       <div className="flex flex-wrap items-center gap-1.5">
         <Tooltip align="left" text={TARGET_HELP}>
           <span className="text-xs font-medium text-zinc-500 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
-            Threshold
+            Set threshold
           </span>
         </Tooltip>
         <input
@@ -226,7 +234,7 @@ export function ApplyThresholdPanel() {
           }}
           placeholder="0.950"
           aria-label="Threshold"
-          className="w-16 rounded-md border border-zinc-300 bg-white px-1.5 py-1 text-right text-xs tabular-nums text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
+          className="w-20 rounded-md border border-zinc-300 bg-white px-2 py-1 text-right text-xs tabular-nums text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
         />
         <span className="text-xs text-zinc-400">to</span>
         <select
@@ -236,7 +244,7 @@ export function ApplyThresholdPanel() {
             setDone(null);
           }}
           aria-label="Apply to"
-          className="max-w-48 rounded-md border border-zinc-300 bg-white px-1.5 py-1 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
+          className="max-w-52 rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
         >
           {spaces.length === 0 && configs.length === 0 && <option value="">Nothing yet</option>}
           {spaces.length > 0 && (
@@ -263,22 +271,25 @@ export function ApplyThresholdPanel() {
           type="button"
           onClick={apply}
           disabled={busy || parsed === null || !target}
-          className="rounded-md bg-black px-2.5 py-1 text-xs font-medium text-white cursor-pointer transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-50 dark:text-black"
+          className={BTN_PRIMARY}
         >
           {busy ? "Applying…" : "Apply"}
         </button>
       </div>
 
-      <div className="flex flex-col gap-0.5 pt-1 text-right text-[11px] leading-snug empty:hidden">
+      {/* Inline and separated by dots rather than stacked: in a full-width strip
+          these are short clauses, and stacking them re-grew the footer by a line
+          per state. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] leading-snug empty:hidden">
         {current && (
           <p className="text-zinc-500 dark:text-zinc-400">
-            <span className="font-mono">{label}</span> currently serves at{" "}
-            <span className="tabular-nums">{current}</span>.
+            <span className="font-mono">{label}</span> serves at{" "}
+            <span className="tabular-nums">{current}</span>
           </p>
         )}
 
         {/* Recommendations arrive from the calibration panels — the collision
-            floor this row belongs to, and the shadow judge below. Nothing is
+            floor this footer belongs to, and the shadow judge below. Nothing is
             live until Apply, so this is a suggestion to take, edit, or ignore. */}
         {rec && parsed !== rec.value && (
           <p className="text-zinc-500 dark:text-zinc-400">
@@ -294,7 +305,7 @@ export function ApplyThresholdPanel() {
             >
               {rec.value.toFixed(4)}
             </button>{" "}
-            for <span className="font-mono">{rec.space}</span>.
+            for <span className="font-mono">{rec.space}</span>
           </p>
         )}
 
@@ -303,9 +314,9 @@ export function ApplyThresholdPanel() {
             type="button"
             onClick={clearOverride}
             disabled={busy}
-            className="self-end text-zinc-400 underline underline-offset-2 cursor-pointer hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:text-zinc-200"
+            className="text-zinc-400 underline underline-offset-2 cursor-pointer hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:text-zinc-200"
           >
-            Clear override (inherit space)
+            Clear override
           </button>
         )}
 
@@ -315,6 +326,6 @@ export function ApplyThresholdPanel() {
         {error && <p className="text-red-600 dark:text-red-400">{error}</p>}
         {done && <p className="text-green-700 dark:text-green-400">{done}</p>}
       </div>
-    </section>
+    </>
   );
 }

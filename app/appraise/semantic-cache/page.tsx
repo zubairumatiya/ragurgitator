@@ -3,17 +3,25 @@
 // of the semantic cache (docs/semantic-caching-plan.md): the eval-bank collision
 // floor, the per-space thresholds, and the shadow-judge calibration.
 //
-// Panel order follows the order you'd actually work in, cheapest evidence first:
+// Panel order follows the order you'd actually work in, cheapest evidence first,
+// and each panel is NUMBERED with its place in it (app/components/semanticCache/
+// Panel.tsx) — the sequence was previously legible only in this comment:
 //   1. Collision floor — pure arithmetic over the eval bank, no LLM spend, usable
 //      the moment a config has labeled questions. Where a threshold starts, and
-//      the apply control rides its heading row so the recommendation and the box
-//      that makes it live sit together.
+//      the apply control sits in its footer so the recommendation and the box
+//      that makes it live are one reading order apart.
 //   2. Thresholds by vector-space — what's live now, read-only.
 //   3. Shadow judge — needs real would-hit traffic and costs judge tokens, so
 //      it's the refinement you reach for after (1), not the starting point.
 //   4. Cache key model — the only panel that isn't about a threshold's VALUE:
 //      it changes WHICH SPACE a config reads its threshold from. Last, because
 //      it only makes sense once you've seen the spaces and what they serve at.
+//
+// All four wear the same card (the shared Panel), so they read as four steps of
+// one workflow. They used to each carry their own chrome — a rule underneath, no
+// box at all, a bordered card, a rule supplied by this page — which made peers
+// look like unrelated widgets and left the page's two write controls looking
+// nothing alike.
 //
 // The page frame is a Server Component. It reads the config list and the first
 // config's SAVED collision floor (migration 0037) here, on the server, and hands
@@ -90,22 +98,25 @@ export default async function SemanticCachePage() {
 
         <AppraiseNav />
 
-        {/* The apply control rides on the collision-floor heading row: the floor
-            is where a threshold starts, so the number and the control that puts
-            it live share a row, and the page's one write action costs no line of
-            its own. Both panels that recommend into it (collision floor here,
-            shadow judge below) stay within a screen. */}
-        <CollisionFloorPanel
-          configs={configs}
-          preload={preload}
-          action={<ApplyThresholdPanel />}
-        />
+        {/* gap-3 between cards, against the page's gap-4 above: the cards have
+            their own borders and padding, so they need less air between them
+            than the unboxed header block does. */}
+        <div className="flex flex-col gap-3">
+          {/* The apply control goes in the collision-floor panel's FOOTER: the
+              floor is where a threshold starts, so the number and the control
+              that puts it live are one card apart rather than one page apart.
+              Both panels that recommend into it (collision floor here, shadow
+              judge below) stay within a screen. */}
+          <CollisionFloorPanel
+            configs={configs}
+            preload={preload}
+            action={<ApplyThresholdPanel />}
+          />
 
-        <ThresholdsPanel />
+          <ThresholdsPanel />
 
-        <ShadowJudgePanel />
+          <ShadowJudgePanel />
 
-        <div className="border-t border-zinc-200 pt-4 dark:border-zinc-800">
           <KeyModelPanel />
         </div>
       </main>
