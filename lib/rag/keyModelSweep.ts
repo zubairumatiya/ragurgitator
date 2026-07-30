@@ -176,13 +176,15 @@ async function scoreModel(model: string, pairs: SweepPair[], target: number): Pr
     target,
     config.semanticCache.minCalibrationSamples,
   );
-  const at = calibration.recommended;
-  const point = at === null ? null : calibration.curve.find((c) => c.sim === at) ?? null;
-
   return {
-    threshold: at,
+    threshold: calibration.recommended,
     recall: calibration.coverageAtRecommended,
-    precision: point?.acceptRateAtOrAbove ?? null,
+    // Straight off the calibration now. This used to re-find the curve point by
+    // `sim === at`, which returns the FIRST point carrying that sim — but τ is
+    // chosen at the LAST one (the tie boundary), and the two have different n
+    // and so different rates whenever sims tie. Serving `sim >= τ` admits the
+    // whole tie group, so the boundary's rate is the one that describes it.
+    precision: calibration.precisionAtRecommended,
     aucValue: auc(scored),
     calibration,
     scored,

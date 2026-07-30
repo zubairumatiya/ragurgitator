@@ -18,6 +18,18 @@ import { createHash } from "node:crypto";
 // values — only Next's bundler does. embeddingModels.ts is itself dependency-
 // free, so this stays importable without a DATABASE_URL.
 import { EMBEDDING_MODELS } from "./embeddingModels";
+// The τ CHOICE lives in its own import-free module so the UI can run it too —
+// see the note there. Re-exported below: this file stays the one place the rest
+// of the app imports calibration types from.
+import { selectFromCurve, type Attainability, type CurvePoint } from "./calibrationCurve";
+
+export type {
+  Attainability,
+  AttainabilityBlocker,
+  CurvePoint,
+  CurveSelection,
+} from "./calibrationCurve";
+export { selectFromCurve } from "./calibrationCurve";
 
 // Cosine similarity between two same-dimension vectors. Duplicated from
 // embedCache.cosine ON PURPOSE: that module imports the DB client at load, so
@@ -289,47 +301,24 @@ export type CalibrationResult = {
   // them comparable across spaces whose cosine scales differ. null when there's
   // no recommendation (or nothing to recall).
   coverageAtRecommended: number | null;
+  // Precision at that same τ — what the served set actually achieves, which is
+  // ≥ target by construction. Read at the TIE BOUNDARY where τ was chosen, so it
+  // describes the whole tie group `sim >= τ` would admit.
+  precisionAtRecommended: number | null;
   // Acceptance rate over every event AT OR ABOVE each sim — the calibration
   // curve — plus the recall that prefix achieves. Points are ordered by
   // descending sim (n grows left→right).
-  curve: { sim: number; acceptRateAtOrAbove: number; coverageAtOrAbove: number; n: number }[];
+  //
+  // Shipped to the client in full (see LeaderboardRow.calibration): it holds
+  // every candidate operating point, so the panel can re-derive τ at a target
+  // the server never saw without re-running anything.
+  curve: CurvePoint[];
   // WHY there's no τ, when there isn't one. A bare `recommended: null` is the
   // single most misread output of this function: it looks like "this model is
   // bad" but is usually "the target is arithmetically out of reach on a set this
   // size". Callers rank on recall@τ and fall back to AUC when every recall is
   // null (keyModelSweep), so an unexplained null quietly becomes a ranking.
   attainability: Attainability;
-};
-
-// The blocker, most-fundamental first:
-//   no-events           nothing judged at all — go label something.
-//   below-min-samples   judged, but never `minSamples` events in one prefix, so
-//                       no prefix was ever ELIGIBLE to be recommended.
-//   target-unreachable  eligible prefixes existed and none cleared `target`.
-//                       This is the interesting one: `bestRate` is how close the
-//                       best of them got, and `requiredN` is how large a prefix
-//                       that target would have needed given its reject count.
-//   null                a τ was recommended; nothing to explain.
-export type AttainabilityBlocker =
-  | "no-events"
-  | "below-min-samples"
-  | "target-unreachable"
-  | null;
-
-export type Attainability = {
-  blocker: AttainabilityBlocker;
-  // Best acceptance rate over ELIGIBLE prefixes (n ≥ minSamples, at a tie
-  // boundary) and where it occurred. null when no prefix was eligible.
-  bestRate: number | null;
-  bestRateAt: { sim: number; n: number } | null;
-  // Rejects inside that best prefix — the reason the target wasn't met.
-  rejectsInBest: number;
-  // The prefix size at which `target` becomes arithmetically POSSIBLE while
-  // still carrying `rejectsInBest` rejects: rate ≥ target ⟺ n ≥ r / (1 − target).
-  // This is the "you need n ≥ 100, you have 34" number. null when it can't be
-  // stated: no eligible prefix, target ≥ 1 (no reject count is ever forgivable),
-  // or the best prefix is already clean (r = 0, so the target was met).
-  requiredN: number | null;
 };
 
 // Precision-at-threshold sweep over judged shadow events. Sort by sim desc; for
@@ -339,81 +328,48 @@ export type Attainability = {
 // served set keeps the false-hit rate under (1 − target). Non-monotonic dips
 // are handled naturally: the guarantee is on the aggregate over the served set,
 // so a dip that later recovers is allowed.
+//
+// TWO STEPS, deliberately split: this builds the curve, and selectFromCurve
+// (calibrationCurve.ts) makes the choice. The panel re-derives τ at a target the
+// server never saw, from the curve alone, and calls that same function — so a
+// number explored on screen is arithmetically the number that would be applied.
+// Anything added to the choice belongs THERE, not here, or the two paths drift.
 export function calibrateFromJudged(
   events: { sim: number; verdict: "accept" | "reject" }[],
   target: number,
   minSamples: number,
 ): CalibrationResult {
   const sorted = [...events].sort((a, b) => b.sim - a.sim);
-  const curve: CalibrationResult["curve"] = [];
+  const curve: CurvePoint[] = [];
   // Recall's denominator, needed BEFORE the sweep so each prefix can report the
   // share of all accepts it covers rather than only the count it contains.
   const totalAccepts = sorted.reduce((n, e) => n + (e.verdict === "accept" ? 1 : 0), 0);
   let accepts = 0;
-  let recommended: number | null = null;
-  let coverageAtRecommended: number | null = null;
-  // Best ELIGIBLE prefix seen, for the attainability report. Eligibility is the
-  // same predicate `recommended` uses (tie boundary + n ≥ minSamples), so the
-  // explanation can never describe a prefix the sweep would not have considered.
-  let bestRate: number | null = null;
-  let bestRateAt: { sim: number; n: number } | null = null;
-  let rejectsInBest = 0;
 
   for (let k = 0; k < sorted.length; k++) {
     if (sorted[k].verdict === "accept") accepts++;
     const n = k + 1;
-    const rate = accepts / n;
-    const coverage = totalAccepts === 0 ? 0 : accepts / totalAccepts;
-    curve.push({ sim: sorted[k].sim, acceptRateAtOrAbove: rate, coverageAtOrAbove: coverage, n });
-    // Only consider τ at the END of a run of equal sims. Mid-run, the prefix
-    // covers only PART of the tie group, but serving `sim >= τ` would admit the
-    // whole group — so a rate measured there doesn't hold for what we'd serve.
-    // Real cosines rarely tie exactly, so this is a correctness guarantee rather
-    // than a behavior change on live data.
-    const isTieBoundary = k === sorted.length - 1 || sorted[k + 1].sim !== sorted[k].sim;
-    if (isTieBoundary && n >= minSamples && (bestRate === null || rate > bestRate)) {
-      bestRate = rate;
-      bestRateAt = { sim: sorted[k].sim, n };
-      rejectsInBest = n - accepts;
-    }
-    if (isTieBoundary && rate >= target && n >= minSamples) {
-      recommended = sorted[k].sim;
-      // Moves WITH `recommended`: τ walks downward to the most inclusive value
-      // that still clears the target, and the recall reported must be the one
-      // that τ achieves, not the tighter prefix's.
-      coverageAtRecommended = totalAccepts === 0 ? null : coverage;
-    }
+    curve.push({
+      sim: sorted[k].sim,
+      acceptRateAtOrAbove: accepts / n,
+      coverageAtOrAbove: totalAccepts === 0 ? 0 : accepts / totalAccepts,
+      n,
+    });
   }
 
-  // requiredN inverts the acceptance test: accepts/n ≥ target with r rejects
-  // means (n − r)/n ≥ target, i.e. n ≥ r / (1 − target). At target = 1 the
-  // denominator is 0 — no prefix size ever forgives a single reject — so the
-  // honest answer is "not statable" rather than Infinity. Only meaningful when
-  // the best prefix actually FAILED, which is why it's gated on the blocker.
-  const requiredN =
-    bestRateAt !== null && rejectsInBest > 0 && target < 1
-      ? Math.ceil(rejectsInBest / (1 - target))
-      : null;
-
-  const blocker: AttainabilityBlocker =
-    recommended !== null
-      ? null
-      : sorted.length === 0
-        ? "no-events"
-        : bestRateAt === null
-          ? "below-min-samples"
-          : "target-unreachable";
+  const selected = selectFromCurve(curve, target, minSamples);
 
   return {
-    recommended,
+    recommended: selected.recommended,
     target,
     minSamples,
     totalJudged: sorted.length,
     overallAcceptRate: sorted.length ? accepts / sorted.length : null,
     totalAccepts,
-    coverageAtRecommended,
+    coverageAtRecommended: selected.coverageAtRecommended,
+    precisionAtRecommended: selected.precisionAtRecommended,
     curve,
-    attainability: { blocker, bestRate, bestRateAt, rejectsInBest, requiredN },
+    attainability: selected.attainability,
   };
 }
 

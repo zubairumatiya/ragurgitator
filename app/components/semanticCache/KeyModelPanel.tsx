@@ -20,11 +20,17 @@
 // ---------------------------------------------------------------------------
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Tooltip } from "@/app/components/Tooltip";
 import { config } from "@/lib/config";
 import { apiFetch } from "@/lib/http/client";
+// The SAME function the server picks τ with (lib/rag/calibrationCurve.ts —
+// import-free precisely so it can be bundled here). Re-running it on the curve
+// the sweep already sent is what makes the target a slider instead of a setting
+// on another page: no re-sweep, no request, and the number on screen is
+// arithmetically the number that would be applied.
+import { selectFromCurve, type Attainability } from "@/lib/rag/calibrationCurve";
 import type { LeaderboardRow, SweepResult } from "@/lib/rag/keyModelSweep";
 import type { PairStats } from "@/lib/rag/semanticCachePairs";
 
@@ -76,9 +82,93 @@ const GEN_MAX = 200;
 // Its default, and a sane starting position — a run you can watch finish.
 const GEN_DEFAULT = 25;
 
-// The sweep's own account of why the target was out of reach, dug out of the
-// closest model's calibration.
-type Attainability = NonNullable<LeaderboardRow["calibration"]>["attainability"];
+// A row read AT A GIVEN TARGET. The sweep ships each model's whole curve, so
+// every number below is re-derived on the client and the server's own
+// threshold/recall/precision fields go unused — they are just this, frozen at
+// the config's stored target.
+//
+// `kind` is the distinction the table turns on:
+//   at-target        met the target; these are the comparable numbers.
+//   best-attainable  missed it — showing the best operating point it DOES reach,
+//                    which is not comparable to an at-target row and must never
+//                    be rendered as though it were.
+//   none             nothing to show: model unavailable, errored, or no prefix
+//                    ever reached minSamples. "No data" and "data, but short of
+//                    target" are different answers and look different.
+type RowKind = "at-target" | "best-attainable" | "none";
+
+type DerivedRow = {
+  row: LeaderboardRow;
+  kind: RowKind;
+  threshold: number | null;
+  precision: number | null;
+  recall: number | null;
+  attainability: Attainability | null;
+};
+
+function deriveRow(row: LeaderboardRow, target: number, minSamples: number): DerivedRow {
+  const cal = row.calibration;
+  const none = (attainability: Attainability | null): DerivedRow => ({
+    row,
+    kind: "none",
+    threshold: null,
+    precision: null,
+    recall: null,
+    attainability,
+  });
+  if (!cal || cal.curve.length === 0) return none(cal?.attainability ?? null);
+
+  const sel = selectFromCurve(cal.curve, target, minSamples);
+  if (sel.recommended !== null) {
+    return {
+      row,
+      kind: "at-target",
+      threshold: sel.recommended,
+      precision: sel.precisionAtRecommended,
+      recall: sel.coverageAtRecommended,
+      attainability: sel.attainability,
+    };
+  }
+
+  // Missed the target — fall back to the best prefix it actually reaches, so
+  // the row still says something. No eligible prefix at all (never hit
+  // minSamples) genuinely has nothing to report.
+  const at = sel.attainability;
+  if (at.bestRateAt === null) return none(at);
+  return {
+    row,
+    kind: "best-attainable",
+    threshold: at.bestRateAt.sim,
+    precision: at.bestRate,
+    recall: at.coverageAtBest,
+    attainability: at,
+  };
+}
+
+// Ranking, in blocks. At-target rows first, best-attainable after, unscored
+// last. The blocks are the point: one recall column across all of them would
+// compare numbers measured at DIFFERENT precisions, which is exactly what
+// holding the target equal exists to prevent. A 90%-recall row that only manages
+// 60% precision is not beating an 80%-recall row that held 99%.
+//
+// The two blocks then sort by DIFFERENT keys, for the same reason:
+//   at-target        by recall — they all met the same precision, so recall is
+//                    the objective and the only thing left to compare.
+//   best-attainable  by PRECISION — nobody met the target, so the question is
+//                    "who came closest", and their recalls sit at precisions
+//                    that differ from row to row. Sorting these by recall reads
+//                    as a ranking and isn't one; it also contradicted the
+//                    "Closest was X" line, which ranks by precision.
+const KIND_ORDER: Record<RowKind, number> = { "at-target": 0, "best-attainable": 1, none: 2 };
+
+function rankDerived(rows: DerivedRow[]): DerivedRow[] {
+  return [...rows].sort((a, b) => {
+    const byKind = KIND_ORDER[a.kind] - KIND_ORDER[b.kind];
+    if (byKind !== 0) return byKind;
+    const key = a.kind === "best-attainable" ? "precision" : "recall";
+    return (b[key] ?? -1) - (a[key] ?? -1) || (b.row.auc ?? -1) - (a.row.auc ?? -1);
+  });
+}
 
 // Why no model produced a τ — the whole diagnosis, as tooltip prose.
 //
@@ -89,14 +179,15 @@ type Attainability = NonNullable<LeaderboardRow["calibration"]>["attainability"]
 // target — which is the entire reason this text exists instead of a bare dash.
 function noThresholdReason(
   sweep: SweepResult,
+  target: number,
   tooFewPairs: boolean,
-  closest: LeaderboardRow | undefined,
-  at: Attainability | undefined,
+  closestModel: string | undefined,
+  at: Attainability | null | undefined,
 ): string {
   if (tooFewPairs) {
     return (
       `No model produced a τ: ${sweep.pairs.total} pairs never fills a serve set of ` +
-      `${sweep.minSamples}, the minimum calibration needs, so ${pct(sweep.target)} was never ` +
+      `${sweep.minSamples}, the minimum calibration needs, so ${pct(target)} was never ` +
       "actually tested.\n\nGenerate more pairs — until then only AUC is meaningful, and it's " +
       "the tiebreak, not the objective."
     );
@@ -104,26 +195,25 @@ function noThresholdReason(
 
   const paras: string[] = [];
   let headline =
-    `No model reached ${pct(sweep.target)} precision on any serve set of ` +
-    `${sweep.minSamples}+ pairs.`;
+    `No model reached ${pct(target)} precision on any serve set of ${sweep.minSamples}+ pairs.`;
 
-  if (closest && at) {
+  if (closestModel && at && at.bestRateAt) {
     const fp =
       at.rejectsInBest > 0
         ? ` (${at.rejectsInBest} false ${at.rejectsInBest === 1 ? "positive" : "positives"})`
         : "";
     headline +=
-      ` Closest was ${closest.model} at ${pct(at.bestRate)} over ${at.bestRateAt!.n} pairs${fp}.`;
+      ` Closest was ${closestModel} at ${pct(at.bestRate)} over ${at.bestRateAt.n} pairs${fp}.`;
     paras.push(headline);
     paras.push(
       at.requiredN !== null
-        ? `Clearing ${pct(sweep.target)} while carrying ${at.rejectsInBest} needs a serve set ` +
+        ? `Clearing ${pct(target)} while carrying ${at.rejectsInBest} needs a serve set ` +
           `of ${at.requiredN} — so at this size the target means “zero false ` +
-          "positives”. Either grow the pair set past that, or lower the target for " +
-          `${sweep.targetSource.configLabel} in Settings → Savings.`
-        : `At a ${pct(sweep.target)} target no serve set size forgives a single false ` +
-          "positive, so only a perfectly clean prefix can ever produce a τ. Lower the target " +
-          `for ${sweep.targetSource.configLabel} in Settings → Savings.`,
+          "positives”. Either grow the pair set past that, or drag the target lower — the " +
+          "table re-reads instantly at whatever precision you pick."
+        : `At a ${pct(target)} target no serve set size forgives a single false ` +
+          "positive, so only a perfectly clean prefix can ever produce a τ. Drag the target " +
+          "lower to see where these models actually land.",
     );
   } else {
     paras.push(headline);
@@ -162,6 +252,11 @@ export function KeyModelPanel() {
   // the default tracks the gap as it shrinks instead of being pinned by an
   // effect the moment the stats first land.
   const [genLimit, setGenLimit] = useState<number | null>(null);
+  // The precision the table is being READ at. Null = the config's stored target,
+  // which is what a fresh sweep always opens on. Purely a lens: it re-derives
+  // what's displayed and writes nothing — the stored acceptTarget (Settings →
+  // Savings) still governs the live τ the shadow judge picks.
+  const [targetOverride, setTargetOverride] = useState<number | null>(null);
 
   // The generate control's range and current position. Capped at the gap (asking
   // for more questions than exist just generates the gap) and at the inline
@@ -229,7 +324,12 @@ export function KeyModelPanel() {
 
   const runSweep = async () => {
     const d = await post("sweep", "/api/semantic-cache/key-model", { action: "sweep" });
-    if (d) setSweep(d as unknown as SweepResult);
+    if (!d) return;
+    setSweep(d as unknown as SweepResult);
+    // A fresh sweep always opens at the config's stored target — an exploratory
+    // position carried over from the last one would silently reinterpret new
+    // numbers.
+    setTargetOverride(null);
   };
 
   const generate = async () => {
@@ -283,26 +383,38 @@ export function KeyModelPanel() {
   // Hard negatives are what makes the table mean anything — a set that's all
   // 'same' grades every model identically at the top of its ranking.
   const noNegatives = pairs !== null && pairs.total > 0 && pairs.different === 0;
+  // The precision the table is being read at, and whether that's the config's
+  // own setting or somewhere you've dragged to.
+  const target = targetOverride ?? sweep?.target ?? 0;
+  const exploring = sweep !== null && targetOverride !== null && targetOverride !== sweep.target;
+
+  // Every row, re-read at that target. Recomputed only when the target moves —
+  // selectFromCurve walks each model's whole curve, and this runs on every
+  // slider tick.
+  const derived = useMemo(
+    () => (sweep ? rankDerived(sweep.rows.map((r) => deriveRow(r, target, sweep.minSamples))) : []),
+    [sweep, target],
+  );
+
   // NO MODEL PRODUCED A τ, which silently demotes the whole table to an AUC
   // ranking (see the sort in keyModelSweep) — so it has to say WHY. The reason
-  // comes from the sweep's own attainability report rather than being guessed
-  // from the pair count: "too few pairs" and "the target is out of reach on this
-  // set" are the difference between get-more-data and lower-the-target, and only
-  // the sweep knows which prefix it actually got to consider.
-  const noThresholds = sweep !== null && sweep.rows.every((r) => r.threshold === null);
-  const scoredRows = sweep?.rows.filter((r) => r.calibration !== null) ?? [];
+  // comes from the attainability report rather than being guessed from the pair
+  // count: "too few pairs" and "the target is out of reach on this set" are the
+  // difference between get-more-data and lower-the-target, and only the sweep
+  // knows which prefix it actually got to consider.
+  const scored = derived.filter((d) => d.attainability !== null);
+  const noThresholds = derived.length > 0 && !derived.some((d) => d.kind === "at-target");
   // No eligible prefix ANYWHERE means the set never reached minSamples — the
   // target was never even tested, so pointing at it would be misleading.
   const tooFewPairs =
-    scoredRows.length > 0 &&
-    scoredRows.every((r) => r.calibration!.attainability.blocker !== "target-unreachable");
+    scored.length > 0 &&
+    scored.every((d) => d.attainability!.blocker !== "target-unreachable");
   // The closest any model got, and what the target would have cost it. Ranked by
   // achieved precision: this is the "you asked for 99%, the best model managed
-  // 95% over 20 pairs, and 99% with that one reject needs n ≥ 100" line.
-  const closest = scoredRows
-    .filter((r) => r.calibration!.attainability.bestRate !== null)
-    .sort((a, b) => b.calibration!.attainability.bestRate! - a.calibration!.attainability.bestRate!)[0];
-  const closestAt = closest?.calibration!.attainability;
+  // 68% over 22 pairs, and 99% with those 7 rejects needs n ≥ 700" line.
+  const closest = scored
+    .filter((d) => d.attainability!.bestRate !== null)
+    .sort((a, b) => b.attainability!.bestRate! - a.attainability!.bestRate!)[0];
 
   return (
     <Panel
@@ -492,26 +604,74 @@ export function KeyModelPanel() {
         <div className="flex flex-col gap-2">
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
             {sweep.pairs.total} pairs ({sweep.pairs.shadow} shadow / {sweep.pairs.generated}{" "}
-            generated · {sweep.pairs.same} same / {sweep.pairs.different} different) · precision
-            held at <span className="tabular-nums">{pct(sweep.target)}</span>{" "}
-            <Tooltip align="left" text={TARGET_ABOUT}>
-              <span className="text-zinc-400 underline decoration-dotted underline-offset-2">
-                from{" "}
-                <span className="font-mono">{sweep.targetSource.configLabel}</span>
-                {sweep.targetSource.source === "config" ? " (override)" : " (global default)"}
-              </span>
-            </Tooltip>
+            generated · {sweep.pairs.same} same / {sweep.pairs.different} different)
           </p>
 
-          {/* The τ / Recall@τ / Precision columns are ALL derived from τ, so
-              when no model produces one the table shows three dashed columns and
-              nothing on the page says why. This says why — as a glyph, because
-              the explanation is a paragraph you read once and then have to scroll
-              past on every visit. */}
+          {/* The target as a DIAL, not a fact. Every model's full curve came
+              down with the sweep, so dragging this re-picks τ for all of them
+              with the same function the server uses — no re-sweep, no request,
+              no embedding spend. Comparability is untouched: wherever the slider
+              sits, every model is still being held to the SAME precision. */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-zinc-200 px-3 py-2 dark:border-zinc-800">
+            <Tooltip align="left" text={TARGET_ABOUT}>
+              <span className="text-xs text-zinc-500 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                Precision held at
+              </span>
+            </Tooltip>
+            <span className="text-lg font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
+              {pct(target)}
+            </span>
+            <input
+              type="range"
+              min={50}
+              max={100}
+              step={0.5}
+              value={target * 100}
+              onChange={(e) => setTargetOverride(Number(e.target.value) / 100)}
+              aria-label="Precision target"
+              className="h-1 w-48 min-w-32 max-w-full cursor-pointer accent-zinc-900 dark:accent-zinc-100"
+            />
+            {/* An explored number must never be mistaken for the config's
+                setting — this is a lens, and nothing here writes. */}
+            {exploring ? (
+              <span className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500 dark:text-zinc-400">
+                exploring —{" "}
+                <span className="font-mono">{sweep.targetSource.configLabel}</span> is set to{" "}
+                <span className="tabular-nums">{pct(sweep.target)}</span>
+                <button
+                  type="button"
+                  onClick={() => setTargetOverride(null)}
+                  className="underline underline-offset-2 cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
+                >
+                  reset
+                </button>
+              </span>
+            ) : (
+              <span className="text-[11px] text-zinc-400">
+                from <span className="font-mono">{sweep.targetSource.configLabel}</span>
+                {sweep.targetSource.source === "config" ? " (override)" : " (global default)"} ·
+                drag to re-read the table
+              </span>
+            )}
+          </div>
+
+          {/* No model clears the target. The table still fills in — with each
+              model's best ATTAINABLE operating point — so this explains what
+              those starred numbers are rather than what a blank means. As a
+              glyph, because it's a paragraph you read once and then scroll past
+              on every visit. */}
           {noThresholds && (
             <p className="flex items-center gap-1.5 text-xs text-amber-700 dark:text-amber-400">
-              <WarnDot text={noThresholdReason(sweep, tooFewPairs, closest, closestAt)} />
-              No τ at {pct(sweep.target)} — τ, Recall@τ and Precision are blank below
+              <WarnDot
+                text={noThresholdReason(
+                  sweep,
+                  target,
+                  tooFewPairs,
+                  closest?.row.model,
+                  closest?.attainability,
+                )}
+              />
+              No model reaches {pct(target)} — showing best attainable, marked ✳
             </p>
           )}
 
@@ -546,14 +706,14 @@ export function KeyModelPanel() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                {sweep.rows.map((r) => (
+                {derived.map((d) => (
                   <Row
-                    key={r.model}
-                    row={r}
-                    current={status?.keyModel === r.model}
-                    selected={selected === r.model}
+                    key={d.row.model}
+                    derived={d}
+                    current={status?.keyModel === d.row.model}
+                    selected={selected === d.row.model}
                     onSelect={() => {
-                      setSelected(r.model);
+                      setSelected(d.row.model);
                       setBlocked(null);
                       setNote(null);
                     }}
@@ -562,6 +722,14 @@ export function KeyModelPanel() {
               </tbody>
             </table>
           </div>
+
+          {derived.some((d) => d.kind === "best-attainable") && (
+            <p className="text-[11px] text-zinc-400">
+              ✳ best attainable — this model never reaches {pct(target)} on a serve set of{" "}
+              {sweep.minSamples}+, so its best operating point is shown instead. Not comparable
+              with an at-target row, and sorted below them.
+            </p>
+          )}
         </div>
       )}
 
@@ -570,19 +738,25 @@ export function KeyModelPanel() {
 }
 
 function Row({
-  row,
+  derived,
   current,
   selected,
   onSelect,
 }: {
-  row: LeaderboardRow;
+  derived: DerivedRow;
   current: boolean;
   selected: boolean;
   onSelect: () => void;
 }) {
+  const { row, kind } = derived;
   // An unavailable or errored model keeps its row — a missing row reads as "it
   // scored badly", which is a different and wrong claim.
   const dim = !row.available || row.error !== null;
+  // Best-attainable numbers are real measurements, but they were NOT taken at
+  // the target, so they can't wear the same weight as a row that met it. Muted
+  // and starred: legible, never mistakable for a comparable figure.
+  const fallback = kind === "best-attainable";
+  const mark = fallback ? "✳" : "";
   return (
     <tr
       onClick={row.available && !row.error ? onSelect : undefined}
@@ -600,17 +774,30 @@ function Row({
         )}
       </td>
       <td className="py-1.5 pr-3 font-mono text-xs text-zinc-500">{row.space}</td>
-      <td className="py-1.5 pr-3 text-right tabular-nums">{num(row.threshold)}</td>
+      <td
+        className={`py-1.5 pr-3 text-right tabular-nums ${fallback ? "text-zinc-400" : ""}`}
+      >
+        {num(derived.threshold)}
+        {mark}
+      </td>
       <td
         className={
           "py-1.5 pr-3 text-right tabular-nums " +
-          (row.recallAtThreshold !== null ? "font-medium text-black dark:text-zinc-50" : "")
+          (fallback
+            ? "text-zinc-400"
+            : derived.recall !== null
+              ? "font-medium text-black dark:text-zinc-50"
+              : "")
         }
       >
-        {pct(row.recallAtThreshold)}
+        {pct(derived.recall)}
+        {mark}
       </td>
-      <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-500">
-        {pct(row.precisionAtThreshold)}
+      <td
+        className={`py-1.5 pr-3 text-right tabular-nums ${fallback ? "text-zinc-400" : "text-zinc-500"}`}
+      >
+        {pct(derived.precision)}
+        {mark}
       </td>
       <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-500">
         {row.auc === null ? "—" : row.auc.toFixed(3)}

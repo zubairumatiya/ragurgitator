@@ -18,6 +18,7 @@ import {
   entityTokens,
   fingerprintFrom,
   isHit,
+  selectFromCurve,
   spaceOf,
 } from "./semanticCacheCore";
 
@@ -485,6 +486,127 @@ test("calibrateFromJudged: no recommendation means no recall to report", () => {
   assert.equal(r.recommended, null);
   assert.equal(r.coverageAtRecommended, null);
   assert.equal(r.totalAccepts, 0);
+});
+
+// --- Phase 4: the curve carries everything the choice needs ------------------
+//
+// The panel re-derives τ from `calibration.curve` at a target the server never
+// saw. That is only sound if the curve is a LOSSLESS input to the choice — so
+// these pin the property the split depends on: selecting from the curve and
+// calibrating from the events it came from must agree, at any target.
+
+test("selectFromCurve: matches calibrateFromJudged on the curve it produced", () => {
+  const events = [
+    { sim: 0.99, verdict: "accept" as const },
+    { sim: 0.97, verdict: "accept" as const },
+    { sim: 0.95, verdict: "reject" as const },
+    { sim: 0.93, verdict: "accept" as const },
+    { sim: 0.91, verdict: "accept" as const },
+    { sim: 0.88, verdict: "reject" as const },
+    { sim: 0.85, verdict: "accept" as const },
+    { sim: 0.8, verdict: "reject" as const },
+  ];
+  // Swept across the whole range, because the client's slider is exactly this:
+  // one curve, re-read at a target the server never computed.
+  for (const target of [0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 0.95, 1.0]) {
+    const full = calibrateFromJudged(events, target, 2);
+    const fromCurve = selectFromCurve(full.curve, target, 2);
+    assert.deepEqual(
+      {
+        recommended: fromCurve.recommended,
+        coverage: fromCurve.coverageAtRecommended,
+        precision: fromCurve.precisionAtRecommended,
+        attainability: fromCurve.attainability,
+      },
+      {
+        recommended: full.recommended,
+        coverage: full.coverageAtRecommended,
+        precision: full.precisionAtRecommended,
+        attainability: full.attainability,
+      },
+      `disagreed at target ${target}`,
+    );
+  }
+});
+
+test("selectFromCurve: the tie-boundary rule survives the round trip", () => {
+  // The folding case, re-derived from the curve alone. The curve records one
+  // point per event, so a tie group is three points sharing a sim — and the
+  // boundary has to be found by looking at the NEIGHBOUR, since the raw verdicts
+  // are gone by then. Mid-group the prefix reads 4/4, but serving `sim >= 0.90`
+  // admits the reject too, so τ must fall back above the group.
+  const events = [
+    { sim: 0.98, verdict: "accept" as const },
+    { sim: 0.95, verdict: "accept" as const },
+    { sim: 0.9, verdict: "accept" as const },
+    { sim: 0.9, verdict: "accept" as const },
+    { sim: 0.9, verdict: "reject" as const },
+  ];
+  const { curve } = calibrateFromJudged(events, 1.0, 1);
+  assert.equal(selectFromCurve(curve, 1.0, 1).recommended, 0.95);
+});
+
+test("selectFromCurve: precision at τ is the tie boundary's, not the group's first point", () => {
+  // Three events tie at 0.90 and the group as a whole clears 0.75 (4/5 = 0.80),
+  // so τ = 0.90. Precision must describe what `sim >= 0.90` SERVES — all five
+  // events, 0.80 — not the 3/3 = 1.0 reading at the group's first point, which
+  // is what a `curve.find(c => c.sim === τ)` lookup returns.
+  const events = [
+    { sim: 0.98, verdict: "accept" as const },
+    { sim: 0.95, verdict: "accept" as const },
+    { sim: 0.9, verdict: "accept" as const },
+    { sim: 0.9, verdict: "reject" as const },
+    { sim: 0.9, verdict: "accept" as const },
+  ];
+  const r = calibrateFromJudged(events, 0.75, 1);
+  assert.equal(r.recommended, 0.9);
+  assert.ok(Math.abs(r.precisionAtRecommended! - 0.8) < 1e-9);
+  assert.equal(r.curve.find((c) => c.sim === 0.9)!.acceptRateAtOrAbove, 1);
+});
+
+test("selectFromCurve: the best attainable point does not move with the target", () => {
+  // What lets the panel show a "best attainable" operating point for a model
+  // that missed the target, and keep showing the SAME one as the slider moves:
+  // bestRate is the best any eligible prefix does, not the best that clears a
+  // bar. Only requiredN and the blocker are target-dependent.
+  // The top event is a reject, so EVERY eligible prefix carries one and no
+  // prefix can ever reach 99% — while 50% is met all the way down. The best
+  // prefix is 4/5 = 0.80 at sim 0.91 either way.
+  const events = [
+    { sim: 0.99, verdict: "reject" as const },
+    { sim: 0.97, verdict: "accept" as const },
+    { sim: 0.95, verdict: "accept" as const },
+    { sim: 0.93, verdict: "accept" as const },
+    { sim: 0.91, verdict: "accept" as const },
+    { sim: 0.88, verdict: "reject" as const },
+  ];
+  const { curve } = calibrateFromJudged(events, 0.99, 2);
+  const strict = selectFromCurve(curve, 0.99, 2).attainability;
+  const loose = selectFromCurve(curve, 0.5, 2).attainability;
+
+  assert.ok(Math.abs(strict.bestRate! - 0.8) < 1e-9);
+  assert.equal(strict.bestRate, loose.bestRate);
+  assert.deepEqual(strict.bestRateAt, { sim: 0.91, n: 5 });
+  assert.deepEqual(strict.bestRateAt, loose.bestRateAt);
+  assert.equal(strict.rejectsInBest, loose.rejectsInBest);
+  // The target-dependent half: unreachable at 99% (needing n ≥ 100 to carry
+  // that one reject), comfortably met at 50% (n ≥ 2 suffices). requiredN is
+  // stated whenever the best prefix carries a reject, met or not — it answers
+  // "how big would this have to get", which is as true at 50% as at 99%.
+  assert.equal(strict.blocker, "target-unreachable");
+  assert.equal(strict.requiredN, 100);
+  assert.equal(loose.blocker, null);
+  assert.equal(loose.requiredN, 2);
+});
+
+test("selectFromCurve: an empty curve is 'no-events', not a crash", () => {
+  const r = selectFromCurve([], 0.99, 20);
+  assert.equal(r.recommended, null);
+  assert.equal(r.precisionAtRecommended, null);
+  assert.equal(r.coverageAtRecommended, null);
+  assert.equal(r.attainability.blocker, "no-events");
+  assert.equal(r.attainability.bestRate, null);
+  assert.equal(r.attainability.requiredN, null);
 });
 
 // --- AUC ---------------------------------------------------------------------
