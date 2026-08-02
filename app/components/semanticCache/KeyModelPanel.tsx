@@ -30,12 +30,23 @@ import { apiFetch } from "@/lib/http/client";
 // the sweep already sent is what makes the target a slider instead of a setting
 // on another page: no re-sweep, no request, and the number on screen is
 // arithmetically the number that would be applied.
-import { selectFromCurve, type Attainability } from "@/lib/rag/calibrationCurve";
+import {
+  selectFromCurve,
+  type Attainability,
+} from "@/lib/rag/calibrationCurve";
 import type { LeaderboardRow, SweepResult } from "@/lib/rag/keyModelSweep";
 import type { PairStats } from "@/lib/rag/semanticCachePairs";
 
 import { SC_CHANGED } from "./events";
-import { BTN, BTN_PRIMARY, NOTE_AMBER, Panel, TABLE_HEAD, TABLE_WRAP, WarnDot } from "./Panel";
+import {
+  BTN,
+  BTN_PRIMARY,
+  NOTE_AMBER,
+  Panel,
+  TABLE_HEAD,
+  TABLE_WRAP,
+  WarnDot,
+} from "./Panel";
 
 const ABOUT =
   "Which embedding model incoming questions are keyed under for the cache " +
@@ -68,7 +79,8 @@ const TARGET_ABOUT =
   "reachable at all: clearing 99% while carrying r false positives takes a " +
   "serve set of 100r, so on a small set 99% means “zero false positives”.";
 
-const pct = (n: number | null) => (n === null ? "—" : `${(n * 100).toFixed(1)}%`);
+const pct = (n: number | null) =>
+  n === null ? "—" : `${(n * 100).toFixed(1)}%`;
 const num = (n: number | null) => (n === null ? "—" : n.toFixed(4));
 
 // What one origin question costs and yields, so the generate control can price
@@ -106,7 +118,11 @@ type DerivedRow = {
   attainability: Attainability | null;
 };
 
-function deriveRow(row: LeaderboardRow, target: number, minSamples: number): DerivedRow {
+function deriveRow(
+  row: LeaderboardRow,
+  target: number,
+  minSamples: number,
+): DerivedRow {
   const cal = row.calibration;
   const none = (attainability: Attainability | null): DerivedRow => ({
     row,
@@ -159,14 +175,20 @@ function deriveRow(row: LeaderboardRow, target: number, minSamples: number): Der
 //                    that differ from row to row. Sorting these by recall reads
 //                    as a ranking and isn't one; it also contradicted the
 //                    "Closest was X" line, which ranks by precision.
-const KIND_ORDER: Record<RowKind, number> = { "at-target": 0, "best-attainable": 1, none: 2 };
+const KIND_ORDER: Record<RowKind, number> = {
+  "at-target": 0,
+  "best-attainable": 1,
+  none: 2,
+};
 
 function rankDerived(rows: DerivedRow[]): DerivedRow[] {
   return [...rows].sort((a, b) => {
     const byKind = KIND_ORDER[a.kind] - KIND_ORDER[b.kind];
     if (byKind !== 0) return byKind;
     const key = a.kind === "best-attainable" ? "precision" : "recall";
-    return (b[key] ?? -1) - (a[key] ?? -1) || (b.row.auc ?? -1) - (a.row.auc ?? -1);
+    return (
+      (b[key] ?? -1) - (a[key] ?? -1) || (b.row.auc ?? -1) - (a.row.auc ?? -1)
+    );
   });
 }
 
@@ -194,26 +216,24 @@ function noThresholdReason(
   }
 
   const paras: string[] = [];
-  let headline =
-    `No model reached ${pct(target)} precision on any serve set of ${sweep.minSamples}+ pairs.`;
+  let headline = `No model reached ${pct(target)} precision on any serve set of ${sweep.minSamples}+ pairs.`;
 
   if (closestModel && at && at.bestRateAt) {
     const fp =
       at.rejectsInBest > 0
         ? ` (${at.rejectsInBest} false ${at.rejectsInBest === 1 ? "positive" : "positives"})`
         : "";
-    headline +=
-      ` Closest was ${closestModel} at ${pct(at.bestRate)} over ${at.bestRateAt.n} pairs${fp}.`;
+    headline += ` Closest was ${closestModel} at ${pct(at.bestRate)} over ${at.bestRateAt.n} pairs${fp}.`;
     paras.push(headline);
     paras.push(
       at.requiredN !== null
         ? `Clearing ${pct(target)} while carrying ${at.rejectsInBest} needs a serve set ` +
-          `of ${at.requiredN} — so at this size the target means “zero false ` +
-          "positives”. Either grow the pair set past that, or drag the target lower — the " +
-          "table re-reads instantly at whatever precision you pick."
+            `of ${at.requiredN} — so at this size the target means “zero false ` +
+            "positives”. Either grow the pair set past that, or drag the target lower — the " +
+            "table re-reads instantly at whatever precision you pick."
         : `At a ${pct(target)} target no serve set size forgives a single false ` +
-          "positive, so only a perfectly clean prefix can ever produce a τ. Drag the target " +
-          "lower to see where these models actually land.",
+            "positive, so only a perfectly clean prefix can ever produce a τ. Drag the target " +
+            "lower to see where these models actually land.",
     );
   } else {
     paras.push(headline);
@@ -233,7 +253,12 @@ type Status = {
   override: string | null;
   globalDefault: string;
   threshold: { space: string; threshold: number; source: string };
-  candidates: { id: string; space: string; dimension: number; provider: string }[];
+  candidates: {
+    id: string;
+    space: string;
+    dimension: number;
+    provider: string;
+  }[];
 };
 
 export function KeyModelPanel() {
@@ -244,8 +269,13 @@ export function KeyModelPanel() {
   const [scope, setScope] = useState<"config" | "all">("config");
   // Set when apply was REFUSED for an uncalibrated space (409). The switch is
   // re-offered explicitly with the fallback named, never retried silently.
-  const [blocked, setBlocked] = useState<{ space: string; fallbackThreshold: number } | null>(null);
-  const [busy, setBusy] = useState<null | "sweep" | "pairs" | "apply" | "backfill">(null);
+  const [blocked, setBlocked] = useState<{
+    space: string;
+    fallbackThreshold: number;
+  } | null>(null);
+  const [busy, setBusy] = useState<
+    null | "sweep" | "pairs" | "apply" | "backfill"
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   // How many origin questions the next generate run covers. Null = untouched, so
@@ -263,7 +293,10 @@ export function KeyModelPanel() {
   // path's own ceiling, so the slider can never promise a run the server will
   // silently trim.
   const genMax = Math.min(pairs?.questionsRemaining ?? 0, GEN_MAX);
-  const genQuestions = Math.max(1, Math.min(genLimit ?? GEN_DEFAULT, genMax || 1));
+  const genQuestions = Math.max(
+    1,
+    Math.min(genLimit ?? GEN_DEFAULT, genMax || 1),
+  );
 
   const load = useCallback(() => {
     apiFetch("/api/semantic-cache/key-model")
@@ -309,7 +342,8 @@ export function KeyModelPanel() {
           })
         | null;
       if (!res.ok || d?.error) {
-        if (res.status === 409 && d?.uncalibratedSpace) setBlocked(d.uncalibratedSpace);
+        if (res.status === 409 && d?.uncalibratedSpace)
+          setBlocked(d.uncalibratedSpace);
         setError(d?.error ?? `Request failed (${res.status}).`);
         return null;
       }
@@ -323,7 +357,9 @@ export function KeyModelPanel() {
   };
 
   const runSweep = async () => {
-    const d = await post("sweep", "/api/semantic-cache/key-model", { action: "sweep" });
+    const d = await post("sweep", "/api/semantic-cache/key-model", {
+      action: "sweep",
+    });
     if (!d) return;
     setSweep(d as unknown as SweepResult);
     // A fresh sweep always opens at the config's stored target — an exploratory
@@ -336,7 +372,9 @@ export function KeyModelPanel() {
     // Explicit every time. The route's own default is 25 questions, so the
     // unlimited-looking button used to quietly do a fraction of the gap and
     // report a number that looked like a failure.
-    const d = await post("pairs", "/api/semantic-cache/pairs", { limit: genQuestions });
+    const d = await post("pairs", "/api/semantic-cache/pairs", {
+      limit: genQuestions,
+    });
     if (!d) return;
     if (d.mode === "batch") {
       setNote(
@@ -370,29 +408,40 @@ export function KeyModelPanel() {
   };
 
   const backfill = async () => {
-    const d = await post("backfill", "/api/semantic-cache/key-model", { action: "backfill" });
+    const d = await post("backfill", "/api/semantic-cache/key-model", {
+      action: "backfill",
+    });
     if (!d) return;
     setNote(
       Number(d.candidates) === 0
         ? `Nothing to re-key — every cached question already has a ${d.keyModel} vector.`
         : `Re-keyed ${d.inserted} of ${d.candidates} cached questions` +
-          (Number(d.failed) > 0 ? `; ${d.failed} failed to embed.` : "."),
+            (Number(d.failed) > 0 ? `; ${d.failed} failed to embed.` : "."),
     );
   };
 
   // Hard negatives are what makes the table mean anything — a set that's all
   // 'same' grades every model identically at the top of its ranking.
-  const noNegatives = pairs !== null && pairs.total > 0 && pairs.different === 0;
+  const noNegatives =
+    pairs !== null && pairs.total > 0 && pairs.different === 0;
   // The precision the table is being read at, and whether that's the config's
   // own setting or somewhere you've dragged to.
   const target = targetOverride ?? sweep?.target ?? 0;
-  const exploring = sweep !== null && targetOverride !== null && targetOverride !== sweep.target;
+  const exploring =
+    sweep !== null &&
+    targetOverride !== null &&
+    targetOverride !== sweep.target;
 
   // Every row, re-read at that target. Recomputed only when the target moves —
   // selectFromCurve walks each model's whole curve, and this runs on every
   // slider tick.
   const derived = useMemo(
-    () => (sweep ? rankDerived(sweep.rows.map((r) => deriveRow(r, target, sweep.minSamples))) : []),
+    () =>
+      sweep
+        ? rankDerived(
+            sweep.rows.map((r) => deriveRow(r, target, sweep.minSamples)),
+          )
+        : [],
     [sweep, target],
   );
 
@@ -403,7 +452,8 @@ export function KeyModelPanel() {
   // difference between get-more-data and lower-the-target, and only the sweep
   // knows which prefix it actually got to consider.
   const scored = derived.filter((d) => d.attainability !== null);
-  const noThresholds = derived.length > 0 && !derived.some((d) => d.kind === "at-target");
+  const noThresholds =
+    derived.length > 0 && !derived.some((d) => d.kind === "at-target");
   // No eligible prefix ANYWHERE means the set never reached minSamples — the
   // target was never even tested, so pointing at it would be misleading.
   const tooFewPairs =
@@ -426,10 +476,13 @@ export function KeyModelPanel() {
         status && (
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
             Keys under <span className="font-mono">{status.keyModel}</span>
-            {status.override === null ? " (global default)" : " (override)"} · space{" "}
-            <span className="font-mono">{status.threshold.space}</span> serves at{" "}
-            <span className="tabular-nums">{status.threshold.threshold.toFixed(3)}</span> (
-            {status.threshold.source})
+            {status.override === null ? " (global default)" : " (override)"} ·
+            space <span className="font-mono">{status.threshold.space}</span>{" "}
+            serves at{" "}
+            <span className="tabular-nums">
+              {status.threshold.threshold.toFixed(3)}
+            </span>{" "}
+            ({status.threshold.source})
           </p>
         )
       }
@@ -455,7 +508,11 @@ export function KeyModelPanel() {
               disabled={busy !== null || !selected}
               className={BTN_PRIMARY}
             >
-              {busy === "apply" ? "Applying…" : blocked ? "Apply anyway" : "Apply"}
+              {busy === "apply"
+                ? "Applying…"
+                : blocked
+                  ? "Apply anyway"
+                  : "Apply"}
             </button>
           </div>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-400">
@@ -529,7 +586,10 @@ export function KeyModelPanel() {
                 {genQuestions}
               </span>{" "}
               question{genQuestions === 1 ? "" : "s"} → ~
-              <span className="tabular-nums">{genQuestions * PAIRS_PER_QUESTION}</span> pairs
+              <span className="tabular-nums">
+                {genQuestions * PAIRS_PER_QUESTION}
+              </span>{" "}
+              pairs
             </span>
             <div className="flex gap-1">
               {/* The two ends of the range are the answers you actually want —
@@ -562,40 +622,60 @@ export function KeyModelPanel() {
         {/* The generate control is gated on knowing the gap, so say so rather
             than rendering nothing — an empty space where a button was reads as
             "the feature is gone", not "the count hasn't arrived". */}
-        {pairs === null && <p className="text-xs text-zinc-400">Loading pair stats…</p>}
+        {pairs === null && (
+          <p className="text-xs text-zinc-400">Loading pair stats…</p>
+        )}
         {pairs !== null && pairs.questionsRemaining === 0 && (
           <p className="text-xs text-zinc-400">
-            Every eval question already has pairs — add eval questions to grow the set.
+            Every eval question already has pairs — add eval questions to grow
+            the set.
           </p>
         )}
 
         <div className="flex flex-wrap items-center gap-2 border-t border-zinc-100 pt-2 dark:border-zinc-800">
-          <button type="button" className={BTN} onClick={runSweep} disabled={busy !== null}>
-            {busy === "sweep" ? "Scoring…" : sweep ? "Re-run sweep" : "Run sweep"}
+          <button
+            type="button"
+            className={BTN}
+            onClick={runSweep}
+            disabled={busy !== null}
+          >
+            {busy === "sweep"
+              ? "Scoring…"
+              : sweep
+                ? "Re-run sweep"
+                : "Run sweep"}
           </button>
           <span className="text-xs text-zinc-400">
-            Embedding-only — no LLM calls, and cached, so re-runs are nearly free.
+            Embedding-only — no LLM calls, and cached, so re-runs are nearly
+            free.
           </span>
         </div>
       </div>
 
       {noNegatives && (
         <p className={NOTE_AMBER}>
-          Every generated pair is labeled &ldquo;same&rdquo;. Without hard negatives the sweep
-          can&apos;t separate models — they&apos;ll all look equally good.
+          Every generated pair is labeled &ldquo;same&rdquo;. Without hard
+          negatives the sweep can&apos;t separate models — they&apos;ll all look
+          equally good.
         </p>
       )}
 
-      {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
-      {note && <p className="text-xs text-green-700 dark:text-green-400">{note}</p>}
+      {error && (
+        <p className="text-xs text-red-600 dark:text-red-400">{error}</p>
+      )}
+      {note && (
+        <p className="text-xs text-green-700 dark:text-green-400">{note}</p>
+      )}
 
       {blocked && (
         <div className="flex flex-col gap-1 rounded-md border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
           <p>
-            <span className="font-mono">{blocked.space}</span> has no calibrated threshold —
-            configs moved there would serve at{" "}
-            <span className="tabular-nums">{blocked.fallbackThreshold.toFixed(3)}</span> (the
-            default). Calibrate it above, or apply again to confirm.
+            <span className="font-mono">{blocked.space}</span> has no calibrated
+            threshold — configs moved there would serve at{" "}
+            <span className="tabular-nums">
+              {blocked.fallbackThreshold.toFixed(3)}
+            </span>{" "}
+            (the default). Calibrate it above, or apply again to confirm.
           </p>
         </div>
       )}
@@ -603,8 +683,9 @@ export function KeyModelPanel() {
       {sweep && (
         <div className="flex flex-col gap-2">
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            {sweep.pairs.total} pairs ({sweep.pairs.shadow} shadow / {sweep.pairs.generated}{" "}
-            generated · {sweep.pairs.same} same / {sweep.pairs.different} different)
+            {sweep.pairs.total} pairs ({sweep.pairs.shadow} shadow /{" "}
+            {sweep.pairs.generated} generated · {sweep.pairs.same} same /{" "}
+            {sweep.pairs.different} different)
           </p>
 
           {/* The target as a DIAL, not a fact. Every model's full curve came
@@ -636,7 +717,10 @@ export function KeyModelPanel() {
             {exploring ? (
               <span className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500 dark:text-zinc-400">
                 exploring —{" "}
-                <span className="font-mono">{sweep.targetSource.configLabel}</span> is set to{" "}
+                <span className="font-mono">
+                  {sweep.targetSource.configLabel}
+                </span>{" "}
+                is set to{" "}
                 <span className="tabular-nums">{pct(sweep.target)}</span>
                 <button
                   type="button"
@@ -648,9 +732,14 @@ export function KeyModelPanel() {
               </span>
             ) : (
               <span className="text-[11px] text-zinc-400">
-                from <span className="font-mono">{sweep.targetSource.configLabel}</span>
-                {sweep.targetSource.source === "config" ? " (override)" : " (global default)"} ·
-                drag to re-read the table
+                from{" "}
+                <span className="font-mono">
+                  {sweep.targetSource.configLabel}
+                </span>
+                {sweep.targetSource.source === "config"
+                  ? " (override)"
+                  : " (global default)"}{" "}
+                · drag to re-read the table
               </span>
             )}
           </div>
@@ -681,24 +770,44 @@ export function KeyModelPanel() {
                 <tr>
                   <th className="py-2 pl-4 pr-3 font-medium">Model</th>
                   <th className="py-2 pr-3 font-medium">Space</th>
-                  <th className="py-2 pr-3 text-right font-medium">τ</th>
                   <th className="py-2 pr-3 text-right font-medium">
                     <Tooltip
                       align="left"
-                      text="Share of servable pairs this model's τ actually catches. The objective."
+                      text="This model's cache threshold: the lowest similarity that still meets the precision target. Solved for, not chosen — and specific to this space, so never copy it to another model."
+                    >
+                      <span className="underline decoration-dotted underline-offset-2">
+                        τ
+                      </span>
+                    </Tooltip>
+                  </th>
+                  <th className="py-2 pr-3 text-right font-medium">
+                    <Tooltip
+                      align="left"
+                      text="Of every pair that SHOULD hit the cache, the share this τ actually serves. What you miss costs savings, not correctness."
                     >
                       <span className="underline decoration-dotted underline-offset-2">
                         Recall@τ
                       </span>
                     </Tooltip>
                   </th>
-                  <th className="py-2 pr-3 text-right font-medium">Precision</th>
+                  <th className="py-2 pr-3 text-right font-medium">
+                    <Tooltip
+                      align="left"
+                      text="Of the pairs this τ serves, the share served correctly. Only serving a DIFFERENT pair lowers it — same pairs left unserved cost nothing here (that's recall)."
+                    >
+                      <span className="underline decoration-dotted underline-offset-2">
+                        Precision
+                      </span>
+                    </Tooltip>
+                  </th>
                   <th className="py-2 pr-3 text-right font-medium">
                     <Tooltip
                       align="left"
                       text="P(a random same pair outranks a random different pair). Scale-free, so it's the tiebreak — but it grades the whole ranking, and a cache only serves from the top."
                     >
-                      <span className="underline decoration-dotted underline-offset-2">AUC</span>
+                      <span className="underline decoration-dotted underline-offset-2">
+                        AUC
+                      </span>
                     </Tooltip>
                   </th>
                   <th className="py-2 pr-3 text-right font-medium">Pairs</th>
@@ -725,14 +834,14 @@ export function KeyModelPanel() {
 
           {derived.some((d) => d.kind === "best-attainable") && (
             <p className="text-[11px] text-zinc-400">
-              ✳ best attainable — this model never reaches {pct(target)} on a serve set of{" "}
-              {sweep.minSamples}+, so its best operating point is shown instead. Not comparable
-              with an at-target row, and sorted below them.
+              ✳ best attainable — this model never reaches {pct(target)} on a
+              serve set of {sweep.minSamples}+, so its best operating point is
+              shown instead. Not comparable with an at-target row, and sorted
+              below them.
             </p>
           )}
         </div>
       )}
-
     </Panel>
   );
 }
@@ -762,7 +871,9 @@ function Row({
       onClick={row.available && !row.error ? onSelect : undefined}
       className={
         (selected ? "bg-zinc-100 dark:bg-zinc-800 " : "") +
-        (dim ? "opacity-50 " : "cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-900 ")
+        (dim
+          ? "opacity-50 "
+          : "cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-900 ")
       }
     >
       <td className="py-1.5 pl-4 pr-3 font-mono text-xs">
@@ -773,7 +884,9 @@ function Row({
           </span>
         )}
       </td>
-      <td className="py-1.5 pr-3 font-mono text-xs text-zinc-500">{row.space}</td>
+      <td className="py-1.5 pr-3 font-mono text-xs text-zinc-500">
+        {row.space}
+      </td>
       <td
         className={`py-1.5 pr-3 text-right tabular-nums ${fallback ? "text-zinc-400" : ""}`}
       >
@@ -802,8 +915,12 @@ function Row({
       <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-500">
         {row.auc === null ? "—" : row.auc.toFixed(3)}
       </td>
-      <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-500">{row.pairsScored}</td>
-      <td className="py-1.5 pr-4 text-xs text-zinc-400">{row.error ?? row.reason ?? ""}</td>
+      <td className="py-1.5 pr-3 text-right tabular-nums text-zinc-500">
+        {row.pairsScored}
+      </td>
+      <td className="py-1.5 pr-4 text-xs text-zinc-400">
+        {row.error ?? row.reason ?? ""}
+      </td>
     </tr>
   );
 }
