@@ -11,29 +11,31 @@
 import { AppraiseNav } from "@/app/components/AppraiseNav";
 import { BackToConfigs } from "@/app/components/BackToConfigs";
 import { InfoDot } from "@/app/components/InfoDot";
-import { ModelComparisonTable } from "@/app/components/ModelComparisonTable";
 import { ModelRateCard } from "@/app/components/ModelRateCard";
-import {
-  listModelPerformance,
-  listModelRateCard,
-  meteredEmbedTokens,
-} from "@/lib/rag/modelAppraisal";
+import { ModelReplayTable } from "@/app/components/ModelReplayTable";
+import { listConfigComparisons } from "@/lib/rag/appraiseStore";
+import { listModelRateCard, meteredEmbedTokens } from "@/lib/rag/modelAppraisal";
+import { listReplays } from "@/lib/rag/replayStore";
 
 export const dynamic = "force-dynamic";
 
 const ABOUT =
-  "Per-token prices for every embedding model, and how each has scored on this " +
-  "corpus.\n\n" +
-  "The rate card is always complete. The performance table only fills in as you " +
-  "run evals and per-chunk model trials — and the badge tells you how much each " +
-  "row's number is worth.";
+  "Per-token prices for every embedding model, and how each ranks the corpus.\n\n" +
+  "The rate card is always complete. The replay scores every model with cached " +
+  "vectors against the same questions — it costs nothing to run, because the " +
+  "vectors were already paid for.";
 
 export default async function AppraiseModelsPage() {
-  // listModelRateCard is sync (registry + env, no IO); only the two DB reads
-  // need awaiting, and they're independent.
+  // listModelRateCard is sync (registry + env, no IO); the DB reads are
+  // independent, so they go in parallel.
+  //
+  // listReplays is the slow one on a cold fingerprint (~8s, dominated by pulling
+  // vectors out of embedding_cache) and ~0.4s once cached in replay_metrics.
+  // loading.tsx covers the cold case — see AppraiseLoading.
   const rateCard = listModelRateCard();
-  const [performance, embedTokens] = await Promise.all([
-    listModelPerformance(),
+  const [replays, comparisons, embedTokens] = await Promise.all([
+    listReplays(),
+    listConfigComparisons(),
     meteredEmbedTokens(),
   ]);
 
@@ -50,7 +52,7 @@ export default async function AppraiseModelsPage() {
         <AppraiseNav />
 
         <ModelRateCard rows={rateCard} meteredEmbedTokens={embedTokens} />
-        <ModelComparisonTable rows={performance} />
+        <ModelReplayTable reports={replays} comparisons={comparisons} />
       </main>
     </div>
   );
