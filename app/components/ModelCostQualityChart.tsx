@@ -19,10 +19,31 @@
 // The chroma-floor FAIL on the neutral is intentional and out of scope: it reads
 // gray BECAUSE it isn't encoding identity. Don't "fix" it by adding hues.
 //
-// Server Component: no JS, so the hover layer is a native SVG <title> per mark.
-// The table above is the required table view.
-import type { ReplayRow } from "@/lib/rag/replayStore";
+// Client Component, for one reason: the y-axis metric is switchable. Everything
+// it needs already arrives as props (the replay is computed server-side), so this
+// costs no extra fetch — same pattern as CostsSection's view selector.
+//
+// The hover layer is a native SVG <title> per mark, so it still needs no JS of
+// its own. NOTE: <title> children must be a SINGLE string — React can't convert
+// an array of text/value nodes into title text, and mixing them silently breaks
+// hydration. Always build it with a template literal.
+"use client";
+
+import { useState } from "react";
+
 import { embedRate } from "@/lib/rag/pricing";
+import type { ReplayRow } from "@/lib/rag/replayStore";
+
+// The y-axis options. `key` indexes ReplayRow; `decimals` keeps the axis honest
+// for metrics that cluster tightly.
+const METRICS = [
+  { id: "mrr", label: "MRR", hint: "mean reciprocal rank of the gold chunk" },
+  { id: "recallAt1", label: "R@1", hint: "gold chunk ranked first" },
+  { id: "recallAt5", label: "R@5", hint: "gold chunk in the top 5" },
+  { id: "ndcg", label: "nDCG@k", hint: "graded, vs. a model-built ideal — see the note below the table" },
+] as const;
+
+type MetricId = (typeof METRICS)[number]["id"];
 
 // Plot geometry. viewBox units; the SVG scales to its container width.
 const W = 720;
@@ -38,15 +59,20 @@ export function ModelCostQualityChart({
   rows: ReplayRow[];
   baseModel: string | null;
 }) {
-  // Only models with BOTH a quality score and a price we'd stand behind can be
-  // placed. An unverified price has no defensible x position, and plotting it
-  // at a guessed one would be the chart telling a lie the table refuses to.
+  const [metric, setMetric] = useState<MetricId>("mrr");
+  const active = METRICS.find((m) => m.id === metric)!;
+
+  // Only models with BOTH a score on the SELECTED metric and a price we'd stand
+  // behind can be placed. An unverified price has no defensible x position, and
+  // plotting it at a guessed one would be the chart telling a lie the table
+  // refuses to.
   const points: Point[] = [];
   for (const r of rows) {
-    if (r.mrr === null) continue;
+    const y = r[metric];
+    if (y === null) continue;
     const rate = embedRate(r.model);
     if (!rate || !rate.verified) continue;
-    points.push({ model: r.model, x: rate.usdPerM, y: r.mrr, isBase: r.model === baseModel });
+    points.push({ model: r.model, x: rate.usdPerM, y, isBase: r.model === baseModel });
   }
   if (points.length < 2) return null;
 
@@ -78,12 +104,31 @@ export function ModelCostQualityChart({
 
   return (
     <figure className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-zinc-500 dark:text-zinc-400">Y axis</span>
+        {METRICS.map((m) => (
+          <button
+            key={m.id}
+            type="button"
+            onClick={() => setMetric(m.id)}
+            title={m.hint}
+            className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+              metric === m.id
+                ? "bg-black text-white dark:bg-white dark:text-black"
+                : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800"
+            }`}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+
       <svg
         viewBox={`0 0 ${W} ${H}`}
         className="w-full"
         role="img"
-        aria-label={`Cost versus quality for ${points.length} embedding models. ${points
-          .map((p) => `${p.model}: $${p.x.toFixed(2)} per million tokens, MRR ${p.y.toFixed(3)}`)
+        aria-label={`Cost versus ${active.label} for ${points.length} embedding models. ${points
+          .map((p) => `${p.model}: $${p.x.toFixed(2)} per million tokens, ${active.label} ${p.y.toFixed(3)}`)
           .join(". ")}`}
       >
         {/* Recessive grid — never competes with the marks. */}
@@ -133,7 +178,7 @@ export function ModelCostQualityChart({
           textAnchor="middle"
           className="fill-zinc-500 text-[11px] dark:fill-zinc-400"
         >
-          MRR →
+          {active.label} →
         </text>
 
         {points.map((p) => {
@@ -156,10 +201,10 @@ export function ModelCostQualityChart({
                     : "fill-[#71717a] stroke-[#fcfcfb] dark:stroke-[#1a1a19]"
                 }
               >
-                <title>
-                  {p.model} — ${p.x.toFixed(2)}/1M, MRR {p.y.toFixed(3)}
-                  {p.isBase ? " (in use)" : ""}
-                </title>
+                {/* One template literal: React cannot turn an array of text and
+                    value nodes into <title> content, and mixing them breaks
+                    hydration rather than failing loudly at build time. */}
+                <title>{`${p.model} — $${p.x.toFixed(2)}/1M, ${active.label} ${p.y.toFixed(3)}${p.isBase ? " (in use)" : ""}`}</title>
               </circle>
               <text
                 x={px(p.x) + (flip ? -12 : 12)}

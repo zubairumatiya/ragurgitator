@@ -7,7 +7,8 @@
 // for every model, on the same questions, by the same exact-cosine scan — and
 // immediately produced a real spread (MRR .800–.881).
 //
-// Server Component, no client state.
+// Server Component. Only the scatter below it is a Client Component, for its
+// y-axis metric selector — the table itself needs no client state.
 //
 // R@1 and MRR lead on purpose. R@5/R@10 are near the ceiling on this corpus
 // (0.92–1.00), which is exactly why the config's stored eval run reads 1.000 —
@@ -96,8 +97,20 @@ function ConfigReplay({
   report: ReplayReport;
   live: ConfigComparison | null;
 }) {
-  const scored = report.rows.filter((r) => r.mrr !== null);
-  const best = scored.length >= 2 ? Math.max(...scored.map((r) => r.mrr!)) : null;
+  // Best value per metric, highlighted like /appraise/configs does. Only
+  // meaningful with >=2 scored models, otherwise the single row is trivially
+  // "best" and the green reads as an endorsement it hasn't earned.
+  const best = (key: "recallAt1" | "recallAt5" | "mrr" | "ndcg"): number | null => {
+    const vals = report.rows.map((r) => r[key]).filter((v): v is number => v !== null);
+    return vals.length >= 2 ? Math.max(...vals) : null;
+  };
+  const bests = {
+    recallAt1: best("recallAt1"),
+    recallAt5: best("recallAt5"),
+    mrr: best("mrr"),
+    ndcg: best("ndcg"),
+  };
+  const anyLeaveOneOut = report.rows.some((r) => r.ndcgLeaveOneOut);
   const baseModel = live?.baseModel ?? null;
 
   return (
@@ -128,13 +141,24 @@ function ConfigReplay({
               <Row
                 key={row.model}
                 row={row}
-                isBest={best !== null && row.mrr === best}
+                bests={bests}
                 isBase={row.model === baseModel}
               />
             ))}
           </tbody>
         </table>
       </div>
+
+      {anyLeaveOneOut && (
+        <p className="text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+          <span className="text-zinc-700 dark:text-zinc-300">*</span> This model
+          helped build the ideal ranking that nDCG grades against
+          (<code className="text-[11px]">rankingAggregateModels</code>), so its
+          nDCG is scored against an ideal rebuilt from the other contributors
+          only. That removes its own vote but not its relatives&apos; — rank by
+          MRR and R@1, which score against the labelled gold chunk instead.
+        </p>
+      )}
 
       <ModelCostQualityChart rows={report.rows} baseModel={baseModel} />
 
@@ -143,13 +167,15 @@ function ConfigReplay({
   );
 }
 
+type Bests = { recallAt1: number | null; recallAt5: number | null; mrr: number | null; ndcg: number | null };
+
 function Row({
   row,
-  isBest,
+  bests,
   isBase,
 }: {
   row: ReplayRow;
-  isBest: boolean;
+  bests: Bests;
   isBase: boolean;
 }) {
   const unscored = row.mrr === null;
@@ -166,28 +192,19 @@ function Row({
           </span>
         )}
       </td>
-      <Num value={f3(row.recallAt1)} />
-      <Num value={f3(row.recallAt5)} />
-      <td
-        className={`px-3 py-2 text-right tabular-nums ${
-          isBest
-            ? "font-semibold text-green-700 dark:text-green-400"
-            : "text-zinc-700 dark:text-zinc-300"
-        }`}
-      >
-        {f3(row.mrr)}
-      </td>
-      <td className="px-3 py-2 text-right tabular-nums text-zinc-500 dark:text-zinc-400">
-        {f3(row.ndcg)}
+      <Metric value={row.recallAt1} best={bests.recallAt1} />
+      <Metric value={row.recallAt5} best={bests.recallAt5} />
+      <Metric value={row.mrr} best={bests.mrr} />
+      <Metric value={row.ndcg} best={bests.ndcg}>
         {row.ndcgLeaveOneOut && (
           <span
-            className="ml-1 text-zinc-400"
-            title="This model helped build the ideal ranking, so its nDCG is scored against an ideal rebuilt without it"
+            className="ml-1 font-normal text-zinc-400"
+            title="This model helped build the ideal ranking, so it was scored against an ideal rebuilt without its own votes"
           >
             *
           </span>
         )}
-      </td>
+      </Metric>
       {/* Price sits in the same row as quality so the trade-off is one glance,
           not two tables. Unverified rates render "—" here exactly as they do on
           the rate card — see EmbedRate.verified. */}
@@ -228,6 +245,33 @@ function LiveNote({ live, report }: { live: ConfigComparison; report: ReplayRepo
       screens), the replay is a plain cosine scan. Compare models by the replay
       column; compare pipelines by the live one.
     </p>
+  );
+}
+
+// One metric cell, highlighting the column's best value — same treatment across
+// every metric column, so no column looks more authoritative than another purely
+// because it's the one that's coloured.
+function Metric({
+  value,
+  best,
+  children,
+}: {
+  value: number | null;
+  best: number | null;
+  children?: React.ReactNode;
+}) {
+  const isBest = value !== null && best !== null && value === best;
+  return (
+    <td
+      className={`px-3 py-2 text-right tabular-nums ${
+        isBest
+          ? "font-semibold text-green-700 dark:text-green-400"
+          : "text-zinc-500 dark:text-zinc-400"
+      }`}
+    >
+      {f3(value)}
+      {children}
+    </td>
   );
 }
 
