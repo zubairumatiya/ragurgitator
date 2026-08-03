@@ -10,8 +10,12 @@
 // still redirects, for hand-typed URLs and old links.
 
 // Order = display order. Money first: it's the page you open Appraise for.
+// Models sits second for the same reason — a per-token rate card is a money
+// page, and it's the one tab that says something useful before you've run
+// anything (the registry and price table are always populated).
 export const APPRAISE_TABS = [
   { href: "/appraise/costs", label: "Costs" },
+  { href: "/appraise/models", label: "Models" },
   { href: "/appraise/semantic-cache", label: "Semantic caching" },
   { href: "/appraise/configs", label: "Config metrics" },
 ] as const;

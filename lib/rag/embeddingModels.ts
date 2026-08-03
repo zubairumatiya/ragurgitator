@@ -111,6 +111,14 @@ export function isProviderAvailable(provider: EmbeddingProviderId): boolean {
   return Boolean(process.env[PROVIDER_KEY_ENV[provider]]);
 }
 
+// Which env var enables a provider, for "set VOYAGE_API_KEY to enable" copy.
+// Exported so callers outside this module (the Appraise → Models rate card,
+// which lists every model rather than just the config-picker candidates) can
+// explain an unavailable provider without duplicating the mapping.
+export function providerKeyEnv(provider: EmbeddingProviderId): string {
+  return PROVIDER_KEY_ENV[provider];
+}
+
 export type BaseModelOption = {
   id: string;
   label: string;
