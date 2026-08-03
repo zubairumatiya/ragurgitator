@@ -13,6 +13,7 @@
 // (0.92–1.00), which is exactly why the config's stored eval run reads 1.000 —
 // its k sits above where these models actually differ.
 import { InfoDot } from "@/app/components/InfoDot";
+import { ModelCostQualityChart } from "@/app/components/ModelCostQualityChart";
 import type { ConfigComparison } from "@/lib/rag/appraiseStore";
 import { embedRate } from "@/lib/rag/pricing";
 import type { ReplayReport, ReplayRow } from "@/lib/rag/replayStore";
@@ -26,7 +27,13 @@ const ABOUT =
   "This is a brute-force scan, not the live ANN index, so it measures the model " +
   "rather than the full retrieval stack. A model is scored only when it has a " +
   "cached vector for every chunk — partial coverage would shrink the pool and " +
-  "flatter the score.";
+  "flatter the score.\n\n" +
+  "RANK BY MRR AND R@1, not nDCG. Those score against the labelled gold chunk, " +
+  "which no embedding model had a hand in choosing. nDCG grades against the " +
+  "ideal ranking, which is itself an average of four Voyage models' opinions — " +
+  "a model marked * helped build it, so its ideal is rebuilt without it, but " +
+  "the remaining voters are still its close relatives. nDCG here means " +
+  "'agrees with the Voyage-4 family', which is not the same as 'is correct'.";
 
 function f3(n: number | null): string {
   return n === null ? "—" : n.toFixed(3);
@@ -111,6 +118,7 @@ function ConfigReplay({
               <Th right>R@1</Th>
               <Th right>R@5</Th>
               <Th right>MRR</Th>
+              <Th right>nDCG@k</Th>
               <Th right>$ / 1M</Th>
               <Th>Coverage</Th>
             </tr>
@@ -127,6 +135,8 @@ function ConfigReplay({
           </tbody>
         </table>
       </div>
+
+      <ModelCostQualityChart rows={report.rows} baseModel={baseModel} />
 
       {live && <LiveNote live={live} report={report} />}
     </div>
@@ -166,6 +176,17 @@ function Row({
         }`}
       >
         {f3(row.mrr)}
+      </td>
+      <td className="px-3 py-2 text-right tabular-nums text-zinc-500 dark:text-zinc-400">
+        {f3(row.ndcg)}
+        {row.ndcgLeaveOneOut && (
+          <span
+            className="ml-1 text-zinc-400"
+            title="This model helped build the ideal ranking, so its nDCG is scored against an ideal rebuilt without it"
+          >
+            *
+          </span>
+        )}
       </td>
       {/* Price sits in the same row as quality so the trade-off is one glance,
           not two tables. Unverified rates render "—" here exactly as they do on

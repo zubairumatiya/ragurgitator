@@ -27,7 +27,8 @@ import { createHash } from "node:crypto";
 
 import { sql } from "@/lib/db";
 import { EMBEDDING_MODELS } from "@/lib/rag/embeddingModels";
-import { goldRank, summarizeRanks } from "@/lib/rag/replayMetrics";
+import { ndcg } from "@/lib/rag/evalMetrics";
+import { goldRank, leaveOneOutIdeal, rankTexts, summarizeRanks } from "@/lib/rag/replayMetrics";
 import { chunksTable, modelDimension } from "@/lib/rag/vectorStore";
 
 const isMissingTable = (err: unknown): boolean =>
@@ -47,6 +48,11 @@ export type ReplayRow = {
   recallAt5: number | null;
   recallAt10: number | null;
   mrr: number | null;
+  // Graded nDCG@k against the ideal ranking, with the leave-one-out correction
+  // applied when this model helped build that ideal (see replayMetrics).
+  ndcg: number | null;
+  ndcgK: number | null;
+  ndcgLeaveOneOut: boolean;
   computedAt: number | null;
 };
 
@@ -64,6 +70,12 @@ export type ReplayReport = {
 type Corpus = {
   chunks: { text: string }[]; // distinct chunk texts, the retrieval pool
   labels: { question: string; goldText: string }[];
+  // Graded ideal per question, in TEXT space (the cache's key) rather than chunk
+  // ids, so duplicate-text chunks can't split a ranking. `perModelRanks` is kept
+  // so the ideal can be rebuilt without the model under test.
+  ideals: Map<string, { idealTexts: string[]; perModelRanks: Record<string, Record<string, number>> }>;
+  textById: Map<string, string>; // chunk id -> text, to translate stored ideals
+  topK: number; // the config's k — the depth nDCG is reported at
 };
 
 // The config's corpus chunks and its labelled questions.
@@ -72,10 +84,14 @@ type Corpus = {
 // corpus join is needed. We match the gold chunk by TEXT rather than id, because
 // the cache is keyed on text — and a chunk re-ingested under new settings gets a
 // new id but the same text.
-async function loadCorpus(configId: string, baseModel: string): Promise<Corpus> {
+async function loadCorpus(
+  configId: string,
+  baseModel: string,
+  topK: number,
+): Promise<Corpus> {
   const table = chunksTable(baseModel, modelDimension(baseModel));
 
-  const [chunks, labels] = await Promise.all([
+  const [chunks, labels, rankings, idMap] = await Promise.all([
     // distinct on text: duplicate chunk texts would otherwise both sit in the
     // pool and split the ranking, and the cache can't tell them apart anyway.
     sql<{ text: string }[]>`
@@ -89,12 +105,72 @@ async function loadCorpus(configId: string, baseModel: string): Promise<Corpus> 
       join ${sql(table)} c on c.id = l.source_chunk_id
       where de.config_id = ${configId}
     `,
+    // The graded ideal per question. Only is_truth counts — the other kinds
+    // (llm_pool, llm_rerank, manual) are alternatives the user hasn't adopted,
+    // and 0009 is explicit that nDCG scores against the marked one.
+    sql<{ question: string; chunk_ids: string[]; details: { perModelRanks?: Record<string, Record<string, number>> } }[]>`
+      select q.question, r.chunk_ids, r.details
+      from eval_rankings r
+      join document_embeddings de on de.id = r.document_embedding_id
+      join eval_questions q on q.id = r.eval_question_id
+      where de.config_id = ${configId} and r.is_truth
+    `,
+    sql<{ id: string; text: string }[]>`
+      select id, text from ${sql(table)} where config_id = ${configId}
+    `,
   ]);
+
+  // Ideals arrive as chunk IDS; everything else in the replay works in TEXT
+  // space (the cache is keyed on text). Translate once here, dropping ids that
+  // no longer resolve — a ranking can outlive a re-chunk.
+  const textById = new Map(idMap.map((r) => [r.id, r.text]));
+  const ideals = new Map<
+    string,
+    { idealTexts: string[]; perModelRanks: Record<string, Record<string, number>> }
+  >();
+  for (const r of rankings) {
+    const idealTexts = r.chunk_ids
+      .map((id) => textById.get(id))
+      .filter((t): t is string => t !== undefined);
+    if (idealTexts.length === 0) continue;
+    ideals.set(r.question, {
+      idealTexts,
+      perModelRanks: r.details?.perModelRanks ?? {},
+    });
+  }
 
   return {
     chunks,
     labels: labels.map((l) => ({ question: l.question, goldText: l.gold_text })),
+    ideals,
+    textById,
+    topK,
   };
+}
+
+// The ideal order (in text space) to grade `model` against for one question.
+//
+// If the model contributed to the stored aggregate, rebuild it from the OTHER
+// contributors — otherwise the model is graded against a target it helped write.
+// Non-contributors get the stored ideal unchanged.
+function idealFor(
+  entry: { idealTexts: string[]; perModelRanks: Record<string, Record<string, number>> },
+  model: string,
+  textById: Map<string, string>,
+): { ideal: string[]; corrected: boolean } {
+  const contributed = Object.values(entry.perModelRanks).some((r) => model in r);
+  if (!contributed) return { ideal: entry.idealTexts, corrected: false };
+
+  const rebuilt = leaveOneOutIdeal(entry.perModelRanks, model);
+  if (!rebuilt) return { ideal: entry.idealTexts, corrected: false };
+
+  const texts = rebuilt
+    .map((id) => textById.get(id))
+    .filter((t): t is string => t !== undefined);
+  // Fall back rather than grade against an empty ideal (evalMetrics.ndcg would
+  // return null anyway, but this keeps the reason explicit).
+  if (texts.length === 0) return { ideal: entry.idealTexts, corrected: false };
+  return { ideal: texts, corrected: true };
 }
 
 // A hash of everything the replay's answer depends on. Same fingerprint ⇒ the
@@ -114,9 +190,16 @@ async function fingerprint(configId: string, corpus: Corpus): Promise<string> {
     .map((l) => `${sha256(l.question)}:${sha256(l.goldText)}`)
     .sort()
     .join(",");
+  // The graded ideal is an input too: re-rank a question, or mark a different
+  // ranking as truth, and every model's nDCG changes. Hashing the ORDER (not
+  // just membership) is the point — a reordered ideal is a different target.
+  const idealPart = [...corpus.ideals.entries()]
+    .map(([q, e]) => `${sha256(q)}:${e.idealTexts.map(sha256).join(">")}`)
+    .sort()
+    .join(",");
 
   return createHash("md5")
-    .update(`${configId}|${count}|${chunkPart}|${labelPart}`)
+    .update(`${configId}|${count}|${chunkPart}|${labelPart}|${idealPart}|k=${corpus.topK}`)
     .digest("hex");
 }
 
@@ -162,6 +245,9 @@ async function scoreModel(model: string, corpus: Corpus): Promise<ReplayRow> {
     recallAt5: null,
     recallAt10: null,
     mrr: null,
+    ndcg: null,
+    ndcgK: null,
+    ndcgLeaveOneOut: false,
     computedAt: Date.now(),
   };
   if (docs.size < texts.length) return unscorable;
@@ -174,6 +260,8 @@ async function scoreModel(model: string, corpus: Corpus): Promise<ReplayRow> {
   const pool = texts.map((t) => ({ text: t, vec: docs.get(t)! }));
 
   const ranks: number[] = [];
+  const ndcgs: number[] = [];
+  let anyCorrected = false;
   for (const { question, goldText } of corpus.labels) {
     const qv = queries.get(question);
     if (!qv) continue; // question never embedded under this model — skip, don't guess
@@ -183,6 +271,17 @@ async function scoreModel(model: string, corpus: Corpus): Promise<ReplayRow> {
     const goldVec = docs.get(goldText);
     if (!goldVec) continue;
     ranks.push(goldRank(qv, goldVec, pool, goldText));
+
+    // nDCG needs the whole retrieved ORDER, not just where the gold chunk fell,
+    // and a graded ideal to score it against. Questions without a truth ranking
+    // simply don't contribute — evalMetrics.ndcg's "ungraded" contract.
+    const entry = corpus.ideals.get(question);
+    if (!entry) continue;
+    const { ideal, corrected } = idealFor(entry, model, corpus.textById);
+    const score = ndcg(ideal, rankTexts(qv, pool), corpus.topK);
+    if (score === null) continue;
+    ndcgs.push(score);
+    if (corrected) anyCorrected = true;
   }
 
   const metrics = summarizeRanks(ranks);
@@ -191,6 +290,9 @@ async function scoreModel(model: string, corpus: Corpus): Promise<ReplayRow> {
     model,
     corpusChunks: texts.length,
     coverageChunks: docs.size,
+    ndcg: ndcgs.length > 0 ? ndcgs.reduce((a, b) => a + b, 0) / ndcgs.length : null,
+    ndcgK: ndcgs.length > 0 ? corpus.topK : null,
+    ndcgLeaveOneOut: anyCorrected,
     computedAt: Date.now(),
     ...metrics,
   };
@@ -211,11 +313,15 @@ async function readCached(configId: string, fp: string): Promise<ReplayRow[] | n
         recall_at_5: string | null;
         recall_at_10: string | null;
         mrr: string | null;
+        ndcg: string | null;
+        ndcg_k: number | null;
+        ndcg_leave_one_out: boolean;
         computed_at: Date;
       }[]
     >`
       select model, questions, corpus_chunks, coverage_chunks,
-             recall_at_1, recall_at_3, recall_at_5, recall_at_10, mrr, computed_at
+             recall_at_1, recall_at_3, recall_at_5, recall_at_10, mrr,
+             ndcg, ndcg_k, ndcg_leave_one_out, computed_at
       from replay_metrics
       where config_id = ${configId} and fingerprint = ${fp}
     `;
@@ -231,6 +337,9 @@ async function readCached(configId: string, fp: string): Promise<ReplayRow[] | n
       recallAt5: num(r.recall_at_5),
       recallAt10: num(r.recall_at_10),
       mrr: num(r.mrr),
+      ndcg: num(r.ndcg),
+      ndcgK: r.ndcg_k,
+      ndcgLeaveOneOut: r.ndcg_leave_one_out,
       computedAt: r.computed_at.getTime(),
     }));
   } catch (err) {
@@ -248,11 +357,12 @@ async function writeCached(configId: string, fp: string, rows: ReplayRow[]): Pro
       await sql`
         insert into replay_metrics (
           fingerprint, config_id, model, questions, corpus_chunks, coverage_chunks,
-          recall_at_1, recall_at_3, recall_at_5, recall_at_10, mrr
+          recall_at_1, recall_at_3, recall_at_5, recall_at_10, mrr,
+          ndcg, ndcg_k, ndcg_leave_one_out
         ) values (
           ${fp}, ${configId}, ${r.model}, ${r.questions}, ${r.corpusChunks},
           ${r.coverageChunks}, ${r.recallAt1}, ${r.recallAt3}, ${r.recallAt5},
-          ${r.recallAt10}, ${r.mrr}
+          ${r.recallAt10}, ${r.mrr}, ${r.ndcg}, ${r.ndcgK}, ${r.ndcgLeaveOneOut}
         )
         on conflict (fingerprint, config_id, model) do nothing
       `;
@@ -268,12 +378,12 @@ async function writeCached(configId: string, fp: string, rows: ReplayRow[]): Pro
 // Every config that has labelled eval questions — the ones a replay can score.
 // Ordered like the config tabs so the page's sections match the rest of the app.
 async function replayableConfigs(): Promise<
-  { id: string; label: string; baseModel: string }[]
+  { id: string; label: string; baseModel: string; topK: number }[]
 > {
   const rows = await sql<
-    { id: string; name: string | null; base_model: string; chunk_size: number; chunk_overlap: number }[]
+    { id: string; name: string | null; base_model: string; chunk_size: number; chunk_overlap: number; top_k: number }[]
   >`
-    select distinct c.id, c.name, c.base_model, c.chunk_size, c.chunk_overlap, c.tab_order, c.created_at
+    select distinct c.id, c.name, c.base_model, c.chunk_size, c.chunk_overlap, c.top_k, c.tab_order, c.created_at
     from configs c
     join document_embeddings de on de.config_id = c.id
     join eval_labels l on l.document_embedding_id = de.id
@@ -283,6 +393,7 @@ async function replayableConfigs(): Promise<
     id: r.id,
     label: r.name ?? `${r.base_model} · ${r.chunk_size}/${r.chunk_overlap}`,
     baseModel: r.base_model,
+    topK: r.top_k,
   }));
 }
 
@@ -294,8 +405,9 @@ export async function replayConfig(
   configId: string,
   baseModel: string,
   label: string,
+  topK: number,
 ): Promise<ReplayReport> {
-  const corpus = await loadCorpus(configId, baseModel);
+  const corpus = await loadCorpus(configId, baseModel, topK);
   const fp = await fingerprint(configId, corpus);
 
   let rows = await readCached(configId, fp);
@@ -333,7 +445,7 @@ export async function listReplays(): Promise<ReplayReport[]> {
   const configs = await replayableConfigs();
   const out: ReplayReport[] = [];
   for (const c of configs) {
-    out.push(await replayConfig(c.id, c.baseModel, c.label));
+    out.push(await replayConfig(c.id, c.baseModel, c.label, c.topK));
   }
   return out;
 }

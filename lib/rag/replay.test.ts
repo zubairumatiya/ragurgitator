@@ -10,7 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { goldRank, summarizeRanks } from "./replayMetrics";
+import { goldRank, leaveOneOutIdeal, rankTexts, summarizeRanks } from "./replayMetrics";
 
 // A tiny 2-D "embedding space". Cosine ignores magnitude, so direction is all
 // that matters and these are easy to reason about by hand.
@@ -94,4 +94,56 @@ test("summarizeRanks: no questions scored yields nulls, not zeros", () => {
   assert.equal(m.mrr, null);
   assert.equal(m.recallAt1, null);
   assert.equal(m.recallAt10, null);
+});
+
+// --- leave-one-out ideal ----------------------------------------------------
+// The stored ideal ranking averages several embedding models' ranks. Grading one
+// of those models against it is circular, so the ideal is rebuilt without it.
+
+test("leaveOneOutIdeal: excluding a model can flip the ideal order", () => {
+  // The case the correction exists for. voyage-4-lite alone loves chunk A
+  // (rank 1) and dislikes B (rank 5); the other two voters disagree. Averaged
+  // over all three, A leads — so grading voyage-4-lite against that ideal would
+  // reward it for its own opinion. Drop its vote and B leads instead.
+  //
+  //   with lite:     A (1+4+4)/3 = 3.00   B (5+2+3)/3 = 3.33  -> A, B
+  //   without lite:  A (4+4)/2   = 4.00   B (2+3)/2   = 2.50  -> B, A
+  const perModelRanks = {
+    A: { "voyage-4-lite": 1, "voyage-4": 4, "voyage-4-large": 4 },
+    B: { "voyage-4-lite": 5, "voyage-4": 2, "voyage-4-large": 3 },
+  };
+  assert.deepEqual(leaveOneOutIdeal(perModelRanks, "nobody"), ["A", "B"]);
+  assert.deepEqual(leaveOneOutIdeal(perModelRanks, "voyage-4-lite"), ["B", "A"]);
+});
+
+test("leaveOneOutIdeal: a chunk only the excluded model ranked is dropped", () => {
+  // Keeping it would mean inventing a position no remaining voter expressed.
+  const perModelRanks = {
+    A: { "voyage-4": 2 },
+    Solo: { "voyage-4-lite": 1 },
+  };
+  assert.deepEqual(leaveOneOutIdeal(perModelRanks, "voyage-4-lite"), ["A"]);
+});
+
+test("leaveOneOutIdeal: null when excluding leaves nothing to average", () => {
+  // The caller must fall back rather than grade against an empty ideal.
+  assert.equal(leaveOneOutIdeal({ A: { "voyage-4-lite": 1 } }, "voyage-4-lite"), null);
+  assert.equal(leaveOneOutIdeal({}, "voyage-4-lite"), null);
+});
+
+test("leaveOneOutIdeal: ties resolve deterministically", () => {
+  // Equal mean ranks must not depend on object key order — an ideal that
+  // reshuffles between runs would make nDCG jitter for no reason.
+  const ranks = { B: { m: 2, n: 2 }, A: { m: 2, n: 2 } };
+  assert.deepEqual(leaveOneOutIdeal(ranks, "other"), ["A", "B"]);
+});
+
+test("rankTexts: returns the pool best-first by cosine", () => {
+  const query = [1, 0];
+  const pool = [
+    { text: "far", vec: [0, 1] },
+    { text: "near", vec: [1, 0.05] },
+    { text: "mid", vec: [1, 1] },
+  ];
+  assert.deepEqual(rankTexts(query, pool), ["near", "mid", "far"]);
 });

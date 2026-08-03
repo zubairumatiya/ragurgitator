@@ -10,6 +10,60 @@
 // ---------------------------------------------------------------------------
 import { cosine } from "./semanticCacheCore";
 
+// The pool ranked best-first by cosine to the query. Needed for nDCG, which
+// grades the whole retrieved ORDER rather than just where the gold chunk landed.
+export function rankTexts(
+  queryVec: number[],
+  pool: { text: string; vec: number[] }[],
+): string[] {
+  return pool
+    .map((c) => ({ text: c.text, score: cosine(queryVec, c.vec) }))
+    .sort((a, b) => b.score - a.score)
+    .map((c) => c.text);
+}
+
+// ---------------------------------------------------------------------------
+// LEAVE-ONE-OUT IDEAL RANKING — the correction that makes cross-model nDCG fair.
+//
+// The stored ideal (eval_rankings, kind='aggregate') is built by averaging the
+// ranks that SEVERAL embedding models gave each chunk — today voyage-4-lite,
+// voyage-4-large, voyage-4 and voyage-code-3 (lib/config.rankingAggregateModels).
+// Scoring one of those four against that ideal is circular: the model helped
+// define the target it's being graded on, which inflates its nDCG relative to a
+// model that contributed nothing.
+//
+// The fix is free, because eval_rankings.details.perModelRanks stores each
+// contributor's rank per chunk: rebuild the average WITHOUT the model under
+// test. A non-contributor keeps the full ideal — it was never advantaged.
+//
+// Returns chunk ids best-first, or null when excluding the model would leave
+// nothing to average (in which case the caller should skip nDCG rather than
+// grade against a single model's opinion).
+export function leaveOneOutIdeal(
+  perModelRanks: Record<string, Record<string, number>>,
+  exclude: string,
+): string[] | null {
+  const ids = Object.keys(perModelRanks);
+  if (ids.length === 0) return null;
+
+  const scored: { id: string; meanRank: number }[] = [];
+  for (const id of ids) {
+    const ranks = perModelRanks[id] ?? {};
+    const kept = Object.entries(ranks).filter(([model]) => model !== exclude);
+    // A chunk no remaining model ranked can't be placed — drop it rather than
+    // guess a position, exactly as the aggregate builder would have.
+    if (kept.length === 0) continue;
+    const mean = kept.reduce((s, [, r]) => s + r, 0) / kept.length;
+    scored.push({ id, meanRank: mean });
+  }
+  if (scored.length === 0) return null;
+
+  // Ascending: rank 1 is best. Ties broken by id so the order is deterministic
+  // across runs — an unstable ideal would make nDCG jitter for no reason.
+  scored.sort((a, b) => (a.meanRank !== b.meanRank ? a.meanRank - b.meanRank : a.id.localeCompare(b.id)));
+  return scored.map((s) => s.id);
+}
+
 // Where the gold chunk lands when the pool is ranked by cosine to the query.
 // 1-based. Counts how many chunks beat it rather than sorting the whole pool:
 // same answer, no allocation, and it's the only thing we need from the ranking.
