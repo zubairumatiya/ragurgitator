@@ -84,7 +84,7 @@ export function ModelReplayTable({
 function Heading() {
   return (
     <h2 className="flex items-center gap-1.5 text-lg font-semibold tracking-tight text-black dark:text-zinc-50">
-      📈 Full-corpus replay
+      Full-corpus replay
       <InfoDot text={ABOUT} />
     </h2>
   );

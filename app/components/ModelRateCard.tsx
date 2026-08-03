@@ -50,7 +50,7 @@ export function ModelRateCard({
   return (
     <section className="flex flex-col gap-3">
       <h2 className="flex items-center gap-1.5 text-lg font-semibold tracking-tight text-black dark:text-zinc-50">
-        🏷️ Rate card
+        Rate card
         <InfoDot text={ABOUT} />
       </h2>
 
@@ -128,15 +128,16 @@ function Status({ row }: { row: RateCardRow }) {
     );
   }
   if (!row.ingestable) {
-    // Usable in the in-memory experiments, but can't be a config's base_model
-    // until it has a chunks_<model>_<dim> table. That distinction is exactly
-    // what the comparison table below scores, so it's worth surfacing.
+    // Keyed, so it CAN be embedded with — but it has no chunks_<model>_<dim>
+    // table, so it can't be a config's base model. This column is about what you
+    // may do with the model, not where the replay's numbers came from (that's
+    // the replay's own Coverage column), so it must not say "from cache".
     return (
       <span
         className="text-zinc-500 dark:text-zinc-400"
-        title="No vector table yet — usable in trials, but not as a config's base model"
+        title="No vector table yet — usable in trials and the replay, but not as a config's base model"
       >
-        Experiments only
+        Trials only
       </span>
     );
   }
