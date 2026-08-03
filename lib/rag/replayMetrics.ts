@@ -26,11 +26,15 @@ export function rankTexts(
 // LEAVE-ONE-OUT IDEAL RANKING — the correction that makes cross-model nDCG fair.
 //
 // The stored ideal (eval_rankings, kind='aggregate') is built by averaging the
-// ranks that SEVERAL embedding models gave each chunk — today voyage-4-lite,
-// voyage-4-large, voyage-4 and voyage-code-3 (lib/config.rankingAggregateModels).
-// Scoring one of those four against that ideal is circular: the model helped
-// define the target it's being graded on, which inflates its nDCG relative to a
-// model that contributed nothing.
+// ranks that SEVERAL embedding models gave each chunk — which models is a
+// per-config setting (Settings → Metrics → nDCG → "Models in aggregate",
+// migration 0045), and each stored ranking records its own voters in
+// details.models. Read that, never a current config value: an old ranking was
+// built by whatever voted at the time.
+//
+// Scoring a VOTER against that ideal is circular: it helped define the target
+// it's being graded on, which inflates its nDCG relative to a model that
+// contributed nothing.
 //
 // The fix is free, because eval_rankings.details.perModelRanks stores each
 // contributor's rank per chunk: rebuild the average WITHOUT the model under

@@ -23,10 +23,11 @@
 // ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { config, rankingAggregateModels } from "@/lib/config";
+import { config } from "@/lib/config";
 import {
   canonicalModelOrder,
   isProviderAvailable,
+  keyedModels,
   EMBEDDING_MODELS,
 } from "@/lib/rag/embeddingModels";
 import { getActiveCriteria } from "@/lib/rag/evalSettingsStore";
@@ -239,16 +240,15 @@ export // Which models vote in this config's ideal ranking (migration 0045).
 async function aggregateModels(): Promise<string[]> {
   const criteria = await getActiveCriteria();
   const saved = criteria.ndcg.aggregateModels;
-  const chosen = saved === null ? rankingAggregateModels : saved;
+  // null = every keyed model (the default since the hard-coded four were
+  // retired — see lib/config). A saved list pins a narrower set.
+  const chosen = saved === null ? keyedModels() : saved;
   const usable = canonicalModelOrder(
     chosen.filter((id) => EMBEDDING_MODELS[id] && isProviderAvailable(EMBEDDING_MODELS[id].provider)),
   );
-  if (usable.length > 0) return usable;
-  return canonicalModelOrder(
-    rankingAggregateModels.filter(
-      (id) => EMBEDDING_MODELS[id] && isProviderAvailable(EMBEDDING_MODELS[id].provider),
-    ),
-  );
+  // A saved list that no longer resolves to anything keyed falls back to the
+  // default rather than building a ranking with no voters.
+  return usable.length > 0 ? usable : canonicalModelOrder(keyedModels());
 }
 
 export async function buildAggregateRanking(

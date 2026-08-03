@@ -31,10 +31,10 @@ const ABOUT =
   "flatter the score.\n\n" +
   "RANK BY MRR AND R@1, not nDCG. Those score against the labelled gold chunk, " +
   "which no embedding model had a hand in choosing. nDCG grades against the " +
-  "ideal ranking, which is itself an average of four Voyage models' opinions — " +
-  "a model marked * helped build it, so its ideal is rebuilt without it, but " +
-  "the remaining voters are still its close relatives. nDCG here means " +
-  "'agrees with the Voyage-4 family', which is not the same as 'is correct'.";
+  "ideal ranking, which is itself an average of several models' opinions — a " +
+  "model marked * helped build the ideal it is graded on, so that ideal is " +
+  "rebuilt without its votes. The correction is even-handed only when every " +
+  "candidate votes; a ranking built by a narrow set still favours that family.";
 
 function f3(n: number | null): string {
   return n === null ? "—" : n.toFixed(3);
@@ -152,11 +152,12 @@ function ConfigReplay({
       {anyLeaveOneOut && (
         <p className="text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
           <span className="text-zinc-700 dark:text-zinc-300">*</span> This model
-          helped build the ideal ranking that nDCG grades against
-          (<code className="text-[11px]">rankingAggregateModels</code>), so its
-          nDCG is scored against an ideal rebuilt from the other contributors
-          only. That removes its own vote but not its relatives&apos; — rank by
-          MRR and R@1, which score against the labelled gold chunk instead.
+          helped build the ideal ranking that nDCG grades against, so its nDCG is
+          scored against an ideal rebuilt from the other voters only. Who votes
+          is set per config under Settings → Metrics → nDCG → Models in
+          aggregate. Rankings built before that setting changed keep their
+          original voters until rebuilt — rank by MRR and R@1, which score
+          against the labelled gold chunk instead.
         </p>
       )}
 

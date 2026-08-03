@@ -3,9 +3,14 @@
 --
 -- "Models in aggregate" (Settings → Metrics → nDCG): which embedding models vote
 -- when building a question's IDEAL ranking (lib/rag/ranking.buildAggregate).
--- NULL (the default) means lib/config.rankingAggregateModels — the hard-coded
--- four this shipped with. A non-null array whitelists model ids (embedding-model
--- registry keys, no FK), mirroring autotune_model_scope (0030).
+-- NULL (the default) means EVERY KEYED MODEL — lib/rag/embeddingModels.keyedModels.
+-- A non-null array whitelists model ids (embedding-model registry keys, no FK),
+-- mirroring autotune_model_scope (0030).
+--
+-- (This shipped defaulting to a hard-coded four in lib/config; that list was
+-- retired immediately after — see the note below on why four voters were unfair.
+-- NULL must mean "all keyed" because the Settings checklist collapses an
+-- all-checked box set to NULL.)
 --
 -- WHY IT'S A KNOB NOW. The ideal ranking is an average of several models' ranks,
 -- and nDCG grades a model against it. With four voters — voyage-4-lite,

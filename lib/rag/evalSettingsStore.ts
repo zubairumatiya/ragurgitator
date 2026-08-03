@@ -63,7 +63,7 @@ export type EvalCriteria = {
   recall: MetricCriteria;
   mrr: MetricCriteria;
   // nDCG carries one extra dial: which models vote when building the IDEAL
-  // ranking it grades against (0045). null = lib/config.rankingAggregateModels.
+  // ranking it grades against (0045). null = every keyed model (keyedModels).
   ndcg: MetricCriteria & { aggregateModels: string[] | null };
   difficulties: Difficulty[]; // '{}' => legacy no-difficulty generation
   autotune: AutotuneSettings;

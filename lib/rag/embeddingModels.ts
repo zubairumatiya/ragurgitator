@@ -39,7 +39,8 @@ export type EmbeddingModelSpec = {
 // the non-ingestable Voyage alts it's informational — embed() doesn't read it.
 export const EMBEDDING_MODELS: Record<string, EmbeddingModelSpec> = {
   // --- Voyage: the default + the alternates used by the in-memory experiments
-  //     (altEmbeddingModels / rankingAggregateModels in lib/config.ts) ---------
+  //     (altEmbeddingModels in lib/config.ts; the nDCG aggregate votes with
+  //     every keyed model — see keyedModels below) ------------------------
   // The voyage-4 family shares one embedding space (space "voyage-4"): a chunk
   // re-embedded under voyage-4 / voyage-4-large stays cosine-comparable to the
   // voyage-4-lite base, so an override under them needs no fusion lane.
@@ -199,6 +200,25 @@ export function listAggregateModelOptions(baseModel: string): AutotuneModelOptio
       reason: available ? null : `set ${PROVIDER_KEY_ENV[spec.provider]} to enable`,
     };
   });
+}
+
+// Every model we could embed with RIGHT NOW: registry order, provider keyed.
+//
+// This is what a null `ndcg_aggregate_models` resolves to (migration 0045) — the
+// nDCG aggregate's default is "every candidate votes", not a hard-coded list.
+// That also keeps the Settings checklist honest: it collapses an all-checked box
+// set to null, so null must mean the same thing as all-checked or ticking
+// everything would silently narrow the aggregate.
+//
+// Note this widens automatically when a provider gains a key. That's the
+// intended "all" semantics, and it only affects rankings built from then on —
+// but it does mean setting LOCAL_EMBEDDINGS opts local models (large weight
+// downloads) into every subsequent aggregate build. Pin an explicit list in
+// Settings to avoid that.
+export function keyedModels(): string[] {
+  return Object.values(EMBEDDING_MODELS)
+    .filter((spec) => isProviderAvailable(spec.provider))
+    .map((spec) => spec.id);
 }
 
 // Canonical ORDER for a set of model ids: registry order, not the order a user
