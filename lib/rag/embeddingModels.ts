@@ -175,6 +175,42 @@ export type AutotuneModelOption = {
   reason: string | null;
 };
 
+// The models the nDCG "Models in aggregate" checklist offers (0045): every
+// registry model, in registry order.
+//
+// Unlike the autotune list this INCLUDES the config's base model — it votes in
+// the aggregate like any other (buildAggregate reuses its already-computed
+// similarities rather than re-embedding), and excluding it from the picker would
+// make the default set unrepresentable in the UI.
+//
+// Same selectable/reason contract as the autotune options: an unkeyed model is
+// listed greyed out with the env var that would enable it, rather than dropped.
+export function listAggregateModelOptions(baseModel: string): AutotuneModelOption[] {
+  const baseSpace = EMBEDDING_MODELS[baseModel]?.vectorSpace ?? null;
+  return Object.values(EMBEDDING_MODELS).map((spec) => {
+    const available = isProviderAvailable(spec.provider);
+    const space = spec.vectorSpace ?? null;
+    return {
+      id: spec.id,
+      provider: spec.provider,
+      vectorSpace: space,
+      sameSpaceAsBase: space !== null && space === baseSpace,
+      selectable: available,
+      reason: available ? null : `set ${PROVIDER_KEY_ENV[spec.provider]} to enable`,
+    };
+  });
+}
+
+// Canonical ORDER for a set of model ids: registry order, not the order a user
+// happened to click them. buildAggregate folds per-model ranks in a declared
+// sequence and breaks rank-sum ties with a secondary key, so the same selection
+// must always produce the same ideal — a stored click order would make the
+// ranking depend on how the checkboxes were ticked.
+export function canonicalModelOrder(ids: string[]): string[] {
+  const wanted = new Set(ids);
+  return Object.keys(EMBEDDING_MODELS).filter((id) => wanted.has(id));
+}
+
 // The alternate models the autotune checklist offers. Cheapest-first ladder
 // order, minus the config's own base model. Everything else in the ladder is
 // returned — the keyed models a run could use now (selectable), plus the ones

@@ -1,0 +1,33 @@
+-- ============================================================================
+-- 0045_ndcg_aggregate_models.sql
+--
+-- "Models in aggregate" (Settings → Metrics → nDCG): which embedding models vote
+-- when building a question's IDEAL ranking (lib/rag/ranking.buildAggregate).
+-- NULL (the default) means lib/config.rankingAggregateModels — the hard-coded
+-- four this shipped with. A non-null array whitelists model ids (embedding-model
+-- registry keys, no FK), mirroring autotune_model_scope (0030).
+--
+-- WHY IT'S A KNOB NOW. The ideal ranking is an average of several models' ranks,
+-- and nDCG grades a model against it. With four voters — voyage-4-lite,
+-- voyage-4-large, voyage-4, voyage-code-3 — four of the seven candidates on
+-- Appraise → Models are being graded against a target they helped write, while
+-- the other three are graded by their competitors. The replay applies a
+-- leave-one-out correction (rebuild the ideal without the model under test), but
+-- that only removes a model's OWN vote, not its family's: every non-contributor
+-- still lands in the bottom half on nDCG.
+--
+-- Widening the aggregate to every candidate makes leave-one-out apply uniformly,
+-- which is the actual fix for that bias. It became cheap only once the embedding
+-- cache had full corpus coverage under every model (see migration 0043's
+-- replay): re-building rankings under more models is now mostly cache hits.
+--
+-- The engine still filters the saved list to models whose provider is keyed, and
+-- falls back to the default when that leaves nothing — a stale id in a saved
+-- scope can never produce a rankless build. Order is canonicalised at build time
+-- (registry order), not stored click order, because the ideal must be
+-- reproducible: buildAggregate folds per-model ranks in a declared sequence and
+-- ties fall through to a secondary key.
+-- ============================================================================
+
+alter table configs
+  add column ndcg_aggregate_models text[];

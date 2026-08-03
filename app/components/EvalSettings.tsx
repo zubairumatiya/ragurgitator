@@ -165,6 +165,11 @@ export function EvalSettings() {
   // enough to bury the sections below it, so it lives behind a disclosure that
   // starts collapsed and pops open when a bulk action changes it.
   const [modelOpts, setModelOpts] = useState<AutotuneModelOption[]>([]);
+  // nDCG "Models in aggregate" (0045): which models build the ideal ranking.
+  // null = the default set, same null-means-default contract as modelScope.
+  const [aggOpts, setAggOpts] = useState<AutotuneModelOption[]>([]);
+  const [aggSel, setAggSel] = useState<Set<string> | null>(null);
+  const [aggOpen, setAggOpen] = useState(false);
   const [modelSel, setModelSel] = useState<Set<string> | null>(null);
   const [modelsOpen, setModelsOpen] = useState(false);
   const [sync, setSync] = useState(false);
@@ -223,6 +228,7 @@ export function EvalSettings() {
             config?: ConfigSummary;
             scopeOptions?: AutotuneScopeDocument[];
             autotuneModels?: AutotuneModelOption[];
+            aggregateModels?: AutotuneModelOption[];
             error?: string;
           }
         | null;
@@ -254,6 +260,8 @@ export function EvalSettings() {
       setScopeSel(c.autotune.chunkScope === null ? null : new Set(c.autotune.chunkScope));
       setScopeExpanded(new Set());
       setModelOpts(data.autotuneModels ?? []);
+      setAggOpts(data.aggregateModels ?? []);
+      setAggSel(c.ndcg.aggregateModels === null ? null : new Set(c.ndcg.aggregateModels));
       setModelSel(c.autotune.modelScope === null ? null : new Set(c.autotune.modelScope));
       setModelsOpen(false);
       setSync(data.config.corpusSync);
@@ -329,10 +337,23 @@ export function EvalSettings() {
       modelSel === null || allModelIds.every((id) => modelSel.has(id))
         ? null
         : allModelIds.filter((id) => modelSel.has(id));
+    // Same all-checked -> null collapse as modelScope: saving the full keyed set
+    // explicitly would freeze today's registry into the config, so a model added
+    // later silently wouldn't vote.
+    const allAggIds = aggOpts.filter((m) => m.selectable).map((m) => m.id);
+    const aggScope =
+      aggSel === null || allAggIds.every((id) => aggSel.has(id))
+        ? null
+        : allAggIds.filter((id) => aggSel.has(id));
     const patch = {
       recall: { enabled: recallOn, k: parseKOrNull(recallK), minRate: parseRateOrNull(recallMin) },
       mrr: { enabled: mrrOn, k: parseKOrNull(mrrK), minRate: parseRateOrNull(mrrMin) },
-      ndcg: { enabled: ndcgOn, k: parseKOrNull(ndcgK), minRate: parseRateOrNull(ndcgMin) },
+      ndcg: {
+        enabled: ndcgOn,
+        k: parseKOrNull(ndcgK),
+        minRate: parseRateOrNull(ndcgMin),
+        aggregateModels: aggScope,
+      },
       autotune: {
         ...(ladderArr.length > 0 ? { sizeLadder: ladderArr } : {}),
         ...(Number.isFinite(overlapNum)
@@ -472,6 +493,12 @@ export function EvalSettings() {
   // offered while the picker shows something else.
   const keyModelDirty = keyModel !== (keyModelInfo?.override ?? "");
 
+  // The collapsed "Models in aggregate" summary. Unkeyed models can't vote, so
+  // they never count — same rule as the autotune summary below.
+  const aggSelected = aggOpts.filter(
+    (m) => m.selectable && (aggSel === null || aggSel.has(m.id)),
+  ).length;
+
   // The collapsed "Models" summary: how many models a run would actually try.
   // Counts only keyed options, so the greyed rows can't inflate it, and treats
   // null ("all") as every keyed option — the same set the save path collapses.
@@ -528,6 +555,62 @@ export function EvalSettings() {
               setMin={setNdcgMin}
               topK={config?.topK ?? 5}
             />
+
+            {/* Which models VOTE in the ideal ranking nDCG grades against. Sits
+                under nDCG rather than in Autotuning because it changes what the
+                metric MEANS, not how a run searches — and a model in this set is
+                partly grading itself (see the tooltip). */}
+            <div className="flex items-center justify-between gap-2 py-0.5 pl-4">
+              <Tooltip
+                align="left"
+                text={
+                  "Which embedding models vote when building each question's " +
+                  "ideal ranking. Their ranks are averaged; nDCG then scores a " +
+                  "model's retrieval against that ideal.\n\n" +
+                  "A model in this set helps define the target it is later graded " +
+                  "on. Appraise → Models corrects for that by rebuilding the ideal " +
+                  "without the model under test, but the remaining voters are " +
+                  "still its relatives — so a NARROW set biases nDCG toward that " +
+                  "family. Including every candidate makes the correction apply " +
+                  "evenly to all of them.\n\n" +
+                  "Changing this does not rewrite existing rankings — rebuild them " +
+                  "from a question's ranking panel. Unkeyed models are greyed out. " +
+                  "Uncheck everything to fall back to the default set."
+                }
+              >
+                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                  Models in aggregate
+                </span>
+              </Tooltip>
+              <div className="flex items-center gap-2 text-[11px]">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAggSel(null);
+                    setAggOpen(true);
+                  }}
+                  className="cursor-pointer text-zinc-500 hover:underline"
+                >
+                  all
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAggOpen((v) => !v)}
+                  aria-expanded={aggOpen}
+                  title={aggOpen ? "Hide the model list" : "Show the model list"}
+                  className="cursor-pointer rounded border border-zinc-300 px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                >
+                  {aggSelected} selected {aggOpen ? "\u25be" : "\u25b8"}
+                </button>
+              </div>
+            </div>
+            {aggOpen && (
+              <ModelScopeChecklist
+                models={aggOpts}
+                selected={aggSel}
+                setSelected={setAggSel}
+              />
+            )}
 
             {/* AUTOTUNING */}
             <p className="mb-1 mt-3 border-t border-zinc-200 pt-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:border-zinc-800">
