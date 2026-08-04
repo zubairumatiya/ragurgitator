@@ -225,18 +225,19 @@ export const autotuneModelLadder: string[] = [
   "embed-v4",
 ];
 
-// Embedding models whose per-model rankings are averaged into the synthetic
-// "aggregate" ideal ranking for graded nDCG (lib/rag/ranking.ts). The active
-// model is the baseline; a few general-purpose alts add cross-model consensus.
-// Like altEmbeddingModels these are re-embedded in memory, never ingested.
+// The nDCG "aggregate" ideal ranking (lib/rag/ranking.ts) used to average a
+// hard-coded four models here: the active model plus voyage-4-large, voyage-4
+// and voyage-code-3.
 //
-// Kept Voyage-only on purpose: every aggregate build embeds the pool under ALL of
-// these eagerly, so adding a model that needs a key (OpenAI/Cohere) or a big
-// weights download (local) would break or stall the aggregate for everyone.
-// Expose those through altEmbeddingModels (opt-in) instead.
-export const rankingAggregateModels: string[] = [
-  config.embeddingModel,
-  "voyage-4-large",
-  "voyage-4",
-  "voyage-code-3",
-];
+// That list is gone. It made nDCG unfair in a way that only became visible once
+// Appraise → Models scored every model on the same corpus: four of the seven
+// candidates were graded against an ideal they had helped write, and every
+// non-contributor landed in the bottom half. The default is now EVERY keyed
+// model (lib/rag/embeddingModels.keyedModels), so the replay's leave-one-out
+// correction applies evenly to all of them, and Settings → Metrics → nDCG →
+// "Models in aggregate" pins a narrower set per config (migration 0045).
+//
+// The old comment's warning still holds and is why the default is keyed-only:
+// an aggregate build embeds the pool under ALL voters eagerly, so a model whose
+// provider has no key would stall or break the build for everyone.
+

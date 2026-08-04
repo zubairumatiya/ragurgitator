@@ -9,9 +9,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import { EMBEDDING_MODELS } from "./embeddingModels";
 import {
   costEmbed,
   costLlm,
+  EMBED_RATES,
+  embedRate,
   estimateTokens,
   estimateTokensAll,
   estimateTokensFromChars,
@@ -54,6 +57,35 @@ test("costEmbed: a dated embed model id prices identically to its alias", () => 
 
 test("costEmbed: a local (free) model is 0 without tripping the unknown path", () => {
   assert.equal(costEmbed("bge-m3", 1_000_000), 0);
+});
+
+test("costEmbed: an UNVERIFIED rate still costs at its number, it does not dash to 0", () => {
+  // The display/costing split (EmbedRate.verified): the Appraise → Models rate
+  // card renders "—" for text-embedding-3-large because OpenAI's own pages
+  // disagree, but accounting must keep using 0.13. If this ever returns 0, the
+  // rate card's caution has leaked into the ledger and embed spend under that
+  // model silently vanishes.
+  assert.equal(EMBED_RATES["text-embedding-3-large"].verified, false);
+  assert.equal(costEmbed("text-embedding-3-large", 1_000_000), 0.13);
+});
+
+test("EMBED_RATES: every registered embedding model has a rate", () => {
+  // A model in EMBEDDING_MODELS with no rate entry costs $0 forever (costEmbed's
+  // unknown path) — the under-count is silent apart from one console warn. This
+  // is the guard that adding a model to the registry can't skip pricing it.
+  for (const id of Object.keys(EMBEDDING_MODELS)) {
+    assert.ok(embedRate(id), `${id} is registered but has no EMBED_RATES entry`);
+  }
+});
+
+test("EMBED_RATES: a free tier is a positive token allowance or absent, never 0", () => {
+  // freeTierM is rendered as "200M"/"50M"/"—". A 0 would render as a free tier
+  // that grants nothing, which is a different (and wrong) claim from "none".
+  for (const [id, rate] of Object.entries(EMBED_RATES)) {
+    if (rate.freeTierM !== null) {
+      assert.ok(rate.freeTierM > 0, `${id} has a zero free tier; use null instead`);
+    }
+  }
 });
 
 test("estimateTokens: ~4 chars per token, rounded up", () => {

@@ -20,7 +20,10 @@ import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { getConfig } from "@/lib/rag/configStore";
-import { listAutotuneModelOptions } from "@/lib/rag/embeddingModels";
+import {
+  listAggregateModelOptions,
+  listAutotuneModelOptions,
+} from "@/lib/rag/embeddingModels";
 import { getActiveCriteria, updateCriteria } from "@/lib/rag/evalSettingsStore";
 import { listAutotuneScopeOptions } from "@/lib/rag/evalStore";
 
@@ -41,7 +44,10 @@ export async function GET(request: Request) {
         autotuneModelLadder,
         activeConfig().embeddingModel,
       );
-      return Response.json({ criteria, config, scopeOptions, autotuneModels });
+      // Which models may vote in the nDCG ideal ranking (0045). Every registry
+      // model, including the base — it votes like any other.
+      const aggregateModels = listAggregateModelOptions(activeConfig().embeddingModel);
+      return Response.json({ criteria, config, scopeOptions, autotuneModels, aggregateModels });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to load criteria.";
       return Response.json({ error: message }, { status: 500 });
@@ -57,10 +63,21 @@ const Metric = z
   })
   .optional();
 
+// nDCG takes one field the other metrics don't: which models build the ideal
+// ranking (0045). null = the default set; a list whitelists registry ids.
+const NdcgMetric = z
+  .object({
+    enabled: z.boolean().optional(),
+    k: z.number().int().positive().nullable().optional(),
+    minRate: z.number().min(0).max(1).nullable().optional(),
+    aggregateModels: z.array(z.string()).nullable().optional(),
+  })
+  .optional();
+
 const Body = z.object({
   recall: Metric,
   mrr: Metric,
-  ndcg: Metric,
+  ndcg: NdcgMetric,
   difficulties: z.array(z.enum(["easy", "medium", "hard"])).optional(),
   autotune: z
     .object({

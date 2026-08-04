@@ -39,7 +39,8 @@ export type EmbeddingModelSpec = {
 // the non-ingestable Voyage alts it's informational — embed() doesn't read it.
 export const EMBEDDING_MODELS: Record<string, EmbeddingModelSpec> = {
   // --- Voyage: the default + the alternates used by the in-memory experiments
-  //     (altEmbeddingModels / rankingAggregateModels in lib/config.ts) ---------
+  //     (altEmbeddingModels in lib/config.ts; the nDCG aggregate votes with
+  //     every keyed model — see keyedModels below) ------------------------
   // The voyage-4 family shares one embedding space (space "voyage-4"): a chunk
   // re-embedded under voyage-4 / voyage-4-large stays cosine-comparable to the
   // voyage-4-lite base, so an override under them needs no fusion lane.
@@ -111,6 +112,14 @@ export function isProviderAvailable(provider: EmbeddingProviderId): boolean {
   return Boolean(process.env[PROVIDER_KEY_ENV[provider]]);
 }
 
+// Which env var enables a provider, for "set VOYAGE_API_KEY to enable" copy.
+// Exported so callers outside this module (the Appraise → Models rate card,
+// which lists every model rather than just the config-picker candidates) can
+// explain an unavailable provider without duplicating the mapping.
+export function providerKeyEnv(provider: EmbeddingProviderId): string {
+  return PROVIDER_KEY_ENV[provider];
+}
+
 export type BaseModelOption = {
   id: string;
   label: string;
@@ -166,6 +175,61 @@ export type AutotuneModelOption = {
   // Why it's NOT selectable ("set OPENAI_API_KEY to enable"); null when it is.
   reason: string | null;
 };
+
+// The models the nDCG "Models in aggregate" checklist offers (0045): every
+// registry model, in registry order.
+//
+// Unlike the autotune list this INCLUDES the config's base model — it votes in
+// the aggregate like any other (buildAggregate reuses its already-computed
+// similarities rather than re-embedding), and excluding it from the picker would
+// make the default set unrepresentable in the UI.
+//
+// Same selectable/reason contract as the autotune options: an unkeyed model is
+// listed greyed out with the env var that would enable it, rather than dropped.
+export function listAggregateModelOptions(baseModel: string): AutotuneModelOption[] {
+  const baseSpace = EMBEDDING_MODELS[baseModel]?.vectorSpace ?? null;
+  return Object.values(EMBEDDING_MODELS).map((spec) => {
+    const available = isProviderAvailable(spec.provider);
+    const space = spec.vectorSpace ?? null;
+    return {
+      id: spec.id,
+      provider: spec.provider,
+      vectorSpace: space,
+      sameSpaceAsBase: space !== null && space === baseSpace,
+      selectable: available,
+      reason: available ? null : `set ${PROVIDER_KEY_ENV[spec.provider]} to enable`,
+    };
+  });
+}
+
+// Every model we could embed with RIGHT NOW: registry order, provider keyed.
+//
+// This is what a null `ndcg_aggregate_models` resolves to (migration 0045) — the
+// nDCG aggregate's default is "every candidate votes", not a hard-coded list.
+// That also keeps the Settings checklist honest: it collapses an all-checked box
+// set to null, so null must mean the same thing as all-checked or ticking
+// everything would silently narrow the aggregate.
+//
+// Note this widens automatically when a provider gains a key. That's the
+// intended "all" semantics, and it only affects rankings built from then on —
+// but it does mean setting LOCAL_EMBEDDINGS opts local models (large weight
+// downloads) into every subsequent aggregate build. Pin an explicit list in
+// Settings to avoid that.
+export function keyedModels(): string[] {
+  return Object.values(EMBEDDING_MODELS)
+    .filter((spec) => isProviderAvailable(spec.provider))
+    .map((spec) => spec.id);
+}
+
+// Canonical ORDER for a set of model ids: registry order, not the order a user
+// happened to click them. buildAggregate folds per-model ranks in a declared
+// sequence and breaks rank-sum ties with a secondary key, so the same selection
+// must always produce the same ideal — a stored click order would make the
+// ranking depend on how the checkboxes were ticked.
+export function canonicalModelOrder(ids: string[]): string[] {
+  const wanted = new Set(ids);
+  return Object.keys(EMBEDDING_MODELS).filter((id) => wanted.has(id));
+}
 
 // The alternate models the autotune checklist offers. Cheapest-first ladder
 // order, minus the config's own base model. Everything else in the ladder is

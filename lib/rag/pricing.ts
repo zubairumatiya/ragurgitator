@@ -77,22 +77,52 @@ const LLM_PRICES: Record<string, LlmPrice> = {
   "claude-haiku-4-5": { inputPerM: 1, outputPerM: 5 },
 };
 
-// Embedding $/M tokens. Voyage from its pricing page; local models are free but
-// still listed (0) so they don't trip the unknown-model warn. Values marked
-// "~confirm" are best-effort and should be verified against current provider
-// pricing before any figure is quoted externally.
-const EMBED_PRICES: Record<string, number> = {
-  "voyage-4-lite": 0.02,
-  "voyage-4": 0.06,
-  "voyage-4-large": 0.12,
-  "voyage-code-3": 0.18, // ~confirm
-  "voyage-code-2": 0.12, // ~confirm
-  "voyage-finance-2": 0.12, // ~confirm
-  "voyage-law-2": 0.12, // ~confirm
-  "text-embedding-3-large": 0.13, // OpenAI ~confirm
-  "embed-v4": 0.12, // Cohere ~confirm
-  "mxbai-embed-large": 0, // local
-  "bge-m3": 0, // local
+// Embedding rates. ONE table, TWO consumers with different needs:
+//
+//   - costEmbed (accounting) always wants a NUMBER. An absent price silently
+//     costs $0 (warnUnknown → 0), which under-counts the ledger forever.
+//   - the Appraise → Models rate card (display) must never quote a figure we
+//     can't stand behind.
+//
+// Hence `verified`: a false entry still COSTS at usdPerM, but the rate card
+// renders "—" for it. Don't collapse these back into a bare number.
+//
+// `freeTierM` is the provider's free allowance in MILLIONS of tokens, per
+// account. It's policy, not an API-readable value, so it goes stale silently —
+// RATES_VERIFIED_ON dates it, and the rate card footnotes that date.
+//
+// Verified 2026-08-02 against provider docs: every Voyage figure and Cohere's
+// were already correct. The one exception is text-embedding-3-large, where
+// OpenAI's own two pages disagree — the model card says $0.13/1M, the pricing
+// page says $0.065/1M, with open community reports about the discrepancy. A
+// conflict between primary sources is a stronger reason to withhold a number
+// than a missing one, so it's unverified until OpenAI resolves it. We keep
+// costing at 0.13 (the model card) so accounting stays conservative.
+export type EmbedRate = {
+  usdPerM: number; // what costEmbed uses — always a number
+  verified: boolean; // false ⇒ rate card shows "—"
+  freeTierM: number | null; // provider free allowance, millions of tokens
+};
+
+// The as-of date for every figure below, rendered by the rate card's footnote.
+export const RATES_VERIFIED_ON = "2026-08-02";
+
+export const EMBED_RATES: Record<string, EmbedRate> = {
+  // Voyage: first 200M tokens free on the voyage-4 family + code-3/code-2,
+  // first 50M on finance-2/law-2 (docs.voyageai.com/docs/pricing).
+  "voyage-4-lite": { usdPerM: 0.02, verified: true, freeTierM: 200 },
+  "voyage-4": { usdPerM: 0.06, verified: true, freeTierM: 200 },
+  "voyage-4-large": { usdPerM: 0.12, verified: true, freeTierM: 200 },
+  "voyage-code-3": { usdPerM: 0.18, verified: true, freeTierM: 200 },
+  "voyage-code-2": { usdPerM: 0.12, verified: true, freeTierM: 200 },
+  "voyage-finance-2": { usdPerM: 0.12, verified: true, freeTierM: 50 },
+  "voyage-law-2": { usdPerM: 0.12, verified: true, freeTierM: 50 },
+  // OpenAI — see the note above; unverified on a source conflict, not absence.
+  "text-embedding-3-large": { usdPerM: 0.13, verified: false, freeTierM: null },
+  "embed-v4": { usdPerM: 0.12, verified: true, freeTierM: null }, // Cohere
+  // Local models run on your own hardware: free, and trivially "verified".
+  "mxbai-embed-large": { usdPerM: 0, verified: true, freeTierM: null },
+  "bge-m3": { usdPerM: 0, verified: true, freeTierM: null },
 };
 
 // Provider batch-API discounts (docs §5.1): the multiple of standard cost SAVED.
@@ -135,13 +165,22 @@ export function costLlm(model: string, inputTokens: number, outputTokens: number
 }
 
 // USD cost of embedding `tokens` under `model`. Unknown model → 0 (+ one warn).
+// Reads usdPerM regardless of `verified`: an unverified rate is still our best
+// estimate of what we were billed, and dashing it here would under-count.
 export function costEmbed(model: string, tokens: number): number {
-  const perM = priceFor(EMBED_PRICES, model);
-  if (perM === undefined) {
+  const rate = priceFor(EMBED_RATES, model);
+  if (rate === undefined) {
     warnUnknown("embed", model);
     return 0;
   }
-  return (tokens * perM) / 1_000_000;
+  return (tokens * rate.usdPerM) / 1_000_000;
+}
+
+// The rate for one model, tolerating a versioned id, for the rate card. Callers
+// that want a displayable price must check `verified` themselves — this returns
+// the accounting rate either way.
+export function embedRate(model: string): EmbedRate | undefined {
+  return priceFor(EMBED_RATES, model);
 }
 
 // Cheap token estimate (≈4 chars/token) — used everywhere the provider doesn't

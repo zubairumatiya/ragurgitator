@@ -62,7 +62,9 @@ export type RetrievalSettings = {
 export type EvalCriteria = {
   recall: MetricCriteria;
   mrr: MetricCriteria;
-  ndcg: MetricCriteria;
+  // nDCG carries one extra dial: which models vote when building the IDEAL
+  // ranking it grades against (0045). null = every keyed model (keyedModels).
+  ndcg: MetricCriteria & { aggregateModels: string[] | null };
   difficulties: Difficulty[]; // '{}' => legacy no-difficulty generation
   autotune: AutotuneSettings;
   retrieval: RetrievalSettings;
@@ -78,6 +80,7 @@ type CriteriaRow = {
   ndcg_enabled: boolean;
   ndcg_k: number | null;
   ndcg_min_rate: number | null;
+  ndcg_aggregate_models: string[] | null;
   eval_difficulties: string[];
   autotune_size_ladder: number[];
   autotune_overlap_pct: number;
@@ -97,7 +100,12 @@ function toCriteria(row: CriteriaRow): EvalCriteria {
   return {
     recall: { enabled: row.recall_enabled, k: row.recall_k, minRate: row.recall_min_rate },
     mrr: { enabled: row.mrr_enabled, k: row.mrr_k, minRate: row.mrr_min_rate },
-    ndcg: { enabled: row.ndcg_enabled, k: row.ndcg_k, minRate: row.ndcg_min_rate },
+    ndcg: {
+      enabled: row.ndcg_enabled,
+      k: row.ndcg_k,
+      minRate: row.ndcg_min_rate,
+      aggregateModels: row.ndcg_aggregate_models,
+    },
     // Keep only recognised difficulties, in the canonical easy→hard order.
     difficulties: DIFFICULTIES.filter((d) => row.eval_difficulties.includes(d)),
     autotune: {
@@ -118,7 +126,7 @@ function toCriteria(row: CriteriaRow): EvalCriteria {
 const COLUMNS = sql`
   recall_enabled, recall_k, recall_min_rate,
   mrr_enabled, mrr_k, mrr_min_rate,
-  ndcg_enabled, ndcg_k, ndcg_min_rate,
+  ndcg_enabled, ndcg_k, ndcg_min_rate, ndcg_aggregate_models,
   eval_difficulties,
   autotune_size_ladder, autotune_overlap_pct, autotune_apply, autotune_search,
   autotune_stop_early, autotune_keep_best, autotune_chunk_scope,
@@ -183,6 +191,7 @@ export async function updateCriteria(
       ndcg_enabled        = ${next.ndcg.enabled},
       ndcg_k              = ${next.ndcg.k},
       ndcg_min_rate       = ${next.ndcg.minRate},
+      ndcg_aggregate_models = ${next.ndcg.aggregateModels}::text[],
       eval_difficulties   = ${next.difficulties},
       autotune_size_ladder = ${next.autotune.sizeLadder},
       autotune_overlap_pct = ${next.autotune.overlapPct},

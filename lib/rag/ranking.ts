@@ -23,7 +23,14 @@
 // ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { config, rankingAggregateModels } from "@/lib/config";
+import { config } from "@/lib/config";
+import {
+  canonicalModelOrder,
+  isProviderAvailable,
+  keyedModels,
+  EMBEDDING_MODELS,
+} from "@/lib/rag/embeddingModels";
+import { getActiveCriteria } from "@/lib/rag/evalSettingsStore";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { meteredMessage } from "@/lib/rag/meter";
 import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
@@ -218,6 +225,32 @@ export async function getRankingContext(
 
 // Step 3: build the cross-model aggregate ranking over the whole active corpus.
 // Throws on a stale question / empty pool so the route can surface it.
+export // Which models vote in this config's ideal ranking (migration 0045).
+//
+// Settings → Metrics → nDCG → "Models in aggregate" overrides the hard-coded
+// default. Three guards, all of which fall back rather than fail:
+//   - unkeyed models are dropped (usable-ladder rule, same as autotune)
+//   - an unknown id (registry entry removed since it was saved) is dropped
+//   - an empty result falls back to the default set — an aggregate with no
+//     voters can't produce a ranking at all, and silently building nothing
+//     would look like the feature was broken
+//
+// Order is canonical (registry order), never the saved click order, so the same
+// selection always yields the same ideal.
+async function aggregateModels(): Promise<string[]> {
+  const criteria = await getActiveCriteria();
+  const saved = criteria.ndcg.aggregateModels;
+  // null = every keyed model (the default since the hard-coded four were
+  // retired — see lib/config). A saved list pins a narrower set.
+  const chosen = saved === null ? keyedModels() : saved;
+  const usable = canonicalModelOrder(
+    chosen.filter((id) => EMBEDDING_MODELS[id] && isProviderAvailable(EMBEDDING_MODELS[id].provider)),
+  );
+  // A saved list that no longer resolves to anything keyed falls back to the
+  // default rather than building a ranking with no voters.
+  return usable.length > 0 ? usable : canonicalModelOrder(keyedModels());
+}
+
 export async function buildAggregateRanking(
   questionId: string,
 ): Promise<RankingCandidate> {
@@ -227,6 +260,7 @@ export async function buildAggregateRanking(
 
   // The active-model question vector drives the ANN itself and the pool's
   // nearest-to-question ordering (the indexed chunk vectors are active-model).
+  const models = await aggregateModels();
   const activeVec = await embedQueryCached(scope.question, activeConfig().embeddingModel);
   const pool = await poolNearest(activeVec, config.rankingPoolSize);
   if (pool.length === 0) {
@@ -244,7 +278,7 @@ export async function buildAggregateRanking(
   // series was the dominant latency of a build — the non-base models have nothing
   // to say to each other.
   const scoredByModel = await Promise.all(
-    rankingAggregateModels.map(async (model) => {
+    models.map(async (model) => {
       if (model === activeConfig().embeddingModel) {
         // Already have these similarities from poolNearest — no re-embed.
         return pool.map((p) => ({ chunkId: p.chunkId, sim: p.similarity }));
@@ -260,13 +294,13 @@ export async function buildAggregateRanking(
     }),
   );
 
-  // Accumulate in rankingAggregateModels' DECLARED order, never completion order.
+  // Accumulate in the resolved models' DECLARED order, never completion order.
   // rankSum is the primary sort key below and its ties fall through to a
   // secondary key, so the same inputs must always fold in the same sequence for
   // the same ideal to come out — a build whose models finished in a different
   // order must not produce a different ranking. Promise.all preserves index
   // order, so scoredByModel[i] is model i's result whenever it resolved.
-  rankingAggregateModels.forEach((model, i) => {
+  models.forEach((model, i) => {
     const scored = scoredByModel[i];
     scored.sort((a, b) => b.sim - a.sim);
     scored.forEach((s, idx) => {
@@ -290,14 +324,14 @@ export async function buildAggregateRanking(
     kind: "aggregate",
     chunkIds: order,
     details: {
-      models: rankingAggregateModels,
+      models,
       perModelRanks,
     },
   });
 
   console.log(
     `[rag:ranking] aggregate q=${questionId.slice(0, 8)} pool=${pool.length} ` +
-      `models=${rankingAggregateModels.length} in ${Math.round(performance.now() - t0)}ms`,
+      `models=${models.length} in ${Math.round(performance.now() - t0)}ms`,
   );
   return resolve(await pickStored(questionId, id));
 }
