@@ -54,6 +54,11 @@ import { NdcgRankingPanel } from "@/app/components/NdcgRankingPanel";
 import { Tooltip } from "@/app/components/Tooltip";
 import type { IngestedDocument } from "@/lib/rag/vectorStore";
 
+// Bulk actions → Add question: how many questions the run should add per chunk
+// at each difficulty (the badge counts in the panel). Absent = don't generate
+// that difficulty at all.
+type DifficultyCounts = Partial<Record<Difficulty, number>>;
+
 function pct(n: number | null): string {
   return n === null ? "—" : `${(n * 100).toFixed(1)}%`;
 }
@@ -563,17 +568,24 @@ export function EvalDashboard() {
       documentIds ? { documentIds } : undefined,
     );
 
-  // Bulk actions → Add question → {difficulty}: generate at one difficulty
-  // (corpus-wide, or the selected documents when scoped), then score. Same
-  // NDJSON stream.
-  const onBulkAdd = (difficulty: Difficulty, documentIds: string[] | null) =>
-    runStream(
+  // Bulk actions → Add question → {difficulty ×N} → Add: top every chunk up to
+  // N questions at each requested difficulty (corpus-wide, or the selected
+  // documents when scoped), then score. Same NDJSON stream.
+  const onBulkAdd = (
+    counts: DifficultyCounts,
+    documentIds: string[] | null,
+  ) => {
+    const mix = (Object.entries(counts) as [Difficulty, number][])
+      .map(([d, n]) => `${n}× ${d}`)
+      .join(", ");
+    return runStream(
       "/api/eval/bulk-generate",
       (r) =>
-        `Added ${r.generated} ${difficulty} question(s), scored ${r.scored}. ` +
+        `Added ${r.generated} question(s) (${mix} per chunk), scored ${r.scored}. ` +
         `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
-      { difficulty, documentIds: documentIds ?? undefined },
+      { counts, documentIds: documentIds ?? undefined },
     );
+  };
 
   // Bulk actions → Add nDCG rankings: for every question in scope without a
   // ground truth, build the aggregate ranking and promote it (the panel's
@@ -1691,7 +1703,10 @@ function BulkActions({
   canAddQuestion,
 }: {
   busy: boolean;
-  onAddDifficulty: (d: Difficulty, documentIds: string[] | null) => void;
+  onAddDifficulty: (
+    counts: DifficultyCounts,
+    documentIds: string[] | null,
+  ) => void;
   onAddNdcg: (documentIds: string[] | null, rebuild: boolean) => void;
   onAddLlmNdcg: (documentIds: string[] | null) => void;
   onChangeConfig: (
@@ -1704,6 +1719,10 @@ function BulkActions({
 }) {
   const [open, setOpen] = useState(false);
   const [subOpen, setSubOpen] = useState(false);
+  // "Add question": clicking a difficulty stages one more question per chunk at
+  // it (badge = the count) — nothing runs until Add is clicked, so several
+  // difficulties and quantities go out as ONE run.
+  const [addCounts, setAddCounts] = useState<DifficultyCounts>({});
   // "Add nDCG rankings" section: its own collapsed block so the rebuild toggle
   // and the Run button read as deliberately as the LLM one below.
   const [ndcgOpen, setNdcgOpen] = useState(false);
@@ -1727,9 +1746,24 @@ function BulkActions({
     setNdcgOpen(false);
     setLlmNdcgOpen(false);
     setDocsOpen(false);
+    setAddCounts({});
   };
 
   const toggleMenu = () => setOpen((o) => !o);
+
+  // Click = +1 question per chunk at that difficulty; shift/right-click = −1,
+  // dropping the difficulty entirely at zero. Capped to match the route.
+  const MAX_PER_DIFFICULTY = 10;
+  const bumpDifficulty = (d: Difficulty, delta: number) =>
+    setAddCounts((counts) => {
+      const next = (counts[d] ?? 0) + delta;
+      const updated = { ...counts };
+      if (next <= 0) delete updated[d];
+      else updated[d] = Math.min(next, MAX_PER_DIFFICULTY);
+      return updated;
+    });
+
+  const stagedTotal = Object.values(addCounts).reduce((a, b) => a + b, 0);
 
   function toggleDocsSection() {
     const opening = !docsOpen;
@@ -1852,23 +1886,84 @@ function BulkActions({
               className="flex w-full cursor-pointer items-center justify-between px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               Add question{" "}
-              <span className="text-zinc-400">{subOpen ? "▾" : "▸"}</span>
+              <span className="flex items-center gap-1.5">
+                {/* The staged total stays visible when the section is collapsed,
+                    so a queued run can't be forgotten behind a ▸. */}
+                {stagedTotal > 0 && !subOpen && (
+                  <span className="rounded-full bg-blue-600 px-1.5 text-[10px] font-semibold leading-4 text-white">
+                    {stagedTotal}
+                  </span>
+                )}
+                <span className="text-zinc-400">{subOpen ? "▾" : "▸"}</span>
+              </span>
             </button>
             {subOpen && (
-              <div className="flex gap-1 px-3 pb-1.5 pt-0.5">
-                {(["easy", "medium", "hard"] as const).map((d) => (
+              <div className="flex flex-col gap-1.5 px-3 pb-1.5 pt-0.5 text-xs">
+                {/* Click a difficulty as many times as you want questions per
+                    chunk — the badge counts the clicks. Nothing generates until
+                    Add, so several difficulties go out as one run. */}
+                <div className="flex gap-1">
+                  {(["easy", "medium", "hard"] as const).map((d) => {
+                    const count = addCounts[d] ?? 0;
+                    return (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={(e) => bumpDifficulty(d, e.shiftKey ? -1 : 1)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          bumpDifficulty(d, -1);
+                        }}
+                        title={`Click to add one more ${d} question per chunk; shift-click (or right-click) to remove one`}
+                        className={`relative cursor-pointer rounded border px-2 py-0.5 text-xs font-medium capitalize ${
+                          count > 0
+                            ? "border-blue-500 bg-blue-50 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300"
+                            : "border-zinc-300 text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                        }`}
+                      >
+                        {d}
+                        {count > 0 && (
+                          <span className="absolute -right-1.5 -top-1.5 min-w-4 rounded-full bg-blue-600 px-1 text-[10px] font-semibold leading-4 text-white">
+                            {count}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+                <span className="text-zinc-500">
+                  {stagedTotal === 0
+                    ? "Click a difficulty once per question you want."
+                    : `Tops every chunk in scope up to ${(
+                        ["easy", "medium", "hard"] as const
+                      )
+                        .filter((d) => addCounts[d])
+                        .map((d) => `${addCounts[d]} ${d}`)
+                        .join(" · ")}.`}
+                </span>
+                <div className="flex items-center gap-2">
                   <button
-                    key={d}
                     type="button"
+                    disabled={stagedTotal === 0}
                     onClick={() => {
+                      const counts = addCounts;
                       close();
-                      onAddDifficulty(d, scopeIds);
+                      onAddDifficulty(counts, scopeIds);
                     }}
-                    className="cursor-pointer rounded border border-zinc-300 px-2 py-0.5 text-xs font-medium capitalize text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    className="cursor-pointer rounded bg-black px-2 py-0.5 font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
                   >
-                    {d}
+                    Add
                   </button>
-                ))}
+                  {stagedTotal > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setAddCounts({})}
+                      className="cursor-pointer text-zinc-400 underline hover:no-underline"
+                    >
+                      clear
+                    </button>
+                  )}
+                </div>
               </div>
             )}
             {/* Bulk nDCG grading: hit Run and every question in scope

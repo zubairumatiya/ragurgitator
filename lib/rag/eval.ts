@@ -311,53 +311,78 @@ async function authorQuestions(
   return parseQuestions(response, count);
 }
 
-// Generate one question per SELECTED difficulty for every chunk that's missing
-// one at that difficulty (Phase A — criteria-driven generation). An empty
-// difficulty set is a no-op, so a config that hasn't opted into a difficulty mix
-// never auto-synthesizes (the user picks via Settings / Bulk actions). Each gap
-// is its own progress step so the bar reflects per-(chunk,difficulty) work.
+// How many questions a bulk run wants per chunk at one difficulty. Bulk actions
+// → Add question lets the user click a difficulty several times; each click is
+// one more question per chunk, so {difficulty:'easy', count:2} tops every chunk
+// up to two easy questions.
+export type DifficultyTarget = { difficulty: Difficulty; count: number };
+
+// Generate `count` question(s) per SELECTED difficulty for every chunk short of
+// that target (Phase A — criteria-driven generation). An empty difficulty set is
+// a no-op, so a config that hasn't opted into a difficulty mix never
+// auto-synthesizes (the user picks via Settings / Bulk actions). Each question
+// slot is its own progress step so the bar reflects the real amount of work; a
+// chunk needing several at one difficulty asks the model for them in ONE call,
+// which keeps them from coming back near-identical.
 export async function generateMissingQuestions(
-  difficulties: Difficulty[],
+  targets: DifficultyTarget[],
   emit: Emit = () => {},
   documentIds?: string[],
 ): Promise<number> {
-  if (difficulties.length === 0) return 0;
-  const gaps = await chunksNeedingQuestionsByDifficulty(difficulties, documentIds);
+  if (targets.length === 0) return 0;
+  const gaps = await chunksNeedingQuestionsByDifficulty(
+    targets.map((t) => t.difficulty),
+    documentIds,
+    targets.map((t) => t.count),
+  );
   if (gaps.length === 0) return 0;
 
+  // Progress is per question, not per gap: a gap needing 3 counts as 3 steps.
+  const total = gaps.reduce((sum, g) => sum + g.needed, 0);
   console.log(
-    `[rag:eval] generating ${gaps.length} question(s) across difficulties [${difficulties.join(", ")}]`,
+    `[rag:eval] generating ${total} question(s) across difficulties ` +
+      `[${targets.map((t) => `${t.difficulty}×${t.count}`).join(", ")}]`,
   );
-  emit({ type: "generate-start", total: gaps.length });
+  emit({ type: "generate-start", total });
 
   let generated = 0;
   let done = 0;
   for (const gap of gaps) {
-    const [q] = await authorQuestions(gap.text, 1, gap.difficulty as Difficulty);
-    let landed: GeneratedQuestionPayload | undefined;
-    if (q && q.question.trim()) {
-      const questionId = await insertQuestionWithLabel({
-        documentId: gap.documentId,
-        documentEmbeddingId: gap.documentEmbeddingId,
-        sourceChunkId: gap.chunkId,
-        question: q.question.trim(),
-        expectedAnswer: q.expected_answer?.trim() || null,
-        generatorModel: activeConfig().llmModel,
-        difficulty: gap.difficulty,
-      });
-      generated += 1;
-      landed = {
-        questionId,
-        question: q.question.trim(),
-        difficulty: gap.difficulty,
-        documentId: gap.documentId,
-        fileName: gap.fileName,
-        sourceChunkId: gap.chunkId,
-        expectedPosition: gap.position,
-      };
+    const authored = await authorQuestions(
+      gap.text,
+      gap.needed,
+      gap.difficulty as Difficulty,
+    );
+    // One step per slot the gap asked for — a model that returned fewer (or
+    // unparseable) questions still advances the bar; the chunk stays under
+    // target and is retried on the next pass.
+    for (let i = 0; i < gap.needed; i += 1) {
+      const q = authored[i];
+      let landed: GeneratedQuestionPayload | undefined;
+      if (q && q.question.trim()) {
+        const questionId = await insertQuestionWithLabel({
+          documentId: gap.documentId,
+          documentEmbeddingId: gap.documentEmbeddingId,
+          sourceChunkId: gap.chunkId,
+          question: q.question.trim(),
+          expectedAnswer: q.expected_answer?.trim() || null,
+          generatorModel: activeConfig().llmModel,
+          difficulty: gap.difficulty,
+        });
+        generated += 1;
+        landed = {
+          questionId,
+          question: q.question.trim(),
+          difficulty: gap.difficulty,
+          documentId: gap.documentId,
+          fileName: gap.fileName,
+          sourceChunkId: gap.chunkId,
+          expectedPosition: gap.position,
+        };
+      }
+      done += 1;
+      emit({ type: "generate-progress", done, total, question: landed });
     }
-    done += 1;
-    emit({ type: "generate-progress", done, total: gaps.length, question: landed });
   }
 
   console.log(`[rag:eval] generated ${generated} question(s)`);
@@ -406,6 +431,11 @@ export async function generateQuestionForChunk(
 // few questions score concurrently; every shared cache they touch (embedding
 // cache, query-vector cache) upserts idempotently, so races cost at most a
 // duplicate embed of the same text.
+// Tried at 8 (2026-08-03) on the theory that scoring is latency-bound and the
+// postgres.js pool has 10 connections, so 4 left most of it idle. Measured: no
+// effect — `rescore` 44.5s → 45.4s, confirm's scoring 82.3s → 81.4s. Reverted.
+// Whatever bounds a batch here, it is not pool width; don't re-raise it without
+// finding out what actually is. See docs/autotune-speedups-plan.md.
 const SCORE_CONCURRENCY = 4;
 
 export async function scoreQuestions(
@@ -419,18 +449,30 @@ export async function scoreQuestions(
   const cfg = activeConfig();
   // Retrieve a superset deep enough for every enabled metric, then judge recall
   // at recall_k (A1). Loading criteria once per run (not per question) is cheap.
-  const criteria = await getActiveCriteria();
+  //
+  // L9 (0042): these four reads are the batch's fixed setup, timed as one
+  // bucket. "Once per batch" is only cheap when the batch is big — autotune
+  // scores one question per call, so it re-pays all of it per question.
+  // L11: four independent reads, so one round trip instead of four. Measured
+  // 2026-08-03 at ~129ms each against this database — sequentially that is pure
+  // waiting, and autotune re-pays it per question because it scores one at a
+  // time. Nothing here feeds anything else here.
+  // Stamp every result with the override state it's scored under (0022) — the
+  // state can't change mid-run, so one fingerprint covers the batch. L12 hands
+  // the same promise to buildRetrievalContext as its piece-cache key, so the
+  // fingerprint is still fetched in parallel here rather than ahead of it.
+  const statePromise = retrievalStateFingerprint();
+  const [criteria, cached, retrievalState, ctx] = await Promise.all([
+      getActiveCriteria(),
+      getCachedQueryEmbeddings(
+        questions.map((q) => q.questionId),
+        cfg.embeddingModel,
+      ),
+    statePromise,
+    buildRetrievalContext(statePromise),
+  ]);
   const depth = retrievalDepth(criteria, cfg.topK);
   const recallK = effectiveK(criteria.recall, cfg.topK);
-
-  const cached = await getCachedQueryEmbeddings(
-    questions.map((q) => q.questionId),
-    cfg.embeddingModel,
-  );
-  // Stamp every result with the override state it's scored under (0022) — the
-  // state can't change mid-run, so one fingerprint covers the batch.
-  const retrievalState = await retrievalStateFingerprint();
-  const ctx = await buildRetrievalContext();
 
   const results: ResultInsert[] = new Array<ResultInsert>(questions.length);
   let done = 0;
@@ -455,7 +497,7 @@ export async function scoreQuestions(
       }
       // Pass the question text too: override configs embed it under the override
       // models for the rank-interleave fusion; non-override configs ignore it (base vector only).
-      const { retrieved, cutoffs } = await retrieveWithCutoffs(q.question, vector, depth, ctx);
+      const { retrieved, cutoffs } = await retrieveWithCutoffs(q.question, vector!, depth, ctx);
       const ids = retrieved.map((r) => r.chunk.chunk.id);
       const scores = retrieved.map((r) => r.score);
       const rank = ids.indexOf(q.sourceChunkId);
@@ -534,7 +576,12 @@ export async function processNewChunks(emit: Emit = () => {}): Promise<{
 }> {
   const t0 = performance.now();
   const criteria = await getActiveCriteria();
-  const generated = await generateMissingQuestions(criteria.difficulties, emit);
+  // One question per selected difficulty per new chunk — the standing mix, not
+  // the per-run multipliers Bulk actions can ask for.
+  const generated = await generateMissingQuestions(
+    criteria.difficulties.map((difficulty) => ({ difficulty, count: 1 })),
+    emit,
+  );
   const scored = await scoreUnscoredQuestions(emit);
   // Everything pending (incl. retrieval-stale) is fresh now — the logged
   // override changes are baked into the rates, so the stale badge can drop.
@@ -568,17 +615,17 @@ export async function processNewChunks(emit: Emit = () => {}): Promise<{
   return { generated, scored, recall: summary.recall };
 }
 
-// "Bulk actions → Add question → {difficulty}": persist the difficulty into the
-// config's mix, then generate one question at that difficulty for every chunk
-// missing one, score the unscored, and freeze a snapshot. Streams EvalEvents like
-// processNewChunks so the dashboard reuses the same progress UI.
-export async function bulkAddDifficulty(
-  difficulty: Difficulty,
+// "Bulk actions → Add question → {difficulty ×N} → Add": persist each requested
+// difficulty into the config's mix, then top every chunk up to N questions at
+// that difficulty, score the unscored, and freeze a snapshot. Streams EvalEvents
+// like processNewChunks so the dashboard reuses the same progress UI.
+export async function bulkAddDifficulties(
+  targets: DifficultyTarget[],
   emit: Emit = () => {},
   documentIds?: string[],
 ): Promise<{ generated: number; scored: number; recall: number | null }> {
-  await addDifficulty(difficulty);
-  const generated = await generateMissingQuestions([difficulty], emit, documentIds);
+  for (const t of targets) await addDifficulty(t.difficulty);
+  const generated = await generateMissingQuestions(targets, emit, documentIds);
   const scored = await scoreUnscoredQuestions(emit);
 
   const summary = await getSummary();

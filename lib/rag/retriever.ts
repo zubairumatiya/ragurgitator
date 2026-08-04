@@ -119,23 +119,103 @@ export type ScreenCutoffs = {
 // Without it every retrieveForQuery call re-reads the override rows and every
 // model's pieces from the DB — the dominant repeat cost of "Re-score all" on
 // a warm embedding cache.
+export type ChunkMeta = { documentId: string; position: number; text: string };
+
 export type RetrievalContext = {
   overrides: ChunkOverride[];
   piecesFor: (model: string) => Promise<OverrideEmbedding[]>;
+  // L14: resolveChunks for the overridden chunks that reached the top-k. Same
+  // cross-call caching as piecesFor — see resolveCached below.
+  resolve: (ids: string[]) => Promise<Map<string, ChunkMeta>>;
 };
 
-export async function buildRetrievalContext(): Promise<RetrievalContext> {
+// L12 (docs/autotune-speedups-plan.md): the per-context memo above only lives
+// as long as one buildRetrievalContext call, and autotune scores ONE question
+// per call — so `overrideEmbeddings` (every override row for the config, with
+// its vectors) was re-pulled per question. Measured at 68.4s in the 0042
+// `pieces` bucket.
+//
+// This survives across calls, keyed by the override-state fingerprint. That key
+// is what makes it safe: the fingerprint IS the hash of the override rows, so a
+// kept or reverted override changes it and the old entry can never be served.
+// A run-scoped context WITHOUT this key would be a correctness bug — overrides
+// change constantly mid-confirm (persist, re-score, maybe revert, re-score).
+//
+// One state at a time, so it self-evicts: a new fingerprint drops the whole
+// previous map rather than growing without bound.
+let pieceCacheState: string | null = null;
+let pieceCacheByModel = new Map<string, Promise<OverrideEmbedding[]>>();
+
+// L14: the same idea for resolveChunks. A chunk's metadata (documentId,
+// position, text) is a property of the CHUNK ROW, which an override never
+// touches — so this could in principle be cached for longer. It is deliberately
+// keyed on the same fingerprint anyway: sharing one eviction rule with the piece
+// cache means there is exactly one staleness question to reason about instead of
+// two, and the reuse that matters (many re-scores under one override state) is
+// captured either way.
+let metaCacheById = new Map<string, ChunkMeta>();
+
+// One state variable for both caches — they are evicted together, so a second
+// one would only be a way for them to disagree.
+function resetCachesFor(state: string): void {
+  if (pieceCacheState === state) return;
+  pieceCacheState = state;
+  pieceCacheByModel = new Map();
+  metaCacheById = new Map();
+}
+
+// `state` is the caller's already-fetched fingerprint, passed as a PROMISE so
+// callers can keep fetching it in parallel with this function instead of
+// serializing behind it (that parallelism is L11, worth ~58s — don't undo it).
+// Omitted → no cross-call caching, just the per-context memo as before.
+export async function buildRetrievalContext(
+  state?: Promise<string>,
+): Promise<RetrievalContext> {
   const overrides = await listOverrides();
-  const pieceCache = new Map<string, Promise<OverrideEmbedding[]>>();
+  const localCache = new Map<string, Promise<OverrideEmbedding[]>>();
   return {
     overrides,
-    piecesFor: (model) => {
-      let p = pieceCache.get(model);
+    piecesFor: async (model) => {
+      const fingerprint = state ? await state : null;
+      if (fingerprint !== null) {
+        resetCachesFor(fingerprint);
+        let shared = pieceCacheByModel.get(model);
+        if (!shared) {
+          shared = overrideEmbeddings(model);
+          pieceCacheByModel.set(model, shared);
+        }
+        return shared;
+      }
+      let p = localCache.get(model);
       if (!p) {
         p = overrideEmbeddings(model);
-        pieceCache.set(model, p);
+        localCache.set(model, p);
       }
       return p;
+    },
+    resolve: async (ids) => {
+      if (ids.length === 0) return new Map();
+      const fingerprint = state ? await state : null;
+      if (fingerprint === null) return resolveChunks(ids);
+      resetCachesFor(fingerprint);
+
+      // Only the ids we haven't already resolved go to the database; the rest
+      // come straight from the cache. A partial miss still costs one query, not
+      // one per id.
+      const out = new Map<string, ChunkMeta>();
+      const missing: string[] = [];
+      for (const id of ids) {
+        const hit = metaCacheById.get(id);
+        if (hit) out.set(id, hit);
+        else missing.push(id);
+      }
+      if (missing.length > 0) {
+        for (const [id, m] of await resolveChunks(missing)) {
+          metaCacheById.set(id, m);
+          out.set(id, m);
+        }
+      }
+      return out;
     },
   };
 }
@@ -170,6 +250,13 @@ export async function fuseWithOverrides(
   // Fusion pool override (0027) — autotune's trial dry-runs pass their own;
   // omitted = the config's retrieval_fusion_pool, then the auto formula.
   pool?: number | null,
+  // L15: a caller-owned cache for the base ANN. Autotune's search re-ranks the
+  // SAME question against many candidate rungs, and the base ANN depends only
+  // on (query vector, excluded ids, depth) — none of which vary across rungs —
+  // so without this it re-runs an identical query per rung. Caller-owned rather
+  // than module-level because the caller knows the lifetime: one chunk's search,
+  // during which no override is persisted. Live retrieval passes nothing.
+  annCache?: Map<string, RetrievedChunk[]>,
 ): Promise<{
   merged: FusedCandidate[];
   meta: Map<string, { documentId: string; position: number; text: string }>;
@@ -187,7 +274,16 @@ export async function fuseWithOverrides(
   // so already-cached deeper candidates can compete for free (header comment).
   const paidN = effectiveFusionPool(k, pool);
   const deepN = Math.max(paidN * FUSION_DEEP_FACTOR, FUSION_DEEP_FLOOR);
-  const baseChunks = await queryExcluding(baseVector, deepN, overriddenIds);
+  // Keyed on everything the ANN result depends on: the query, the excluded set
+  // (sorted so ordering can't produce a false miss), and the depth. `text`
+  // stands in for baseVector — they're 1:1 under a fixed base model, and the
+  // vector itself would be a 1024-float key.
+  const annKey = annCache
+    ? `${text} ${deepN} ${[...overriddenIds].sort().join(",")}`
+    : null;
+  const cachedAnn = annKey !== null ? annCache!.get(annKey) : undefined;
+  const baseChunks = cachedAnn ?? (await queryExcluding(baseVector, deepN, overriddenIds));
+  if (annKey !== null && cachedAnn === undefined) annCache!.set(annKey, baseChunks);
   baseChunks.forEach((rc) =>
     meta.set(rc.chunk.chunk.id, {
       documentId: rc.chunk.chunk.documentId,
@@ -342,8 +438,11 @@ export async function retrieveWithCutoffs(
   const top = merged.slice(0, k);
 
   // Override winners weren't in the base ANN (they were excluded) — resolve them.
+  // Through the context when there is one, so repeated re-scores under the same
+  // override state don't re-read the same chunk rows (L14).
   const unresolved = top.map(({ id }) => id).filter((id) => !meta.has(id));
-  for (const [id, m] of await resolveChunks(unresolved)) meta.set(id, m);
+  const resolved = ctx ? await ctx.resolve(unresolved) : await resolveChunks(unresolved);
+  for (const [id, m] of resolved) meta.set(id, m);
 
   const retrieved = top.map(({ id, sim }) => {
     const m = meta.get(id);

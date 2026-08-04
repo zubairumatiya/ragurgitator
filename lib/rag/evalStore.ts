@@ -276,33 +276,42 @@ export async function chunksNeedingQuestions(
 }
 
 // One (chunk, difficulty) generation gap: a chunk under the active config that
-// has no question yet at `difficulty`. Drives the difficulty-driven generator
-// (Phase A) — generation is now "one question per selected difficulty per chunk"
-// instead of a fixed per-chunk count.
+// is short of the requested number of questions at `difficulty`. Drives the
+// difficulty-driven generator (Phase A) — generation is "N questions per
+// selected difficulty per chunk" (N defaults to 1) instead of a fixed per-chunk
+// count across all difficulties.
 export type ChunkDifficultyGap = {
   chunkId: string;
   text: string;
   documentId: string;
   documentEmbeddingId: string;
   difficulty: string;
+  // How many more questions this chunk needs at this difficulty: the requested
+  // target minus what it already has. Always >= 1 (rows at target are dropped).
+  needed: number;
   // For the live "question landed" stream event: where the dashboard should
   // file the new row (its chunk group header) without waiting for a reload.
   fileName: string;
   position: number | null;
 };
 
-// For each requested difficulty, the chunks under the active config that lack a
-// question at that difficulty. The cross join fans every chunk out across the
-// requested difficulties; the NOT EXISTS keeps only the missing pairs.
-// `documentId` (bulk-actions document scope) narrows to one document.
+// For each requested difficulty, the chunks under the active config that have
+// fewer than `targets[i]` questions at that difficulty (targets default to 1,
+// the historical "lacks one" behaviour). The cross join fans every chunk out
+// across the requested difficulties; the lateral counts what each pair already
+// has, and the filter keeps only the ones still short.
+// `documentIds` (bulk-actions document scope) narrows to those documents.
 export async function chunksNeedingQuestionsByDifficulty(
   difficulties: string[],
   documentIds?: string[],
+  targets?: number[],
 ): Promise<ChunkDifficultyGap[]> {
   const table = await activeChunksTable();
   if (!table || difficulties.length === 0) return [];
   // Bulk-actions scope: one or more documents; null/empty = the whole corpus.
   const docScope = documentIds && documentIds.length > 0 ? documentIds : null;
+  // Aligned with `difficulties`; a missing/short list means one each.
+  const wanted = difficulties.map((_, i) => Math.max(1, Math.trunc(targets?.[i] ?? 1)));
 
   const rows = await sql<
     {
@@ -311,26 +320,29 @@ export async function chunksNeedingQuestionsByDifficulty(
       document_id: string;
       document_embedding_id: string;
       difficulty: string;
+      needed: number;
       file_name: string;
       position: number | null;
     }[]
   >`
     select c.id, c.text, c.document_id, c.document_embedding_id, d.difficulty,
+           (d.target - e.have)::int as needed,
            doc.file_name, c.position
     from ${sql(table)} c
     join document_embeddings de on de.id = c.document_embedding_id
     join documents doc on doc.id = c.document_id
-    cross join unnest(${difficulties}::text[]) as d(difficulty)
+    cross join unnest(${difficulties}::text[], ${wanted}::int[]) as d(difficulty, target)
+    cross join lateral (
+      select count(*)::int as have
+      from eval_labels l
+      join eval_questions q on q.id = l.eval_question_id
+      where l.source_chunk_id = c.id
+        and l.document_embedding_id = c.document_embedding_id
+        and q.difficulty = d.difficulty
+    ) e
     where de.config_id = ${activeConfig().id}
       and (${docScope}::uuid[] is null or c.document_id = any(${docScope}::uuid[]))
-      and not exists (
-        select 1
-        from eval_labels l
-        join eval_questions q on q.id = l.eval_question_id
-        where l.source_chunk_id = c.id
-          and l.document_embedding_id = c.document_embedding_id
-          and q.difficulty = d.difficulty
-      )
+      and e.have < d.target
     order by c.position, d.difficulty
   `;
 
@@ -340,6 +352,7 @@ export async function chunksNeedingQuestionsByDifficulty(
     documentId: r.document_id,
     documentEmbeddingId: r.document_embedding_id,
     difficulty: r.difficulty,
+    needed: r.needed,
     fileName: r.file_name,
     position: r.position,
   }));
@@ -1495,6 +1508,28 @@ export async function deleteModelTrial(id: string): Promise<boolean> {
 
 export async function insertResults(rows: ResultInsert[]): Promise<void> {
   if (rows.length === 0) return;
+
+  // L13: a single row needs no transaction — one INSERT is already atomic, and
+  // wrapping it costs a BEGIN and a COMMIT round trip on top of the statement.
+  // Measured 2026-08-03 against this database: 193.9ms wrapped vs 65.3ms bare,
+  // i.e. 66% of the call was transaction bookkeeping. It matters because
+  // autotune scores ONE question at a time (scoreQuestionNow → scoreQuestions
+  // ([q]) → here), so the single-row case is the hot one, not the batch.
+  if (rows.length === 1) {
+    const r = rows[0];
+    await sql`
+      insert into eval_results
+        (eval_question_id, eval_label_id, k, hit, found_rank, retrieved_ids,
+         retrieved_scores, retrieval_state, screen_cutoffs)
+      values
+        (${r.questionId}, ${r.labelId}, ${r.k}, ${r.hit}, ${r.foundRank},
+         ${r.retrievedIds}::uuid[], ${r.retrievedScores}::real[],
+         ${r.retrievalState},
+         ${r.screenCutoffs === null ? null : JSON.stringify(r.screenCutoffs)}::jsonb)
+    `;
+    return;
+  }
+
   await sql.begin(async (tx) => {
     for (const r of rows) {
       await tx`
@@ -1794,6 +1829,203 @@ async function activeDocIngestTimes(): Promise<number[]> {
   return rows.map((r) => r.created_at.getTime());
 }
 
+// One row of the per-question detail query, shared by getSummary (whole config)
+// and getChunkQuestions (one chunk) so the two can't drift apart.
+type EvalDetailRow = {
+  question_id: string;
+  question: string;
+  source: string;
+  difficulty: string | null;
+  document_id: string;
+  updated_at: Date;
+  file_name: string;
+  source_chunk_id: string;
+  expected_position: number | null;
+  hit: boolean | null;
+  found_rank: number | null;
+  retrieved_ids: string[] | null;
+  retrieved_scores: number[] | null;
+  scored_at: Date | null;
+  retrieval_state: string | null;
+  ignored: boolean;
+};
+
+type DetailContext = {
+  currentState: string;
+  retrievalChangedAt: Date | null;
+  recallK: number;
+  mrrK: number;
+  ndcgK: number;
+  truthOrders: Map<string, string[]>;
+};
+
+// Rows → QuestionDetail. Extracted so the chunk-scoped read produces byte-identical
+// values to the whole-config one: autotune's keep/revert decision compares a
+// `before` from one against an `after` from the other, and any divergence here
+// would silently change which overrides survive.
+function mapQuestionDetails(
+  rows: EvalDetailRow[],
+  ctx: DetailContext,
+): { questions: QuestionDetail[]; retrievalStale: number; editStaleIds: Set<string> } {
+  let retrievalStale = 0;
+  const editStaleIds = new Set<string>();
+  const questions: QuestionDetail[] = rows.map((r) => {
+    // Edited after its last score -> the shown hit/miss is for the old text. Treat
+    // as pending (it will be re-scored next run, see questionsNeedingScoring).
+    const editStale = r.scored_at !== null && r.updated_at.getTime() > r.scored_at.getTime();
+    if (editStale) editStaleIds.add(r.question_id);
+    // Retrieval-stale = scored under a DIFFERENT override state than today's
+    // (0022 fingerprint), so a set-then-reverted change isn't stale. Legacy
+    // rows without a fingerprint fall back to the 0019 timestamp rule.
+    const retrStale =
+      r.scored_at !== null &&
+      (r.retrieval_state !== null
+        ? r.retrieval_state !== ctx.currentState
+        : ctx.retrievalChangedAt !== null &&
+          r.scored_at.getTime() < ctx.retrievalChangedAt.getTime());
+    if (retrStale && !editStale) retrievalStale += 1;
+    const stale = editStale || retrStale;
+    const scored = r.scored_at !== null;
+    // Recompute the hit at the CURRENT recall_k from the stored found_rank (the
+    // rank within the stored superset, A1) — so changing recall_k in Settings is
+    // reflected without a re-score, as long as it's within the retrieved depth.
+    const hit = scored ? r.found_rank !== null && r.found_rank <= ctx.recallK : null;
+    // Same recompute-at-current-k treatment for MRR: 1/rank within mrr_k, 0 past it.
+    const rr = scored ? reciprocalRank(r.found_rank, ctx.mrrK) : null;
+    const countable = scored && !editStale;
+    // Graded nDCG needs an ideal ranking AND a countable retrieval order;
+    // otherwise it's ungraded (null) and the UI shows the grey placeholder.
+    const ideal = ctx.truthOrders.get(r.question_id);
+    const qNdcg = countable && ideal ? ndcg(ideal, r.retrieved_ids ?? [], ctx.ndcgK) : null;
+    // The ground-truth chunk's cosine sim in the stored retrieval — found_rank is
+    // 1-based into retrieved_scores. Null on a full miss or pre-0004 results.
+    const storedSim =
+      countable && r.found_rank !== null && r.retrieved_scores
+        ? (r.retrieved_scores[r.found_rank - 1] ?? null)
+        : null;
+    return {
+      questionId: r.question_id,
+      question: r.question,
+      source: r.source,
+      difficulty: r.difficulty,
+      documentId: r.document_id,
+      fileName: r.file_name,
+      sourceChunkId: r.source_chunk_id,
+      expectedPosition: r.expected_position,
+      hit,
+      foundRank: r.found_rank,
+      storedSim,
+      retrievedIds: r.retrieved_ids,
+      scoredAt: r.scored_at ? r.scored_at.getTime() : null,
+      stale,
+      editStale,
+      rr,
+      ndcg: qNdcg,
+      ignored: r.ignored,
+    };
+  });
+  return { questions, retrievalStale, editStaleIds };
+}
+
+// ONE CHUNK's questions, in the exact shape getSummary would give them (L6 of
+// docs/autotune-speedups-plan.md).
+//
+// Why it exists: autotune's confirm step (applyAutotuneCandidate) called the
+// whole-config getSummary() two or three times per confirm and then immediately
+// filtered to a single chunk. Measured 2026-08-02 that call is ~1.1s against a
+// 162-question corpus, and a run makes ~150 of them — ~167s of an 894s run, all
+// to read 1–2 questions at a time.
+//
+// The savings are twofold: the `latest` CTE now runs over one chunk's results
+// instead of the whole corpus, and the five aggregate queries getSummary fires in
+// parallel (run history, pending counts, chunk count, override info, change log)
+// plus the corpus-wide nDCG drift analysis are skipped entirely — the confirm
+// step reads none of them.
+//
+// Shares mapQuestionDetails with getSummary, so `stale`, `hit`, `rr` and `ndcg`
+// are computed identically. That matters: the keep/revert comparison puts a
+// `before` from this function against an `after` from it, and failingMetrics
+// treats stale as not-failing.
+export async function getChunkQuestions(
+  chunkId: string,
+): Promise<{ questions: QuestionDetail[]; criteria: EvalCriteria }> {
+  const cfg = activeConfig();
+
+  // L11 (docs/autotune-speedups-plan.md): these four reads have no data
+  // dependency on each other — criteria only feeds effectiveK below, table only
+  // gates the early return, and the other two are consumed by the query and the
+  // mapper. Run sequentially they cost four round trips; measured 2026-08-03 at
+  // ~129ms EACH against this database, i.e. 40% of the whole function spent
+  // waiting rather than working. One Promise.all makes it one round trip.
+  //
+  // Deliberately NOT hoisted to run scope: `criteria` and the table are
+  // constant for a run, but the fingerprint is not — it changes as overrides
+  // land mid-run, and a stale one silently mis-labels fresh results. Fetching
+  // all four fresh every call keeps that correctness property exactly as it was
+  // and still captures the saving.
+  //
+  // Costs one wasted fingerprint query when `table` is null (config with no
+  // embedded documents) — the early return below used to short-circuit it.
+  const [criteria, table, currentState, retrievalChangedAt] = await Promise.all([
+    getActiveCriteria(),
+    activeChunksTable(),
+    retrievalStateFingerprint(),
+    getRetrievalChangedAt(),
+  ]);
+  const recallK = effectiveK(criteria.recall, cfg.topK);
+  const mrrK = effectiveK(criteria.mrr, cfg.topK);
+  const ndcgK = effectiveK(criteria.ndcg, cfg.topK);
+
+  if (!table) return { questions: [], criteria };
+
+  // Same query as getSummary's detail select, with the chunk filter pushed into
+  // active_labels so `latest` only scans this chunk's results.
+  const detail = await sql<EvalDetailRow[]>`
+    with active_labels as (
+      select l.id as label_id, l.eval_question_id, l.source_chunk_id
+      from eval_labels l
+      join document_embeddings de on de.id = l.document_embedding_id
+      where de.config_id = ${cfg.id} and l.source_chunk_id = ${chunkId}
+    ),
+    latest as (
+      select distinct on (r.eval_question_id)
+        r.eval_question_id, r.hit, r.found_rank, r.retrieved_ids,
+        r.retrieved_scores, r.scored_at, r.retrieval_state
+      from eval_results r
+      join active_labels al on al.label_id = r.eval_label_id
+      order by r.eval_question_id,
+        (r.retrieval_state is not distinct from ${currentState}) desc,
+        r.scored_at desc
+    )
+    select
+      q.id as question_id, q.question, q.source, q.difficulty, q.document_id,
+      q.updated_at, d.file_name, al.source_chunk_id,
+      c.position as expected_position,
+      lt.hit, lt.found_rank, lt.retrieved_ids, lt.retrieved_scores,
+      lt.scored_at, lt.retrieval_state,
+      (ig.eval_question_id is not null) as ignored
+    from eval_questions q
+    join active_labels al on al.eval_question_id = q.id
+    join documents d on d.id = q.document_id
+    left join ${sql(table)} c on c.id = al.source_chunk_id
+    left join latest lt on lt.eval_question_id = q.id
+    left join config_question_ignores ig
+      on ig.eval_question_id = q.id and ig.config_id = ${cfg.id}
+    order by d.file_name, c.position, q.created_at
+  `;
+
+  const truthOrders = await getTruthOrder(detail.map((r) => r.question_id));
+  const { questions } = mapQuestionDetails(detail, {
+    currentState,
+    retrievalChangedAt,
+    recallK,
+    mrrK,
+    ndcgK,
+    truthOrders,
+  });
+  return { questions, criteria };
+}
+
 export async function getSummary(): Promise<EvalSummary> {
   const cfg = activeConfig();
   const criteria = await getActiveCriteria();
@@ -1977,62 +2209,13 @@ export async function getSummary(): Promise<EvalSummary> {
   // or cleared) were produced by a retrieval that no longer exists. They still
   // COUNT toward the rates (badged stale, refreshed next run) — only edit-stale
   // rows are excluded, since their score belongs to the question's OLD text.
-  let retrievalStale = 0;
-  const editStaleIds = new Set<string>();
-  const questions: QuestionDetail[] = detail.map((r) => {
-    // Edited after its last score -> the shown hit/miss is for the old text. Treat
-    // as pending (it will be re-scored next run, see questionsNeedingScoring).
-    const editStale = r.scored_at !== null && r.updated_at.getTime() > r.scored_at.getTime();
-    if (editStale) editStaleIds.add(r.question_id);
-    // Retrieval-stale = scored under a DIFFERENT override state than today's
-    // (0022 fingerprint), so a set-then-reverted change isn't stale. Legacy
-    // rows without a fingerprint fall back to the 0019 timestamp rule.
-    const retrStale =
-      r.scored_at !== null &&
-      (r.retrieval_state !== null
-        ? r.retrieval_state !== currentState
-        : retrievalChangedAt !== null &&
-          r.scored_at.getTime() < retrievalChangedAt.getTime());
-    if (retrStale && !editStale) retrievalStale += 1;
-    const stale = editStale || retrStale;
-    const scored = r.scored_at !== null;
-    // Recompute the hit at the CURRENT recall_k from the stored found_rank (the
-    // rank within the stored superset, A1) — so changing recall_k in Settings is
-    // reflected without a re-score, as long as it's within the retrieved depth.
-    const hit = scored ? r.found_rank !== null && r.found_rank <= recallK : null;
-    // Same recompute-at-current-k treatment for MRR: 1/rank within mrr_k, 0 past it.
-    const rr = scored ? reciprocalRank(r.found_rank, mrrK) : null;
-    const countable = scored && !editStale;
-    // Graded nDCG needs an ideal ranking AND a countable retrieval order;
-    // otherwise it's ungraded (null) and the UI shows the grey placeholder.
-    const ideal = truthOrders.get(r.question_id);
-    const qNdcg = countable && ideal ? ndcg(ideal, r.retrieved_ids ?? [], ndcgK) : null;
-    // The ground-truth chunk's cosine sim in the stored retrieval — found_rank is
-    // 1-based into retrieved_scores. Null on a full miss or pre-0004 results.
-    const storedSim =
-      countable && r.found_rank !== null && r.retrieved_scores
-        ? (r.retrieved_scores[r.found_rank - 1] ?? null)
-        : null;
-    return {
-      questionId: r.question_id,
-      question: r.question,
-      source: r.source,
-      difficulty: r.difficulty,
-      documentId: r.document_id,
-      fileName: r.file_name,
-      sourceChunkId: r.source_chunk_id,
-      expectedPosition: r.expected_position,
-      hit,
-      foundRank: r.found_rank,
-      storedSim,
-      retrievedIds: r.retrieved_ids,
-      scoredAt: r.scored_at ? r.scored_at.getTime() : null,
-      stale,
-      editStale,
-      rr,
-      ndcg: qNdcg,
-      ignored: r.ignored,
-    };
+  const { questions, retrievalStale, editStaleIds } = mapQuestionDetails(detail, {
+    currentState,
+    retrievalChangedAt,
+    recallK,
+    mrrK,
+    ndcgK,
+    truthOrders,
   });
 
   // Scored rows count toward recall — including retrieval-stale ones (badged,

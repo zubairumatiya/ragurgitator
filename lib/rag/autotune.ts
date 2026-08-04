@@ -9,7 +9,8 @@
 // rank-fused retrieval (reverted if the approximation over-promised — the
 // runner-up finalists then get their turn before the chunk is given up on),
 // snapshotted into the chunk's "Models tried" list (eval_model_trials — the
-// kept winner only, not every search rung), and the run ends
+// kept winner only, not every search rung; L10: skipped entirely on a TRIAL
+// run, which reverts its overrides anyway), and the run ends
 // with a dirty-set re-score (A3 — only questions the kept overrides could have
 // affected re-run retrieval; the rest are proven unchanged and re-stamped, see
 // eval.rescoreAffectedQuestions) + an eval_runs snapshot (feeds Appraise)
@@ -44,7 +45,7 @@ import { isProviderAvailable, modelSpec } from "@/lib/rag/embeddingModels";
 import {
   rescoreAffectedQuestions,
   runModelTrial,
-  scoreQuestionNow,
+  scoreQuestions,
   setChunkModelOverride,
   setChunkSizeModelOverride,
   setChunkSizeOverride,
@@ -53,12 +54,16 @@ import {
 } from "@/lib/rag/eval";
 import { effectiveK, type EvalCriteria } from "@/lib/rag/evalSettingsStore";
 import {
+  getChunkQuestions,
+  getQuestionToScore,
+  type QuestionToScore,
   getChunksByIds,
   getModelTrialQuestions,
   getSummary,
   type QuestionDetail,
 } from "@/lib/rag/evalStore";
 import {
+  clearAllOverridesForTrial,
   clearChunkOverride,
   getChunkOverridePieces,
   listOverrides,
@@ -69,6 +74,7 @@ import {
   type OverrideEmbedding,
 } from "@/lib/rag/overrideStore";
 import { fuseWithOverrides } from "@/lib/rag/retriever";
+import type { RetrievedChunk } from "@/types/rag";
 
 export type AutotuneMetric = "recall" | "mrr" | "ndcg";
 export type CandidateFamily = "size" | "model" | "size+model";
@@ -156,6 +162,21 @@ export type AutotuneEvent =
       mrr: number | null;
       ndcg: number | null;
       durationMs: number;
+      // Per-phase wall clock (0041), so scripts/autotune-trial.ts can read a
+      // run's profile straight off the stream. Deliberately doesn't sum to
+      // durationMs — see the `phase` declaration in runAutotune.
+      phase: { search: number; confirm: number; rescore: number };
+      // L8: confirm cycles run, and how many ended in a revert (the search
+      // over-promising). Measured at 3% — see docs/autotune-speedups-plan.md.
+      confirms: number;
+      reverts: number;
+    }
+  | {
+      // TRIAL MODE (branch autotune-speed-baseline only): the run reverted its
+      // own overrides so the next trial faces an identical workload.
+      type: "trial-reset";
+      overridesCleared: number;
+      resultsPruned: number;
     }
   | { type: "error"; message: string };
 
@@ -277,6 +298,34 @@ function usableModelLadder(scope: string[] | null): string[] {
 // is autotune's fusion pool (0027) — null follows live retrieval's. The
 // confirm re-score always runs at the live pool, so a smaller search pool
 // only trades embedding cost for coarser ranks (and possible confirm reverts).
+// L15: everything a chunk's search re-reads identically on every rung. The
+// search phase was 257.8s (55% of the run) and untouched — because the doc's
+// search levers (L1 fan-out, L3 pre-warm) both assumed the cost was EMBEDDING
+// round-trips, so nobody looked at the DB reads repeating underneath.
+//
+// Per rung, fusedTrialRanks was re-fetching `listOverrides()`, re-pulling every
+// stored override vector (its piece cache lived one call), and re-running an
+// identical base ANN per target. None of it varies across the ~6 rungs a chunk
+// tries: overrides are only ever persisted in CONFIRM, never mid-search.
+//
+// Lifetime is exactly one chunk's search, so it's built in the chunk loop and
+// thrown away after — no fingerprint key needed, because nothing can invalidate
+// it while it lives.
+type SearchContext = {
+  storedOverrides: ChunkOverride[];
+  storedPieces: Map<string, Promise<OverrideEmbedding[]>>;
+  annCache: Map<string, RetrievedChunk[]>;
+};
+
+async function buildSearchContext(chunkId: string): Promise<SearchContext> {
+  return {
+    // This chunk's own override never competes — the candidate replaces it.
+    storedOverrides: (await listOverrides()).filter((o) => o.sourceChunkId !== chunkId),
+    storedPieces: new Map(),
+    annCache: new Map(),
+  };
+}
+
 async function fusedTrialRanks(
   targets: TargetQuestion[],
   chunkId: string,
@@ -284,28 +333,28 @@ async function fusedTrialRanks(
   family: CandidateFamily,
   model: string,
   pool: number | null,
+  search: SearchContext,
 ): Promise<(number | null)[]> {
   const candVecs = await embedDocsCached(candidateTexts, model);
   const hypOverrides: ChunkOverride[] = [
-    ...(await listOverrides()).filter((o) => o.sourceChunkId !== chunkId),
+    ...search.storedOverrides,
     { sourceChunkId: chunkId, model, kind: family },
   ];
-  // Pieces per model: the stored overrides minus this chunk's, plus the
-  // in-memory candidate vectors under the trial model. Memoized —
-  // fuseWithOverrides asks once per model per question.
-  const pieceCache = new Map<string, Promise<OverrideEmbedding[]>>();
+  // Pieces per model: the stored overrides minus this chunk's (fetched once per
+  // chunk, not once per rung), plus the in-memory candidate vectors under the
+  // trial model. The candidate part DOES change per rung, so only the stored
+  // half is shared.
   const piecesFor = (m: string): Promise<OverrideEmbedding[]> => {
-    let p = pieceCache.get(m);
-    if (!p) {
-      p = overrideEmbeddings(m).then((stored) => {
-        const kept = stored.filter((piece) => piece.chunkId !== chunkId);
-        return m === model
-          ? [...kept, ...candVecs.map((embedding) => ({ chunkId, embedding }))]
-          : kept;
-      });
-      pieceCache.set(m, p);
+    let stored = search.storedPieces.get(m);
+    if (!stored) {
+      stored = overrideEmbeddings(m).then((all) =>
+        all.filter((piece) => piece.chunkId !== chunkId),
+      );
+      search.storedPieces.set(m, stored);
     }
-    return p;
+    return stored.then((kept) =>
+      m === model ? [...kept, ...candVecs.map((embedding) => ({ chunkId, embedding }))] : kept,
+    );
   };
 
   const cfg = activeConfig();
@@ -313,12 +362,13 @@ async function fusedTrialRanks(
   for (const t of targets) {
     const baseQVec = await embedQueryCached(t.question, cfg.embeddingModel);
     const { merged } = await fuseWithOverrides(
-      t.question,
-      baseQVec,
-      cfg.topK,
-      hypOverrides,
-      piecesFor,
-      pool,
+        t.question,
+        baseQVec,
+        cfg.topK,
+        hypOverrides,
+        piecesFor,
+        pool,
+      search.annCache,
     );
     const idx = merged.findIndex((c) => c.id === chunkId);
     ranks.push(idx === -1 ? null : idx + 1);
@@ -347,6 +397,16 @@ async function persistCandidate(
 // chunk's questions already retrieved; runModelTrial re-adds the chunk itself.
 // Best-effort — a snapshot failure never fails (or reverts) the applied
 // override, which stands on its own confirm.
+//
+// L10 (docs/autotune-speedups-plan.md): this is the single most expensive thing
+// in a run that the run does not need — 100.7s, 12.0%, measured 2026-08-03 via
+// the 0043 `snapshot` bucket, because each call is a FULL runModelTrial
+// (re-chunk, embed under the candidate model, fused-rank the pool) and 36
+// candidates are kept. Nothing inside runAutotune reads eval_model_trials back;
+// only the three UI-facing routes do. Trial runs skip it (see the tryApply call
+// site). If it ever needs to come off the critical path for real runs too,
+// deferring the kept (chunkId, candidate) pairs to after the done-log is the
+// next step — same rows, same UI, just not between chunks.
 async function saveKeptTrialSnapshot(
   chunkId: string,
   c: Pick<AutotuneCandidate, "family" | "size" | "overlap" | "model">,
@@ -404,16 +464,37 @@ export async function applyAutotuneCandidate(
   chunkId: string,
   candidate: Pick<AutotuneCandidate, "family" | "size" | "overlap" | "model">,
   mode: "clear" | "improve" = "clear",
+  // L10: the kept-trial snapshot is 100.7s (12.0%) of a run, spent inline to
+  // populate a UI list. Defaults ON so the post-run apply endpoint and ordinary
+  // dashboard runs are unchanged; a trial run turns it off — see the call site.
+  opts: { snapshot?: boolean } = {},
 ): Promise<ApplyResult> {
-  let before = await getSummary();
+  // L6 (docs/autotune-speedups-plan.md): chunk-scoped read, not the whole-config
+  // getSummary(). This function only ever looked at THIS chunk's questions, but
+  // getSummary is ~1.1s against a 162-question corpus and the confirm step ran it
+  // 2-3 times per candidate — ~167s of an 894s run spent computing 160 questions
+  // to read one or two. Same mapper underneath, so the values are identical.
+  let before = await getChunkQuestions(chunkId);
   const criteria = before.criteria;
-  let chunkQs = before.questions.filter((q) => q.sourceChunkId === chunkId);
+  let chunkQs = before.questions;
   if (chunkQs.length === 0) {
     return { status: "failed", detail: "Chunk has no questions under this config." };
   }
 
+  // L2, revisited. The original verdict was "dead": its ceiling is
+  // questions-per-chunk (1.2 here), so the 4-wide scoring pool has almost
+  // nothing to parallelize. That reasoning still holds for the POOL — but it
+  // only ever considered parallelism. Batching also pays the per-call fixed
+  // costs (setup, and one retrieval context) ONCE per re-score instead of once
+  // per question, which is a different saving the original analysis missed.
+  //
+  // The lookups run concurrently so the batch still costs one round trip to
+  // assemble, then a single scoreQuestions call does the work.
   const rescoreChunk = async () => {
-    for (const q of chunkQs) await scoreQuestionNow(q.questionId);
+    const toScore = (
+      await Promise.all(chunkQs.map((q) => getQuestionToScore(q.questionId)))
+    ).filter((q): q is QuestionToScore => q !== null);
+    if (toScore.length > 0) await scoreQuestions(toScore);
   };
 
   // Fresh baseline first: an override kept on ANOTHER chunk earlier in the run
@@ -424,8 +505,8 @@ export async function applyAutotuneCandidate(
   // same retrieval state.
   if (chunkQs.some((q) => q.stale)) {
     await rescoreChunk();
-    before = await getSummary();
-    chunkQs = before.questions.filter((q) => q.sourceChunkId === chunkId);
+    before = await getChunkQuestions(chunkId);
+    chunkQs = before.questions;
   }
   const beforeFailing = failingPairs(chunkQs, criteria);
   const failingSum = (qs: QuestionDetail[]) => {
@@ -460,8 +541,8 @@ export async function applyAutotuneCandidate(
 
   await rescoreChunk();
 
-  const after = await getSummary();
-  const afterQs = after.questions.filter((q) => q.sourceChunkId === chunkId);
+  const after = await getChunkQuestions(chunkId);
+  const afterQs = after.questions;
   const afterFailing = failingPairs(afterQs, criteria);
   const newFailure = [...afterFailing].some((p) => !beforeFailing.has(p));
   const progressed =
@@ -480,6 +561,13 @@ export async function applyAutotuneCandidate(
     } else {
       await clearChunkOverride(chunkId);
     }
+    // Re-scored unconditionally. L7 (docs/autotune-speedups-plan.md) tried to
+    // skip this by leaning on 0022's revert-awareness — restoring the prior
+    // override restores the prior fingerprint, so the pre-confirm rows would
+    // resurface on their own. It worked, and it was a NET LOSS: measured
+    // 2026-08-02, reverts are only 3% of confirms (1 of 33), so it saved one
+    // re-score per run while costing an extra fingerprint query on all 33.
+    // Removed. Don't re-propose without checking the revert counter first.
     await rescoreChunk();
     return {
       status: "reverted",
@@ -488,7 +576,9 @@ export async function applyAutotuneCandidate(
         : "Override made no real-retrieval progress (approximation over-promised).",
     };
   }
-  await saveKeptTrialSnapshot(chunkId, candidate);
+  if (opts.snapshot !== false) {
+    await saveKeptTrialSnapshot(chunkId, candidate);
+  }
   return {
     status: "kept",
     detail:
@@ -500,8 +590,14 @@ export async function applyAutotuneCandidate(
 }
 
 // The run itself — driven by the streamed POST /api/eval/autotune route.
-export async function runAutotune(emit: Emit = () => {}): Promise<void> {
+export async function runAutotune(
+  emit: Emit = () => {},
+  opts: { trialLabel?: string | null } = {},
+): Promise<void> {
   const t0 = performance.now();
+  // Wall-clock start, for the trial reset's prune bound (performance.now() is a
+  // monotonic offset, not a timestamp, so it can't be compared to scored_at).
+  const startedAt = new Date();
   // Per-phase wall-clock accounting on top of the total (durationMs): where the
   // run's time actually goes, so an optimization can be aimed before it's built.
   //   search  — the fusedTrialRanks dry-runs (Stages 1-3), incl. their embeds.
@@ -519,6 +615,11 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       phase[bucket] += performance.now() - s;
     }
   };
+  // Groups this run with the others in the same timing experiment (0041). Travels
+  // in on the request (x-trial-label) from scripts/autotune-trial.ts — it can't
+  // be an env var, since the engine runs in the SERVER process, not the script's.
+  // A run from the dashboard sends none and is filed as ad-hoc.
+  const trialLabel = opts.trialLabel?.trim() || null;
   const cfg = activeConfig();
   // Run-start override state, for the final dirty-set re-score: only chunks
   // whose override changed between here and the end can affect other
@@ -617,6 +718,11 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       mrr: summary.mrr,
       ndcg: summary.ndcg,
       durationMs: Math.round(performance.now() - t0),
+      phase: { search: 0, confirm: 0, rescore: 0 },
+      confirms: 0,
+      reverts: 0,
+      // Nothing was targeted, so nothing was scored. Zeros rather than a read
+      // of the accumulator, which this path never armed any work into.
     });
     return;
   }
@@ -632,6 +738,21 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
 
   let attempts = 0;
   let pendingChoice = 0;
+  // L8 diagnostics: confirm cycles run, how many ended in a revert (the search
+  // over-promising), and how many of those skipped the re-score via L7.
+  let confirms = 0;
+  let reverts = 0;
+
+  // L10: kept candidates awaiting their "Models tried" snapshot. Deferred out of
+  // the chunk loop because each one re-runs a FULL model trial (re-chunk,
+  // re-embed, re-rank the pool) — 97.6s across a run, 41% of confirm — purely to
+  // populate a UI list. Nothing inside the run reads eval_model_trials back;
+  // only /api/eval/trials, /api/eval/chunks/[chunkId]/trials and try-model do.
+  // Drained after the done event, so the run's RESULT no longer waits on
+  // bookkeeping. Note this is a latency win, not a work win: the snapshots still
+  // cost the same, they just stop sitting between chunks.
+  const pendingSnapshots: { chunkId: string; candidate: AutotuneCandidate }[] = [];
+
   // Applied override per chunk, for the outcome rows.
   const applied = new Map<
     string,
@@ -672,6 +793,12 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       questions: chunkTargets.length,
     });
 
+    // L15: one read of the override state + one base ANN per question, shared by
+    // every rung this chunk tries. Rebuilt per chunk because the previous
+    // chunk's confirm may have persisted an override; within THIS chunk's
+    // search nothing can change it.
+    const searchCtx = await buildSearchContext(chunkId);
+
     const baselineScore = chunkTargets.reduce(
       (s, t) => s + (t.beforeRank === null ? 0 : 1 / t.beforeRank),
       0,
@@ -707,13 +834,26 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       cand: AutotuneCandidate,
       mode: "clear" | "improve" = "clear",
     ): Promise<boolean> => {
-      const res = await timed("confirm", () => applyAutotuneCandidate(chunkId, cand, mode));
+      // L10: the kept-trial snapshot is deferred out of the chunk loop — see
+      // `pendingSnapshots` above and the drain after the done event. Measured
+      // 2026-08-03 at 97.6s, 41% of confirm, entirely to populate a UI list the
+      // run itself never reads back.
+      const res = await timed("confirm", () =>
+        applyAutotuneCandidate(chunkId, cand, mode, { snapshot: false }),
+      );
+      // L8: how often the approximate search over-promises. Measured 2026-08-02
+      // at 3% (1 of 33) — the search is accurate, so confirm cycles are almost
+      // never wasted on candidates that get rejected. Kept because it's free and
+      // it's the number that killed L7; a future workload could differ.
+      confirms += 1;
+      if (res.status === "reverted") reverts += 1;
       if (res.status === "kept") {
         applied.set(chunkId, {
           kind: cand.family,
           model: cand.model,
           size: cand.size,
         });
+        pendingSnapshots.push({ chunkId, candidate: cand });
         emit({
           type: mode === "clear" || res.remaining === 0 ? "chunk-resolved" : "chunk-improved",
           chunkId,
@@ -745,7 +885,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       const overlap = overlapFor(size);
       const pieces = await splitText(chunkText, size, overlap);
       const ranks = await timed("search", () =>
-        fusedTrialRanks(chunkTargets, chunkId, pieces, "size", cfg.embeddingModel, trialPool),
+        fusedTrialRanks(chunkTargets, chunkId, pieces, "size", cfg.embeddingModel, trialPool, searchCtx),
       );
       attempts += chunkTargets.length;
       emit({ type: "attempt", chunkId, stage: "size", detail: `size ${size}`, attempts });
@@ -777,7 +917,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       const rungCands: AutotuneCandidate[] = [];
 
       const ranksB = await timed("search", () =>
-        fusedTrialRanks(chunkTargets, chunkId, [chunkText], "model", model, trialPool),
+        fusedTrialRanks(chunkTargets, chunkId, [chunkText], "model", model, trialPool, searchCtx),
       );
       attempts += chunkTargets.length;
       emit({ type: "attempt", chunkId, stage: "model", detail: model, attempts });
@@ -787,7 +927,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       if (bestSize !== null) {
         const pieces = await splitText(chunkText, bestSize.size!, bestSize.overlap ?? 0);
         const ranksA = await timed("search", () =>
-          fusedTrialRanks(chunkTargets, chunkId, pieces, "size+model", model, trialPool),
+          fusedTrialRanks(chunkTargets, chunkId, pieces, "size+model", model, trialPool, searchCtx),
         );
         attempts += chunkTargets.length;
         emit({
@@ -825,7 +965,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
           if (rungs >= rungCap) break outer;
           rungs += 1;
           const ranks = await timed("search", () =>
-            fusedTrialRanks(chunkTargets, chunkId, pieces, "size+model", model, trialPool),
+            fusedTrialRanks(chunkTargets, chunkId, pieces, "size+model", model, trialPool, searchCtx),
           );
           attempts += chunkTargets.length;
           emit({
@@ -982,6 +1122,10 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
     }
   }
 
+  // Stopped BEFORE the history insert: the number describes the run's work, not
+  // the bookkeeping that records it.
+  const durationMs = Math.round(performance.now() - t0);
+
   await insertAutotuneRun(
     {
       recallK: recallTargeting ? recallK : null,
@@ -995,17 +1139,22 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
       unresolved: targets.length - resolved,
       improved,
       attempts,
+      durationMs,
+      searchMs: Math.round(phase.search),
+      confirmMs: Math.round(phase.confirm),
+      rescoreMs: Math.round(phase.rescore),
+      trialLabel,
     },
     outcomes,
   );
 
-  const durationMs = Math.round(performance.now() - t0);
   console.log(
     `[rag:autotune] done: targeted=${targets.length} resolved=${resolved} ` +
       `improved=${improved} pendingChoice=${pendingChoice} attempts=${attempts} ` +
       `rescoreSkipped=${skipped} in ${durationMs}ms ` +
       `(search=${Math.round(phase.search)}ms confirm=${Math.round(phase.confirm)}ms ` +
-      `rescore=${Math.round(phase.rescore)}ms)`,
+      `rescore=${Math.round(phase.rescore)}ms) ` +
+      `confirms=${confirms} reverts=${reverts}`,
   );
   emit({
     type: "autotune-done",
@@ -1019,5 +1168,45 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
     mrr: final.mrr,
     ndcg: final.ndcg,
     durationMs,
+    phase: {
+      search: Math.round(phase.search),
+      confirm: Math.round(phase.confirm),
+      rescore: Math.round(phase.rescore),
+    },
+    confirms,
+    reverts,
   });
+
+  // L10: the deferred snapshots. AFTER the done event on purpose — the caller
+  // already has its result, so this no longer sits on the critical path. Still
+  // INSIDE the request handler: the NDJSON stream stays open until this function
+  // returns, and moving it past that would let the platform kill the work.
+  // Best-effort exactly as it was inline (saveKeptTrialSnapshot swallows its own
+  // failures), so a snapshot that fails never affects the applied override.
+  for (const { chunkId, candidate } of pendingSnapshots) {
+    await saveKeptTrialSnapshot(chunkId, candidate);
+  }
+
+  await resetForNextTrial(emit, startedAt);
+}
+
+// ⚠️  TRIAL MODE — branch `autotune-speed-baseline` only. DELETE OR GATE BEFORE
+// MERGING TO MAIN. This makes autotune destroy its own work: every override the
+// run just applied is reverted, so a run that improved your retrieval leaves
+// nothing behind.
+//
+// It exists because a timed trial has to face the same workload every time.
+// Targets are recomputed each run from the below-bar questions, so a run that
+// resolves some of them hands the next run a smaller job — and that shrinkage
+// would read as a speedup from whatever optimization we happened to be testing.
+//
+// Runs after insertAutotuneRun, so the history row (and its timings) survives
+// the reset that erases everything else.
+async function resetForNextTrial(emit: Emit, startedAt: Date): Promise<void> {
+  const { overridesCleared, resultsPruned } = await clearAllOverridesForTrial(startedAt);
+  console.log(
+    `[rag:autotune] TRIAL RESET: cleared ${overridesCleared} override piece(s), ` +
+      `pruned ${resultsPruned} eval result(s) — retrieval back to baseline`,
+  );
+  emit({ type: "trial-reset", overridesCleared, resultsPruned });
 }

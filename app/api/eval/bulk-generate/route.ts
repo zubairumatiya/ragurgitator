@@ -1,17 +1,23 @@
 // ---------------------------------------------------------------------------
 // API route: POST /api/eval/bulk-generate
 //
-// "Bulk actions → Add question → {easy|medium|hard}" on /eval: adds the
-// difficulty to the active config's mix, then generates one question at that
-// difficulty for every chunk missing one and scores the unscored. Streams
-// progress as NDJSON (one EvalEvent per line) so the dashboard reuses the
-// Process-new-chunks progress bar. Body: { difficulty: 'easy'|'medium'|'hard' }.
+// "Bulk actions → Add question → {easy|medium|hard} ×N → Add" on /eval: adds the
+// requested difficulties to the active config's mix, then tops every chunk up to
+// N questions at each and scores the unscored. Streams progress as NDJSON (one
+// EvalEvent per line) so the dashboard reuses the Process-new-chunks progress
+// bar. Body: { counts: { easy?: n, medium?: n, hard?: n } }, or the legacy
+// { difficulty: 'easy'|'medium'|'hard' } (one question per chunk).
 // ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
 import { ndjsonStream } from "@/lib/http/ndjson";
-import { bulkAddDifficulty, type Difficulty, type EvalEvent } from "@/lib/rag/eval";
+import {
+  bulkAddDifficulties,
+  type Difficulty,
+  type DifficultyTarget,
+  type EvalEvent,
+} from "@/lib/rag/eval";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { getConfig } from "@/lib/rag/configStore";
 import { addDifficulty } from "@/lib/rag/evalSettingsStore";
@@ -22,10 +28,23 @@ import { submitBatch } from "@/lib/batch/orchestrator";
 
 const DIFFICULTIES = ["easy", "medium", "hard"] as const satisfies readonly Difficulty[];
 
+// Questions per chunk at each difficulty — the click counts from the panel's
+// badges. Capped so a stray click can't queue a corpus-sized bill.
+const MAX_PER_DIFFICULTY = 10;
+const Count = z
+  .number()
+  .int()
+  .min(1)
+  .max(MAX_PER_DIFFICULTY, {
+    error: `At most ${MAX_PER_DIFFICULTY} questions per difficulty per run.`,
+  });
+
 const Body = z.object({
-  difficulty: z.enum(DIFFICULTIES, {
-    error: "Provide a `difficulty` of 'easy', 'medium', or 'hard'.",
-  }),
+  counts: z
+    .object({ easy: Count.optional(), medium: Count.optional(), hard: Count.optional() })
+    .optional(),
+  // Legacy single-difficulty form (one question per chunk).
+  difficulty: z.enum(DIFFICULTIES).optional(),
   // Bulk-actions document scope: generate only for these documents' chunks
   // (legacy single `documentId` still accepted; absent = the whole corpus).
   documentId: z.uuid({ error: "`documentId` must be a uuid." }).optional(),
@@ -41,6 +60,23 @@ export async function POST(request: Request) {
     body.data.documentIds ??
     (body.data.documentId ? [body.data.documentId] : undefined);
 
+  // Fixed difficulty order (easy → medium → hard) so the generated questions and
+  // the progress bar read in the same order however the badges were clicked.
+  const targets: DifficultyTarget[] = body.data.counts
+    ? DIFFICULTIES.flatMap((d) => {
+        const count = body.data.counts?.[d];
+        return count ? [{ difficulty: d, count }] : [];
+      })
+    : body.data.difficulty
+      ? [{ difficulty: body.data.difficulty, count: 1 }]
+      : [];
+  if (targets.length === 0) {
+    return Response.json(
+      { error: "Pick at least one difficulty to add questions at." },
+      { status: 400 },
+    );
+  }
+
   return withRequestConfig(request, async () =>
     ndjsonStream<EvalEvent>(async (send) => {
       try {
@@ -49,12 +85,13 @@ export async function POST(request: Request) {
         // untouched and stays the default (batch is opt-in).
         const savings = await getActiveBatchSavings();
         if (isBatchEnabled(savings, "question_generation")) {
-          // Still record the difficulty in the mix so the config reflects the
+          // Still record the difficulties in the mix so the config reflects the
           // ask, then submit the gaps as a batch instead of generating inline.
-          await addDifficulty(body.data.difficulty);
+          for (const t of targets) await addDifficulty(t.difficulty);
           const handler = handlerFor("question_generation")!;
           const built = await handler.build({
-            difficulties: [body.data.difficulty],
+            difficulties: targets.map((t) => t.difficulty),
+            counts: targets.map((t) => t.count),
             documentIds,
           });
           if (!built || built.requests.length === 0) {
@@ -75,7 +112,7 @@ export async function POST(request: Request) {
           return;
         }
 
-        await bulkAddDifficulty(body.data.difficulty, send, documentIds);
+        await bulkAddDifficulties(targets, send, documentIds);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Bulk generation failed.";
         send({ type: "error", message });

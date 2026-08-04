@@ -19,6 +19,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, useSyncExternalStore } from "react";
+import { signOut } from "@/app/auth/actions";
 import { apiFetch } from "@/lib/http/client";
 import type { ConfigSummary } from "@/lib/rag/configStore";
 import type { CorpusSummary } from "@/lib/rag/corpusStore";
@@ -86,8 +87,12 @@ const rowClass = (active: boolean) =>
     ? "flex items-baseline justify-between gap-2 rounded-md bg-white px-2 py-1 text-sm font-medium text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-50"
     : "flex items-baseline justify-between gap-2 rounded-md px-2 py-1 text-sm text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100";
 
+// Routes that render without the app frame (login/signup/auth callback).
+const AUTH_PREFIXES = ["/login", "/signup", "/auth"];
+
 export function Sidebar() {
   const pathname = usePathname();
+  const onAuthRoute = AUTH_PREFIXES.some((p) => pathname.startsWith(p));
   const [open, toggle] = useStoredOpen("sidebar-open");
   const [corpora, setCorpora] = useState<CorpusSummary[] | null>(null);
   const [configs, setConfigs] = useState<{
@@ -117,13 +122,18 @@ export function Sidebar() {
           if (!cancelled) setConfigs({ open: [], closed: [] });
         });
     };
-    load();
+    if (!onAuthRoute) load();
     window.addEventListener(CORPORA_CHANGED, load);
     return () => {
       cancelled = true;
       window.removeEventListener(CORPORA_CHANGED, load);
     };
-  }, [pathname]);
+  }, [pathname, onAuthRoute]);
+
+  // Signed-out routes render bare: there's no account yet, so both lists would
+  // be empty (and their fetches 401 once ownership lands in 0045). Returning
+  // AFTER every hook keeps hook order stable across renders.
+  if (onAuthRoute) return null;
 
   if (!open) {
     return (
@@ -224,6 +234,52 @@ export function Sidebar() {
           );
         })}
       </Section>
+
+      <AccountFooter />
     </aside>
+  );
+}
+
+// Signed-in identity + sign out, pinned to the bottom of the sidebar. Fetches
+// its own DTO (GET /api/auth/me) for the same reason the lists above do: the
+// root layout must stay DB-free, so nothing is server-fed into this tree.
+//
+// Sign-out is a <form> posting to the signOut Server Action rather than an
+// onClick handler — it must clear httpOnly cookies, which only the server can
+// do, and this keeps working with JavaScript disabled.
+function AccountFooter() {
+  const [email, setEmail] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch("/api/auth/me")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled) setEmail(d?.user?.email ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setEmail(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!email) return null;
+
+  return (
+    <div className="mt-auto flex flex-col gap-1 border-t border-zinc-200 pt-2 dark:border-zinc-800">
+      <span className="truncate px-2 text-xs text-zinc-500" title={email}>
+        {email}
+      </span>
+      <form action={signOut}>
+        <button
+          type="submit"
+          className="w-full cursor-pointer rounded-md px-2 py-1 text-left text-sm text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
+        >
+          Sign out
+        </button>
+      </form>
+    </div>
   );
 }
