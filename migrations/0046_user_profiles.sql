@@ -1,10 +1,10 @@
 -- ============================================================================
--- 0044_user_profiles.sql
+-- 0046_user_profiles.sql
 --
 -- Phase 1 of the user-accounts epic (docs/user-accounts-plan.md): identity only.
 -- No ownership columns yet — this migration is safe to apply to a live
 -- single-tenant database and changes nothing about how existing data is read.
--- Ownership (corpora/configs/documents.user_id) lands in 0045.
+-- Ownership (corpora/configs/documents.user_id) lands in 0047.
 --
 -- Supabase Auth owns `auth.users`: signup, password hashing, email confirmation,
 -- and session issuance all happen there, and we never write to it. What we own

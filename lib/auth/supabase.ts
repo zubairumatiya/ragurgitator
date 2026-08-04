@@ -20,31 +20,69 @@ import { createBrowserClient, createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import type { NextRequest, NextResponse } from "next/server";
 
-function config(): { url: string; anonKey: string } {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !anonKey) {
-    throw new Error(
-      "NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY are not set. " +
-        "Copy them from the Supabase dashboard (Project Settings → API) into .env.local.",
-    );
-  }
-  return { url, anonKey };
+// Is Supabase Auth wired up at all? Callers on the REQUEST PATH use this to
+// degrade instead of throwing.
+//
+// Without it, an unset env var takes down every route in the app — proxy.ts runs
+// on all of them, so even pages that need no session 500. That's a bad failure
+// mode locally and a worse one on a first deploy, where a variable missing from
+// the hosting dashboard would brick the whole site rather than just disabling
+// sign-in. Deliberately NOT used by the auth Server Actions: someone actively
+// submitting the login form should get config()'s explicit error, not a silent
+// no-op that looks like wrong credentials.
+export function supabaseConfigured(): boolean {
+  return Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && publishableKey());
 }
 
-// The anon key is PUBLIC by design — it identifies the project and carries no
-// authority of its own; row access is governed by the user's JWT. That's why
-// these are NEXT_PUBLIC_ and why shipping them to the browser is correct.
+// ---------------------------------------------------------------------------
+// PUBLISHABLE KEY (`sb_publishable_…`) — the successor to the legacy `anon` key.
+//
+// Supabase replaced the JWT-based anon/service_role pair with opaque publishable
+// and secret keys (github.com/orgs/supabase/discussions/29260). Both formats work
+// in the same client argument today, but the legacy keys are scheduled for
+// DELETION in late 2026 — so a new build targets the new format and treats the
+// old one as a fallback, not the other way round.
+//
+// Why the new format is better here, beyond the deadline: an opaque key can be
+// rotated or revoked on its own, whereas the legacy anon key is a JWT signed
+// with the project's JWT secret — rotating it invalidates every other token
+// signed by that secret at the same time.
+// ---------------------------------------------------------------------------
+function publishableKey(): string | undefined {
+  return (
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+    // Legacy projects created before the new format. Kept only for the
+    // transition; drop this once the project is on sb_publishable_…
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  );
+}
+
+function config(): { url: string; key: string } {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = publishableKey();
+  if (!url || !key) {
+    throw new Error(
+      "NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY are not set. " +
+        "Copy them from the Supabase dashboard (Project Settings → API Keys) into .env.local.",
+    );
+  }
+  return { url, key };
+}
+
+// The publishable key is PUBLIC by design — it identifies the project and
+// carries no authority of its own; access is governed by the signed-in user's
+// JWT. That's why these are NEXT_PUBLIC_ and why shipping them to the browser is
+// correct. The SECRET key (sb_secret_…) is the one that must never appear here.
 export function browserSupabase() {
-  const { url, anonKey } = config();
-  return createBrowserClient(url, anonKey);
+  const { url, key } = config();
+  return createBrowserClient(url, key);
 }
 
 export async function serverSupabase() {
-  const { url, anonKey } = config();
+  const { url, key } = config();
   const cookieStore = await cookies(); // async in Next 16
 
-  return createServerClient(url, anonKey, {
+  return createServerClient(url, key, {
     cookies: {
       getAll: () => cookieStore.getAll(),
       setAll(cookiesToSet) {
@@ -71,8 +109,8 @@ export function proxySupabase(
   request: NextRequest,
   onCookiesSet: (cookiesToSet: { name: string; value: string; options?: object }[]) => NextResponse,
 ) {
-  const { url, anonKey } = config();
-  return createServerClient(url, anonKey, {
+  const { url, key } = config();
+  return createServerClient(url, key, {
     cookies: {
       getAll: () => request.cookies.getAll(),
       setAll: (cookiesToSet) => {

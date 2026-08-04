@@ -22,7 +22,7 @@ import { cache } from "react";
 import { redirect } from "next/navigation";
 
 import { sql } from "@/lib/db";
-import { serverSupabase } from "@/lib/auth/supabase";
+import { serverSupabase, supabaseConfigured } from "@/lib/auth/supabase";
 
 // The DTO — deliberately NOT the auth.users row. Supabase's user object carries
 // app_metadata, identities, raw provider payloads and more; none of it belongs
@@ -39,6 +39,12 @@ export type SessionUser = {
 // Uses getUser(), never getSession(): getSession() trusts the cookie without
 // verifying its signature with the auth server. See lib/auth/supabase.ts.
 export const getSessionUser = cache(async (): Promise<SessionUser | null> => {
+  // Matches proxy.ts: with Supabase unconfigured there is no session to read, so
+  // report "nobody is signed in" rather than throwing. Keeps GET /api/auth/me a
+  // clean 401 instead of a 500, which is what the sidebar's account footer
+  // expects when it decides not to render.
+  if (!supabaseConfigured()) return null;
+
   const supabase = await serverSupabase();
   const { data, error } = await supabase.auth.getUser();
   if (error || !data.user?.email) return null;
