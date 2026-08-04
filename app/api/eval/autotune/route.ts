@@ -12,14 +12,10 @@ import { ndjsonStream } from "@/lib/http/ndjson";
 import { withRequestConfig } from "@/lib/http/configScope";
 
 export async function POST(request: Request) {
-  // Timing-trial grouping (0041): scripts/autotune-trial.ts labels its runs so
-  // the Appraise → Trial times tab can median them together. Header rather than
-  // body — the body is unused here and the header survives the stream wrapper.
-  const trialLabel = request.headers.get("x-trial-label");
   return withRequestConfig(request, async () =>
     ndjsonStream<AutotuneEvent>(async (send) => {
       try {
-        await runAutotune(send, { trialLabel });
+        await runAutotune(send);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Autotune failed.";
         send({ type: "error", message });

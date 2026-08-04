@@ -203,16 +203,6 @@ export function AutotunePanel({
             case "autotune-done":
               setDone(event);
               break;
-            // ⚠️ TRIAL MODE (labelled runs only — the harness, never a normal
-            // dashboard run). The run just threw away every override it
-            // applied. Logged loudly because this is otherwise invisible —
-            // you'd see "resolved 12" and have nothing to show for it.
-            case "trial-reset":
-              pushLog(
-                `⚠ TRIAL RESET — reverted ${event.overridesCleared} override piece(s) ` +
-                  `and pruned ${event.resultsPruned} result(s). This run kept NOTHING.`,
-              );
-              break;
             case "error":
               setError(event.message);
               return;

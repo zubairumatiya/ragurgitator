@@ -284,53 +284,6 @@ export async function clearChunkOverride(sourceChunkId: string): Promise<boolean
   return rows.length > 0;
 }
 
-// ⚠️  TRIAL MODE — destructive. Its only call site
-// (lib/rag/autotune.resetForNextTrial) is gated on the run carrying a trial
-// label, so a normal dashboard run never reaches it. Keep it that way.
-//
-// Wipes EVERY override under the active config, returning its retrieval to
-// baseline. Exists so a timed autotune trial can be repeated against an
-// identical workload: a run resolves questions by applying overrides, so
-// without this the next run starts with fewer targets and finishes faster for
-// reasons that have nothing to do with the code being optimized.
-//
-// Why this is cheap rather than a full re-score. Each eval_results row is
-// stamped with the override-state fingerprint it was scored under (0022), and
-// evalStore's `latest` CTE prefers the row matching the CURRENT fingerprint over
-// a merely newer one. Deleting every override puts the fingerprint back to
-// 'baseline', so the pre-trial baseline rows resurface un-stale on their own —
-// exactly the revert-awareness 0022 was built for. Nothing is re-scored.
-//
-// The rows the trial wrote are pruned rather than left: they can never be
-// selected again (wrong fingerprint), so they are pure growth. `since` bounds
-// the prune to this run so a genuine older override state is never touched.
-export async function clearAllOverridesForTrial(
-  since: Date,
-): Promise<{ overridesCleared: number; resultsPruned: number }> {
-  const cfg = activeConfig();
-  const overrides = await sql`
-    delete from config_chunk_overrides where config_id = ${cfg.id}
-    returning 1
-  `;
-  // The stale-badge log describes changes that no longer exist.
-  await sql`delete from config_retrieval_changes where config_id = ${cfg.id}`;
-  await sql`update configs set retrieval_changed_at = null where id = ${cfg.id}`;
-
-  // Only this config's questions, and only results this run wrote under a
-  // non-baseline state. Scoped through eval_labels → document_embeddings, the
-  // same join evalStore uses to reach a config's questions.
-  const pruned = await sql`
-    delete from eval_results r
-    using eval_labels l, document_embeddings de
-    where r.eval_label_id = l.id
-      and l.document_embedding_id = de.id
-      and de.config_id = ${cfg.id}
-      and r.scored_at >= ${since}
-      and r.retrieval_state is distinct from 'baseline'
-    returning 1
-  `;
-  return { overridesCleared: overrides.length, resultsPruned: pruned.length };
-}
 
 // When the active config's retrieval last changed shape (an override set or
 // cleared), or null when it never has. Tolerates the column not existing yet

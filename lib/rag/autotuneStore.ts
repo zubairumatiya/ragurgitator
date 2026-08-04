@@ -20,16 +20,6 @@ export type AutotuneRunHeader = {
   unresolved: number;
   improved: number; // still below the bar, but a targeted metric got better
   attempts: number;
-  // Wall clock (0041). The engine already measured all of this; these fields are
-  // where it lands. The three phases do NOT sum to durationMs — the remainder
-  // (getSummary/splitText/etc.) is real and the Trial times tab shows it as
-  // "other". Null on a run that predates the migration.
-  durationMs: number | null;
-  searchMs: number | null;
-  confirmMs: number | null;
-  rescoreMs: number | null;
-  // Groups the N runs of one timing experiment; null = an ad-hoc dashboard run.
-  trialLabel: string | null;
 };
 
 export type AutotuneOutcome = {
@@ -57,16 +47,13 @@ export async function insertAutotuneRun(
       insert into autotune_runs
         (config_id, recall_k, recall_min_rate, mrr_k, mrr_min_rate,
          ndcg_k, ndcg_min_rate,
-         targeted, resolved, unresolved, improved, attempts,
-         duration_ms, search_ms, confirm_ms, rescore_ms, trial_label)
+         targeted, resolved, unresolved, improved, attempts)
       values
         (${cfg.id}, ${header.recallK}, ${header.recallMinRate},
          ${header.mrrK}, ${header.mrrMinRate},
          ${header.ndcgK}, ${header.ndcgMinRate},
          ${header.targeted}, ${header.resolved}, ${header.unresolved},
-         ${header.improved}, ${header.attempts},
-         ${header.durationMs}, ${header.searchMs}, ${header.confirmMs},
-         ${header.rescoreMs}, ${header.trialLabel})
+         ${header.improved}, ${header.attempts})
       returning id
     `;
     for (const o of outcomes) {

@@ -8,7 +8,6 @@
     "start": "next start",
     "lint": "eslint",
     "test": "node --import tsx --test '**/*.test.ts'",
-    "trial": "node --env-file=.env.local --import tsx scripts/autotune-trial.ts",
     "vault:check": "node --env-file=.env.local --import tsx scripts/vault-check.ts"
   },
   "dependencies": {

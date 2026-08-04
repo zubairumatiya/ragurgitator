@@ -9,8 +9,8 @@
 // rank-fused retrieval (reverted if the approximation over-promised — the
 // runner-up finalists then get their turn before the chunk is given up on),
 // snapshotted into the chunk's "Models tried" list (eval_model_trials — the
-// kept winner only, not every search rung; L10: skipped entirely on a TRIAL
-// run, which reverts its overrides anyway), and the run ends
+// kept winner only, not every search rung; L10: deferred to after the run
+// reports done, since nothing in the run reads it back), and the run ends
 // with a dirty-set re-score (A3 — only questions the kept overrides could have
 // affected re-run retrieval; the rest are proven unchanged and re-stamped, see
 // eval.rescoreAffectedQuestions) + an eval_runs snapshot (feeds Appraise)
@@ -63,7 +63,6 @@ import {
   type QuestionDetail,
 } from "@/lib/rag/evalStore";
 import {
-  clearAllOverridesForTrial,
   clearChunkOverride,
   getChunkOverridePieces,
   listOverrides,
@@ -162,22 +161,6 @@ export type AutotuneEvent =
       mrr: number | null;
       ndcg: number | null;
       durationMs: number;
-      // Per-phase wall clock (0041), so scripts/autotune-trial.ts can read a
-      // run's profile straight off the stream. Deliberately doesn't sum to
-      // durationMs — see the `phase` declaration in runAutotune.
-      phase: { search: number; confirm: number; rescore: number };
-      // L8: confirm cycles run, and how many ended in a revert (the search
-      // over-promising). Measured at 3% — see docs/autotune-speedups-plan.md.
-      confirms: number;
-      reverts: number;
-    }
-  | {
-      // TRIAL MODE (labelled runs only): the run reverted its own overrides so
-      // the next trial faces an identical workload. Never emitted for a normal
-      // dashboard run.
-      type: "trial-reset";
-      overridesCleared: number;
-      resultsPruned: number;
     }
   | { type: "error"; message: string };
 
@@ -400,14 +383,12 @@ async function persistCandidate(
 // override, which stands on its own confirm.
 //
 // L10 (docs/autotune-speedups-plan.md): this is the single most expensive thing
-// in a run that the run does not need — 100.7s, 12.0%, measured 2026-08-03 via
-// the 0043 `snapshot` bucket, because each call is a FULL runModelTrial
-// (re-chunk, embed under the candidate model, fused-rank the pool) and 36
-// candidates are kept. Nothing inside runAutotune reads eval_model_trials back;
-// only the three UI-facing routes do. Trial runs skip it (see the tryApply call
-// site). If it ever needs to come off the critical path for real runs too,
-// deferring the kept (chunkId, candidate) pairs to after the done-log is the
-// next step — same rows, same UI, just not between chunks.
+// in a run that the run does not need — 97.6s, 41% of confirm, measured
+// 2026-08-03, because each call is a FULL runModelTrial (re-chunk, embed under
+// the candidate model, fused-rank the pool) and 36 candidates are kept. Nothing
+// inside runAutotune reads eval_model_trials back; only the three UI-facing
+// routes do. So a run defers these to after it reports done (see
+// pendingSnapshots) — same rows, same UI, off the clock.
 async function saveKeptTrialSnapshot(
   chunkId: string,
   c: Pick<AutotuneCandidate, "family" | "size" | "overlap" | "model">,
@@ -591,14 +572,8 @@ export async function applyAutotuneCandidate(
 }
 
 // The run itself — driven by the streamed POST /api/eval/autotune route.
-export async function runAutotune(
-  emit: Emit = () => {},
-  opts: { trialLabel?: string | null } = {},
-): Promise<void> {
+export async function runAutotune(emit: Emit = () => {}): Promise<void> {
   const t0 = performance.now();
-  // Wall-clock start, for the trial reset's prune bound (performance.now() is a
-  // monotonic offset, not a timestamp, so it can't be compared to scored_at).
-  const startedAt = new Date();
   // Per-phase wall-clock accounting on top of the total (durationMs): where the
   // run's time actually goes, so an optimization can be aimed before it's built.
   //   search  — the fusedTrialRanks dry-runs (Stages 1-3), incl. their embeds.
@@ -616,11 +591,6 @@ export async function runAutotune(
       phase[bucket] += performance.now() - s;
     }
   };
-  // Groups this run with the others in the same timing experiment (0041). Travels
-  // in on the request (x-trial-label) from scripts/autotune-trial.ts — it can't
-  // be an env var, since the engine runs in the SERVER process, not the script's.
-  // A run from the dashboard sends none and is filed as ad-hoc.
-  const trialLabel = opts.trialLabel?.trim() || null;
   const cfg = activeConfig();
   // Run-start override state, for the final dirty-set re-score: only chunks
   // whose override changed between here and the end can affect other
@@ -719,11 +689,6 @@ export async function runAutotune(
       mrr: summary.mrr,
       ndcg: summary.ndcg,
       durationMs: Math.round(performance.now() - t0),
-      phase: { search: 0, confirm: 0, rescore: 0 },
-      confirms: 0,
-      reverts: 0,
-      // Nothing was targeted, so nothing was scored. Zeros rather than a read
-      // of the accumulator, which this path never armed any work into.
     });
     return;
   }
@@ -1140,11 +1105,6 @@ export async function runAutotune(
       unresolved: targets.length - resolved,
       improved,
       attempts,
-      durationMs,
-      searchMs: Math.round(phase.search),
-      confirmMs: Math.round(phase.confirm),
-      rescoreMs: Math.round(phase.rescore),
-      trialLabel,
     },
     outcomes,
   );
@@ -1169,13 +1129,6 @@ export async function runAutotune(
     mrr: final.mrr,
     ndcg: final.ndcg,
     durationMs,
-    phase: {
-      search: Math.round(phase.search),
-      confirm: Math.round(phase.confirm),
-      rescore: Math.round(phase.rescore),
-    },
-    confirms,
-    reverts,
   });
 
   // L10: the deferred snapshots. AFTER the done event on purpose — the caller
@@ -1187,30 +1140,4 @@ export async function runAutotune(
   for (const { chunkId, candidate } of pendingSnapshots) {
     await saveKeptTrialSnapshot(chunkId, candidate);
   }
-
-  // GATED: trial runs only. A run with no label is a real one from the
-  // dashboard and must keep the overrides it just applied.
-  if (trialLabel) await resetForNextTrial(emit, startedAt);
-}
-
-// ⚠️  TRIAL MODE — only ever reached when the run carries a trial label, i.e.
-// from scripts/autotune-trial.ts (which sets the x-trial-label header). It
-// makes autotune destroy its own work: every override the run just applied is
-// reverted, so a run that improved your retrieval leaves nothing behind. Never
-// call this unguarded — see the gate at the end of runAutotune.
-//
-// It exists because a timed trial has to face the same workload every time.
-// Targets are recomputed each run from the below-bar questions, so a run that
-// resolves some of them hands the next run a smaller job — and that shrinkage
-// would read as a speedup from whatever optimization we happened to be testing.
-//
-// Runs after insertAutotuneRun, so the history row (and its timings) survives
-// the reset that erases everything else.
-async function resetForNextTrial(emit: Emit, startedAt: Date): Promise<void> {
-  const { overridesCleared, resultsPruned } = await clearAllOverridesForTrial(startedAt);
-  console.log(
-    `[rag:autotune] TRIAL RESET: cleared ${overridesCleared} override piece(s), ` +
-      `pruned ${resultsPruned} eval result(s) — retrieval back to baseline`,
-  );
-  emit({ type: "trial-reset", overridesCleared, resultsPruned });
 }
