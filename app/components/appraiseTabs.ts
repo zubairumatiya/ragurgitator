@@ -14,6 +14,7 @@ export const APPRAISE_TABS = [
   { href: "/appraise/costs", label: "Costs" },
   { href: "/appraise/semantic-cache", label: "Semantic caching" },
   { href: "/appraise/configs", label: "Config metrics" },
+  { href: "/appraise/trials", label: "Trial times" },
 ] as const;
 
 // Where "Appraise" lands. Change this (or reorder TABS) in one place.
