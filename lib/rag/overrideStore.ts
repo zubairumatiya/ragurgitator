@@ -284,8 +284,9 @@ export async function clearChunkOverride(sourceChunkId: string): Promise<boolean
   return rows.length > 0;
 }
 
-// ⚠️  TRIAL MODE — branch `autotune-speed-baseline` only. DO NOT MERGE the call
-// site (lib/rag/autotune.resetForNextTrial) to main.
+// ⚠️  TRIAL MODE — destructive. Its only call site
+// (lib/rag/autotune.resetForNextTrial) is gated on the run carrying a trial
+// label, so a normal dashboard run never reaches it. Keep it that way.
 //
 // Wipes EVERY override under the active config, returning its retrieval to
 // baseline. Exists so a timed autotune trial can be repeated against an

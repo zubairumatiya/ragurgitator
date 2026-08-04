@@ -172,8 +172,9 @@ export type AutotuneEvent =
       reverts: number;
     }
   | {
-      // TRIAL MODE (branch autotune-speed-baseline only): the run reverted its
-      // own overrides so the next trial faces an identical workload.
+      // TRIAL MODE (labelled runs only): the run reverted its own overrides so
+      // the next trial faces an identical workload. Never emitted for a normal
+      // dashboard run.
       type: "trial-reset";
       overridesCleared: number;
       resultsPruned: number;
@@ -1187,13 +1188,16 @@ export async function runAutotune(
     await saveKeptTrialSnapshot(chunkId, candidate);
   }
 
-  await resetForNextTrial(emit, startedAt);
+  // GATED: trial runs only. A run with no label is a real one from the
+  // dashboard and must keep the overrides it just applied.
+  if (trialLabel) await resetForNextTrial(emit, startedAt);
 }
 
-// ⚠️  TRIAL MODE — branch `autotune-speed-baseline` only. DELETE OR GATE BEFORE
-// MERGING TO MAIN. This makes autotune destroy its own work: every override the
-// run just applied is reverted, so a run that improved your retrieval leaves
-// nothing behind.
+// ⚠️  TRIAL MODE — only ever reached when the run carries a trial label, i.e.
+// from scripts/autotune-trial.ts (which sets the x-trial-label header). It
+// makes autotune destroy its own work: every override the run just applied is
+// reverted, so a run that improved your retrieval leaves nothing behind. Never
+// call this unguarded — see the gate at the end of runAutotune.
 //
 // It exists because a timed trial has to face the same workload every time.
 // Targets are recomputed each run from the below-bar questions, so a run that
