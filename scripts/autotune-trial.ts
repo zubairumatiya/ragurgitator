@@ -310,7 +310,11 @@ async function main() {
     console.log("  ⚠ Over 10% — something uncontrolled is in the measurement.");
   }
 
-  console.log(`\n  saved as trial '${LABEL}' (${RUNS} runs) → /appraise/trials\n`);
+  // The Trial times tab that used to render these is gone; the timings still
+  // land in autotune_runs (0041), so read them from there.
+  console.log(
+    `\n  saved as trial '${LABEL}' (${RUNS} runs) → autotune_runs.trial_label\n`,
+  );
 }
 
 main()
