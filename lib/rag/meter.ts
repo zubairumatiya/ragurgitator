@@ -12,7 +12,8 @@
 // ---------------------------------------------------------------------------
 import type Anthropic from "@anthropic-ai/sdk";
 
-import { anthropicClient } from "@/lib/llm/client";
+import { anthropicFor } from "@/lib/llm/client";
+import { activeUserId } from "@/lib/auth/userScope";
 import { costLlm, type Surface } from "@/lib/rag/pricing";
 import { recordSpend } from "@/lib/rag/savingsStore";
 
@@ -20,7 +21,11 @@ export async function meteredMessage(
   surface: Surface,
   params: Anthropic.Messages.MessageCreateParamsNonStreaming,
 ): Promise<Anthropic.Messages.Message> {
-  const response = await anthropicClient.messages.create(params);
+  // The user's own key, resolved per call (cached 60s in lib/llm/client.ts).
+  // Every generation site in the app funnels through here, so this one line is
+  // what makes "whose key paid for this answer" have an answer at all.
+  const client = await anthropicFor(activeUserId());
+  const response = await client.messages.create(params);
   const u = response.usage;
   if (u) {
     const inTok = u.input_tokens ?? 0;

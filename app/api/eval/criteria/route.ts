@@ -24,6 +24,7 @@ import {
   listAggregateModelOptions,
   listAutotuneModelOptions,
 } from "@/lib/rag/embeddingModels";
+import { availableProviders } from "@/lib/rag/providerAvailability";
 import { getActiveCriteria, updateCriteria } from "@/lib/rag/evalSettingsStore";
 import { listAutotuneScopeOptions } from "@/lib/rag/evalStore";
 
@@ -40,13 +41,19 @@ export async function GET(request: Request) {
       // vector space in the Settings checklist. Includes models whose provider
       // has no key — flagged unselectable with a reason, so the checklist can
       // grey them out instead of hiding whole spaces without explanation.
+      // One availability lookup shared by both checklists below.
+      const availability = await availableProviders();
       const autotuneModels = listAutotuneModelOptions(
+        availability,
         autotuneModelLadder,
         activeConfig().embeddingModel,
       );
       // Which models may vote in the nDCG ideal ranking (0045). Every registry
       // model, including the base — it votes like any other.
-      const aggregateModels = listAggregateModelOptions(activeConfig().embeddingModel);
+      const aggregateModels = listAggregateModelOptions(
+        availability,
+        activeConfig().embeddingModel,
+      );
       return Response.json({ criteria, config, scopeOptions, autotuneModels, aggregateModels });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to load criteria.";

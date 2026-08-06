@@ -22,7 +22,8 @@ import {
   getActiveCriteria,
   retrievalDepth,
 } from "@/lib/rag/evalSettingsStore";
-import { isProviderAvailable, modelSpec, sameVectorSpace } from "@/lib/rag/embeddingModels";
+import { modelSpec, sameVectorSpace } from "@/lib/rag/embeddingModels";
+import { availableProviders } from "@/lib/rag/providerAvailability";
 import {
   clearRetrievalChanges,
   listOverrides,
@@ -1207,7 +1208,7 @@ export async function setChunkModelOverride(
     return "unknown-model";
   }
   if (model === activeConfig().embeddingModel) return "is-base";
-  if (!isProviderAvailable(spec.provider)) return "unavailable";
+  if (!(await availableProviders()).has(spec.provider)) return "unavailable";
 
   const chunk = await getModelTrialChunk(chunkId);
   if (!chunk) return "not-found";
@@ -1276,7 +1277,7 @@ export async function setChunkSizeModelOverride(
   } catch {
     return "unknown-model";
   }
-  if (!isProviderAvailable(spec.provider)) return "unavailable";
+  if (!(await availableProviders()).has(spec.provider)) return "unavailable";
   if (!Number.isInteger(size) || size < 1 || overlap < 0 || overlap >= size) {
     return "invalid";
   }

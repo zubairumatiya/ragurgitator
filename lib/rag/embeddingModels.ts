@@ -95,29 +95,42 @@ export function sameVectorSpace(a: string, b: string): boolean {
 }
 
 // --- Provider availability (drives the base-model picker's grey-out) ---------
-// Which env var enables each provider. API providers: their credential. Local
-// models need no key, but they download multi-hundred-MB weights on first use
-// and can't run on serverless hosts — so they're opt-in behind LOCAL_EMBEDDINGS
-// (set to any non-empty value in environments that can run them).
-const PROVIDER_KEY_ENV: Record<EmbeddingProviderId, string> = {
-  voyage: "VOYAGE_API_KEY",
-  openai: "OPENAI_API_KEY",
-  cohere: "COHERE_API_KEY",
-  local: "LOCAL_EMBEDDINGS",
-};
+// Availability is no longer a property of the environment — under strict BYOK it
+// is a property of the USER, resolved from user_provider_keys. That answer is
+// async and requires a DB read, so it does NOT live here: this module stays a
+// pure data table that any layer can import, and the IO lives in
+// lib/rag/providerAvailability.ts.
+//
+// Every function below therefore takes the resolved set as its first argument.
+// Callers do `const available = await availableProviders()` once and pass it in
+// — which also means one query per render rather than one per model.
+// Structural, not `ReadonlySet<EmbeddingProviderId>`, on purpose: the same
+// resolved set answers for LLM providers too (anthropic is a ProviderId but not
+// an EmbeddingProviderId), so one lookup serves both registries. A Set of any
+// provider-id union satisfies this.
+export type ProviderAvailability = { has(provider: string): boolean };
 
-// Is this provider usable right now? Its enabling env var is non-empty.
-// Server-only (reads process.env) — call it from a route/server component.
-export function isProviderAvailable(provider: EmbeddingProviderId): boolean {
-  return Boolean(process.env[PROVIDER_KEY_ENV[provider]]);
-}
-
-// Which env var enables a provider, for "set VOYAGE_API_KEY to enable" copy.
-// Exported so callers outside this module (the Appraise → Models rate card,
-// which lists every model rather than just the config-picker candidates) can
-// explain an unavailable provider without duplicating the mapping.
-export function providerKeyEnv(provider: EmbeddingProviderId): string {
-  return PROVIDER_KEY_ENV[provider];
+// Why a provider is unavailable, phrased as the action that would fix it.
+//
+// The two cases are deliberately worded differently. An API provider needs a
+// CREDENTIAL, which the user adds themselves on the Account page. `local` needs
+// a HOST CAPABILITY — transformers.js downloads multi-hundred-MB weights and
+// can't run on a serverless function — which only an operator can grant, and
+// which is identical for every user of a deployment. Telling a user to "add a
+// local key in Settings" would send them somewhere that cannot help them.
+//
+// Pure (no IO), so it lives with the registry rather than with the async lookup.
+export function unavailableReason(provider: EmbeddingProviderId): string {
+  switch (provider) {
+    case "openai":
+      return "add an OpenAI key in Settings";
+    case "cohere":
+      return "add a Cohere key in Settings";
+    case "voyage":
+      return "add a Voyage key in Settings";
+    case "local":
+      return "set LOCAL_EMBEDDINGS to enable";
+  }
 }
 
 export type BaseModelOption = {
@@ -139,13 +152,13 @@ export type BaseModelOption = {
 // exist only for the in-memory try-a-model experiment (altEmbeddingModels), not
 // as ingestion targets. The rule: any ingestable model, plus any non-Voyage
 // provider (local/OpenAI/Cohere) we'd set up to ingest under.
-export function listBaseModelOptions(): BaseModelOption[] {
+export function listBaseModelOptions(availability: ProviderAvailability): BaseModelOption[] {
   return Object.values(EMBEDDING_MODELS)
     .filter((spec) => spec.ingestable || spec.provider !== "voyage")
     .map((spec) => {
-    const available = isProviderAvailable(spec.provider);
+    const available = availability.has(spec.provider);
     const reasons: string[] = [];
-    if (!available) reasons.push(`set ${PROVIDER_KEY_ENV[spec.provider]} to enable`);
+    if (!available) reasons.push(unavailableReason(spec.provider));
     if (!spec.ingestable) reasons.push("no vector table yet (add a migration)");
     return {
       id: spec.id,
@@ -186,10 +199,13 @@ export type AutotuneModelOption = {
 //
 // Same selectable/reason contract as the autotune options: an unkeyed model is
 // listed greyed out with the env var that would enable it, rather than dropped.
-export function listAggregateModelOptions(baseModel: string): AutotuneModelOption[] {
+export function listAggregateModelOptions(
+  availability: ProviderAvailability,
+  baseModel: string,
+): AutotuneModelOption[] {
   const baseSpace = EMBEDDING_MODELS[baseModel]?.vectorSpace ?? null;
   return Object.values(EMBEDDING_MODELS).map((spec) => {
-    const available = isProviderAvailable(spec.provider);
+    const available = availability.has(spec.provider);
     const space = spec.vectorSpace ?? null;
     return {
       id: spec.id,
@@ -197,7 +213,7 @@ export function listAggregateModelOptions(baseModel: string): AutotuneModelOptio
       vectorSpace: space,
       sameSpaceAsBase: space !== null && space === baseSpace,
       selectable: available,
-      reason: available ? null : `set ${PROVIDER_KEY_ENV[spec.provider]} to enable`,
+      reason: available ? null : unavailableReason(spec.provider),
     };
   });
 }
@@ -215,9 +231,9 @@ export function listAggregateModelOptions(baseModel: string): AutotuneModelOptio
 // but it does mean setting LOCAL_EMBEDDINGS opts local models (large weight
 // downloads) into every subsequent aggregate build. Pin an explicit list in
 // Settings to avoid that.
-export function keyedModels(): string[] {
+export function keyedModels(availability: ProviderAvailability): string[] {
   return Object.values(EMBEDDING_MODELS)
-    .filter((spec) => isProviderAvailable(spec.provider))
+    .filter((spec) => availability.has(spec.provider))
     .map((spec) => spec.id);
 }
 
@@ -244,6 +260,7 @@ export function canonicalModelOrder(ids: string[]): string[] {
 // caller passes the ladder (lib/config.autotuneModelLadder) to avoid a
 // config → registry import cycle.
 export function listAutotuneModelOptions(
+  availability: ProviderAvailability,
   ladder: string[],
   baseModel: string,
 ): AutotuneModelOption[] {
@@ -253,7 +270,7 @@ export function listAutotuneModelOptions(
     if (id === baseModel) continue;
     const spec = EMBEDDING_MODELS[id];
     if (!spec) continue; // not in the registry — nothing to embed with
-    const available = isProviderAvailable(spec.provider);
+    const available = availability.has(spec.provider);
     const space = spec.vectorSpace ?? null;
     options.push({
       id,
@@ -261,7 +278,7 @@ export function listAutotuneModelOptions(
       vectorSpace: space,
       sameSpaceAsBase: space !== null && space === baseSpace,
       selectable: available,
-      reason: available ? null : `set ${PROVIDER_KEY_ENV[spec.provider]} to enable`,
+      reason: available ? null : unavailableReason(spec.provider),
     });
   }
   return options;

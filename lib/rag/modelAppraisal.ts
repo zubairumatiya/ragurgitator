@@ -19,9 +19,9 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import {
   EMBEDDING_MODELS,
-  isProviderAvailable,
-  providerKeyEnv,
+  unavailableReason,
   type EmbeddingProviderId,
+  type ProviderAvailability,
 } from "@/lib/rag/embeddingModels";
 import { embedRate } from "@/lib/rag/pricing";
 
@@ -46,19 +46,20 @@ export type RateCardRow = {
   reason: string | null;
 };
 
-// Every registered model with price + availability. Server-only
-// (isProviderAvailable reads process.env). Sync — there's no IO here.
+// Every registered model with price + availability. Takes the resolved
+// availability set (see lib/rag/providerAvailability.ts) — under BYOK
+// "available" is a per-user fact, so the card renders differently per viewer.
 //
 // Unlike listBaseModelOptions this does NOT filter to ingestion candidates: the
 // alternate Voyage entries are exactly what the comparison table scores, so a
 // rate card that hid them would price the models you can't try and omit the
 // ones you can.
-export function listModelRateCard(): RateCardRow[] {
+export function listModelRateCard(availability: ProviderAvailability): RateCardRow[] {
   return Object.values(EMBEDDING_MODELS).map((spec) => {
     const rate = embedRate(spec.id);
-    const available = isProviderAvailable(spec.provider);
+    const available = availability.has(spec.provider);
     const reasons: string[] = [];
-    if (!available) reasons.push(`set ${providerKeyEnv(spec.provider)} to enable`);
+    if (!available) reasons.push(unavailableReason(spec.provider));
     if (!spec.ingestable) reasons.push("no vector table yet");
     return {
       id: spec.id,

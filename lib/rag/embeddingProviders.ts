@@ -13,7 +13,8 @@
 // ---------------------------------------------------------------------------
 import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
 
-import { cohereClient, openaiClient, voyageClient } from "@/lib/llm/client";
+import { activeUserId } from "@/lib/auth/userScope";
+import { cohereFor, openaiFor, voyageFor } from "@/lib/llm/client";
 import type { EmbeddingModelSpec, EmbeddingProviderId } from "@/lib/rag/embeddingModels";
 
 export type EmbedRole = "document" | "query";
@@ -35,6 +36,7 @@ export interface EmbeddingProvider {
 const voyageProvider: EmbeddingProvider = {
   batchLimit: 128,
   async embedBatch(texts, role, spec) {
+    const voyageClient = await voyageFor(activeUserId());
     const response = await voyageClient.embed({
       input: texts,
       model: spec.apiModel,
@@ -59,7 +61,8 @@ const voyageProvider: EmbeddingProvider = {
 const openaiProvider: EmbeddingProvider = {
   batchLimit: 2048,
   async embedBatch(texts, _role, spec) {
-    const res = await openaiClient().embeddings.create({
+    const openaiClient = await openaiFor(activeUserId());
+    const res = await openaiClient.embeddings.create({
       model: spec.apiModel,
       input: texts,
       // text-embedding-3-* support `dimensions`; native is 3072 so only send it
@@ -78,7 +81,8 @@ const openaiProvider: EmbeddingProvider = {
 const cohereProvider: EmbeddingProvider = {
   batchLimit: 96,
   async embedBatch(texts, role, spec) {
-    const res = await cohereClient().embed({
+    const cohereClient = await cohereFor(activeUserId());
+    const res = await cohereClient.embed({
       model: spec.apiModel,
       inputType: role === "query" ? "search_query" : "search_document",
       texts,

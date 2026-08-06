@@ -17,7 +17,9 @@
 // payloads. See lib/batch/providers.test.ts.
 // ---------------------------------------------------------------------------
 import type Anthropic from "@anthropic-ai/sdk";
-import { anthropicClient } from "@/lib/llm/client";
+import { activeUserId } from "@/lib/auth/userScope";
+import { openProviderKey } from "@/lib/auth/providerKeys";
+import { anthropicFor, MissingProviderKeyError } from "@/lib/llm/client";
 import {
   type BatchProvider,
   type BatchRequest,
@@ -54,8 +56,14 @@ export interface ProviderAdapter {
 // Anthropic
 // ===========================================================================
 
+// Every method resolves the ACTIVE user's key. The batch poller is a
+// session-bearing route (app/api/batch/poll/route.ts runs inside
+// withRequestUser), so there is always a user in scope here — a batch is only
+// ever advanced by a request from the person who owns it. That is what makes
+// per-job key resolution unnecessary: the scope is already the owner's.
 const anthropicAdapter: ProviderAdapter = {
   async submit(requests) {
+    const anthropicClient = await anthropicFor(activeUserId());
     const batch = await anthropicClient.messages.batches.create({
       requests: requests.map((r) => ({
         custom_id: r.customId,
@@ -66,6 +74,7 @@ const anthropicAdapter: ProviderAdapter = {
   },
 
   async poll(id) {
+    const anthropicClient = await anthropicFor(activeUserId());
     const b = await anthropicClient.messages.batches.retrieve(id);
     const c = b.request_counts;
     return {
@@ -80,6 +89,7 @@ const anthropicAdapter: ProviderAdapter = {
 
   async results(id) {
     const out: BatchResultRow[] = [];
+    const anthropicClient = await anthropicFor(activeUserId());
     const decoder = await anthropicClient.messages.batches.results(id);
     for await (const row of decoder) {
       const res = row.result;
@@ -99,6 +109,7 @@ const anthropicAdapter: ProviderAdapter = {
   },
 
   async cancel(id) {
+    const anthropicClient = await anthropicFor(activeUserId());
     await anthropicClient.messages.batches.cancel(id);
   },
 };
@@ -109,16 +120,22 @@ const anthropicAdapter: ProviderAdapter = {
 
 const VOYAGE_BASE = "https://api.voyageai.com/v1";
 
-function voyageKey(): string {
-  const key = process.env.VOYAGE_API_KEY;
-  if (!key) throw new Error("VOYAGE_API_KEY is not set — cannot submit a Voyage batch.");
-  return key;
+// Voyage has no batch surface in voyageai@0.2.1, so this path builds the
+// Authorization header by hand rather than going through voyageFor(). That means
+// it is the one place in the app that handles a raw key string outside a client
+// constructor — hence .expose() inline in the header literal, never into a
+// variable, and a MissingProviderKeyError rather than a keyless request that
+// would come back as an opaque 401.
+async function voyageAuth(): Promise<string> {
+  const secret = await openProviderKey(activeUserId(), "voyage");
+  if (!secret) throw new MissingProviderKeyError("voyage");
+  return `Bearer ${secret.expose()}`;
 }
 
 async function voyageJson<T>(path: string, init: RequestInit): Promise<T> {
   const res = await fetch(`${VOYAGE_BASE}${path}`, {
     ...init,
-    headers: { Authorization: `Bearer ${voyageKey()}`, ...(init.headers ?? {}) },
+    headers: { Authorization: await voyageAuth(), ...(init.headers ?? {}) },
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -178,7 +195,7 @@ const voyageAdapter: ProviderAdapter = {
   async results(_id, outputFileId) {
     if (!outputFileId) throw new Error("Voyage batch completed without an output file id.");
     const res = await fetch(`${VOYAGE_BASE}/files/${outputFileId}/content`, {
-      headers: { Authorization: `Bearer ${voyageKey()}` },
+      headers: { Authorization: await voyageAuth() },
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");

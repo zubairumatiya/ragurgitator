@@ -19,6 +19,7 @@ import {
   listConfigs,
 } from "@/lib/rag/configStore";
 import { listBaseModelOptions } from "@/lib/rag/embeddingModels";
+import { availableProviders } from "@/lib/rag/providerAvailability";
 import { withRequestUser } from "@/lib/http/configScope";
 
 export async function GET() {
@@ -86,7 +87,9 @@ export async function POST(request: Request) {
       // The base model must actually be ingestable AND available right now (has a
       // vector table + a key / local) — re-check server-side so a stale/forged
       // selection can't create an unusable config.
-      const option = listBaseModelOptions().find((o) => o.id === body.baseModel);
+      const option = listBaseModelOptions(await availableProviders()).find(
+        (o) => o.id === body.baseModel,
+      );
       if (!option || !option.selectable) {
         return Response.json(
           { error: option?.reason ?? `"${body.baseModel}" isn't a selectable base model.` },

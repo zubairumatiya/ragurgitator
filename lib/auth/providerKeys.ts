@@ -133,6 +133,33 @@ export async function deleteProviderKey(userId: string, provider: ProviderId): P
   `;
 }
 
+// --- availability (drives every picker's grey-out) ---------------------------
+// Which providers this user holds a key for. ONE query returning a Set, rather
+// than a hasProviderKey() call per model: the pickers ask about ~11 registry
+// models spanning 4 providers, and a per-model query would turn one dropdown
+// render into eleven round trips.
+//
+// Note this touches no ciphertext and no vault — availability is a row-existence
+// question, so the greyed-out UI costs a single indexed lookup and never a Key
+// Vault operation. That separation is why the picker stays cheap to render.
+export async function keyedProviders(userId: string): Promise<Set<ProviderId>> {
+  const rows = await sql<{ provider: ProviderId }[]>`
+    select provider from user_provider_keys where user_id = ${userId}
+  `;
+  return new Set(rows.map((r) => r.provider));
+}
+
+// Single-provider form, for the call sites that genuinely need just one (the
+// generation path's pre-flight check). Prefer keyedProviders() in any loop.
+export async function hasProviderKey(userId: string, provider: ProviderId): Promise<boolean> {
+  const rows = await sql<{ one: number }[]>`
+    select 1 as one
+      from user_provider_keys
+     where user_id = ${userId} and provider = ${provider}
+  `;
+  return rows.length > 0;
+}
+
 // SERVER-ONLY read path, for Phase 4's per-user provider clients. Returns null
 // when the user has no key for the provider, so callers can distinguish "not
 // configured" from "configured but broken" — the latter throws out of open(),

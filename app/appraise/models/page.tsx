@@ -16,6 +16,7 @@ import { ModelReplayTable } from "@/app/components/ModelReplayTable";
 import { withPageUser } from "@/lib/auth/dal";
 import { listConfigComparisons } from "@/lib/rag/appraiseStore";
 import { listModelRateCard, meteredEmbedTokens } from "@/lib/rag/modelAppraisal";
+import { availableProviders } from "@/lib/rag/providerAvailability";
 import { listReplays } from "@/lib/rag/replayStore";
 
 export const dynamic = "force-dynamic";
@@ -27,15 +28,21 @@ const ABOUT =
   "vectors were already paid for.";
 
 export default async function AppraiseModelsPage() {
-  // listModelRateCard is sync (registry + env, no IO); the DB reads are
-  // independent, so they go in parallel.
+  // The rate card's "available?" column is now per-user (strict BYOK), so it
+  // needs the availability lookup and therefore a user scope — it moved inside
+  // withPageUser with the rest. It is still the cheap one: a single indexed read
+  // of user_provider_keys, no vault call.
   //
   // listReplays is the slow one on a cold fingerprint (~8s, dominated by pulling
   // vectors out of embedding_cache) and ~0.4s once cached in replay_metrics.
   // loading.tsx covers the cold case — see AppraiseLoading.
-  const rateCard = listModelRateCard();
-  const [replays, comparisons, embedTokens] = await withPageUser(() =>
-    Promise.all([listReplays(), listConfigComparisons(), meteredEmbedTokens()]),
+  const [rateCard, replays, comparisons, embedTokens] = await withPageUser(async () =>
+    Promise.all([
+      availableProviders().then(listModelRateCard),
+      listReplays(),
+      listConfigComparisons(),
+      meteredEmbedTokens(),
+    ]),
   );
 
   return (

@@ -26,7 +26,8 @@ import { config } from "@/lib/config";
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { embedQueryCached } from "@/lib/rag/embedCache";
-import { EMBEDDING_MODELS, isProviderAvailable } from "@/lib/rag/embeddingModels";
+import { EMBEDDING_MODELS } from "@/lib/rag/embeddingModels";
+import { availableProviders } from "@/lib/rag/providerAvailability";
 import type { EffectiveAcceptTarget } from "@/lib/rag/semanticCache";
 import {
   auc,
@@ -211,6 +212,7 @@ export async function runKeyModelSweep(
   };
 
   const rows: LeaderboardRow[] = [];
+  const availability = await availableProviders();
   for (const model of candidates) {
     const spec = EMBEDDING_MODELS[model];
     const base = {
@@ -233,7 +235,7 @@ export async function runKeyModelSweep(
       rows.push({ ...base, available: false, reason: "not in EMBEDDING_MODELS" });
       continue;
     }
-    if (!isProviderAvailable(spec.provider)) {
+    if (!availability.has(spec.provider)) {
       rows.push({ ...base, available: false, reason: `${spec.provider} not enabled` });
       continue;
     }
