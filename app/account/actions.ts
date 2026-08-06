@@ -18,6 +18,7 @@ import { revalidatePath } from "next/cache";
 import { requireUser } from "@/lib/auth/dal";
 import { serverSupabase } from "@/lib/auth/supabase";
 import { deleteProviderKey, isProviderId, saveProviderKey } from "@/lib/auth/providerKeys";
+import { invalidateProviderClients } from "@/lib/llm/client";
 import { sql } from "@/lib/db";
 
 export type KeyFormState = {
@@ -42,6 +43,11 @@ export async function saveKey(_prev: KeyFormState, formData: FormData): Promise<
     return { error: result.message, provider };
   }
 
+  // Drop any client built from the PREVIOUS key. Without this a rotation would
+  // keep billing the old credential for up to the 60s client TTL, and the user
+  // would see a settings page that says "saved" while their next request still
+  // fails on the key they just replaced.
+  invalidateProviderClients(user.id);
   revalidatePath("/account");
   return { savedProvider: provider, provider };
 }
@@ -55,6 +61,8 @@ export async function deleteKey(_prev: KeyFormState, formData: FormData): Promis
   }
 
   await deleteProviderKey(user.id, provider);
+  // A deleted key must stop working immediately, not when the cache expires.
+  invalidateProviderClients(user.id);
   revalidatePath("/account");
   return { provider };
 }

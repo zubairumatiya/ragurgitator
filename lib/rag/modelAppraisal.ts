@@ -23,7 +23,12 @@ import {
   type EmbeddingProviderId,
   type ProviderAvailability,
 } from "@/lib/rag/embeddingModels";
-import { embedRate } from "@/lib/rag/pricing";
+import {
+  LLM_MODELS,
+  llmUnavailableReason,
+  type LlmProviderId,
+} from "@/lib/llm/llmModels";
+import { embedRate, llmRate } from "@/lib/rag/pricing";
 
 const isMissingTable = (err: unknown): boolean =>
   (err as { code?: string }).code === "42P01";
@@ -72,6 +77,70 @@ export function listModelRateCard(availability: ProviderAvailability): RateCardR
       reason: reasons.length > 0 ? reasons.join("; ") : null,
     };
   });
+}
+
+// --- 1b. the LLM rate card ---------------------------------------------------
+//
+// The generation side of the same question. Until now LLM_PRICES was priced in
+// the ledger but never SHOWN anywhere — you could see what a model had cost you
+// after the fact on Costs, but not what it would cost before you picked it.
+// With §9.2's picker offering eleven models across two providers, that gap is
+// the difference between an informed choice and a guess.
+//
+// Deliberately NOT merged with RateCardRow. An embedding model is priced on one
+// axis (per input token) and an LLM on two (input and output, at very different
+// rates), and it has no dimension while an LLM has a context window. A union row
+// would be half-null in both directions.
+
+export type LlmRateCardRow = {
+  id: string;
+  label: string;
+  provider: LlmProviderId;
+  contextTokens: number;
+  // Both null ⇒ render "—". Unlike the embedding card there is no `verified`
+  // flag to strip a rate (see llmRate); null here means the model is registered
+  // in llmModels but genuinely missing from LLM_PRICES, which is a bug worth
+  // seeing rather than hiding behind a plausible number.
+  inputPerM: number | null;
+  outputPerM: number | null;
+  note: string | null;
+  available: boolean; // the viewer holds a key for this provider
+  reason: string | null; // why not; null when available
+};
+
+// Every registered LLM with price + per-user availability, sorted ASCENDING BY
+// OUTPUT RATE. Output is the column that ranks the ladder honestly: at this
+// app's prompt sizes (a few thousand tokens of chunked context in, a short
+// answer out) generation spend is dominated by the output rate, so sorting on
+// input would put the cheap-to-prompt/expensive-to-answer models at the top and
+// misrepresent which one is actually cheap to run here.
+//
+// Ties break on input rate, then id, so the order is stable across renders
+// rather than depending on registry insertion order for the several models that
+// share an output rate.
+export function listLlmRateCard(availability: ProviderAvailability): LlmRateCardRow[] {
+  return Object.values(LLM_MODELS)
+    .map((spec) => {
+      const rate = llmRate(spec.id);
+      const available = availability.has(spec.provider);
+      return {
+        id: spec.id,
+        label: spec.label,
+        provider: spec.provider,
+        contextTokens: spec.contextTokens,
+        inputPerM: rate?.inputPerM ?? null,
+        outputPerM: rate?.outputPerM ?? null,
+        note: spec.note ?? null,
+        available,
+        reason: available ? null : llmUnavailableReason(spec.provider),
+      };
+    })
+    .sort(
+      (a, b) =>
+        (a.outputPerM ?? Infinity) - (b.outputPerM ?? Infinity) ||
+        (a.inputPerM ?? Infinity) - (b.inputPerM ?? Infinity) ||
+        a.id.localeCompare(b.id),
+    );
 }
 
 // --- 2. performance: moved ---

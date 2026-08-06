@@ -55,7 +55,10 @@ scores retrieval quality with real information-retrieval metrics.
    ```bash
    cp .env.example .env.local
    ```
-   Set `DATABASE_URL`, `ANTHROPIC_API_KEY`, and `VOYAGE_API_KEY`.
+   Set `DATABASE_URL`, the Supabase Auth vars, and the Azure Key Vault vars.
+   **No provider API keys go here** — under strict BYOK each user adds their own
+   Anthropic / Voyage / OpenAI / Cohere keys on the `/account` page after signing
+   up, and they are stored encrypted. See `.env.example` for the details.
 3. Apply the database schema — run the SQL files in `migrations/` against your
    database **in numerical order** (`0001…`, `0002…`, and so on).
 4. Start the dev server:

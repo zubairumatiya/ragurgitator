@@ -24,6 +24,7 @@ import {
   listAggregateModelOptions,
   listAutotuneModelOptions,
 } from "@/lib/rag/embeddingModels";
+import { listLlmOptions } from "@/lib/llm/llmModels";
 import { availableProviders } from "@/lib/rag/providerAvailability";
 import { getActiveCriteria, updateCriteria } from "@/lib/rag/evalSettingsStore";
 import { listAutotuneScopeOptions } from "@/lib/rag/evalStore";
@@ -54,7 +55,18 @@ export async function GET(request: Request) {
         availability,
         activeConfig().embeddingModel,
       );
-      return Response.json({ criteria, config, scopeOptions, autotuneModels, aggregateModels });
+      // The answer-generation models for the Settings LLM picker (§9.2). Shares
+      // the availability lookup above — one query covers embedding AND LLM
+      // providers, so the second picker costs nothing extra.
+      const llmModels = listLlmOptions(availability);
+      return Response.json({
+        criteria,
+        config,
+        scopeOptions,
+        autotuneModels,
+        aggregateModels,
+        llmModels,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to load criteria.";
       return Response.json({ error: message }, { status: 500 });

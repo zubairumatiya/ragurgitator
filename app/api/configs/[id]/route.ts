@@ -2,7 +2,8 @@
 // API route: PATCH/POST/DELETE /api/configs/[id]
 //
 //   PATCH  — mutate one tab: { name } rename, { isOpen } close/reopen,
-//            { tabOrder } move, { corpusSync } toggle corpus auto-sync (0017).
+//            { tabOrder } move, { corpusSync } toggle corpus auto-sync (0017),
+//            { llmModel } set the answer-generation model (§9.2).
 //            Mixed bodies apply each field present.
 //   POST   — duplicate this config (copy-on-write, no embedding calls); returns
 //            the new config. POST-to-a-resource = "make a copy of it".
@@ -14,6 +15,7 @@
 // ---------------------------------------------------------------------------
 import { readJsonBody } from "@/lib/http/body";
 import { withRequestUser } from "@/lib/http/configScope";
+import { LLM_MODELS } from "@/lib/llm/llmModels";
 import {
   closeConfig,
   countConfigs,
@@ -23,6 +25,7 @@ import {
   renameConfig,
   reopenConfig,
   setCorpusSync,
+  setLlmModel,
   setTabOrder,
 } from "@/lib/rag/configStore";
 
@@ -39,6 +42,7 @@ export async function PATCH(
       isOpen?: unknown;
       tabOrder?: unknown;
       corpusSync?: unknown;
+      llmModel?: unknown;
     };
 
     try {
@@ -53,6 +57,26 @@ export async function PATCH(
 
       if (typeof body.name === "string") {
         if (!(await renameConfig(id, body.name))) {
+          return Response.json({ error: "Config not found." }, { status: 404 });
+        }
+        touched = true;
+      }
+
+      // The Settings dropdown's LLM picker (§9.2). Validated through llmSpec()
+      // HERE rather than in the store, because this is the closest point to the
+      // control that set it: an unknown llm_model otherwise surfaces as a thrown
+      // error deep inside a generation call, three screens away, long after the
+      // dropdown that caused it has closed. llmSpec throws on an unknown id, so
+      // the catch below would turn a bad id into a 500 — hence the explicit
+      // membership test and 400.
+      if (typeof body.llmModel === "string") {
+        if (!(body.llmModel in LLM_MODELS)) {
+          return Response.json(
+            { error: `Unknown LLM model "${body.llmModel}".` },
+            { status: 400 },
+          );
+        }
+        if (!(await setLlmModel(id, body.llmModel))) {
           return Response.json({ error: "Config not found." }, { status: 404 });
         }
         touched = true;
@@ -87,7 +111,10 @@ export async function PATCH(
 
       if (!touched) {
         return Response.json(
-          { error: "Nothing to update — send name, isOpen, tabOrder, or corpusSync." },
+          {
+            error:
+              "Nothing to update — send name, isOpen, tabOrder, corpusSync, or llmModel.",
+          },
           { status: 400 },
         );
       }

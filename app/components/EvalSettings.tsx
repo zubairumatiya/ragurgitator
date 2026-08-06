@@ -3,14 +3,16 @@
 // the Nav (see Nav.tsx) so it's reachable from every config view, not just
 // /eval. Extracted from EvalDashboard.
 //
-// Sections: eval METRICS (per-metric enable + k + optional min-rate, A1),
-// AUTOTUNING (A5; consumed by the autotune engine), CORPUS (the auto-sync
-// toggle — corpus ↔ config membership sync, 0017), and the greyed "Long-term
-// savings" Phase E stub.
+// Sections: LLM (the config's answer-generation model, §9.2 — first because
+// every metric below is measured on answers it produced), eval METRICS
+// (per-metric enable + k + optional min-rate, A1), AUTOTUNING (A5; consumed by
+// the autotune engine), CORPUS (the auto-sync toggle — corpus ↔ config
+// membership sync, 0017), and the greyed "Long-term savings" Phase E stub.
 //
 // Self-sufficient: opens by seeding from GET /api/eval/criteria (criteria +
-// config summary), saves via PATCH /api/eval/criteria (+ PATCH
-// /api/configs/[id] when auto-sync changed), then fires EVAL_CRITERIA_CHANGED
+// config summary + the model option lists), saves via PATCH /api/eval/criteria
+// (+ PATCH /api/configs/[id] carrying whichever of auto-sync / llmModel
+// changed), then fires EVAL_CRITERIA_CHANGED
 // (the eval dashboard re-pulls its summary) and router.refresh() (the banner
 // re-renders). apiFetch scopes everything to the tab in the URL.
 // ---------------------------------------------------------------------------
@@ -30,6 +32,7 @@ import {
   type JobKind,
 } from "@/lib/batch/types";
 import type { ConfigSummary } from "@/lib/rag/configStore";
+import type { LlmModelOption, LlmProviderId } from "@/lib/llm/llmModels";
 import type { AutotuneModelOption } from "@/lib/rag/embeddingModels";
 import type { AutotuneApply, AutotuneSearch, EvalCriteria } from "@/lib/rag/evalSettingsStore";
 import type { AutotuneScopeDocument } from "@/lib/rag/evalStore";
@@ -164,6 +167,20 @@ export function EvalSettings() {
   // the keyed ones (also covers models keyed later). The checklist is long
   // enough to bury the sections below it, so it lives behind a disclosure that
   // starts collapsed and pops open when a bulk action changes it.
+  // --- LLM picker (§9.2) ---
+  // `llmModel` is the config's answer-generation model; `savedLlmModel` is what
+  // the server last confirmed, so save can PATCH only on a real change (the same
+  // pattern corpusSync uses below).
+  //
+  // `llmProvider` is UI-ONLY and never persisted — it filters the model select.
+  // Provider is derived from the model id server-side (llmProviderOf), so
+  // storing it would be a second source of truth for a fact the id already
+  // carries, and the two could disagree.
+  const [llmOpts, setLlmOpts] = useState<LlmModelOption[]>([]);
+  const [llmModel, setLlmModel] = useState<string>("");
+  const [savedLlmModel, setSavedLlmModel] = useState<string>("");
+  const [llmProvider, setLlmProvider] = useState<LlmProviderId>("anthropic");
+
   const [modelOpts, setModelOpts] = useState<AutotuneModelOption[]>([]);
   // nDCG "Models in aggregate" (0045): which models build the ideal ranking.
   // null = the default set, same null-means-default contract as modelScope.
@@ -229,6 +246,7 @@ export function EvalSettings() {
             scopeOptions?: AutotuneScopeDocument[];
             autotuneModels?: AutotuneModelOption[];
             aggregateModels?: AutotuneModelOption[];
+            llmModels?: LlmModelOption[];
             error?: string;
           }
         | null;
@@ -259,6 +277,18 @@ export function EvalSettings() {
       setScopeDocs(data.scopeOptions ?? []);
       setScopeSel(c.autotune.chunkScope === null ? null : new Set(c.autotune.chunkScope));
       setScopeExpanded(new Set());
+      // Seed the LLM picker from the config's saved model, and default the
+      // provider FILTER to that model's own provider — otherwise opening
+      // Settings on a GPT config would show the Anthropic list with the current
+      // selection nowhere in it.
+      const llmOptions = data.llmModels ?? [];
+      setLlmOpts(llmOptions);
+      setLlmModel(data.config.llmModel);
+      setSavedLlmModel(data.config.llmModel);
+      setLlmProvider(
+        llmOptions.find((m) => m.id === data.config!.llmModel)?.provider ?? "anthropic",
+      );
+
       setModelOpts(data.autotuneModels ?? []);
       setAggOpts(data.aggregateModels ?? []);
       setAggSel(c.ndcg.aggregateModels === null ? null : new Set(c.ndcg.aggregateModels));
@@ -382,18 +412,27 @@ export function EvalSettings() {
         setErr(data?.error ?? `Request failed (${res.status}).`);
         return;
       }
-      // Auto-sync lives on the config row, not the criteria — separate PATCH,
-      // only when it actually changed.
-      if (config && config.corpusId && sync !== savedSync) {
-        const res2 = await apiFetch(`/api/configs/${config.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ corpusSync: sync }),
-        });
-        const data2 = (await res2.json().catch(() => null)) as { error?: string } | null;
-        if (!res2.ok) {
-          setErr(data2?.error ?? `Sync update failed (${res2.status}).`);
-          return;
+      // Auto-sync and the LLM model both live on the config ROW, not the
+      // criteria — one separate PATCH, carrying whichever of them actually
+      // changed. The route applies each field present, so they ride together
+      // rather than costing two requests.
+      if (config) {
+        const configPatch: { corpusSync?: boolean; llmModel?: string } = {};
+        if (config.corpusId && sync !== savedSync) configPatch.corpusSync = sync;
+        if (llmModel && llmModel !== savedLlmModel) configPatch.llmModel = llmModel;
+
+        if (Object.keys(configPatch).length > 0) {
+          const res2 = await apiFetch(`/api/configs/${config.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(configPatch),
+          });
+          const data2 = (await res2.json().catch(() => null)) as { error?: string } | null;
+          if (!res2.ok) {
+            setErr(data2?.error ?? `Config update failed (${res2.status}).`);
+            return;
+          }
+          setSavedLlmModel(llmModel);
         }
       }
       // Savings preference lives in its own store (configs.batch_savings).
@@ -521,6 +560,69 @@ export function EvalSettings() {
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
           <div className="absolute right-0 top-full z-20 mt-1 w-80 rounded-md border border-zinc-200 bg-white p-3 text-sm shadow-lg dark:border-zinc-800 dark:bg-zinc-900">
+            {/* LLM — the config's answer-generation model (§9.2).
+                First in the dropdown because it's the setting with the broadest
+                effect: every metric below is measured on answers this model
+                produced, so it frames what the rest of the panel is tuning. */}
+            <p className="mb-1 text-xs font-medium uppercase tracking-wide text-zinc-500">
+              LLM
+            </p>
+            <div className="mb-3 flex flex-col gap-1.5">
+              <label className="flex items-center justify-between gap-2">
+                <span className="text-zinc-600 dark:text-zinc-400">Provider</span>
+                <select
+                  value={llmProvider}
+                  onChange={(e) => {
+                    const next = e.target.value as LlmProviderId;
+                    setLlmProvider(next);
+                    // Moving the filter must not leave the Model select showing
+                    // a value from the other provider. Jump to that provider's
+                    // first SELECTABLE model, falling back to its first model —
+                    // an unkeyed provider has no selectable option, and leaving
+                    // the field blank would read as "no model set" when the
+                    // config still has one.
+                    const inProvider = llmOpts.filter((m) => m.provider === next);
+                    const target =
+                      inProvider.find((m) => m.selectable) ?? inProvider[0];
+                    if (target) setLlmModel(target.id);
+                  }}
+                  className="w-44 rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800"
+                >
+                  <option value="anthropic">Anthropic</option>
+                  <option value="openai">OpenAI</option>
+                </select>
+              </label>
+
+              <label className="flex items-center justify-between gap-2">
+                <span className="text-zinc-600 dark:text-zinc-400">Model</span>
+                <select
+                  value={llmModel}
+                  onChange={(e) => setLlmModel(e.target.value)}
+                  className="w-44 rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-800"
+                >
+                  {/* Unkeyed models are LISTED, disabled, with the reason —
+                      never dropped. Same contract as the base-model and autotune
+                      pickers: a list that silently omitted OpenAI would look
+                      like an app that doesn't support it, when the truth is one
+                      missing key. */}
+                  {llmOpts
+                    .filter((m) => m.provider === llmProvider)
+                    .map((m) => (
+                      <option
+                        key={m.id}
+                        value={m.id}
+                        disabled={!m.selectable}
+                        title={m.reason ?? undefined}
+                      >
+                        {m.label}
+                        {m.note ? ` — ${m.note}` : ""}
+                        {m.selectable ? "" : ` (${m.reason})`}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            </div>
+
             {/* METRICS */}
             <p className="mb-1 text-xs font-medium uppercase tracking-wide text-zinc-500">
               Metrics

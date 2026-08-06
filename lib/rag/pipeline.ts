@@ -13,7 +13,7 @@
 // ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
 
-import { config } from "@/lib/config";
+import { cheapModelFor, config } from "@/lib/config";
 import { activeConfig, resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";
 import {
@@ -438,7 +438,9 @@ async function answerWithCascade(
     };
   }
 
-  const cheapModel = config.cascade.cheapModel;
+  // Derived from the strong tier so the cascade never crosses providers — one
+  // provider, one key, one rate card for both legs (lib/config.cheapModelFor).
+  const cheapModel = cheapModelFor(strongModel);
 
   // AXIS 1 (rung 1, PRE-generation): weak retrieval is a context bottleneck a
   // stronger model can't fix, so when it fails we answer once with the cheap

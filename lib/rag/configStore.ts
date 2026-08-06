@@ -297,6 +297,31 @@ export async function setCascadeEnabled(
   return rows.length > 0 ? enabled : null;
 }
 
+// The ANSWER-GENERATION model for this config (docs/user-accounts-plan.md §9.2).
+// Written by the Settings dropdown's LLM picker; read on the hot path via
+// activeConfig().llmModel, which generateAnswer() already defaults to.
+//
+// Per-CONFIG rather than per-user (§9.0): configs are the A/B unit Appraise's
+// replay scoring keys off, so a user-level LLM toggle would silently override
+// every config's own choice and make each stored comparison mean something the
+// row no longer records. There is no provider column to keep in step either —
+// provider is derived from the id (llmProviderOf), so this one write is the
+// whole change.
+//
+// Deliberately NOT validated here: llmSpec() is the validator and it runs at the
+// route, so an unknown id is refused at the control that set it rather than
+// deep inside a later generation call. This layer stays a row update, like its
+// neighbours. Returns false when no row matched (missing, or another user's).
+export async function setLlmModel(id: string, model: string): Promise<boolean> {
+  if (!isUuid(id)) return false;
+  const rows = await sql`
+    update configs set llm_model = ${model}, updated_at = now()
+    where id = ${id} and user_id = ${activeUserId()}
+    returning id
+  `;
+  return rows.length > 0;
+}
+
 // Update a config's processing settings IN PLACE (the bulk-actions "change this
 // config" flow). Pure row update — the caller (lib/rag/reconfigure) owns the
 // re-embed + eval-label remap that a model/size change requires.

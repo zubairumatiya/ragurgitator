@@ -66,15 +66,40 @@ export const LEVERS: Record<
 
 // --- price tables (USD per 1M tokens) --------------------------------------
 
-type LlmPrice = { inputPerM: number; outputPerM: number };
+export type LlmPrice = { inputPerM: number; outputPerM: number };
 
 // Keyed on the DATE-LESS alias. Real responses may echo a resolved dated ID
 // (e.g. "claude-haiku-4-5-20251001"), so lookup strips a trailing -YYYYMMDD —
 // see costLlm. Add the alias here, never the dated form.
 const LLM_PRICES: Record<string, LlmPrice> = {
+  // --- Anthropic (claude-api skill, 2026-08-05) -----------------------------
+  "claude-opus-5": { inputPerM: 5, outputPerM: 25 },
   "claude-opus-4-8": { inputPerM: 5, outputPerM: 25 },
+  // Sonnet 5 carries INTRODUCTORY pricing of 2/10 through 2026-08-31, reverting
+  // to the 3/15 registered here. LlmPrice has no time dimension, so one of the
+  // two numbers has to be wrong for part of the year. We register the STANDING
+  // rate: it over-counts Sonnet 5 spend until Sept 1 and is exact from then on,
+  // whereas the introductory figure would be a table that quietly starts lying
+  // on a known date with nothing in the code to notice.
+  "claude-sonnet-5": { inputPerM: 3, outputPerM: 15 },
   "claude-sonnet-4-6": { inputPerM: 3, outputPerM: 15 },
   "claude-haiku-4-5": { inputPerM: 1, outputPerM: 5 },
+
+  // --- OpenAI (developers.openai.com/api/docs/pricing.md, 2026-08-05) -------
+  // SHORT-CONTEXT RATES ONLY. OpenAI prices prompts over 272K input tokens at
+  // roughly 2× (per-model figures in the comments below), and the gpt-5.6-*
+  // models additionally bill cache WRITES as a separate line. LlmPrice has one
+  // input and one output rate, and this app's prompts are chunked RAG contexts
+  // of a few thousand tokens — the 272K boundary is unreachable in practice, so
+  // a tier the code can never exercise would be dead weight carrying its own
+  // maintenance cost. Revisit before trusting the ledger if a 1M-context
+  // experiment ever lands.
+  "gpt-5.6-sol": { inputPerM: 5, outputPerM: 30 }, // >272K: 10 / 45
+  "gpt-5.6-terra": { inputPerM: 2, outputPerM: 12 }, // >272K: 4 / 18
+  "gpt-5.6-luna": { inputPerM: 0.2, outputPerM: 1.2 }, // >272K: 0.40 / 1.80
+  "gpt-5.4": { inputPerM: 2.5, outputPerM: 15 }, // >272K: 5 / 22.50
+  "gpt-5.4-mini": { inputPerM: 0.75, outputPerM: 4.5 },
+  "gpt-5.4-nano": { inputPerM: 0.2, outputPerM: 1.25 },
 };
 
 // Embedding rates. ONE table, TWO consumers with different needs:
@@ -104,8 +129,26 @@ export type EmbedRate = {
   freeTierM: number | null; // provider free allowance, millions of tokens
 };
 
+// Re-checked 2026-08-05 while registering the §9.3 models. The Cohere v3 family
+// is the notable addition, and it is unverified for a reason worth recording:
+// cohere.com/pricing NO LONGER PUBLISHES a per-token Embed v3 rate at all. The
+// page now carries only Embed 4 ($0.12/1M text, $0.47/1M image) plus Model Vault
+// capacity pricing (Embed 4 Small $4.00/hr or $2,500/mo; Medium $5.00/hr or
+// $3,250/mo), and the "legacy models" FAQ lists Command-family rates only.
+//
+// The $0.10/1M below is not invented, though: Cohere itself published it, and it
+// is still verifiable in the 2026-02-16 Wayback snapshot of that page ("Embed 3
+// … $0.10 / 1M tokens"), which is the last one carrying an Embed 3 card. Cohere
+// never split the rate across the four v3 SKUs — all of them sat under one card.
+// So this is a WITHDRAWN first-party figure, not a third-party guess, which is
+// why it's trustworthy enough to cost at and not trustworthy enough to display.
+//
+// The v3 models are all still served: docs.cohere.com/docs/models lists them
+// with no deprecation flag, and the deprecations page retires only the v2.0
+// embed models (April 2026). Withdrawn price, live model.
+
 // The as-of date for every figure below, rendered by the rate card's footnote.
-export const RATES_VERIFIED_ON = "2026-08-02";
+export const RATES_VERIFIED_ON = "2026-08-05";
 
 export const EMBED_RATES: Record<string, EmbedRate> = {
   // Voyage: first 200M tokens free on the voyage-4 family + code-3/code-2,
@@ -118,8 +161,27 @@ export const EMBED_RATES: Record<string, EmbedRate> = {
   "voyage-finance-2": { usdPerM: 0.12, verified: true, freeTierM: 50 },
   "voyage-law-2": { usdPerM: 0.12, verified: true, freeTierM: 50 },
   // OpenAI — see the note above; unverified on a source conflict, not absence.
+  // The same model-card-vs-pricing-page conflict affects the embedding rows
+  // generally, so `small` inherits `large`'s unverified status rather than being
+  // trusted just because nobody has noticed a second number for it yet.
   "text-embedding-3-large": { usdPerM: 0.13, verified: false, freeTierM: null },
-  "embed-v4": { usdPerM: 0.12, verified: true, freeTierM: null }, // Cohere
+  "text-embedding-3-small": { usdPerM: 0.02, verified: false, freeTierM: null },
+  // Cohere. embed-v4 is the one embed figure Cohere still publishes, and it's
+  // corroborated — it stays verified. The 1024 row is the SAME MODEL at a
+  // narrower Matryoshka width, so it bills at the same rate by construction; it
+  // is spelled out rather than left to priceFor()'s prefix fallback so that
+  // changing the v4 rate can't silently desynchronise the two.
+  "embed-v4": { usdPerM: 0.12, verified: true, freeTierM: null },
+  "embed-v4-1024": { usdPerM: 0.12, verified: true, freeTierM: null },
+  // Cohere v3 — the withdrawn-rate family. Costed at Cohere's own last published
+  // figure so the ledger doesn't under-count; shown as "—" because that figure
+  // is no longer standing. Cohere published one rate for all four SKUs, so the
+  // light variants carry the same number as the full-size ones despite being
+  // much smaller models.
+  "embed-english-v3": { usdPerM: 0.1, verified: false, freeTierM: null },
+  "embed-multilingual-v3": { usdPerM: 0.1, verified: false, freeTierM: null },
+  "embed-english-light-v3": { usdPerM: 0.1, verified: false, freeTierM: null },
+  "embed-multilingual-light-v3": { usdPerM: 0.1, verified: false, freeTierM: null },
   // Local models run on your own hardware: free, and trivially "verified".
   "mxbai-embed-large": { usdPerM: 0, verified: true, freeTierM: null },
   "bge-m3": { usdPerM: 0, verified: true, freeTierM: null },
@@ -181,6 +243,17 @@ export function costEmbed(model: string, tokens: number): number {
 // the accounting rate either way.
 export function embedRate(model: string): EmbedRate | undefined {
   return priceFor(EMBED_RATES, model);
+}
+
+// The LLM twin of embedRate(), for the Appraise → Models LLM rate card. Note
+// there is no `verified` flag on this side: every figure in LLM_PRICES comes
+// from a single primary source per provider (the bundled claude-api skill;
+// OpenAI's published pricing doc), with none of the model-card-vs-pricing-page
+// conflict that dashes half the embedding rows. The caveats that DO exist here
+// are about time and tiers, not trust — Sonnet 5's introductory rate and
+// OpenAI's >272K long-context tier — and both are documented at LLM_PRICES.
+export function llmRate(model: string): LlmPrice | undefined {
+  return priceFor(LLM_PRICES, model);
 }
 
 // Cheap token estimate (≈4 chars/token) — used everywhere the provider doesn't

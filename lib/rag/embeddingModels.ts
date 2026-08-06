@@ -22,6 +22,19 @@ export type EmbeddingModelSpec = {
   provider: EmbeddingProviderId;
   apiModel: string; // the provider's real model name / HF repo id
   dimension: number; // native, or the chosen output dim (e.g. OpenAI Matryoshka)
+  // What `apiModel` returns when we send NO shrink parameter — the model's own
+  // full-width output, which is a fact about the provider's model and not about
+  // this row. `dimension` is what we WANT; `nativeDimension` is what we'd get by
+  // default; the adapters send a shrink param (OpenAI `dimensions`, Cohere
+  // `output_dimension`) exactly when the two differ.
+  //
+  // It's a field rather than a constant because that comparison used to be a
+  // literal `< 3072` in embeddingProviders.ts — right for text-embedding-3-large
+  // and wrong for every other Matryoshka model. It sent a redundant
+  // `dimensions: 1536` to text-embedding-3-small (native 1536), and would have
+  // sent an outright invalid dim ABOVE native for any model registered between
+  // its own native size and 3072.
+  nativeDimension: number;
   ingestable: boolean; // true ⇒ has a chunks_<model>_<dim> table + migration (Tier B)
   // Curated: models that emit into the SAME, cosine-comparable embedding space
   // share one `vectorSpace` tag. When a delegate override's model shares the
@@ -32,11 +45,25 @@ export type EmbeddingModelSpec = {
   // claim about the provider's models, not something we can probe — verify
   // against the provider's docs before adding a model to an existing space.
   vectorSpace?: string;
+  // A caveat the pickers can show beside this model: a real limit that makes it
+  // a BAD FIT for some configs, as opposed to a reason it can't be used at all
+  // (that's the option builders' `reason`, which greys the row out). A note
+  // never blocks a selection — it explains a trade-off the user is making.
+  // Today the only notes are the Cohere v3 family's 512-token input cap.
+  note?: string;
 };
 
+// One shared note for the four Cohere v3 models: they all cap input at 512
+// tokens (v4 takes 128K). Stated in CHARACTERS because that's the unit a
+// config's chunk size is in — ~4 chars/token, the same estimate pricing.ts uses.
+const COHERE_V3_INPUT_CAP_NOTE =
+  "512-token input cap (~2,000 characters): longer chunks are truncated to their opening ~2,000 characters, so this model is a poor fit for configs chunked larger than that.";
+
 // `dimension` is load-bearing only for ingestable models (it picks the physical
-// vector table) and for the OpenAI adapter (the `dimensions` shrink param). For
-// the non-ingestable Voyage alts it's informational — embed() doesn't read it.
+// vector table) and for the adapters that can shrink a Matryoshka model to it
+// (OpenAI's `dimensions`, Cohere's `output_dimension`) — each sends the param
+// only when `dimension < nativeDimension`. For the non-ingestable Voyage alts
+// it's informational — embed() doesn't read it.
 export const EMBEDDING_MODELS: Record<string, EmbeddingModelSpec> = {
   // --- Voyage: the default + the alternates used by the in-memory experiments
   //     (altEmbeddingModels in lib/config.ts; the nDCG aggregate votes with
@@ -44,30 +71,57 @@ export const EMBEDDING_MODELS: Record<string, EmbeddingModelSpec> = {
   // The voyage-4 family shares one embedding space (space "voyage-4"): a chunk
   // re-embedded under voyage-4 / voyage-4-large stays cosine-comparable to the
   // voyage-4-lite base, so an override under them needs no fusion lane.
-  "voyage-4-lite": { id: "voyage-4-lite", provider: "voyage", apiModel: "voyage-4-lite", dimension: 1024, ingestable: true, vectorSpace: "voyage-4" },
-  "voyage-4-large": { id: "voyage-4-large", provider: "voyage", apiModel: "voyage-4-large", dimension: 1024, ingestable: false, vectorSpace: "voyage-4" },
-  "voyage-4": { id: "voyage-4", provider: "voyage", apiModel: "voyage-4", dimension: 1024, ingestable: false, vectorSpace: "voyage-4" },
-  "voyage-code-3": { id: "voyage-code-3", provider: "voyage", apiModel: "voyage-code-3", dimension: 1024, ingestable: false },
-  "voyage-code-2": { id: "voyage-code-2", provider: "voyage", apiModel: "voyage-code-2", dimension: 1536, ingestable: false },
-  "voyage-finance-2": { id: "voyage-finance-2", provider: "voyage", apiModel: "voyage-finance-2", dimension: 1024, ingestable: false },
-  "voyage-law-2": { id: "voyage-law-2", provider: "voyage", apiModel: "voyage-law-2", dimension: 1024, ingestable: false },
+  // The Voyage adapter never sends an output-dimension param, so every row here
+  // takes the model's default width: dimension === nativeDimension throughout.
+  "voyage-4-lite": { id: "voyage-4-lite", provider: "voyage", apiModel: "voyage-4-lite", dimension: 1024, nativeDimension: 1024, ingestable: true, vectorSpace: "voyage-4" },
+  "voyage-4-large": { id: "voyage-4-large", provider: "voyage", apiModel: "voyage-4-large", dimension: 1024, nativeDimension: 1024, ingestable: false, vectorSpace: "voyage-4" },
+  "voyage-4": { id: "voyage-4", provider: "voyage", apiModel: "voyage-4", dimension: 1024, nativeDimension: 1024, ingestable: false, vectorSpace: "voyage-4" },
+  "voyage-code-3": { id: "voyage-code-3", provider: "voyage", apiModel: "voyage-code-3", dimension: 1024, nativeDimension: 1024, ingestable: false },
+  "voyage-code-2": { id: "voyage-code-2", provider: "voyage", apiModel: "voyage-code-2", dimension: 1536, nativeDimension: 1536, ingestable: false },
+  "voyage-finance-2": { id: "voyage-finance-2", provider: "voyage", apiModel: "voyage-finance-2", dimension: 1024, nativeDimension: 1024, ingestable: false },
+  "voyage-law-2": { id: "voyage-law-2", provider: "voyage", apiModel: "voyage-law-2", dimension: 1024, nativeDimension: 1024, ingestable: false },
 
   // --- Staged plumbing: usable in experiments once a key/weights are present;
   //     flip `ingestable` + add a 0012+ migration to index under them ----------
-  // Each of these is its own embedding space. A `vectorSpace` groups models that
-  // are cosine-comparable; across providers that only ever holds for one model's
-  // Matryoshka output dimensions (OpenAI's `dimensions` / Cohere's
-  // `output_dimension` truncate ONE model, staying in its space — a shorter
-  // vector is a prefix of the longer one), never across different models (OpenAI
-  // large ≠ small; Cohere v4 ≠ v3). So today every entry below is a single-member
-  // space: the tag matters only when a second Matryoshka dim-variant of the SAME
-  // model is added — it then auto-clusters with this one (no fusion between them).
-  "mxbai-embed-large": { id: "mxbai-embed-large", provider: "local", apiModel: "Xenova/mxbai-embed-large-v1", dimension: 1024, ingestable: true, vectorSpace: "mxbai-embed-large-v1" },
-  "bge-m3": { id: "bge-m3", provider: "local", apiModel: "Xenova/bge-m3", dimension: 1024, ingestable: true, vectorSpace: "bge-m3" },
+  // A `vectorSpace` groups models that are cosine-comparable. Across providers
+  // that only ever holds for one model's Matryoshka output dimensions (OpenAI's
+  // `dimensions` / Cohere's `output_dimension` truncate ONE model, staying in
+  // its space — a shorter vector is a prefix of the longer one), never across
+  // different models (OpenAI large ≠ small; Cohere v4 ≠ v3).
+  //
+  // `embed-v4` + `embed-v4-1024` are the first pair to exercise that: two rows,
+  // one model (`embed-v4.0`), one space. The 1024 row is literally the first
+  // 1024 components of the 1536 row, so an override under one folds into the
+  // other's lane (sameVectorSpace → no query re-embed, no fusion lane) — which
+  // is the whole point of the tag. Every other entry here is still a
+  // single-member space, and stays one until a dim-variant of THAT model lands.
+  "mxbai-embed-large": { id: "mxbai-embed-large", provider: "local", apiModel: "Xenova/mxbai-embed-large-v1", dimension: 1024, nativeDimension: 1024, ingestable: true, vectorSpace: "mxbai-embed-large-v1" },
+  "bge-m3": { id: "bge-m3", provider: "local", apiModel: "Xenova/bge-m3", dimension: 1024, nativeDimension: 1024, ingestable: true, vectorSpace: "bge-m3" },
   // native 3072; shrunk to 1024 via the `dimensions` param (Matryoshka, E7) so it
   // stays under pgvector's HNSW cap and is ingestable later without re-deciding.
-  "text-embedding-3-large": { id: "text-embedding-3-large", provider: "openai", apiModel: "text-embedding-3-large", dimension: 1024, ingestable: false, vectorSpace: "openai-text-embedding-3-large" },
-  "embed-v4": { id: "embed-v4", provider: "cohere", apiModel: "embed-v4.0", dimension: 1536, ingestable: false, vectorSpace: "cohere-embed-v4" },
+  "text-embedding-3-large": { id: "text-embedding-3-large", provider: "openai", apiModel: "text-embedding-3-large", dimension: 1024, nativeDimension: 3072, ingestable: false, vectorSpace: "openai-text-embedding-3-large" },
+  // Registered AT its native 1536, so no `dimensions` param goes out for it — a
+  // different space from *large* despite the shared family name (a 1024-wide
+  // large vector and a 1536-wide small vector describe nothing in common).
+  "text-embedding-3-small": { id: "text-embedding-3-small", provider: "openai", apiModel: "text-embedding-3-small", dimension: 1536, nativeDimension: 1536, ingestable: false, vectorSpace: "openai-text-embedding-3-small" },
+  // Cohere v4 at its default width, and the same model asked for a 1024 prefix.
+  "embed-v4": { id: "embed-v4", provider: "cohere", apiModel: "embed-v4.0", dimension: 1536, nativeDimension: 1536, ingestable: false, vectorSpace: "cohere-embed-v4" },
+  "embed-v4-1024": { id: "embed-v4-1024", provider: "cohere", apiModel: "embed-v4.0", dimension: 1024, nativeDimension: 1536, ingestable: false, vectorSpace: "cohere-embed-v4" },
+  // The Cohere v3 family: four separate models, four separate spaces, and a
+  // 512-TOKEN input cap where v4 takes 128K. The light variants' 384 dims are
+  // the smallest vectors any provider in this registry offers, which is what
+  // earns them a place — the cheap end of a dimension-vs-quality sweep.
+  //
+  // The `note` is the cap restated in characters, because that is the unit the
+  // config's chunk size is in. The adapter truncates rather than erroring (see
+  // embeddingProviders.ts), so over ~2,000 characters these models quietly
+  // describe only the HEAD of each chunk — a silent quality loss that looks like
+  // a bad model rather than a bad fit. The pickers show the note so the choice
+  // is made with that in view.
+  "embed-english-v3": { id: "embed-english-v3", provider: "cohere", apiModel: "embed-english-v3.0", dimension: 1024, nativeDimension: 1024, ingestable: false, vectorSpace: "cohere-embed-english-v3", note: COHERE_V3_INPUT_CAP_NOTE },
+  "embed-multilingual-v3": { id: "embed-multilingual-v3", provider: "cohere", apiModel: "embed-multilingual-v3.0", dimension: 1024, nativeDimension: 1024, ingestable: false, vectorSpace: "cohere-embed-multilingual-v3", note: COHERE_V3_INPUT_CAP_NOTE },
+  "embed-english-light-v3": { id: "embed-english-light-v3", provider: "cohere", apiModel: "embed-english-light-v3.0", dimension: 384, nativeDimension: 384, ingestable: false, vectorSpace: "cohere-embed-english-light-v3", note: COHERE_V3_INPUT_CAP_NOTE },
+  "embed-multilingual-light-v3": { id: "embed-multilingual-light-v3", provider: "cohere", apiModel: "embed-multilingual-light-v3.0", dimension: 384, nativeDimension: 384, ingestable: false, vectorSpace: "cohere-embed-multilingual-light-v3", note: COHERE_V3_INPUT_CAP_NOTE },
 };
 
 // Look up a model spec, failing loudly on an unknown id (a missing registry
