@@ -22,7 +22,7 @@ import { activeConfig } from "@/lib/rag/activeConfig";
 import { getConfig } from "@/lib/rag/configStore";
 import { addDifficulty } from "@/lib/rag/evalSettingsStore";
 import { getActiveBatchSavings } from "@/lib/rag/batchStore";
-import { isBatchEnabled, providerOfKind } from "@/lib/batch/types";
+import { isBatchEnabled } from "@/lib/batch/types";
 import { handlerFor } from "@/lib/batch/jobs/registry";
 import { submitBatch } from "@/lib/batch/orchestrator";
 
@@ -101,7 +101,7 @@ export async function POST(request: Request) {
           const cfg = await getConfig(activeConfig().id);
           const job = await submitBatch({
             kind: "question_generation",
-            provider: providerOfKind("question_generation"),
+            provider: built.provider,
             configId: activeConfig().id,
             configLabel: cfg?.label ?? "—",
             requests: built.requests,

@@ -1011,7 +1011,7 @@ export function EvalSettings() {
               </p>
             )}
 
-            {/* SAVINGS (Phase E1 — batch API: −50% Anthropic / −33% Voyage) */}
+            {/* SAVINGS (Phase E1 — batch API: −50% on either LLM provider, −33% Voyage) */}
             <p className="mb-1 mt-3 border-t border-zinc-200 pt-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:border-zinc-800">
               Savings
             </p>

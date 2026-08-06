@@ -14,13 +14,17 @@
 // THE SIGNATURE IS ANTHROPIC-SHAPED ON PURPOSE. All six generation callers
 // (generator, eval, ranking, clusterLabeler, semanticCacheCalibration,
 // semanticCachePairs) build Anthropic `MessageCreateParams` and read
-// `response.content[0].text`, and two of them (eval, clusterLabeler) share those
-// param builders verbatim with the BATCH path, which is Anthropic's Message
-// Batches API and cannot be made provider-neutral. So Anthropic's request and
-// response shape stays the in-app lingua franca and the OpenAI path translates in
-// and out, below. The alternative — a neutral third shape — would have meant
-// rewriting six callers, two batch jobs, and every `content[0].text` read to buy
-// symmetry nothing in the app needs.
+// `response.content[0].text`, and three of them (eval, clusterLabeler,
+// semanticCachePairs) share those param builders verbatim with the BATCH path.
+// So Anthropic's request and response shape stays the in-app lingua franca and
+// the OpenAI path translates in and out. The alternative — a neutral third shape
+// — would have meant rewriting six callers, three batch jobs, and every
+// `content[0].text` read to buy symmetry nothing in the app needs.
+//
+// The batch path holds to the same convention rather than being an exception to
+// it: lib/batch/providers.ts submits these very params as JSONL and translates
+// them with the SAME functions this file uses, so a batched request and a
+// synchronous one are identical by construction.
 //
 // The metering itself needed no change for the second provider: costLlm() routes
 // by model id, so once OpenAI ids are in LLM_PRICES the ledger works as-is.

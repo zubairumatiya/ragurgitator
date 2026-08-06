@@ -11,13 +11,14 @@ import {
   isPollable,
   isTerminal,
   legOfKind,
-  providerOfKind,
   type BatchSavings,
 } from "./types";
 
-test("legOfKind / providerOfKind: only ingest_embedding is the embedding/voyage leg", () => {
+// The leg is still a per-kind fact (it groups the Settings dropdown); the
+// PROVIDER is not, and deliberately has no per-kind function to test — it is
+// derived from each job's model by build(), see BuiltBatch.provider.
+test("legOfKind: only ingest_embedding is the embedding leg", () => {
   assert.equal(legOfKind("ingest_embedding"), "embedding");
-  assert.equal(providerOfKind("ingest_embedding"), "voyage");
   for (const k of [
     "question_generation",
     "ndcg_ranking",
@@ -25,7 +26,6 @@ test("legOfKind / providerOfKind: only ingest_embedding is the embedding/voyage 
     "cache_pair_generation",
   ] as const) {
     assert.equal(legOfKind(k), "llm");
-    assert.equal(providerOfKind(k), "anthropic");
   }
 });
 

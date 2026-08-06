@@ -1,5 +1,6 @@
 // ---------------------------------------------------------------------------
-// BATCH JOB: question_generation (Anthropic).
+// BATCH JOB: question_generation (Anthropic or OpenAI — whichever serves the
+// config's llmModel; both discount batch work 50%).
 //
 // The ideal batch shape — one independent request per (chunk, difficulty) gap,
 // dozens-to-thousands at once. Shares the exact prompt + parse with the inline
@@ -19,7 +20,8 @@ import { activeConfig } from "@/lib/rag/activeConfig";
 import type { Difficulty } from "@/lib/rag/eval";
 import { parseQuestions, questionRequestParams } from "@/lib/rag/eval";
 import { chunksNeedingQuestionsByDifficulty, insertQuestionWithLabel } from "@/lib/rag/evalStore";
-import { bankAnthropicBatchSaving } from "@/lib/batch/savings";
+import { bankLlmBatchSaving } from "@/lib/batch/savings";
+import { llmProviderOf } from "@/lib/llm/llmModels";
 import type { BatchResultRow } from "@/lib/batch/types";
 import type { BuiltBatch, JobHandler } from "@/lib/batch/jobs/registry";
 
@@ -61,8 +63,6 @@ async function gapStillOpen(gap: Gap): Promise<boolean> {
 }
 
 export const questionGenerationHandler: JobHandler = {
-  provider: "anthropic",
-
   async build(scope) {
     const { difficulties, documentIds, counts } = scope as QuestionGenScope;
     if (!difficulties || difficulties.length === 0) return null;
@@ -97,7 +97,15 @@ export const questionGenerationHandler: JobHandler = {
       }
     }
     const input: QuestionGenInput = { generatorModel: model, gaps: built };
-    return { requests, input, submitMeta: {} } satisfies BuiltBatch;
+    // Same model as the inline generator, so the same provider — a config on a
+    // gpt-* model batches through OpenAI rather than submitting an OpenAI id to
+    // Anthropic's Message Batches API.
+    return {
+      requests,
+      provider: llmProviderOf(model),
+      input,
+      submitMeta: {},
+    } satisfies BuiltBatch;
   },
 
   async apply(input, results) {
@@ -121,7 +129,7 @@ export const questionGenerationHandler: JobHandler = {
       });
       applied += 1;
     }
-    bankAnthropicBatchSaving(results);
+    bankLlmBatchSaving(results);
     return applied;
   },
 };

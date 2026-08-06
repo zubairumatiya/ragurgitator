@@ -32,7 +32,7 @@ import {
 } from "@/lib/rag/semanticCachePairs";
 import { handlerFor } from "@/lib/batch/jobs/registry";
 import { submitBatch } from "@/lib/batch/orchestrator";
-import { isBatchEnabled, providerOfKind } from "@/lib/batch/types";
+import { isBatchEnabled } from "@/lib/batch/types";
 
 const msg = (err: unknown, fallback: string) =>
   err instanceof Error ? err.message : fallback;
@@ -70,7 +70,7 @@ export async function POST(request: Request) {
         const cfg = await getConfig(configId);
         const job = await submitBatch({
           kind: "cache_pair_generation",
-          provider: providerOfKind("cache_pair_generation"),
+          provider: built.provider,
           configId,
           configLabel: cfg?.label ?? "config",
           requests: built.requests,

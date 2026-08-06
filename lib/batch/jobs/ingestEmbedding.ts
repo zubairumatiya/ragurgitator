@@ -78,8 +78,6 @@ async function resolveDocIds(scope: IngestEmbeddingScope): Promise<string[]> {
 }
 
 export const ingestEmbeddingHandler: JobHandler = {
-  provider: "voyage",
-
   async build(scope) {
     const cfg = activeConfig();
     const spec = modelSpec(cfg.embeddingModel);
@@ -126,6 +124,9 @@ export const ingestEmbeddingHandler: JobHandler = {
     };
     return {
       requests,
+      // Unconditional, unlike the LLM jobs: the guard above already returned
+      // null for every non-Voyage base model, so reaching here IS the Voyage leg.
+      provider: "voyage",
       input,
       submitMeta: {
         model: spec.apiModel,

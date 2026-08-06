@@ -18,7 +18,7 @@ import { resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { embedCorpora, embedExistingCorpus, type IngestEvent } from "@/lib/rag/pipeline";
 import { getActiveBatchSavings } from "@/lib/rag/batchStore";
 import { getConfig } from "@/lib/rag/configStore";
-import { isBatchEnabled, providerOfKind } from "@/lib/batch/types";
+import { isBatchEnabled } from "@/lib/batch/types";
 import { handlerFor } from "@/lib/batch/jobs/registry";
 import { submitBatch } from "@/lib/batch/orchestrator";
 import { withRequestUser } from "@/lib/http/configScope";
@@ -60,7 +60,7 @@ export async function POST(
             const summary = await getConfig(cfg.id);
             await submitBatch({
               kind: "ingest_embedding",
-              provider: providerOfKind("ingest_embedding"),
+              provider: built.provider,
               configId: cfg.id,
               configLabel: summary?.label ?? "—",
               requests: built.requests,

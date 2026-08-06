@@ -40,7 +40,7 @@ export type LeverId =
   | "embed_cache" // #1 avoided re-embed (cache hit)
   | "cascade" // #2 FrugalGPT-lite: cheap-first, NET of escalations
   | "semantic_cache" // #3 served answer skips retrieve+generate
-  | "batch" // #4 −50% Anthropic / −33% Voyage on offline jobs
+  | "batch" // #4 −50% on either LLM provider / −33% Voyage, on offline jobs
   // (#5 "nDCG by bucket, not corpus" is RETIRED — the aggregate nDCG pool now
   // comes from a direct HNSW query, so there is no bucket-vs-corpus saving to
   // bank. Its historical rows are deleted by migrations/0039. The remaining ids
@@ -188,7 +188,10 @@ export const EMBED_RATES: Record<string, EmbedRate> = {
 };
 
 // Provider batch-API discounts (docs §5.1): the multiple of standard cost SAVED.
-export const BATCH_DISCOUNT = { anthropic: 0.5, voyage: 0.33 } as const;
+// Keyed by BatchProvider — both LLM providers discount batch work by the same
+// half, so a config's choice of vendor changes what the batch lever costs but
+// not what it saves.
+export const BATCH_DISCOUNT = { anthropic: 0.5, openai: 0.5, voyage: 0.33 } as const;
 
 const warned = new Set<string>();
 function warnUnknown(kind: string, model: string): void {
