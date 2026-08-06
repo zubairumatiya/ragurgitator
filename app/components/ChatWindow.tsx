@@ -9,11 +9,12 @@
 import { useState } from "react";
 import { MessageList, type DisplayMessage } from "@/app/components/MessageList";
 import { apiFetch } from "@/lib/http/client";
+import { errorTextFrom, type MissingKeyFields } from "@/lib/http/missingKey";
 import type { RetrievedChunk } from "@/types/rag";
 
 type ChatResponse =
   | { answer: string; sources: RetrievedChunk[] }
-  | { error: string };
+  | ({ error: string } & MissingKeyFields);
 
 export function ChatWindow() {
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
@@ -45,8 +46,10 @@ export function ChatWindow() {
       setMessages((prev) => {
         const copy = prev.slice(0, -1);
         if (!res.ok || "error" in data) {
-          const message =
-            "error" in data ? data.error : `Request failed (${res.status}).`;
+          // A chat bubble is a plain string, so this is the no-link half of the
+          // missing-key contract — it still names the provider and the Account
+          // page. See lib/http/missingKey.ts.
+          const message = errorTextFrom(data, `Request failed (${res.status}).`);
           copy.push({ role: "assistant", content: `Error: ${message}` });
         } else {
           copy.push({

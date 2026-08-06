@@ -8,6 +8,7 @@
 // still-unscored. Streams progress as NDJSON (one EvalEvent per line) for the
 // dashboard's progress bar. Body: { documentIds?, rebuild? }.
 // ---------------------------------------------------------------------------
+import { streamError } from "@/lib/http/missingKeyServer";
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
@@ -36,8 +37,7 @@ export async function POST(request: Request) {
       try {
         await bulkBuildRankings(send, documentIds, rebuild);
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Bulk nDCG grading failed.";
-        send({ type: "error", message });
+        send(streamError(err, "Bulk nDCG grading failed."));
       }
     }),
   );

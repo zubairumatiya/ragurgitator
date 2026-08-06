@@ -20,7 +20,27 @@
 // ---------------------------------------------------------------------------
 import { requireUserForApi, unauthorizedJson } from "@/lib/auth/dal";
 import { withUser } from "@/lib/auth/userScope";
+import { missingKeyResponse } from "@/lib/http/missingKeyServer";
 import { UnknownConfigError, resolveRequestConfig, withConfig } from "@/lib/rag/activeConfig";
+
+// A MISSING PROVIDER KEY BELONGS HERE for the same reason the 401 does: under
+// strict BYOK every user hits it on their first run, and handling it one route at
+// a time is how it would be missed in the routes nobody thought about. The
+// wrappers already stand between every handler and the client, so this is the one
+// place it cannot be forgotten. Anything else rethrows untouched.
+//
+// NDJSON routes do NOT come through here — their `run` callback owns its errors
+// by contract (lib/http/ndjson.ts) and emits streamError() instead, which builds
+// the same payload. See lib/http/missingKey.ts.
+async function catchingMissingKey<T>(fn: () => Promise<T>): Promise<T | Response> {
+  try {
+    return await fn();
+  } catch (err) {
+    const response = missingKeyResponse(err);
+    if (response) return response;
+    throw err;
+  }
+}
 
 // Authenticate, then run `fn` inside the user scope AND the active-config scope.
 // The union return type is what forces call sites to keep returning the wrapper's
@@ -45,7 +65,7 @@ export async function withRequestConfig<T>(
       }
       throw err;
     }
-    return withConfig(cfg, fn);
+    return withConfig(cfg, () => catchingMissingKey(fn));
   });
 }
 
@@ -57,5 +77,5 @@ export async function withRequestConfig<T>(
 export async function withRequestUser<T>(fn: () => Promise<T>): Promise<T | Response> {
   const user = await requireUserForApi();
   if (!user) return unauthorizedJson();
-  return withUser(user, fn);
+  return withUser(user, () => catchingMissingKey(fn));
 }

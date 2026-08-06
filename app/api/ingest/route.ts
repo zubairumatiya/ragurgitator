@@ -11,6 +11,7 @@
 // returned as plain JSON before the stream starts. All RAG logic stays in
 // lib/rag — this route just translates HTTP <-> input.
 // ---------------------------------------------------------------------------
+import { streamError } from "@/lib/http/missingKeyServer";
 import { config } from "@/lib/config";
 import { ingest, type IngestEvent } from "@/lib/rag/pipeline";
 import type { LoadInput } from "@/lib/rag/loader";
@@ -71,8 +72,7 @@ export async function POST(request: Request) {
       try {
         await ingest(inputs, send);
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Ingestion failed.";
-        send({ type: "error", message });
+        send(streamError(err, "Ingestion failed."));
       }
     }),
   );

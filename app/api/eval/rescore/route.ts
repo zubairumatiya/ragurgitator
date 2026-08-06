@@ -7,6 +7,7 @@
 // so Recall@k stays apples-to-apples. Backs the "Re-score all" button on /eval.
 // Streams progress as NDJSON (one EvalEvent per line) for a live bar + results.
 // ---------------------------------------------------------------------------
+import { streamError } from "@/lib/http/missingKeyServer";
 import { rescoreAllQuestions, type EvalEvent } from "@/lib/rag/eval";
 import { ndjsonStream } from "@/lib/http/ndjson";
 import { withRequestConfig } from "@/lib/http/configScope";
@@ -29,8 +30,7 @@ export async function POST(request: Request) {
       try {
         await rescoreAllQuestions(send, documentIds);
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Re-scoring failed.";
-        send({ type: "error", message });
+        send(streamError(err, "Re-scoring failed."));
       }
     }),
   );

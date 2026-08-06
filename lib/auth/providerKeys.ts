@@ -149,16 +149,13 @@ export async function keyedProviders(userId: string): Promise<Set<ProviderId>> {
   return new Set(rows.map((r) => r.provider));
 }
 
-// Single-provider form, for the call sites that genuinely need just one (the
-// generation path's pre-flight check). Prefer keyedProviders() in any loop.
-export async function hasProviderKey(userId: string, provider: ProviderId): Promise<boolean> {
-  const rows = await sql<{ one: number }[]>`
-    select 1 as one
-      from user_provider_keys
-     where user_id = ${userId} and provider = ${provider}
-  `;
-  return rows.length > 0;
-}
+// There is deliberately NO single-provider hasProviderKey(). keyedProviders()
+// answers every question the app actually asks — the pickers ask about a whole
+// registry at once, and the generation path finds out by trying (openProviderKey
+// returns null, the client throws MissingProviderKeyError, and lib/http/missingKey
+// turns that into a 400 with a link). A second query shape that nothing calls is
+// the same unread plumbing this phase already declined once when it skipped
+// SCRIPT_USER_ID.
 
 // SERVER-ONLY read path, for Phase 4's per-user provider clients. Returns null
 // when the user has no key for the provider, so callers can distinguish "not

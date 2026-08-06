@@ -14,6 +14,7 @@
 import { createHash } from "node:crypto";
 
 import { cheapModelFor, config } from "@/lib/config";
+import type { StreamErrorEvent } from "@/lib/http/missingKey";
 import { activeConfig, resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";
 import {
@@ -133,7 +134,10 @@ export type IngestEvent =
   | { type: "step"; index: number; fileName: string; step: IngestStep }
   | { type: "file-done"; index: number; result: IngestResult }
   | { type: "done"; results: IngestResult[] }
-  | { type: "error"; message: string };
+  // The shared stream error shape — carries the missing-provider-key fields
+  // when that was the cause, so every stream reports it the same way the
+  // plain routes do. See lib/http/missingKey.ts.
+  | StreamErrorEvent;
 
 type Emit = (event: IngestEvent) => void;
 

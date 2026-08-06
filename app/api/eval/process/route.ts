@@ -6,6 +6,7 @@
 // "Process new chunks" button on /eval. Streams progress as NDJSON (one
 // EvalEvent per line) so the dashboard can show a live bar + per-question results.
 // ---------------------------------------------------------------------------
+import { streamError } from "@/lib/http/missingKeyServer";
 import { processNewChunks, type EvalEvent } from "@/lib/rag/eval";
 import { ndjsonStream } from "@/lib/http/ndjson";
 import { withRequestConfig } from "@/lib/http/configScope";
@@ -16,8 +17,7 @@ export async function POST(request: Request) {
       try {
         await processNewChunks(send);
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Eval processing failed.";
-        send({ type: "error", message });
+        send(streamError(err, "Eval processing failed."));
       }
     }),
   );

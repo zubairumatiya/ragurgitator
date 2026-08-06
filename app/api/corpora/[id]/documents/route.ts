@@ -11,6 +11,7 @@
 // that costs embedding calls; zero synced configs = instant). Corpus-level, so
 // no withRequestConfig. `params` is a Promise in this Next.js version.
 // ---------------------------------------------------------------------------
+import { streamError } from "@/lib/http/missingKeyServer";
 import { config } from "@/lib/config";
 import { ndjsonStream } from "@/lib/http/ndjson";
 import { getCorpus } from "@/lib/rag/corpusStore";
@@ -85,8 +86,7 @@ export async function POST(
       try {
         await addDocsToCorpus(id, loaded, documentIds, send);
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Failed to add documents.";
-        send({ type: "error", message });
+        send(streamError(err, "Failed to add documents."));
       }
     });
   });

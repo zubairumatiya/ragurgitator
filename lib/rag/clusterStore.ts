@@ -6,6 +6,7 @@
 // the user can compare and keep; unsaved candidates are pruned when the next run
 // starts. Mirrors the run/snapshot conventions in lib/rag/evalStore.ts.
 // ---------------------------------------------------------------------------
+import type { StreamErrorEvent } from "@/lib/http/missingKey";
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { vectorLiteral } from "@/lib/rag/vectorStore";
@@ -81,7 +82,10 @@ export type ClusterEvent =
       silhouette: number;
     }
   | { type: "done"; runs: ClusterRunSummary[] }
-  | { type: "error"; message: string };
+  // The shared stream error shape — carries the missing-provider-key fields
+  // when that was the cause, so every stream reports it the same way the
+  // plain routes do. See lib/http/missingKey.ts.
+  | StreamErrorEvent;
 
 type Emit = (event: ClusterEvent) => void;
 

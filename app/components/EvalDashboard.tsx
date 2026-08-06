@@ -27,6 +27,7 @@ import { useRouter } from "next/navigation";
 import { HIGH_NDCG } from "@/lib/config";
 import { apiFetch } from "@/lib/http/client";
 import { noteHeadline } from "@/lib/rag/embeddingModels";
+import { ApiErrorNotice, type ApiErrorBody } from "@/app/components/MissingKeyNotice";
 import { failsBar } from "@/lib/rag/evalBar";
 import type {
   ChunkOverrideInfo,
@@ -2974,7 +2975,10 @@ function ModelTrial({
 
   const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [runError, setRunError] = useState<string | null>(null);
+  // The parsed error BODY, not a string: a missing provider key needs the
+  // provider to render a link to /account (see ApiErrorNotice), and trying a
+  // model whose provider you have no key for is exactly what this panel invites.
+  const [runError, setRunError] = useState<ApiErrorBody | null>(null);
   const [result, setResult] = useState<ModelTrialResult | null>(null);
   // Phase 5: this chunk's persisted model override for the active config (null =
   // none). Setting it re-embeds the chunk under that model so retrieval ranks it
@@ -3115,9 +3119,7 @@ function ModelTrial({
         | { result: ModelTrialResult; savedTrial: SavedModelTrial | null }
         | { error: string };
       if (!res.ok || "error" in data) {
-        setRunError(
-          "error" in data ? data.error : `Request failed (${res.status}).`,
-        );
+        setRunError("error" in data ? data : { error: `Request failed (${res.status}).` });
         return;
       }
       if (data.savedTrial) {
@@ -3131,7 +3133,7 @@ function ModelTrial({
         setResult(data.result);
       }
     } catch (err) {
-      setRunError(err instanceof Error ? err.message : "Network error.");
+      setRunError({ error: err instanceof Error ? err.message : "Network error." });
     } finally {
       setSaving(false);
       setRunning(false);
@@ -3152,12 +3154,12 @@ function ModelTrial({
         error?: string;
       } | null;
       if (!res.ok) {
-        setRunError(data?.error ?? `Request failed (${res.status}).`);
+        setRunError(data ?? { error: `Request failed (${res.status}).` });
         return;
       }
       setOverride(null);
     } catch (err) {
-      setRunError(err instanceof Error ? err.message : "Network error.");
+      setRunError({ error: err instanceof Error ? err.message : "Network error." });
     } finally {
       setOvBusy(false);
     }
@@ -3417,7 +3419,9 @@ function ModelTrial({
           </div>
 
           {runError && (
-            <span className="text-red-600 dark:text-red-400">{runError}</span>
+            <span className="text-red-600 dark:text-red-400">
+              <ApiErrorNotice body={runError} fallback="Model trial failed." />
+            </span>
           )}
 
           {result && (

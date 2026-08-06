@@ -6,6 +6,7 @@
 // first ingest, migration 0010). Body: { documentIds: [...] }. Streams the same
 // NDJSON IngestEvents as /api/ingest so the upload panel reuses its progress UI.
 // ---------------------------------------------------------------------------
+import { streamError } from "@/lib/http/missingKeyServer";
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
@@ -27,8 +28,7 @@ export async function POST(request: Request) {
       try {
         await embedDocumentsById(body.data.documentIds, send);
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Library ingest failed.";
-        send({ type: "error", message });
+        send(streamError(err, "Library ingest failed."));
       }
     }),
   );

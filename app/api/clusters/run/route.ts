@@ -6,6 +6,7 @@
 // are pruned first (see lib/rag/clusterStore.runClustering). Streams progress as
 // NDJSON (one ClusterEvent per line) so the dashboard shows a live bar.
 // ---------------------------------------------------------------------------
+import { streamError } from "@/lib/http/missingKeyServer";
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { ndjsonStream } from "@/lib/http/ndjson";
@@ -46,8 +47,7 @@ export async function POST(request: Request) {
       try {
         await runClustering(k, send);
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Clustering failed.";
-        send({ type: "error", message });
+        send(streamError(err, "Clustering failed."));
       }
     });
   });

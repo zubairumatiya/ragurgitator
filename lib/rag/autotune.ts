@@ -32,6 +32,7 @@
 // real metrics) is the arbiter either way — it also catches override state
 // drifting between a chunk's search and its apply.
 // ---------------------------------------------------------------------------
+import type { StreamErrorEvent } from "@/lib/http/missingKey";
 import { autotuneModelLadder } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import {
@@ -163,7 +164,10 @@ export type AutotuneEvent =
       ndcg: number | null;
       durationMs: number;
     }
-  | { type: "error"; message: string };
+  // The shared stream error shape — carries the missing-provider-key fields
+  // when that was the cause, so every stream reports it the same way the
+  // plain routes do. See lib/http/missingKey.ts.
+  | StreamErrorEvent;
 
 type Emit = (event: AutotuneEvent) => void;
 

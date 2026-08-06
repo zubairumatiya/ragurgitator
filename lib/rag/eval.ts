@@ -14,6 +14,7 @@
 //   - Retrieval searches the whole model+dim chunks table (all docs/configs that
 //     share it); fine with today's single fixed config.
 // ---------------------------------------------------------------------------
+import type { StreamErrorEvent } from "@/lib/http/missingKey";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import {
   addDifficulty,
@@ -171,7 +172,10 @@ export type EvalEvent =
   // Savings preference routes question generation through the batch API: the
   // work was submitted, not run here — track it in the Batches panel.
   | { type: "batch-submitted"; jobId: string; requestCount: number }
-  | { type: "error"; message: string };
+  // The shared stream error shape — carries the missing-provider-key fields
+  // when that was the cause, so every stream reports it the same way the
+  // plain routes do. See lib/http/missingKey.ts.
+  | StreamErrorEvent;
 
 type Emit = (event: EvalEvent) => void;
 

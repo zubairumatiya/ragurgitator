@@ -13,6 +13,7 @@
 // Streams IngestEvents as NDJSON so the dialog shows progress. Scoped to the
 // config named in the path. `params` is a Promise in this Next.js version.
 // ---------------------------------------------------------------------------
+import { streamError } from "@/lib/http/missingKeyServer";
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestUser } from "@/lib/http/configScope";
@@ -68,8 +69,7 @@ export async function POST(
           await reconfigureConfig(id, changes, send);
         }
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Reconfigure failed.";
-        send({ type: "error", message });
+        send(streamError(err, "Reconfigure failed."));
       }
     });
   });

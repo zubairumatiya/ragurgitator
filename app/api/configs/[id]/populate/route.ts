@@ -13,6 +13,7 @@
 // `params` is a Promise in this Next.js version. NDJSON producer enters the scope
 // itself, so the deferred stream callback still sees the right config.
 // ---------------------------------------------------------------------------
+import { streamError } from "@/lib/http/missingKeyServer";
 import { ndjsonStream } from "@/lib/http/ndjson";
 import { resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { embedCorpora, embedExistingCorpus, type IngestEvent } from "@/lib/rag/pipeline";
@@ -76,8 +77,7 @@ export async function POST(
             : embedExistingCorpus(send));
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Spawn embedding failed.";
-        send({ type: "error", message });
+        send(streamError(err, "Spawn embedding failed."));
       }
     });
   });
