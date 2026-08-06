@@ -893,8 +893,8 @@ export function EvalSettings() {
                   "overrides. Models in the base model's own vector space rank " +
                   "directly against it — no extra fusion lane, no extra query " +
                   "embedding per live retrieval. A model in a separate space adds a " +
-                  "fusion lane. Models whose provider has no key are listed greyed " +
-                  "out with the env var that would enable them. Uncheck all to tune " +
+                  "fusion lane. Models whose provider you have no key for are listed " +
+                  "greyed out with the key to add. Uncheck all to tune " +
                   "chunk size only."
                 }
               >
@@ -1516,9 +1516,9 @@ const PROVIDER_LABEL: Record<string, string> = {
 // that one lane. `selected === null` = all allowed (the default, and what a
 // fully-checked list saves back as); nothing checked = size-only tuning.
 //
-// Models whose provider has no key are LISTED under their own space heading,
-// disabled, with the env var that would enable them. Hiding them was the bug
-// this fixes: with only VOYAGE_API_KEY set the whole list collapsed to the base
+// Models whose provider the user has no key for are LISTED under their own space
+// heading, disabled, with the key that would enable them. Hiding them was the bug
+// this fixes: with only a Voyage key added the whole list collapsed to the base
 // model's own space, so the UI read as "fusion isn't a thing here" instead of
 // "the other spaces need a key". A disabled row is never checked, never
 // toggleable, and never counted — not in the fusion-lane footer, not in the

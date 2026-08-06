@@ -207,9 +207,10 @@ export const HIGH_NDCG = 0.7;
 // CHEAPEST FIRST, as an explicit ordered list (no cost field exists in the
 // registry to derive it from). Free local models lead (slower but $0), then
 // Voyage from lite upward, then keyed providers last. The engine filters out
-// the config's base model and any provider whose enabling env var is unset
-// (isProviderAvailable — keys for API providers, LOCAL_EMBEDDINGS for local),
-// so entries here are candidates, not guarantees.
+// the config's base model and any provider the RUNNING USER has no key for
+// (availableProviders() — a saved key for the API providers, LOCAL_EMBEDDINGS
+// for local), so entries here are candidates, not guarantees, and the same
+// ladder yields a different run for two users with different keys.
 // The domain-tuned Voyage models (code/finance/law) sit in the Voyage band at
 // their own price. Each is its own vector space, so unlike the voyage-4 family
 // an override under one costs a fusion lane at retrieval — the Settings

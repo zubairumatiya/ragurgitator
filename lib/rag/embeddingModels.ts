@@ -322,7 +322,8 @@ export type AutotuneModelOption = {
 // make the default set unrepresentable in the UI.
 //
 // Same selectable/reason contract as the autotune options: an unkeyed model is
-// listed greyed out with the env var that would enable it, rather than dropped.
+// listed greyed out with the action that would enable it (add a key on the
+// Account page, or LOCAL_EMBEDDINGS for local weights), rather than dropped.
 export function listAggregateModelOptions(
   availability: ProviderAvailability,
   baseModel: string,
@@ -375,7 +376,7 @@ export function canonicalModelOrder(ids: string[]): string[] {
 // The alternate models the autotune checklist offers. Cheapest-first ladder
 // order, minus the config's own base model. Everything else in the ladder is
 // returned — the keyed models a run could use now (selectable), plus the ones
-// whose provider has no key/weights, flagged with the env var that would enable
+// whose provider has no key/weights, flagged with the action that would enable
 // them so the UI can grey them out with a reason.
 //
 // The ENGINE keeps its own eligibility check (autotune.usableModelLadder
