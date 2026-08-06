@@ -50,8 +50,21 @@ export type EmbeddingModelSpec = {
   // (that's the option builders' `reason`, which greys the row out). A note
   // never blocks a selection — it explains a trade-off the user is making.
   // Today the only notes are the Cohere v3 family's 512-token input cap.
+  //
+  // WRITE IT AS "headline: detail". Pickers are tight on room — a `<select>`
+  // option can't carry a paragraph — so they render noteHeadline() inline and
+  // hang the full text off the row's tooltip. A note with no colon is its own
+  // headline, which just means it has to stay short.
   note?: string;
 };
+
+// The part of a `note` before its first colon — see the field's comment. Pure
+// string work, kept beside the convention it depends on so a picker can't
+// invent its own truncation.
+export function noteHeadline(note: string): string {
+  const colon = note.indexOf(":");
+  return colon === -1 ? note : note.slice(0, colon);
+}
 
 // One shared note for the four Cohere v3 models: they all cap input at 512
 // tokens (v4 takes 128K). Stated in CHARACTERS because that's the unit a
@@ -66,8 +79,9 @@ const COHERE_V3_INPUT_CAP_NOTE =
 // it's informational — embed() doesn't read it.
 export const EMBEDDING_MODELS: Record<string, EmbeddingModelSpec> = {
   // --- Voyage: the default + the alternates used by the in-memory experiments
-  //     (altEmbeddingModels in lib/config.ts; the nDCG aggregate votes with
-  //     every keyed model — see keyedModels below) ------------------------
+  //     (try-a-model offers every row here but the config's own — see
+  //     listTrialModelOptions; the nDCG aggregate votes with every keyed model,
+  //     see keyedModels below) ---------------------------------------------
   // The voyage-4 family shares one embedding space (space "voyage-4"): a chunk
   // re-embedded under voyage-4 / voyage-4-large stays cosine-comparable to the
   // voyage-4-lite base, so an override under them needs no fusion lane.
@@ -192,6 +206,10 @@ export type BaseModelOption = {
   label: string;
   provider: EmbeddingProviderId;
   dimension: number;
+  // The spec's caveat (the Cohere v3 input cap, today), for the picker to show
+  // beside the row. A note is NOT a reason: it never blocks a selection, it
+  // explains a trade-off the user is choosing.
+  note: string | null;
   // selectable = has a chunks table (ingestable) AND its provider is available.
   selectable: boolean;
   // Why it's NOT selectable, for the greyed-out tooltip; null when selectable.
@@ -203,9 +221,9 @@ export type BaseModelOption = {
 // aren't `selectable`, showing `reason` (missing key, or no vector table yet).
 //
 // "Candidate" excludes the extra Voyage entries (voyage-4-large, etc.) — those
-// exist only for the in-memory try-a-model experiment (altEmbeddingModels), not
-// as ingestion targets. The rule: any ingestable model, plus any non-Voyage
-// provider (local/OpenAI/Cohere) we'd set up to ingest under.
+// exist only for the in-memory try-a-model experiment, not as ingestion targets.
+// The rule: any ingestable model, plus any non-Voyage provider
+// (local/OpenAI/Cohere) we'd set up to ingest under.
 export function listBaseModelOptions(availability: ProviderAvailability): BaseModelOption[] {
   return Object.values(EMBEDDING_MODELS)
     .filter((spec) => spec.ingestable || spec.provider !== "voyage")
@@ -219,10 +237,59 @@ export function listBaseModelOptions(availability: ProviderAvailability): BaseMo
       label: spec.id,
       provider: spec.provider,
       dimension: spec.dimension,
+      note: spec.note ?? null,
       selectable: spec.ingestable && available,
       reason: reasons.length > 0 ? reasons.join("; ") : null,
     };
   });
+}
+
+// --- try-a-model (per-chunk trial) options -----------------------------------
+// One alternate model the in-memory trial could re-embed a chunk under.
+export type TrialModelOption = {
+  id: string;
+  label: string;
+  provider: EmbeddingProviderId;
+  dimension: number;
+  // The spec's caveat, surfaced so the trade-off is visible at the moment of
+  // choosing. Never greys the row out — that's `reason`.
+  note: string | null;
+  // selectable = its provider is keyed, so the trial could actually run.
+  selectable: boolean;
+  reason: string | null;
+};
+
+// Every registry model except the config's own (it's the baseline the trial is
+// measured against), in registry order.
+//
+// THE TRIAL IS TIER A: it re-embeds a small candidate pool in memory and ranks
+// by cosine, so `ingestable` is irrelevant here — no chunks_<model>_<dim> table
+// is touched and any output dimension works. That is why this offers strictly
+// more than listBaseModelOptions, which has to exclude models with no table.
+//
+// This replaced a hand-maintained list in lib/config.ts, which is why models kept
+// drifting out of the trial picker as they were added to the registry. An unkeyed
+// model is LISTED GREYED OUT with its reason rather than dropped — the same
+// contract as every other picker, and the one that distinguishes "this app does
+// not support Cohere" from "you have not added a Cohere key".
+export function listTrialModelOptions(
+  availability: ProviderAvailability,
+  baseModel: string,
+): TrialModelOption[] {
+  return Object.values(EMBEDDING_MODELS)
+    .filter((spec) => spec.id !== baseModel)
+    .map((spec) => {
+      const available = availability.has(spec.provider);
+      return {
+        id: spec.id,
+        label: spec.provider === "voyage" ? spec.id : `${spec.id} (${spec.provider})`,
+        provider: spec.provider,
+        dimension: spec.dimension,
+        note: spec.note ?? null,
+        selectable: available,
+        reason: available ? null : unavailableReason(spec.provider),
+      };
+    });
 }
 
 // --- Autotune "Models" checklist options -------------------------------------
@@ -239,8 +306,11 @@ export type AutotuneModelOption = {
   // unkeyed model is LISTED (greyed out) rather than dropped, so the checklist
   // explains why a space is missing instead of silently showing one group.
   selectable: boolean;
-  // Why it's NOT selectable ("set OPENAI_API_KEY to enable"); null when it is.
+  // Why it's NOT selectable ("add an OpenAI key in Settings"); null when it is.
   reason: string | null;
+  // The spec's caveat, on the same terms as BaseModelOption.note: shown beside
+  // the row, never a reason to grey it out.
+  note: string | null;
 };
 
 // The models the nDCG "Models in aggregate" checklist offers (0045): every
@@ -268,6 +338,7 @@ export function listAggregateModelOptions(
       sameSpaceAsBase: space !== null && space === baseSpace,
       selectable: available,
       reason: available ? null : unavailableReason(spec.provider),
+      note: spec.note ?? null,
     };
   });
 }
@@ -333,6 +404,7 @@ export function listAutotuneModelOptions(
       sameSpaceAsBase: space !== null && space === baseSpace,
       selectable: available,
       reason: available ? null : unavailableReason(spec.provider),
+      note: spec.note ?? null,
     });
   }
   return options;

@@ -33,7 +33,7 @@ import {
 } from "@/lib/batch/types";
 import type { ConfigSummary } from "@/lib/rag/configStore";
 import type { LlmModelOption, LlmProviderId } from "@/lib/llm/llmModels";
-import type { AutotuneModelOption } from "@/lib/rag/embeddingModels";
+import { noteHeadline, type AutotuneModelOption } from "@/lib/rag/embeddingModels";
 import type { AutotuneApply, AutotuneSearch, EvalCriteria } from "@/lib/rag/evalSettingsStore";
 import type { AutotuneScopeDocument } from "@/lib/rag/evalStore";
 
@@ -1631,9 +1631,21 @@ function ModelScopeChecklist({
                     >
                       {m.id}
                     </span>
+                    {/* A reason greys the row out; a note doesn't — it's a
+                        trade-off worth seeing before ticking the box (the
+                        Cohere v3 input cap silently truncates long chunks).
+                        Both can be present, so both render. */}
                     {m.reason && (
                       <span className="block truncate text-[10px] text-zinc-400 dark:text-zinc-500">
                         {m.reason}
+                      </span>
+                    )}
+                    {m.note && (
+                      <span
+                        className="block truncate text-[10px] text-amber-600 dark:text-amber-500"
+                        title={m.note}
+                      >
+                        {noteHeadline(m.note)}
                       </span>
                     )}
                   </span>

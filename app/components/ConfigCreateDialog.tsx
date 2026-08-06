@@ -23,7 +23,7 @@ import { CorpusPicker } from "@/app/components/CorpusPicker";
 import { apiFetch } from "@/lib/http/client";
 import type { ConfigSummary } from "@/lib/rag/configStore";
 import type { CorpusSummary } from "@/lib/rag/corpusStore";
-import type { BaseModelOption } from "@/lib/rag/embeddingModels";
+import { noteHeadline, type BaseModelOption } from "@/lib/rag/embeddingModels";
 import type { IngestEvent } from "@/lib/rag/pipeline";
 
 // Sensible starting points (match lib/config.ts defaults). The user tweaks these
@@ -307,8 +307,14 @@ export function ConfigCreateDialog({
             className="rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700"
           >
             {models?.map((m) => (
-              <option key={m.id} value={m.id} disabled={!m.selectable}>
-                {m.label} ({m.dimension}d){m.selectable ? "" : ` — ${m.reason}`}
+              <option
+                key={m.id}
+                value={m.id}
+                disabled={!m.selectable}
+                title={m.note ?? undefined}
+              >
+                {m.label} ({m.dimension}d){m.note ? ` — ${noteHeadline(m.note)}` : ""}
+                {m.selectable ? "" : ` — ${m.reason}`}
               </option>
             ))}
           </select>

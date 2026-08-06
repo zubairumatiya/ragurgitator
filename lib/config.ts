@@ -196,36 +196,6 @@ export function cheapModelFor(llmModel: string): string {
   return CHEAP_MODEL[llmProviderOf(llmModel)];
 }
 
-// Alternate embedding models offered by the per-chunk "try a different model"
-// experiment (see lib/rag/eval.runModelTrial). This is an EPHEMERAL re-ranking
-// tool: these models are never ingested into chunks_<model>_<dim> tables — the
-// experiment re-embeds a small candidate pool in memory and ranks by cosine, so
-// any output dimension works and no migration is needed to add one here.
-//
-// Cross-provider entries (OpenAI/Cohere/local) route through the embedding
-// dispatcher (lib/rag/embeddingProviders.ts). They're OPT-IN: selecting one
-// without its enabling env var (a key for OpenAI/Cohere; LOCAL_EMBEDDINGS for
-// the local models) just fails that one trial as "unavailable" — it never
-// touches the live index. This is why they live here and NOT in
-// rankingAggregateModels (which embeds eagerly for every aggregate build — see
-// below).
-//
-// Excludes the active embeddingModel (it's the baseline) and voyage-context-3
-// (a different, contextualized embedding API that can't drop into embed()).
-export const altEmbeddingModels: { id: string; label: string }[] = [
-  { id: "voyage-4-large", label: "voyage-4-large" },
-  { id: "voyage-4", label: "voyage-4" },
-  { id: "voyage-code-3", label: "voyage-code-3" },
-  { id: "voyage-code-2", label: "voyage-code-2" },
-  { id: "voyage-finance-2", label: "voyage-finance-2" },
-  { id: "voyage-law-2", label: "voyage-law-2" },
-  // --- other providers (need a key / local weights; see embeddingModels.ts) ---
-  { id: "text-embedding-3-large", label: "text-embedding-3-large (OpenAI)" },
-  { id: "embed-v4", label: "embed-v4 (Cohere)" },
-  { id: "mxbai-embed-large", label: "mxbai-embed-large (local)" },
-  { id: "bge-m3", label: "bge-m3 (local)" },
-];
-
 // False-positive detector threshold (eval-autotuning-plan §7): a question that
 // MISSED recall but whose graded nDCG is at least this high is likely a victim
 // of distractor crowding (the ground truth ranks well against its ideal, other

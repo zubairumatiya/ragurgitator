@@ -26,6 +26,7 @@ import {
 import { useRouter } from "next/navigation";
 import { HIGH_NDCG } from "@/lib/config";
 import { apiFetch } from "@/lib/http/client";
+import { noteHeadline } from "@/lib/rag/embeddingModels";
 import { failsBar } from "@/lib/rag/evalBar";
 import type {
   ChunkOverrideInfo,
@@ -2998,7 +2999,10 @@ function ModelTrial({
           );
         }
         setState({ status: "ready", ctx: data });
-        setModel(data.models[0]?.id ?? "");
+        // The first SELECTABLE model, not the first listed: unkeyed models are
+        // shown greyed out (see the select below), so seeding with models[0]
+        // would open the panel pre-set to one the user can't run.
+        setModel(data.models.find((m) => m.selectable)?.id ?? "");
         setSelected(new Set(data.autoPool.map((c) => c.chunkId)));
         setOverride(data.currentOverride);
       })
@@ -3228,9 +3232,21 @@ function ModelTrial({
                   onChange={(e) => setModel(e.target.value)}
                   className="rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
                 >
+                  {/* Unkeyed models are LISTED, disabled, with the reason —
+                      never dropped. Same contract as the base-model, autotune
+                      and LLM pickers. The `note` is a trade-off (the Cohere v3
+                      input cap), not a blocker, so it shows on selectable rows
+                      too. */}
                   {state.ctx.models.map((m) => (
-                    <option key={m.id} value={m.id}>
+                    <option
+                      key={m.id}
+                      value={m.id}
+                      disabled={!m.selectable}
+                      title={m.reason ?? m.note ?? undefined}
+                    >
                       {m.label}
+                      {m.note ? ` — ${noteHeadline(m.note)}` : ""}
+                      {m.selectable ? "" : ` (${m.reason})`}
                     </option>
                   ))}
                 </select>
