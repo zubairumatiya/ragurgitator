@@ -7,6 +7,7 @@
 // what sync means. Unsynced/detached configs are untouched. `params` is a
 // Promise in this Next.js version.
 // ---------------------------------------------------------------------------
+import { withRequestUser } from "@/lib/http/configScope";
 import { getCorpus, removeDocumentFromCorpus } from "@/lib/rag/corpusStore";
 import { syncRemoveDocFromConfigs } from "@/lib/rag/pipeline";
 
@@ -15,18 +16,20 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string; docId: string }> },
 ) {
   const { id, docId } = await params;
-  try {
-    const corpus = await getCorpus(id);
-    if (!corpus) return Response.json({ error: "Corpus not found." }, { status: 404 });
+  return withRequestUser(async () => {
+    try {
+      const corpus = await getCorpus(id);
+      if (!corpus) return Response.json({ error: "Corpus not found." }, { status: 404 });
 
-    const removed = await removeDocumentFromCorpus(id, docId);
-    if (!removed) {
-      return Response.json({ error: "Document is not in this corpus." }, { status: 404 });
+      const removed = await removeDocumentFromCorpus(id, docId);
+      if (!removed) {
+        return Response.json({ error: "Document is not in this corpus." }, { status: 404 });
+      }
+      const removedFromConfigs = await syncRemoveDocFromConfigs(id, docId);
+      return Response.json({ ok: true, removedFromConfigs });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to remove document.";
+      return Response.json({ error: message }, { status: 500 });
     }
-    const removedFromConfigs = await syncRemoveDocFromConfigs(id, docId);
-    return Response.json({ ok: true, removedFromConfigs });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to remove document.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  });
 }

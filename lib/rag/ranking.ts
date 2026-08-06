@@ -26,10 +26,10 @@ import { z } from "zod";
 import { config } from "@/lib/config";
 import {
   canonicalModelOrder,
-  isProviderAvailable,
   keyedModels,
   EMBEDDING_MODELS,
 } from "@/lib/rag/embeddingModels";
+import { availableProviders } from "@/lib/rag/providerAvailability";
 import { getActiveCriteria } from "@/lib/rag/evalSettingsStore";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { meteredMessage } from "@/lib/rag/meter";
@@ -242,13 +242,14 @@ async function aggregateModels(): Promise<string[]> {
   const saved = criteria.ndcg.aggregateModels;
   // null = every keyed model (the default since the hard-coded four were
   // retired — see lib/config). A saved list pins a narrower set.
-  const chosen = saved === null ? keyedModels() : saved;
+  const availability = await availableProviders();
+  const chosen = saved === null ? keyedModels(availability) : saved;
   const usable = canonicalModelOrder(
-    chosen.filter((id) => EMBEDDING_MODELS[id] && isProviderAvailable(EMBEDDING_MODELS[id].provider)),
+    chosen.filter((id) => EMBEDDING_MODELS[id] && availability.has(EMBEDDING_MODELS[id].provider)),
   );
   // A saved list that no longer resolves to anything keyed falls back to the
   // default rather than building a ranking with no voters.
-  return usable.length > 0 ? usable : canonicalModelOrder(keyedModels());
+  return usable.length > 0 ? usable : canonicalModelOrder(keyedModels(availability));
 }
 
 export async function buildAggregateRanking(

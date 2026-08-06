@@ -13,8 +13,10 @@
 // Streams IngestEvents as NDJSON so the dialog shows progress. Scoped to the
 // config named in the path. `params` is a Promise in this Next.js version.
 // ---------------------------------------------------------------------------
+import { streamError } from "@/lib/http/missingKeyServer";
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
+import { withRequestUser } from "@/lib/http/configScope";
 import { ndjsonStream } from "@/lib/http/ndjson";
 import { resolveConfig } from "@/lib/rag/activeConfig";
 import type { IngestEvent } from "@/lib/rag/pipeline";
@@ -45,23 +47,30 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  const cfg = await resolveConfig(id);
-  if (!cfg) return Response.json({ error: "Config not found." }, { status: 404 });
 
-  const body = await parseBody(request, Body);
-  if (body.response) return body.response;
-  const { documentId, ...changes } = body.data;
+  // Resolves the config from the path rather than the usual query param, so this
+  // route takes withRequestUser and calls resolveConfig itself — which is now
+  // owner-scoped, making another user's config indistinguishable from a missing
+  // one. ndjsonStream's AsyncResource.bind carries the user scope into the
+  // producer, so the re-embedding work below still sees it.
+  return withRequestUser(async () => {
+    const cfg = await resolveConfig(id);
+    if (!cfg) return Response.json({ error: "Config not found." }, { status: 404 });
 
-  return ndjsonStream<IngestEvent>(async (send) => {
-    try {
-      if (documentId) {
-        await reconfigureDocument(cfg, documentId, changes, send);
-      } else {
-        await reconfigureConfig(id, changes, send);
+    const body = await parseBody(request, Body);
+    if (body.response) return body.response;
+    const { documentId, ...changes } = body.data;
+
+    return ndjsonStream<IngestEvent>(async (send) => {
+      try {
+        if (documentId) {
+          await reconfigureDocument(cfg, documentId, changes, send);
+        } else {
+          await reconfigureConfig(id, changes, send);
+        }
+      } catch (err) {
+        send(streamError(err, "Reconfigure failed."));
       }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Reconfigure failed.";
-      send({ type: "error", message });
-    }
+    });
   });
 }

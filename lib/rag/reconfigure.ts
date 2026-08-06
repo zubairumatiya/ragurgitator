@@ -24,7 +24,8 @@ import { resolveConfig, withConfig, type ResolvedConfig } from "@/lib/rag/active
 import { chunkDocument } from "@/lib/rag/chunker";
 import { updateConfigSettings } from "@/lib/rag/configStore";
 import { meterEmbeds } from "@/lib/rag/embedCache";
-import { isProviderAvailable, modelSpec } from "@/lib/rag/embeddingModels";
+import { modelSpec, unavailableReason } from "@/lib/rag/embeddingModels";
+import { availableProviders } from "@/lib/rag/providerAvailability";
 import { embedTexts } from "@/lib/rag/embeddings";
 import {
   setChunkModelOverride,
@@ -75,11 +76,11 @@ function overlap(a: { start: number; end: number }, b: { start: number; end: num
 
 // Validate that a base-model change targets an ingestable, available model.
 // Throws with a user-facing message otherwise.
-function assertUsableBaseModel(model: string): void {
+async function assertUsableBaseModel(model: string): Promise<void> {
   const spec = modelSpec(model); // throws on unknown
   chunksTable(model, modelDimension(model)); // throws when not ingestable
-  if (!isProviderAvailable(spec.provider)) {
-    throw new Error(`"${model}" isn't available — set its provider's API key.`);
+  if (!(await availableProviders()).has(spec.provider)) {
+    throw new Error(`"${model}" isn't available — ${unavailableReason(spec.provider)}.`);
   }
 }
 

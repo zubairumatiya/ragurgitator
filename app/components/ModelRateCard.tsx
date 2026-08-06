@@ -13,10 +13,16 @@ import { RATES_VERIFIED_ON } from "@/lib/rag/pricing";
 const ABOUT =
   "List price per 1M tokens for every embedding model the app knows about, so " +
   "you don't have to go to the provider's site.\n\n" +
-  "A dash means we won't quote a figure: today that's text-embedding-3-large, " +
-  "where OpenAI's model card ($0.13) and pricing page ($0.065) disagree. Cost " +
-  "accounting still charges it at $0.13 — the dash is about what we'll claim, " +
-  "not what we count.";
+  "A dash means we won't quote a figure, and there are two reasons a row gets " +
+  "one. The OpenAI models sit on a source conflict: the model card and the " +
+  "pricing page disagree ($0.13 vs $0.065 for 3-large). The Cohere v3 models " +
+  "sit on a withdrawn rate: Cohere used to publish $0.10/1M for the whole v3 " +
+  "family and has since removed per-token Embed v3 pricing from its site " +
+  "entirely, keeping only Embed 4 and capacity plans — while still serving the " +
+  "v3 models.\n\n" +
+  "Cost accounting charges every dashed row at its underlying number anyway, so " +
+  "the ledger never under-counts. The dash is about what we'll claim, not what " +
+  "we count.";
 
 const compact = new Intl.NumberFormat("en-US", {
   notation: "compact",
@@ -80,7 +86,7 @@ export function ModelRateCard({
                   className="px-3 py-2 text-right tabular-nums text-zinc-700 dark:text-zinc-300"
                   title={
                     r.usdPerM === null
-                      ? "No price we can stand behind — OpenAI's model card and pricing page disagree"
+                      ? "No price we can stand behind — either the provider's own pages disagree (OpenAI) or the published rate has been withdrawn (Cohere v3). Still costed at the underlying figure."
                       : undefined
                   }
                 >

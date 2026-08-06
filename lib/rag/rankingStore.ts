@@ -343,7 +343,16 @@ export async function truthKindByQuestion(
   return new Map(rows.map((r) => [r.eval_question_id, r.kind]));
 }
 
+// eval_rankings reaches a config through document_embedding_id (0009 + 0011),
+// so that join is the authorization check for an id supplied by a caller.
 export async function deleteRanking(id: string): Promise<boolean> {
-  const rows = await sql`delete from eval_rankings where id = ${id} returning id`;
+  const rows = await sql`
+    delete from eval_rankings r
+    using document_embeddings de
+    where de.id = r.document_embedding_id
+      and de.config_id = ${activeConfig().id}
+      and r.id = ${id}
+    returning r.id
+  `;
   return rows.length > 0;
 }

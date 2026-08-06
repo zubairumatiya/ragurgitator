@@ -9,6 +9,7 @@ import Link from "next/link";
 import { AppraiseNav } from "@/app/components/AppraiseNav";
 import { BackToConfigs } from "@/app/components/BackToConfigs";
 import { InfoDot } from "@/app/components/InfoDot";
+import { withPageUser } from "@/lib/auth/dal";
 import { listConfigComparisons, type ConfigComparison } from "@/lib/rag/appraiseStore";
 
 export const dynamic = "force-dynamic";
@@ -19,7 +20,7 @@ const ABOUT =
   "Run Process / Re-score on a config's Eval tab to populate or refresh its row.";
 
 export default async function AppraiseConfigsPage() {
-  const rows = await listConfigComparisons();
+  const rows = await withPageUser(() => listConfigComparisons());
 
   // Group by corpus, preserving the store's (corpus, tab) ordering.
   // Detached configs (corpus deleted) group together under "No corpus".

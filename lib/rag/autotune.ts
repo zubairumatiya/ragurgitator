@@ -32,6 +32,7 @@
 // real metrics) is the arbiter either way — it also catches override state
 // drifting between a chunk's search and its apply.
 // ---------------------------------------------------------------------------
+import type { StreamErrorEvent } from "@/lib/http/missingKey";
 import { autotuneModelLadder } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import {
@@ -41,7 +42,8 @@ import {
 } from "@/lib/rag/autotuneStore";
 import { splitText } from "@/lib/rag/chunker";
 import { embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
-import { isProviderAvailable, modelSpec } from "@/lib/rag/embeddingModels";
+import { modelSpec } from "@/lib/rag/embeddingModels";
+import { availableProviders } from "@/lib/rag/providerAvailability";
 import {
   rescoreAffectedQuestions,
   runModelTrial,
@@ -162,7 +164,10 @@ export type AutotuneEvent =
       ndcg: number | null;
       durationMs: number;
     }
-  | { type: "error"; message: string };
+  // The shared stream error shape — carries the missing-provider-key fields
+  // when that was the cause, so every stream reports it the same way the
+  // plain routes do. See lib/http/missingKey.ts.
+  | StreamErrorEvent;
 
 type Emit = (event: AutotuneEvent) => void;
 
@@ -258,14 +263,15 @@ function mkCandidate(
 // config's base model and any provider without a key/weights. `scope` (the
 // config's autotune.modelScope, 0030) further whitelists model ids: null = no
 // restriction; an explicit list keeps only its members (so [] = size-only).
-function usableModelLadder(scope: string[] | null): string[] {
+async function usableModelLadder(scope: string[] | null): Promise<string[]> {
   const base = activeConfig().embeddingModel;
   const allowed = scope === null ? null : new Set(scope);
+  const availability = await availableProviders();
   return autotuneModelLadder.filter((id) => {
     if (id === base) return false;
     if (allowed !== null && !allowed.has(id)) return false;
     try {
-      return isProviderAvailable(modelSpec(id).provider);
+      return availability.has(modelSpec(id).provider);
     } catch {
       return false;
     }
@@ -697,7 +703,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
   const trialPool = criteria.autotune.fusionPool;
   const overlapFor = (size: number) =>
     Math.min(size - 1, Math.max(0, Math.round(size * criteria.autotune.overlapPct)));
-  const models = usableModelLadder(criteria.autotune.modelScope);
+  const models = await usableModelLadder(criteria.autotune.modelScope);
   // Per-chunk cap on search RUNGS (a rung = one size, or one model's two
   // branches) so even exhaustive mode is bounded (A4/A5).
   const rungCap = sizes.length + 2 * models.length + 6;

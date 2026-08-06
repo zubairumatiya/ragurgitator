@@ -20,7 +20,7 @@ import {
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { getConfig } from "@/lib/rag/configStore";
 import { getActiveBatchSavings } from "@/lib/rag/batchStore";
-import { isBatchEnabled, providerOfKind } from "@/lib/batch/types";
+import { isBatchEnabled } from "@/lib/batch/types";
 import { handlerFor } from "@/lib/batch/jobs/registry";
 import { submitBatch } from "@/lib/batch/orchestrator";
 
@@ -50,7 +50,7 @@ export async function POST(
         const cfg = await getConfig(activeConfig().id);
         const job = await submitBatch({
           kind: "cluster_labeling",
-          provider: providerOfKind("cluster_labeling"),
+          provider: built.provider,
           configId: activeConfig().id,
           configLabel: cfg?.label ?? "—",
           requests: built.requests,

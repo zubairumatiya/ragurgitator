@@ -13,7 +13,8 @@
 // ---------------------------------------------------------------------------
 import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
 
-import { cohereClient, openaiClient, voyageClient } from "@/lib/llm/client";
+import { activeUserId } from "@/lib/auth/userScope";
+import { cohereFor, openaiFor, voyageFor } from "@/lib/llm/client";
 import type { EmbeddingModelSpec, EmbeddingProviderId } from "@/lib/rag/embeddingModels";
 
 export type EmbedRole = "document" | "query";
@@ -35,6 +36,7 @@ export interface EmbeddingProvider {
 const voyageProvider: EmbeddingProvider = {
   batchLimit: 128,
   async embedBatch(texts, role, spec) {
+    const voyageClient = await voyageFor(activeUserId());
     const response = await voyageClient.embed({
       input: texts,
       model: spec.apiModel,
@@ -59,13 +61,17 @@ const voyageProvider: EmbeddingProvider = {
 const openaiProvider: EmbeddingProvider = {
   batchLimit: 2048,
   async embedBatch(texts, _role, spec) {
-    const res = await openaiClient().embeddings.create({
+    const openaiClient = await openaiFor(activeUserId());
+    const res = await openaiClient.embeddings.create({
       model: spec.apiModel,
       input: texts,
-      // text-embedding-3-* support `dimensions`; native is 3072 so only send it
-      // when we want a smaller output. Omitted for any model whose registry dim
-      // equals its native size.
-      dimensions: spec.dimension < 3072 ? spec.dimension : undefined,
+      // text-embedding-3-* support `dimensions`, but only DOWNWARD: send it just
+      // when the registry asks for less than the model's own native width.
+      // Compared against spec.nativeDimension, not a literal — a hardcoded 3072
+      // (large's native size) sent a pointless dimensions: 1536 to
+      // text-embedding-3-small, and would send an invalid above-native value to
+      // any model registered between its native size and 3072.
+      dimensions: spec.dimension < spec.nativeDimension ? spec.dimension : undefined,
     });
     return [...res.data]
       .sort((a, b) => a.index - b.index)
@@ -75,14 +81,46 @@ const openaiProvider: EmbeddingProvider = {
 
 // --- Cohere — input_type is REQUIRED for v3/v4; request float embeddings and
 // read them back from the by-type response. ----------------------------------
+
+// Which Cohere models accept `output_dimension`. Cohere documents it as "only
+// available for embed-v4 and newer models" — the v3 family has one fixed width.
+//
+// Deliberately an allow-list of what we've checked, not a "v4 or later" version
+// comparison: the docs describe non-support rather than promising a 4xx, so a
+// v3 model handed the parameter may simply IGNORE it and return its native
+// width under a registry row claiming something narrower — a dimension mismatch
+// nothing downstream would catch until it reached a vector table. Gating here
+// means the app never depends on Cohere to reject it. Widen this only after
+// checking a new model's docs.
+function acceptsOutputDimension(apiModel: string): boolean {
+  return apiModel.startsWith("embed-v4");
+}
+
 const cohereProvider: EmbeddingProvider = {
   batchLimit: 96,
   async embedBatch(texts, role, spec) {
-    const res = await cohereClient().embed({
+    const cohereClient = await cohereFor(activeUserId());
+    const res = await cohereClient.embed({
       model: spec.apiModel,
       inputType: role === "query" ? "search_query" : "search_document",
       texts,
       embeddingTypes: ["float"],
+      // Pin the width for the models that let us. Without it embed-v4-1024 gets
+      // Cohere's 1536 default back under a registry row that says 1024. Sent for
+      // every v4 row, including the one already at 1536: an explicit value can't
+      // drift when a provider changes its default, and it makes the registry's
+      // `dimension` the single thing that decides the vector width.
+      outputDimension: acceptsOutputDimension(spec.apiModel) ? spec.dimension : undefined,
+      // Explicit rather than inherited from the provider default, because the
+      // two families disagree about how much this matters: v4 takes 128K tokens
+      // and will never hit the cap on our chunk sizes, while the v3 family caps
+      // at 512 (~2,000 characters) and truncates most real chunks. "END" keeps
+      // the head of the chunk — the lead sentences carry the topic, and a
+      // consistent rule beats one that varies with the SDK's default. The
+      // alternative, truncate: "NONE", turns an over-long chunk into a failed
+      // batch mid-ingest; the v3 specs carry a `note` so the picker can warn
+      // about the quality cost instead.
+      truncate: "END",
     });
     const floats = res.embeddings?.float;
     if (!floats || floats.length !== texts.length) {

@@ -18,6 +18,7 @@
 // ---------------------------------------------------------------------------
 import { AsyncLocalStorage } from "node:async_hooks";
 
+import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { chunksTable, modelDimension } from "@/lib/rag/vectorStore";
 
@@ -85,7 +86,15 @@ export function isUuid(s: string): boolean {
   return UUID_RE.test(s);
 }
 
-// Resolve a specific config by id; null when malformed or it doesn't exist.
+// Resolve a specific config by id; null when malformed, absent, or owned by
+// somebody else.
+//
+// The user_id predicate here is the single highest-value line in the ownership
+// work (docs/user-accounts-plan.md §6). Every store call below this layer filters
+// by config_id and trusts that the config was legitimately resolved, so this one
+// check is what makes all of them safe. It deliberately returns null rather than
+// throwing a distinct "forbidden" — callers turn that into a 404, so an id probe
+// cannot distinguish "no such config" from "not yours".
 export async function resolveConfig(configId: string): Promise<ResolvedConfig | null> {
   if (!isUuid(configId)) return null;
   const rows = await sql<ConfigRow[]>`
@@ -93,28 +102,38 @@ export async function resolveConfig(configId: string): Promise<ResolvedConfig | 
            retrieval_fusion_pool, llm_model, cascade_enabled
     from configs
     where id = ${configId}
+      and user_id = ${activeUserId()}
     limit 1
   `;
   return rows.length > 0 ? toResolved(rows[0]) : null;
 }
 
-// The config to use when a request doesn't name one. Until the tabs UI lands
-// (Phase 2) there's a single Default config from the 0011 backfill; pick the
-// earliest as a stable default.
+// The config to use when a request doesn't name one: the user's earliest, as a
+// stable default.
 export async function resolveDefaultConfig(): Promise<ResolvedConfig> {
   const rows = await sql<ConfigRow[]>`
     select id, corpus_id, corpus_sync, base_model, chunk_size, chunk_overlap, top_k,
            retrieval_fusion_pool, llm_model, cascade_enabled
     from configs
+    where user_id = ${activeUserId()}
     order by created_at
     limit 1
   `;
   if (rows.length === 0) {
-    throw new Error(
-      "No config exists. Apply migrations 0010/0011 (they backfill a Default config).",
-    );
+    throw new Error("This account has no configs yet. Create one to get started.");
   }
   return toResolved(rows[0]);
+}
+
+// Thrown when an explicitly-named config doesn't resolve — because it doesn't
+// exist, is malformed, or belongs to another user. A distinct type so the HTTP
+// layer can answer 404 instead of letting it surface as a 500; the three causes
+// are deliberately indistinguishable to the caller.
+export class UnknownConfigError extends Error {
+  constructor(configId: string) {
+    super(`Unknown configId "${configId}".`);
+    this.name = "UnknownConfigError";
+  }
 }
 
 // Resolve the active config for an incoming request: an explicit configId
@@ -126,7 +145,7 @@ export async function resolveRequestConfig(request: Request): Promise<ResolvedCo
   const configId = fromQuery ?? request.headers.get("x-config-id");
   if (!configId) return resolveDefaultConfig();
   const resolved = await resolveConfig(configId);
-  if (!resolved) throw new Error(`Unknown configId "${configId}".`);
+  if (!resolved) throw new UnknownConfigError(configId);
   return resolved;
 }
 

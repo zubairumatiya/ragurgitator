@@ -10,9 +10,14 @@
 //   - chunkOverlap   : how much neighboring chunks overlap (preserves context)
 //   - topK           : how many chunks to retrieve per query
 //
-// TODO: export a typed config object. Read secrets from process.env, never
-//       hard-code API keys here (see .env.example).
+// TODO: export a typed config object.
+//
+// There are no API keys to hard-code here any more, and no env var to read one
+// from either: under strict BYOK every provider credential belongs to a USER and
+// is resolved through lib/llm/client.ts (docs/user-accounts-plan.md §5).
 // ---------------------------------------------------------------------------
+import { llmProviderOf, type LlmProviderId } from "@/lib/llm/llmModels";
+
 export const config = {
   embeddingModel: "voyage-4-lite",
   llmModel: "claude-sonnet-4-6",
@@ -33,7 +38,8 @@ export const config = {
     // OFF (default) = today's behaviour: one answer from the config's llmModel, no
     // gate, zero extra cost. ON = Haiku-first + gate + escalation. The knobs below
     // are the (still global) cascade parameters.
-    cheapModel: "claude-haiku-4-5", // cheap first tier; strong tier = activeConfig().llmModel
+    // The cheap first tier is NOT a constant here — it is derived from the
+    // config's own llmModel, per provider. See CHEAP_MODEL / cheapModelFor below.
     // Rung 1 (AXIS 1, pre-generation): retrieval cosine below which context is too
     // weak to answer from. A stronger model can't fix missing context, so below
     // this we answer once with the cheap model and NEVER escalate. Not a quality
@@ -163,35 +169,32 @@ export const config = {
   },
 } as const;
 
-// Alternate embedding models offered by the per-chunk "try a different model"
-// experiment (see lib/rag/eval.runModelTrial). This is an EPHEMERAL re-ranking
-// tool: these models are never ingested into chunks_<model>_<dim> tables — the
-// experiment re-embeds a small candidate pool in memory and ranks by cosine, so
-// any output dimension works and no migration is needed to add one here.
+// The saver cascade's CHEAP FIRST TIER, one per provider (docs/user-accounts-plan.md
+// §9.1). This used to be the constant `cascade.cheapModel: "claude-haiku-4-5"`,
+// which was correct for exactly as long as Anthropic was the only provider.
 //
-// Cross-provider entries (OpenAI/Cohere/local) route through the embedding
-// dispatcher (lib/rag/embeddingProviders.ts). They're OPT-IN: selecting one
-// without its enabling env var (a key for OpenAI/Cohere; LOCAL_EMBEDDINGS for
-// the local models) just fails that one trial as "unavailable" — it never
-// touches the live index. This is why they live here and NOT in
-// rankingAggregateModels (which embeds eagerly for every aggregate build — see
-// below).
+// Under a GPT config that constant made the cascade CROSS PROVIDERS: the cheap
+// first answer billed to the user's Anthropic key, the escalation to their OpenAI
+// one. That is a wrong bill for a user who holds both keys and an outright
+// failure (MissingProviderKeyError, mid-answer) for a user who holds one. Worse,
+// it would have made the cascade's own savings number meaningless — it compares
+// cheap-tier cost against strong-tier cost, and the two would no longer be the
+// same vendor's rate card.
 //
-// Excludes the active embeddingModel (it's the baseline) and voyage-context-3
-// (a different, contextualized embedding API that can't drop into embed()).
-export const altEmbeddingModels: { id: string; label: string }[] = [
-  { id: "voyage-4-large", label: "voyage-4-large" },
-  { id: "voyage-4", label: "voyage-4" },
-  { id: "voyage-code-3", label: "voyage-code-3" },
-  { id: "voyage-code-2", label: "voyage-code-2" },
-  { id: "voyage-finance-2", label: "voyage-finance-2" },
-  { id: "voyage-law-2", label: "voyage-law-2" },
-  // --- other providers (need a key / local weights; see embeddingModels.ts) ---
-  { id: "text-embedding-3-large", label: "text-embedding-3-large (OpenAI)" },
-  { id: "embed-v4", label: "embed-v4 (Cohere)" },
-  { id: "mxbai-embed-large", label: "mxbai-embed-large (local)" },
-  { id: "bge-m3", label: "bge-m3 (local)" },
-];
+// Deriving the tier from the config's llmModel keeps every cascade inside one
+// provider and one key, which is the invariant the ledger and the error handling
+// both assume.
+export const CHEAP_MODEL: Record<LlmProviderId, string> = {
+  anthropic: "claude-haiku-4-5",
+  openai: "gpt-5.6-luna",
+};
+
+// The cheap tier for a config whose strong tier is `llmModel`. Throws on a model
+// id with no recognisable provider prefix — the same id would fail at the
+// generation call a moment later, so failing here names the actual problem.
+export function cheapModelFor(llmModel: string): string {
+  return CHEAP_MODEL[llmProviderOf(llmModel)];
+}
 
 // False-positive detector threshold (eval-autotuning-plan §7): a question that
 // MISSED recall but whose graded nDCG is at least this high is likely a victim
@@ -204,9 +207,10 @@ export const HIGH_NDCG = 0.7;
 // CHEAPEST FIRST, as an explicit ordered list (no cost field exists in the
 // registry to derive it from). Free local models lead (slower but $0), then
 // Voyage from lite upward, then keyed providers last. The engine filters out
-// the config's base model and any provider whose enabling env var is unset
-// (isProviderAvailable — keys for API providers, LOCAL_EMBEDDINGS for local),
-// so entries here are candidates, not guarantees.
+// the config's base model and any provider the RUNNING USER has no key for
+// (availableProviders() — a saved key for the API providers, LOCAL_EMBEDDINGS
+// for local), so entries here are candidates, not guarantees, and the same
+// ladder yields a different run for two users with different keys.
 // The domain-tuned Voyage models (code/finance/law) sit in the Voyage band at
 // their own price. Each is its own vector space, so unlike the voyage-4 family
 // an override under one costs a fusion lane at retrieval — the Settings

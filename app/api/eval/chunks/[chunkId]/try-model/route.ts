@@ -15,7 +15,7 @@
 // is a Promise in this Next.js version — await it.
 // ---------------------------------------------------------------------------
 import { z } from "zod";
-import { altEmbeddingModels } from "@/lib/config";
+import { EMBEDDING_MODELS } from "@/lib/rag/embeddingModels";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
 import {
@@ -25,7 +25,11 @@ import {
 } from "@/lib/rag/eval";
 import { deleteModelTrial } from "@/lib/rag/evalStore";
 
-const MODEL_ERROR = "`model` must be one of the offered alternate models.";
+// Registry membership only — a SCHEMA question, and the one a 400 is right for.
+// Whether the user holds that provider's key is a per-user, async, DB-backed
+// question that a zod refine can't ask; runModelTrial checks it and throws a
+// message naming the key to add.
+const MODEL_ERROR = "`model` must be a registered embedding model.";
 
 // "Try a different configuration": vary the model, the chunk's shape (uniform
 // size/overlap or custom sections), or both. At least one knob must be present;
@@ -34,7 +38,7 @@ const Body = z
   .object({
     model: z
       .string({ error: MODEL_ERROR })
-      .refine((m) => altEmbeddingModels.some((alt) => alt.id === m), {
+      .refine((m) => m in EMBEDDING_MODELS, {
         error: MODEL_ERROR,
       })
       .optional(),

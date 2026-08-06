@@ -14,7 +14,7 @@
 //   - Retrieval searches the whole model+dim chunks table (all docs/configs that
 //     share it); fine with today's single fixed config.
 // ---------------------------------------------------------------------------
-import { altEmbeddingModels } from "@/lib/config";
+import type { StreamErrorEvent } from "@/lib/http/missingKey";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import {
   addDifficulty,
@@ -22,7 +22,14 @@ import {
   getActiveCriteria,
   retrievalDepth,
 } from "@/lib/rag/evalSettingsStore";
-import { isProviderAvailable, modelSpec, sameVectorSpace } from "@/lib/rag/embeddingModels";
+import {
+  listTrialModelOptions,
+  modelSpec,
+  sameVectorSpace,
+  unavailableReason,
+  type TrialModelOption,
+} from "@/lib/rag/embeddingModels";
+import { availableProviders } from "@/lib/rag/providerAvailability";
 import {
   clearRetrievalChanges,
   listOverrides,
@@ -165,7 +172,10 @@ export type EvalEvent =
   // Savings preference routes question generation through the batch API: the
   // work was submitted, not run here — track it in the Batches panel.
   | { type: "batch-submitted"; jobId: string; requestCount: number }
-  | { type: "error"; message: string };
+  // The shared stream error shape — carries the missing-provider-key fields
+  // when that was the cause, so every stream reports it the same way the
+  // plain routes do. See lib/http/missingKey.ts.
+  | StreamErrorEvent;
 
 type Emit = (event: EvalEvent) => void;
 
@@ -1091,7 +1101,10 @@ export async function buildChunkWindow(
 // stored baseline), the auto pool (top-k union), and the rest of the corpus to
 // pick from — plus the models on offer and any saved trials for this chunk.
 export type ModelTrialContext = {
-  models: { id: string; label: string }[];
+  // Every registry model but the baseline, with the unkeyed ones greyed out —
+  // see listTrialModelOptions. Was a hand-maintained list in lib/config.ts,
+  // which is how the registry's newer models never reached this picker.
+  models: TrialModelOption[];
   baselineModel: string;
   k: number;
   chunk: { chunkId: string; fileName: string; position: number | null; text: string };
@@ -1169,7 +1182,7 @@ export async function getModelTrialContext(
   ]);
 
   return {
-    models: altEmbeddingModels,
+    models: listTrialModelOptions(await availableProviders(), activeConfig().embeddingModel),
     baselineModel: activeConfig().embeddingModel,
     k: activeConfig().topK,
     chunk: {
@@ -1207,7 +1220,7 @@ export async function setChunkModelOverride(
     return "unknown-model";
   }
   if (model === activeConfig().embeddingModel) return "is-base";
-  if (!isProviderAvailable(spec.provider)) return "unavailable";
+  if (!(await availableProviders()).has(spec.provider)) return "unavailable";
 
   const chunk = await getModelTrialChunk(chunkId);
   if (!chunk) return "not-found";
@@ -1276,7 +1289,7 @@ export async function setChunkSizeModelOverride(
   } catch {
     return "unknown-model";
   }
-  if (!isProviderAvailable(spec.provider)) return "unavailable";
+  if (!(await availableProviders()).has(spec.provider)) return "unavailable";
   if (!Number.isInteger(size) || size < 1 || overlap < 0 || overlap >= size) {
     return "invalid";
   }
@@ -1318,11 +1331,20 @@ export async function runModelTrial(
 ): Promise<{ result: ModelTrialResult; savedTrial: SavedModelTrial | null } | null> {
   const baselineModel = activeConfig().embeddingModel;
   const model = variation.kind === "size" ? baselineModel : variation.model;
-  if (
-    variation.kind !== "size" &&
-    !altEmbeddingModels.some((m) => m.id === model)
-  ) {
-    throw new Error(`Unknown model "${model}".`);
+  if (variation.kind !== "size") {
+    // Two separate failures with two separate fixes, so they get two messages:
+    // an id the registry has never heard of is a bad request, while a keyless
+    // provider is a keyed-model-away from working. The picker already greys the
+    // latter out — this is the guard for a hand-rolled request.
+    let spec;
+    try {
+      spec = modelSpec(model);
+    } catch {
+      throw new Error(`Unknown model "${model}".`);
+    }
+    if (!(await availableProviders()).has(spec.provider)) {
+      throw new Error(`Cannot try "${model}" — ${unavailableReason(spec.provider)}.`);
+    }
   }
 
   const t0 = performance.now();

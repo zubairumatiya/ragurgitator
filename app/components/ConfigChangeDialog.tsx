@@ -17,7 +17,7 @@
 import { useEffect, useState } from "react";
 import { apiFetch } from "@/lib/http/client";
 import type { EvalConfigInfo } from "@/lib/rag/evalStore";
-import type { BaseModelOption } from "@/lib/rag/embeddingModels";
+import { noteHeadline, type BaseModelOption } from "@/lib/rag/embeddingModels";
 import type { IngestEvent, IngestResult } from "@/lib/rag/pipeline";
 
 type Phase =
@@ -189,8 +189,14 @@ export function ConfigChangeDialog({
             className="rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700"
           >
             {models?.map((m) => (
-              <option key={m.id} value={m.id} disabled={!m.selectable && m.id !== config.baseModel}>
+              <option
+                key={m.id}
+                value={m.id}
+                disabled={!m.selectable && m.id !== config.baseModel}
+                title={m.note ?? undefined}
+              >
                 {m.label} ({m.dimension}d){m.id === config.baseModel ? " — current" : ""}
+                {m.note ? ` — ${noteHeadline(m.note)}` : ""}
                 {m.selectable ? "" : ` — ${m.reason}`}
               </option>
             ))}

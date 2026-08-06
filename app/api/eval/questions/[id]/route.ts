@@ -25,7 +25,10 @@ export async function PATCH(
 
   return withRequestConfig(request, async () => {
     try {
-      await updateQuestion(id, body.data.question);
+      const updated = await updateQuestion(id, body.data.question);
+      if (!updated) {
+        return Response.json({ error: "Question not found." }, { status: 404 });
+      }
       return Response.json({ ok: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Update failed.";
@@ -41,7 +44,10 @@ export async function DELETE(
   const { id } = await params;
   return withRequestConfig(request, async () => {
     try {
-      await deleteQuestion(id);
+      const deleted = await deleteQuestion(id);
+      if (!deleted) {
+        return Response.json({ error: "Question not found." }, { status: 404 });
+      }
       return Response.json({ ok: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Delete failed.";

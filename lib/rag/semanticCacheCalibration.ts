@@ -15,6 +15,7 @@
 // Best-effort against missing tables (42P01), like the rest of the cache.
 // ---------------------------------------------------------------------------
 import { config } from "@/lib/config";
+import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { getBatchSavings } from "@/lib/rag/batchStore";
@@ -44,6 +45,17 @@ async function safe<T>(fn: () => Promise<T[]>, fallback: T[]): Promise<T[]> {
 }
 
 // --- A. Collision floor (config-scoped) ------------------------------------
+
+
+// Ownership fragment (0049). semantic_cache_shadow and semantic_cache both carry
+// config_id, so "my rows" is exactly "rows under a config I own". These reads
+// return real user content — new_query / matched_query / served_answer are a
+// user's questions and the answers served to them — so an unscoped read here is
+// a content leak, not merely a stats leak. The thresholds table is the one piece
+// of this subsystem that CANNOT be scoped this way: it is keyed by (space) alone
+// and needs migration 0047 in Phase 5.
+const ownedConfigs = () =>
+  sql`config_id in (select id from configs where user_id = ${activeUserId()})`;
 
 export type CollisionFloorReport = CollisionFloorResult & {
   space: string;
@@ -176,14 +188,14 @@ export async function listThresholdsWithStats(): Promise<ThresholdReport[]> {
                  count(*)::int as entries,
                  coalesce(sum(hit_count), 0)::int as hits,
                  max(last_hit_at) as last_hit
-          from semantic_cache group by embedding_model`,
+          from semantic_cache where ${ownedConfigs()} group by embedding_model`,
       [] as { embedding_model: string; entries: number; hits: number; last_hit: Date | null }[],
     ),
     safe(
       () =>
         sql<{ space: string; total: number; judged: number }[]>`
           select space, count(*)::int as total, count(verdict)::int as judged
-          from semantic_cache_shadow group by space`,
+          from semantic_cache_shadow where ${ownedConfigs()} group by space`,
       [] as { space: string; total: number; judged: number }[],
     ),
   ]);
@@ -250,6 +262,7 @@ export async function listShadowSpaces(): Promise<ShadowSpace[]> {
                min(sim)::float as "minSim",
                max(sim)::float as "maxSim"
         from semantic_cache_shadow
+        where ${ownedConfigs()}
         group by space
         order by total desc`,
     [],
@@ -302,7 +315,7 @@ export async function listShadowEvents(opts: {
         select id, new_query, matched_query, served_answer, sim,
                verdict, judge_source, judge_model, judge_reason, created_at
         from semantic_cache_shadow
-        where space = ${opts.space} ${filterCond}
+        where space = ${opts.space} and ${ownedConfigs()} ${filterCond}
         order by sim desc
         limit ${limit}`,
       [],
@@ -443,6 +456,7 @@ async function runJudgePass(opts: {
         select id, new_query, served_answer
         from semantic_cache_shadow
         where space = ${opts.space}
+          and ${ownedConfigs()}
           and sim >= ${simMin} and sim <= ${simMax}
           and ${target}
         order by sim desc
@@ -470,7 +484,7 @@ async function runJudgePass(opts: {
       update semantic_cache_shadow
       set verdict = ${out.verdict}, judge_source = 'llm', judge_model = ${opts.model},
           judge_reason = ${out.reason}, judged_at = now()
-      where id = ${row.id}`;
+      where id = ${row.id} and ${ownedConfigs()}`;
     if (out.verdict === "accept") accepted++;
     else rejected++;
   }
@@ -483,11 +497,16 @@ export async function setHumanVerdict(
   id: string,
   verdict: "accept" | "reject",
 ): Promise<void> {
+  // The id comes straight from the request body, so without the ownership
+  // predicate a guessed uuid writes a verdict onto another account's shadow
+  // event — and shadow verdicts are what calibration derives a threshold from,
+  // so this is a write that can end up making someone else's cache serve wrong
+  // answers.
   await sql`
     update semantic_cache_shadow
     set verdict = ${verdict}, judge_source = 'human', judge_model = null,
         judge_reason = null, judged_at = now()
-    where id = ${id}`;
+    where id = ${id} and ${ownedConfigs()}`;
 }
 
 export type CalibrationReport = CalibrationResult & {
@@ -512,7 +531,7 @@ export async function calibrationCurve(
     () =>
       sql<{ sim: number; verdict: "accept" | "reject" }[]>`
         select sim, verdict from semantic_cache_shadow
-        where space = ${space} and verdict is not null`,
+        where space = ${space} and ${ownedConfigs()} and verdict is not null`,
       [],
   );
   const result = calibrateFromJudged(

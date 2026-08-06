@@ -12,6 +12,7 @@
 // candidates, exactly as a per-question "Re-rank top-k" would. Streams progress
 // as NDJSON (one EvalEvent per line). Body: { documentIds? }.
 // ---------------------------------------------------------------------------
+import { streamError } from "@/lib/http/missingKeyServer";
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
@@ -37,9 +38,7 @@ export async function POST(request: Request) {
       try {
         await bulkBuildLlmRankings(send, documentIds);
       } catch (err) {
-        const message =
-          err instanceof Error ? err.message : "Bulk LLM nDCG ranking failed.";
-        send({ type: "error", message });
+        send(streamError(err, "Bulk LLM nDCG ranking failed."));
       }
     }),
   );

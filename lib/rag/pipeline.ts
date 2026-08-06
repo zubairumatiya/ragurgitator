@@ -13,7 +13,8 @@
 // ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
 
-import { config } from "@/lib/config";
+import { cheapModelFor, config } from "@/lib/config";
+import type { StreamErrorEvent } from "@/lib/http/missingKey";
 import { activeConfig, resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";
 import {
@@ -133,7 +134,10 @@ export type IngestEvent =
   | { type: "step"; index: number; fileName: string; step: IngestStep }
   | { type: "file-done"; index: number; result: IngestResult }
   | { type: "done"; results: IngestResult[] }
-  | { type: "error"; message: string };
+  // The shared stream error shape — carries the missing-provider-key fields
+  // when that was the cause, so every stream reports it the same way the
+  // plain routes do. See lib/http/missingKey.ts.
+  | StreamErrorEvent;
 
 type Emit = (event: IngestEvent) => void;
 
@@ -438,7 +442,9 @@ async function answerWithCascade(
     };
   }
 
-  const cheapModel = config.cascade.cheapModel;
+  // Derived from the strong tier so the cascade never crosses providers — one
+  // provider, one key, one rate card for both legs (lib/config.cheapModelFor).
+  const cheapModel = cheapModelFor(strongModel);
 
   // AXIS 1 (rung 1, PRE-generation): weak retrieval is a context bottleneck a
   // stronger model can't fix, so when it fails we answer once with the cheap

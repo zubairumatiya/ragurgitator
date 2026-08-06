@@ -12,6 +12,7 @@ import { AppraiseNav } from "@/app/components/AppraiseNav";
 import { BackToConfigs } from "@/app/components/BackToConfigs";
 import CostsSection from "@/app/components/CostsSection";
 import { CostsConfigPicker } from "@/app/components/CostsConfigPicker";
+import { withPageUser } from "@/lib/auth/dal";
 import { listClosedConfigs, listConfigs } from "@/lib/rag/configStore";
 import { getCostsReport } from "@/lib/rag/savingsStore";
 
@@ -25,13 +26,17 @@ export default async function AppraiseCostsPage({
   const raw = (await searchParams).configId;
   const requested = Array.isArray(raw) ? raw[0] : raw;
 
-  const [open, closed] = await Promise.all([listConfigs(), listClosedConfigs()]);
-  const configs = [...open, ...closed];
+  const { configs, configId, report } = await withPageUser(async () => {
+    const [open, closed] = await Promise.all([listConfigs(), listClosedConfigs()]);
+    const configs = [...open, ...closed];
 
-  // An unknown id (deleted config, hand-typed URL) falls back to the
-  // account-wide view instead of rendering a confusingly empty report.
-  const configId = configs.some((c) => c.id === requested) ? requested! : "";
-  const report = await getCostsReport(configId || null);
+    // An unknown id (deleted config, hand-typed URL) falls back to the
+    // account-wide view instead of rendering a confusingly empty report. Since
+    // both lists are owner-scoped, this membership test doubles as the
+    // authorization check — another user's configId is simply "unknown" here.
+    const configId = configs.some((c) => c.id === requested) ? requested! : "";
+    return { configs, configId, report: await getCostsReport(configId || null) };
+  });
 
   return (
     <div className="flex flex-1 flex-col items-center bg-zinc-50 font-sans dark:bg-black">

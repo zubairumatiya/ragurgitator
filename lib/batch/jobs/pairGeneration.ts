@@ -1,5 +1,6 @@
 // ---------------------------------------------------------------------------
-// BATCH JOB: cache_pair_generation (Anthropic).
+// BATCH JOB: cache_pair_generation — routed by keyModelSweep.generateModel's own
+// provider, which is an Anthropic id today.
 //
 // Synthesizes the generated half of the cache-key eval pair set — one
 // independent request per eval question, so the whole bank goes out at once at
@@ -24,7 +25,8 @@ import {
   parsePairs,
   questionsNeedingPairs,
 } from "@/lib/rag/semanticCachePairs";
-import { bankAnthropicBatchSaving } from "@/lib/batch/savings";
+import { bankLlmBatchSaving } from "@/lib/batch/savings";
+import { llmProviderOf } from "@/lib/llm/llmModels";
 import type { BatchResultRow } from "@/lib/batch/types";
 import type { BuiltBatch, JobHandler } from "@/lib/batch/jobs/registry";
 
@@ -41,8 +43,6 @@ type MessageBody = { content: Array<{ type: string; text?: string }>; stop_reaso
 const BATCH_MAX_QUESTIONS = 5000;
 
 export const pairGenerationHandler: JobHandler = {
-  provider: "anthropic",
-
   async build(scope) {
     const { limit } = (scope ?? {}) as PairGenScope;
     const gaps = await questionsNeedingPairs(Math.min(limit ?? BATCH_MAX_QUESTIONS, BATCH_MAX_QUESTIONS));
@@ -63,6 +63,12 @@ export const pairGenerationHandler: JobHandler = {
     }));
     return {
       requests,
+      // NOT the config's llmModel — this job runs on its own global
+      // generateModel (above), and the whole point of having build() name the
+      // provider is that this difference can't be lost at the call site. An
+      // Anthropic id today, so an Anthropic batch; changing that setting to a
+      // gpt-* id is all it would take to move this leg, with no other edit.
+      provider: llmProviderOf(model),
       input: { generatedBy: model, origins } satisfies PairGenInput,
       submitMeta: {},
     } satisfies BuiltBatch;
@@ -82,7 +88,7 @@ export const pairGenerationHandler: JobHandler = {
       if (pairs.length === 0) continue;
       applied += await insertPairs(origin.questionId, pairs, generatedBy);
     }
-    bankAnthropicBatchSaving(results);
+    bankLlmBatchSaving(results);
     return applied;
   },
 };

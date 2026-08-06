@@ -4,20 +4,28 @@
 // handler's apply(), which runs inside the job's config scope — so recordSaving
 // picks up the right config with no explicit id.
 //
-// Each provider's saving is priced where its token counts actually live:
-//   • Anthropic — the result bodies carry real per-request `usage`, so sum it.
-//   • Voyage    — result rows carry only embedding vectors (no usage), so price
-//                 the −33% from the embedded texts (char/4), like embed_cache.
+// Each leg's saving is priced where its token counts actually live:
+//   • LLM    — the result bodies carry real per-request `usage`, so sum it.
+//   • Voyage — result rows carry only embedding vectors (no usage), so price
+//              the −33% from the embedded texts (char/4), like embed_cache.
 // Both are fire-and-forget; savingsStore swallows a missing table / any error.
 // ---------------------------------------------------------------------------
 import { BATCH_DISCOUNT, costEmbed, costLlm, estimateTokensAll } from "@/lib/rag/pricing";
+import { llmProviderOf } from "@/lib/llm/llmModels";
 import { recordSaving } from "@/lib/rag/savingsStore";
 import type { BatchResultRow } from "@/lib/batch/types";
 
-// Anthropic-leg (question generation, cluster labeling, …). Sums the real usage
-// across every succeeded result — the batch paid for all of them, so all of them
-// saved −50% vs. standard price. Model comes from the result body.
-export function bankAnthropicBatchSaving(results: BatchResultRow[]): void {
+// LLM leg (question generation, cluster labeling, cache pairs) — either provider.
+// Sums the real usage across every succeeded result: the batch paid for all of
+// them, so all of them saved vs. standard price.
+//
+// MODEL AND RATE BOTH COME FROM THE RESULT BODY, not the caller. The OpenAI
+// adapter translates its ChatCompletions back into the same Anthropic Message
+// shape (lib/llm/openaiChat.ts), so `usage` and `model` are read identically on
+// both legs, and the discount is looked up from the model's own provider rather
+// than assumed. Today both are 0.5, which is exactly why hardcoding one would go
+// unnoticed until a provider changed its batch price.
+export function bankLlmBatchSaving(results: BatchResultRow[]): void {
   let inTok = 0;
   let outTok = 0;
   let model = "";
@@ -31,7 +39,17 @@ export function bankAnthropicBatchSaving(results: BatchResultRow[]): void {
     if (b.model) model = b.model;
   }
   if (!model || inTok + outTok === 0) return;
-  const saved = costLlm(model, inTok, outTok) * BATCH_DISCOUNT.anthropic;
+  // A provider echoes back its own resolved id, which llmProviderOf answers for
+  // by prefix even when it is a dated variant the registry doesn't list. An
+  // unrecognised one would throw here, inside a fire-and-forget accounting call
+  // that must never fail an applied batch — so it degrades to banking nothing.
+  let discount: number;
+  try {
+    discount = BATCH_DISCOUNT[llmProviderOf(model)];
+  } catch {
+    return;
+  }
+  const saved = costLlm(model, inTok, outTok) * discount;
   void recordSaving("batch", saved, inTok + outTok);
 }
 

@@ -48,6 +48,7 @@ import {
 import { KeyModelPanel } from "@/app/components/semanticCache/KeyModelPanel";
 import { ShadowJudgePanel } from "@/app/components/semanticCache/ShadowJudgePanel";
 import { ThresholdsPanel } from "@/app/components/semanticCache/ThresholdsPanel";
+import { withPageUser } from "@/lib/auth/dal";
 import { resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { readCollisionFloorState } from "@/lib/rag/collisionFloorStore";
 import { listClosedConfigs, listConfigs } from "@/lib/rag/configStore";
@@ -80,11 +81,13 @@ async function preloadFirstFloor(
 }
 
 export default async function SemanticCachePage() {
-  // Same list, in the same order, the panel's picker used to fetch for itself:
-  // open tabs then closed ones.
-  const [open, closed] = await Promise.all([listConfigs(), listClosedConfigs()]);
-  const configs = [...open, ...closed];
-  const preload = await preloadFirstFloor(configs[0]?.id);
+  const { configs, preload } = await withPageUser(async () => {
+    // Same list, in the same order, the panel's picker used to fetch for itself:
+    // open tabs then closed ones.
+    const [open, closed] = await Promise.all([listConfigs(), listClosedConfigs()]);
+    const configs = [...open, ...closed];
+    return { configs, preload: await preloadFirstFloor(configs[0]?.id) };
+  });
 
   return (
     <div className="flex flex-1 flex-col items-center bg-zinc-50 font-sans dark:bg-black">

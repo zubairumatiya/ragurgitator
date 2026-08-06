@@ -8,7 +8,16 @@
 // runs. A config may point at a corpus (configs.corpus_id, nullable) and opt
 // into auto-sync (configs.corpus_sync) so membership changes flow both ways.
 // Deleting a corpus never touches configs — the FK sets their pointer null.
+//
+// OWNERSHIP (0049): corpora and documents are both user-owned roots, so every
+// statement here filters on `user_id = ${activeUserId()}`. The membership table
+// `corpus_documents` carries no user_id of its own — it reaches an owner through
+// BOTH sides, so joins against it constrain the corpus and the document
+// separately. That matters: without the document-side predicate, adding a
+// document id you don't own to a corpus you do own would smuggle it into your
+// corpus.
 // ---------------------------------------------------------------------------
+import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { isUuid } from "@/lib/rag/activeConfig";
 
@@ -17,8 +26,8 @@ import { isUuid } from "@/lib/rag/activeConfig";
 // (rename/list/membership management) lands with the corpus UI in Phase 3.
 export async function createCorpus(name: string): Promise<string> {
   const rows = await sql<{ id: string }[]>`
-    insert into corpora (name)
-    values (${name})
+    insert into corpora (user_id, name)
+    values (${activeUserId()}, ${name})
     returning id
   `;
   return rows[0].id;
@@ -30,9 +39,15 @@ export async function addDocumentToCorpus(
   corpusId: string,
   documentId: string,
 ): Promise<void> {
+  // The select-driven insert is what enforces ownership on BOTH ends: it
+  // produces zero rows (a silent no-op, same as the idempotent re-add) unless the
+  // caller owns the corpus AND the document.
   await sql`
     insert into corpus_documents (corpus_id, document_id)
-    values (${corpusId}, ${documentId})
+    select co.id, d.id
+    from corpora co, documents d
+    where co.id = ${corpusId} and co.user_id = ${activeUserId()}
+      and d.id = ${documentId} and d.user_id = ${activeUserId()}
     on conflict (corpus_id, document_id) do nothing
   `;
 }
@@ -80,11 +95,13 @@ export async function listCorpora(
       co.name,
       count(cd.document_id)::int as doc_count,
       count(cd.document_id) filter (where d.content is not null)::int as embeddable_count,
-      (select count(*)::int from configs cf where cf.corpus_id = co.id) as config_count,
+      (select count(*)::int from configs cf
+        where cf.corpus_id = co.id and cf.user_id = ${activeUserId()}) as config_count,
       co.created_at
     from corpora co
     left join corpus_documents cd on cd.corpus_id = co.id
     left join documents d on d.id = cd.document_id
+    where co.user_id = ${activeUserId()}
     group by co.id, co.name, co.created_at
     having (count(cd.document_id) > 0 or ${includeEmpty})
     order by co.created_at
@@ -105,7 +122,9 @@ export type Corpus = { id: string; name: string; createdAt: number };
 export async function getCorpus(id: string): Promise<Corpus | null> {
   if (!isUuid(id)) return null;
   const rows = await sql<{ id: string; name: string; created_at: Date }[]>`
-    select id, name, created_at from corpora where id = ${id} limit 1
+    select id, name, created_at from corpora
+    where id = ${id} and user_id = ${activeUserId()}
+    limit 1
   `;
   if (rows.length === 0) return null;
   return { id: rows[0].id, name: rows[0].name, createdAt: rows[0].created_at.getTime() };
@@ -131,7 +150,10 @@ export async function listCorpusDocuments(corpusId: string): Promise<CorpusDocum
            cd.added_at
     from corpus_documents cd
     join documents d on d.id = cd.document_id
+    join corpora co on co.id = cd.corpus_id
     where cd.corpus_id = ${corpusId}
+      and co.user_id = ${activeUserId()}
+      and d.user_id = ${activeUserId()}
     order by cd.added_at desc
   `;
   return rows.map((r) => ({
@@ -152,10 +174,11 @@ export async function listDocumentsNotInCorpus(corpusId: string): Promise<Corpus
     select d.id, d.file_name, d.content_hash, (d.content is not null) as has_content,
            d.created_at
     from documents d
-    where not exists (
-      select 1 from corpus_documents cd
-      where cd.corpus_id = ${corpusId} and cd.document_id = d.id
-    )
+    where d.user_id = ${activeUserId()}
+      and not exists (
+        select 1 from corpus_documents cd
+        where cd.corpus_id = ${corpusId} and cd.document_id = d.id
+      )
     order by d.created_at desc
   `;
   return rows.map((r) => ({
@@ -175,9 +198,11 @@ export async function removeDocumentFromCorpus(
   documentId: string,
 ): Promise<boolean> {
   const rows = await sql`
-    delete from corpus_documents
-    where corpus_id = ${corpusId} and document_id = ${documentId}
-    returning document_id
+    delete from corpus_documents cd
+    using corpora co
+    where co.id = cd.corpus_id and co.user_id = ${activeUserId()}
+      and cd.corpus_id = ${corpusId} and cd.document_id = ${documentId}
+    returning cd.document_id
   `;
   return rows.length > 0;
 }
@@ -187,7 +212,9 @@ export async function removeDocumentFromCorpus(
 // embedded documents remain. Returns false when no row matched.
 export async function deleteCorpus(id: string): Promise<boolean> {
   const rows = await sql`
-    delete from corpora where id = ${id} returning id
+    delete from corpora
+    where id = ${id} and user_id = ${activeUserId()}
+    returning id
   `;
   return rows.length > 0;
 }
@@ -216,7 +243,7 @@ export async function listCorpusConfigs(corpusId: string): Promise<CorpusConfig[
   >`
     select id, name, base_model, chunk_size, chunk_overlap, corpus_sync, is_open
     from configs
-    where corpus_id = ${corpusId}
+    where corpus_id = ${corpusId} and user_id = ${activeUserId()}
     order by created_at
   `;
   return rows.map((r) => ({
@@ -247,7 +274,10 @@ export async function dedupCorporaDocuments(corpusIds: string[]): Promise<Dedupe
            d.created_at
     from corpus_documents cd
     join documents d on d.id = cd.document_id
+    join corpora co on co.id = cd.corpus_id
     where cd.corpus_id = any(${corpusIds}::uuid[])
+      and co.user_id = ${activeUserId()}
+      and d.user_id = ${activeUserId()}
     order by d.id
   `;
   type DocRow = {
@@ -303,7 +333,10 @@ export async function corpusDocumentsForEmbedding(
     select d.id, d.file_name, d.content
     from corpus_documents cd
     join documents d on d.id = cd.document_id
+    join corpora co on co.id = cd.corpus_id
     where cd.corpus_id = ${corpusId}
+      and co.user_id = ${activeUserId()}
+      and d.user_id = ${activeUserId()}
       and d.content is not null
     order by d.created_at
   `;
@@ -318,6 +351,7 @@ export async function documentsForEmbedding(docIds: string[]): Promise<Embeddabl
     select d.id, d.file_name, d.content
     from documents d
     where d.id = any(${docIds}::uuid[])
+      and d.user_id = ${activeUserId()}
       and d.content is not null
     order by d.created_at
   `;

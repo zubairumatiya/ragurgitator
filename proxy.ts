@@ -19,7 +19,7 @@
 // ---------------------------------------------------------------------------
 import { NextResponse, type NextRequest } from "next/server";
 
-import { proxySupabase, supabaseConfigured } from "@/lib/auth/supabase";
+import { proxySupabase } from "@/lib/auth/supabase";
 
 // Reachable without a session. Everything else redirects.
 const PUBLIC_PREFIXES = ["/login", "/signup", "/auth"];
@@ -27,15 +27,11 @@ const PUBLIC_PREFIXES = ["/login", "/signup", "/auth"];
 const isPublic = (path: string) => PUBLIC_PREFIXES.some((p) => path.startsWith(p));
 
 export async function proxy(request: NextRequest) {
-  // Supabase not configured (no env vars yet, or a variable missing from a
-  // deploy): pass every request through untouched, exactly as the app behaved
-  // before auth existed. Auth switches itself on the moment the keys appear.
-  //
-  // The alternative is what this replaced — a throw here 500s EVERY route,
-  // including ones that never needed a session, so one missing variable takes
-  // the whole site down instead of just disabling sign-in.
-  if (!supabaseConfigured()) return NextResponse.next({ request });
-
+  // NOTE: Supabase config is assumed present. A missing NEXT_PUBLIC_SUPABASE_*
+  // variable now throws from config() and 500s every route, because this runs on
+  // all of them. That is deliberate — auth is no longer optional, so a deploy
+  // without it should fail loudly rather than silently serving an app with the
+  // login wall switched off.
   let response = NextResponse.next({ request });
 
   // Supabase hands back rotated cookies through setAll. They must be written to

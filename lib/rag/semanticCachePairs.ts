@@ -22,6 +22,7 @@ import { createHash } from "node:crypto";
 import type Anthropic from "@anthropic-ai/sdk";
 
 import { config } from "@/lib/config";
+import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { meteredMessage } from "@/lib/rag/meter";
@@ -232,7 +233,13 @@ export async function listPairs(): Promise<EvalPair[]> {
   try {
     const rows = await sql<
       { text_a: string; text_b: string; label: PairLabel; difficulty: PairDifficulty }[]
-    >`select text_a, text_b, label, difficulty from semantic_cache_pairs`;
+    >`
+      select p.text_a, p.text_b, p.label, p.difficulty
+      from semantic_cache_pairs p
+      join eval_questions q on q.id = p.origin_question_id
+      join documents d on d.id = q.document_id
+      where d.user_id = ${activeUserId()}
+    `;
     return rows.map((r) => ({
       textA: r.text_a,
       textB: r.text_b,
@@ -268,10 +275,13 @@ export async function pairStats(): Promise<PairStats> {
       { total: number; same: number; different: number; covered: number }[]
     >`
       select count(*)::int as total,
-             count(*) filter (where label = 'same')::int as same,
-             count(*) filter (where label = 'different')::int as different,
-             count(distinct origin_question_id)::int as covered
-      from semantic_cache_pairs
+             count(*) filter (where p.label = 'same')::int as same,
+             count(*) filter (where p.label = 'different')::int as different,
+             count(distinct p.origin_question_id)::int as covered
+      from semantic_cache_pairs p
+      join eval_questions q on q.id = p.origin_question_id
+      join documents d on d.id = q.document_id
+      where d.user_id = ${activeUserId()}
     `;
     const remaining = (await questionsNeedingPairs(10_000)).length;
     return {

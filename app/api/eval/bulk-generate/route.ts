@@ -8,6 +8,7 @@
 // bar. Body: { counts: { easy?: n, medium?: n, hard?: n } }, or the legacy
 // { difficulty: 'easy'|'medium'|'hard' } (one question per chunk).
 // ---------------------------------------------------------------------------
+import { streamError } from "@/lib/http/missingKeyServer";
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
@@ -22,7 +23,7 @@ import { activeConfig } from "@/lib/rag/activeConfig";
 import { getConfig } from "@/lib/rag/configStore";
 import { addDifficulty } from "@/lib/rag/evalSettingsStore";
 import { getActiveBatchSavings } from "@/lib/rag/batchStore";
-import { isBatchEnabled, providerOfKind } from "@/lib/batch/types";
+import { isBatchEnabled } from "@/lib/batch/types";
 import { handlerFor } from "@/lib/batch/jobs/registry";
 import { submitBatch } from "@/lib/batch/orchestrator";
 
@@ -101,7 +102,7 @@ export async function POST(request: Request) {
           const cfg = await getConfig(activeConfig().id);
           const job = await submitBatch({
             kind: "question_generation",
-            provider: providerOfKind("question_generation"),
+            provider: built.provider,
             configId: activeConfig().id,
             configLabel: cfg?.label ?? "—",
             requests: built.requests,
@@ -114,8 +115,7 @@ export async function POST(request: Request) {
 
         await bulkAddDifficulties(targets, send, documentIds);
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Bulk generation failed.";
-        send({ type: "error", message });
+        send(streamError(err, "Bulk generation failed."));
       }
     }),
   );

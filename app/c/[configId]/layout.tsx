@@ -19,6 +19,7 @@ import { notFound } from "next/navigation";
 import { RememberConfigRoute } from "@/app/components/BackToConfigs";
 import { ConfigTabs } from "@/app/components/ConfigTabs";
 import { Nav } from "@/app/components/Nav";
+import { withPageUser } from "@/lib/auth/dal";
 import { getConfig, listClosedConfigs, listConfigs } from "@/lib/rag/configStore";
 
 export default async function ConfigLayout({
@@ -29,11 +30,17 @@ export default async function ConfigLayout({
   params: Promise<{ configId: string }>;
 }) {
   const { configId } = await params;
-  const [active, open, closed] = await Promise.all([
-    getConfig(configId),
-    listConfigs(),
-    listClosedConfigs(),
-  ]);
+  // All three reads are owner-scoped, so a config id belonging to another
+  // account 404s exactly like a deleted one — no shell, no tab bar, no leak of
+  // the config's name through the banner.
+  const { active, open, closed } = await withPageUser(async () => {
+    const [active, open, closed] = await Promise.all([
+      getConfig(configId),
+      listConfigs(),
+      listClosedConfigs(),
+    ]);
+    return { active, open, closed };
+  });
   if (!active) notFound();
 
   return (

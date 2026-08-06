@@ -10,8 +10,18 @@ export default async function LoginPage({
   searchParams,
 }: {
   // Async in Next 16 — searchParams is a Promise.
-  searchParams: Promise<{ next?: string; error?: string }>;
+  searchParams: Promise<{ next?: string; error?: string; deleted?: string }>;
 }) {
-  const { next, error } = await searchParams;
-  return <AuthForm mode="signin" action={signIn} next={next} initialError={error} />;
+  const { next, error, deleted } = await searchParams;
+  return (
+    <AuthForm
+      mode="signin"
+      action={signIn}
+      next={next}
+      initialError={error}
+      // Set by deleteAccount() on its way out, so the last thing a departing
+      // user sees confirms the deletion actually happened.
+      initialNotice={deleted ? "Your account and all of its keys have been deleted." : undefined}
+    />
+  );
 }

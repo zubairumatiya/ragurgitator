@@ -12,7 +12,15 @@
 //
 // Unlike the other stores, these functions take explicit ids (the config being
 // acted on is named by the caller / URL) rather than reading activeConfig().
+//
+// OWNERSHIP (0049): because the id comes from the caller, every statement here
+// is a potential IDOR — an id from a URL must never be trusted on its own. So
+// every read, update and delete carries `user_id = ${activeUserId()}`, and every
+// insert stamps it. A scoped-out id therefore behaves exactly like a deleted
+// one: reads return null, mutations match 0 rows and return false/null, and the
+// routes turn both into the same 404.
 // ---------------------------------------------------------------------------
+import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { config } from "@/lib/config";
 import { isUuid } from "@/lib/rag/activeConfig";
@@ -91,7 +99,7 @@ export async function listConfigs(): Promise<ConfigSummary[]> {
            c.tab_order, c.created_at
     from configs c
     left join corpora co on co.id = c.corpus_id
-    where c.is_open = true
+    where c.is_open = true and c.user_id = ${activeUserId()}
     order by c.tab_order, c.created_at
   `;
   return rows.map(toSummary);
@@ -105,7 +113,7 @@ export async function listClosedConfigs(): Promise<ConfigSummary[]> {
            c.tab_order, c.created_at
     from configs c
     left join corpora co on co.id = c.corpus_id
-    where c.is_open = false
+    where c.is_open = false and c.user_id = ${activeUserId()}
     order by c.created_at desc
   `;
   return rows.map(toSummary);
@@ -119,7 +127,7 @@ export async function getConfig(id: string): Promise<ConfigSummary | null> {
            c.tab_order, c.created_at
     from configs c
     left join corpora co on co.id = c.corpus_id
-    where c.id = ${id}
+    where c.id = ${id} and c.user_id = ${activeUserId()}
     limit 1
   `;
   return rows.length > 0 ? toSummary(rows[0]) : null;
@@ -129,13 +137,16 @@ export async function getConfig(id: string): Promise<ConfigSummary | null> {
 // (the UI always needs at least one tab to land on).
 export async function countOpenConfigs(): Promise<number> {
   const rows = await sql<{ n: number }[]>`
-    select count(*)::int as n from configs where is_open = true
+    select count(*)::int as n from configs
+    where is_open = true and user_id = ${activeUserId()}
   `;
   return rows[0].n;
 }
 
 export async function countConfigs(): Promise<number> {
-  const rows = await sql<{ n: number }[]>`select count(*)::int as n from configs`;
+  const rows = await sql<{ n: number }[]>`
+    select count(*)::int as n from configs where user_id = ${activeUserId()}
+  `;
   return rows[0].n;
 }
 
@@ -143,6 +154,7 @@ export async function countConfigs(): Promise<number> {
 async function nextTabOrder(): Promise<number> {
   const rows = await sql<{ next: number }[]>`
     select coalesce(max(tab_order), -1) + 1 as next from configs
+    where user_id = ${activeUserId()}
   `;
   return rows[0].next;
 }
@@ -165,12 +177,12 @@ export async function createConfig(input: NewConfigInput): Promise<ConfigSummary
   const tabOrder = await nextTabOrder();
   const rows = await sql<{ id: string }[]>`
     insert into configs
-      (corpus_id, corpus_sync, name, base_model, chunk_size, chunk_overlap, top_k,
-       llm_model, is_open, tab_order)
+      (user_id, corpus_id, corpus_sync, name, base_model, chunk_size, chunk_overlap,
+       top_k, llm_model, is_open, tab_order)
     values
-      (${input.corpusId}, ${input.corpusSync ?? false}, ${input.name ?? null},
-       ${input.baseModel}, ${input.chunkSize}, ${input.chunkOverlap}, ${input.topK},
-       ${input.llmModel}, true, ${tabOrder})
+      (${activeUserId()}, ${input.corpusId}, ${input.corpusSync ?? false},
+       ${input.name ?? null}, ${input.baseModel}, ${input.chunkSize},
+       ${input.chunkOverlap}, ${input.topK}, ${input.llmModel}, true, ${tabOrder})
     returning id
   `;
   const created = await getConfig(rows[0].id);
@@ -248,6 +260,7 @@ export async function listSyncedConfigIds(corpusId: string): Promise<string[]> {
   const rows = await sql<{ id: string }[]>`
     select id from configs
     where corpus_id = ${corpusId} and corpus_sync = true
+      and user_id = ${activeUserId()}
     order by created_at
   `;
   return rows.map((r) => r.id);
@@ -262,7 +275,7 @@ export async function setCorpusSync(
 ): Promise<ConfigSummary | null> {
   const rows = await sql`
     update configs set corpus_sync = ${sync}, updated_at = now()
-    where id = ${id}
+    where id = ${id} and user_id = ${activeUserId()}
     returning id
   `;
   return rows.length > 0 ? getConfig(id) : null;
@@ -278,10 +291,35 @@ export async function setCascadeEnabled(
   if (!isUuid(id)) return null;
   const rows = await sql`
     update configs set cascade_enabled = ${enabled}, updated_at = now()
-    where id = ${id}
+    where id = ${id} and user_id = ${activeUserId()}
     returning id
   `;
   return rows.length > 0 ? enabled : null;
+}
+
+// The ANSWER-GENERATION model for this config (docs/user-accounts-plan.md §9.2).
+// Written by the Settings dropdown's LLM picker; read on the hot path via
+// activeConfig().llmModel, which generateAnswer() already defaults to.
+//
+// Per-CONFIG rather than per-user (§9.0): configs are the A/B unit Appraise's
+// replay scoring keys off, so a user-level LLM toggle would silently override
+// every config's own choice and make each stored comparison mean something the
+// row no longer records. There is no provider column to keep in step either —
+// provider is derived from the id (llmProviderOf), so this one write is the
+// whole change.
+//
+// Deliberately NOT validated here: llmSpec() is the validator and it runs at the
+// route, so an unknown id is refused at the control that set it rather than
+// deep inside a later generation call. This layer stays a row update, like its
+// neighbours. Returns false when no row matched (missing, or another user's).
+export async function setLlmModel(id: string, model: string): Promise<boolean> {
+  if (!isUuid(id)) return false;
+  const rows = await sql`
+    update configs set llm_model = ${model}, updated_at = now()
+    where id = ${id} and user_id = ${activeUserId()}
+    returning id
+  `;
+  return rows.length > 0;
 }
 
 // Update a config's processing settings IN PLACE (the bulk-actions "change this
@@ -305,7 +343,7 @@ export async function updateConfigSettings(
         chunk_overlap = ${changes.chunkOverlap ?? current.chunkOverlap},
         top_k = ${changes.topK ?? current.topK},
         updated_at = now()
-    where id = ${id}
+    where id = ${id} and user_id = ${activeUserId()}
   `;
   return getConfig(id);
 }
@@ -315,7 +353,7 @@ export async function renameConfig(id: string, name: string): Promise<ConfigSumm
   const rows = await sql`
     update configs
     set name = ${trimmed || null}, updated_at = now()
-    where id = ${id}
+    where id = ${id} and user_id = ${activeUserId()}
     returning id
   `;
   return rows.length > 0 ? getConfig(id) : null;
@@ -326,7 +364,7 @@ export async function renameConfig(id: string, name: string): Promise<ConfigSumm
 export async function closeConfig(id: string): Promise<boolean> {
   const rows = await sql`
     update configs set is_open = false, updated_at = now()
-    where id = ${id}
+    where id = ${id} and user_id = ${activeUserId()}
     returning id
   `;
   return rows.length > 0;
@@ -337,7 +375,7 @@ export async function reopenConfig(id: string): Promise<boolean> {
   const tabOrder = await nextTabOrder();
   const rows = await sql`
     update configs set is_open = true, tab_order = ${tabOrder}, updated_at = now()
-    where id = ${id}
+    where id = ${id} and user_id = ${activeUserId()}
     returning id
   `;
   return rows.length > 0;
@@ -349,7 +387,7 @@ export async function reopenConfig(id: string): Promise<boolean> {
 export async function setTabOrder(id: string, tabOrder: number): Promise<boolean> {
   const rows = await sql`
     update configs set tab_order = ${tabOrder}, updated_at = now()
-    where id = ${id}
+    where id = ${id} and user_id = ${activeUserId()}
     returning id
   `;
   return rows.length > 0;
@@ -361,7 +399,7 @@ export async function setTabOrder(id: string, tabOrder: number): Promise<boolean
 // Returns false when no row matched.
 export async function deleteConfig(id: string): Promise<boolean> {
   const rows = await sql`
-    delete from configs where id = ${id} returning id
+    delete from configs where id = ${id} and user_id = ${activeUserId()} returning id
   `;
   return rows.length > 0;
 }
@@ -387,12 +425,12 @@ export async function duplicateConfig(id: string): Promise<ConfigSummary | null>
   const newId = await sql.begin(async (tx) => {
     const [created] = await tx<{ id: string }[]>`
       insert into configs
-        (corpus_id, corpus_sync, name, base_model, chunk_size, chunk_overlap, top_k,
-         llm_model, is_open, tab_order)
+        (user_id, corpus_id, corpus_sync, name, base_model, chunk_size, chunk_overlap,
+         top_k, llm_model, is_open, tab_order)
       values
-        (${source.corpusId}, ${source.corpusSync}, ${copyName}, ${source.baseModel},
-         ${source.chunkSize}, ${source.chunkOverlap}, ${source.topK}, ${source.llmModel},
-         true, ${tabOrder})
+        (${activeUserId()}, ${source.corpusId}, ${source.corpusSync}, ${copyName},
+         ${source.baseModel}, ${source.chunkSize}, ${source.chunkOverlap},
+         ${source.topK}, ${source.llmModel}, true, ${tabOrder})
       returning id
     `;
 

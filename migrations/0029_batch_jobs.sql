@@ -42,7 +42,7 @@ alter table configs
 
 create table batch_jobs (
   id                      uuid        primary key default gen_random_uuid(),
-  provider                text        not null,   -- 'anthropic' | 'voyage'
+  provider                text        not null,   -- 'anthropic' | 'openai' | 'voyage' (documentation, not a constraint)
   provider_batch_id       text,                   -- null until submit returns
   kind                    text        not null,   -- question_generation | ndcg_ranking | cluster_labeling | ingest_embedding
   config_id               uuid        references configs(id) on delete set null,

@@ -9,7 +9,14 @@
 // types) client code alike.
 // ---------------------------------------------------------------------------
 
-export type BatchProvider = "anthropic" | "voyage";
+// Which batch API a job is submitted to. NOT a per-kind fact: the two LLM
+// providers both serve a batch API, and which one a job goes to follows from the
+// MODEL its requests carry (docs/user-accounts-plan.md §9.1 — provider is derived
+// from the model id, never stored twice). That is why there is no
+// `providerOfKind(kind)` here any more: only the job's build() knows which model
+// it put in the requests, so build() names the provider — see BuiltBatch.provider
+// in lib/batch/jobs/registry.ts.
+export type BatchProvider = "anthropic" | "openai" | "voyage";
 
 // The offline surfaces that may run through a batch API (chat answers and live
 // query embeds are excluded by design — they're interactive; see the plan doc).
@@ -30,14 +37,14 @@ export const JOB_LABELS: Record<JobKind, string> = {
   cache_pair_generation: "Cache-key eval pairs",
 };
 
-// The two "settings" the user groups jobs into: the embedding leg (Voyage) is
-// just ingest_embedding; the LLM leg (Anthropic) is everything else.
+// The two "settings" the user groups jobs into: the embedding leg is just
+// ingest_embedding; the LLM leg is everything else. Deliberately still a
+// per-KIND fact even though the provider is not — the Settings dropdown groups
+// by "embedding vs answer generation", which stays true whichever vendor serves
+// either leg.
 export type BatchLeg = "embedding" | "llm";
 export function legOfKind(kind: JobKind): BatchLeg {
   return kind === "ingest_embedding" ? "embedding" : "llm";
-}
-export function providerOfKind(kind: JobKind): BatchProvider {
-  return kind === "ingest_embedding" ? "voyage" : "anthropic";
 }
 
 // --- the per-config preference (configs.batch_savings) ---------------------
@@ -250,12 +257,16 @@ export function isCancelable(status: BatchStatus): boolean {
 
 // --- provider I/O shapes ---------------------------------------------------
 
-// One request to submit. `params` is provider-specific (Anthropic
-// MessageCreateParams; Voyage embeddings body); the provider adapter shapes it.
+// One request to submit. `params` is an Anthropic MessageCreateParams for both
+// LLM providers (the OpenAI adapter translates it per JSONL line — see
+// lib/llm/openaiChat.ts) or a Voyage embeddings body; the adapter shapes it.
 export type BatchRequest = { customId: string; params: unknown };
 
-// A normalized result row, provider-agnostic. `body` is the Anthropic Message
-// or the Voyage embedding output; null on a non-success outcome.
+// A normalized result row, provider-agnostic. `body` is an Anthropic Message —
+// including on the OpenAI leg, whose ChatCompletion bodies are translated back
+// into that shape by the adapter, which is what lets every apply() handler read
+// `body.content[0].text` without knowing who served it — or the Voyage embedding
+// output; null on a non-success outcome.
 export type BatchResultRow = {
   customId: string;
   outcome: "succeeded" | "errored" | "canceled" | "expired";
@@ -269,8 +280,8 @@ export type ProviderStatus = {
   requestCount: number;
   succeededCount: number;
   erroredCount: number;
-  // Voyage exposes the results file id on the batch object; Anthropic streams
-  // results from a dedicated endpoint and leaves this null.
+  // Voyage and OpenAI expose the results file id on the batch object; Anthropic
+  // streams results from a dedicated endpoint and leaves this null.
   outputFileId: string | null;
 };
 

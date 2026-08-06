@@ -15,14 +15,20 @@
 // pricing.ts too, but nothing measures their quality, so they'd be a table of
 // prices with every metric dashed — they belong on the Costs tab, not here.
 // ---------------------------------------------------------------------------
+import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import {
   EMBEDDING_MODELS,
-  isProviderAvailable,
-  providerKeyEnv,
+  unavailableReason,
   type EmbeddingProviderId,
+  type ProviderAvailability,
 } from "@/lib/rag/embeddingModels";
-import { embedRate } from "@/lib/rag/pricing";
+import {
+  LLM_MODELS,
+  llmUnavailableReason,
+  type LlmProviderId,
+} from "@/lib/llm/llmModels";
+import { embedRate, llmRate } from "@/lib/rag/pricing";
 
 const isMissingTable = (err: unknown): boolean =>
   (err as { code?: string }).code === "42P01";
@@ -45,19 +51,20 @@ export type RateCardRow = {
   reason: string | null;
 };
 
-// Every registered model with price + availability. Server-only
-// (isProviderAvailable reads process.env). Sync — there's no IO here.
+// Every registered model with price + availability. Takes the resolved
+// availability set (see lib/rag/providerAvailability.ts) — under BYOK
+// "available" is a per-user fact, so the card renders differently per viewer.
 //
 // Unlike listBaseModelOptions this does NOT filter to ingestion candidates: the
 // alternate Voyage entries are exactly what the comparison table scores, so a
 // rate card that hid them would price the models you can't try and omit the
 // ones you can.
-export function listModelRateCard(): RateCardRow[] {
+export function listModelRateCard(availability: ProviderAvailability): RateCardRow[] {
   return Object.values(EMBEDDING_MODELS).map((spec) => {
     const rate = embedRate(spec.id);
-    const available = isProviderAvailable(spec.provider);
+    const available = availability.has(spec.provider);
     const reasons: string[] = [];
-    if (!available) reasons.push(`set ${providerKeyEnv(spec.provider)} to enable`);
+    if (!available) reasons.push(unavailableReason(spec.provider));
     if (!spec.ingestable) reasons.push("no vector table yet");
     return {
       id: spec.id,
@@ -70,6 +77,70 @@ export function listModelRateCard(): RateCardRow[] {
       reason: reasons.length > 0 ? reasons.join("; ") : null,
     };
   });
+}
+
+// --- 1b. the LLM rate card ---------------------------------------------------
+//
+// The generation side of the same question. Until now LLM_PRICES was priced in
+// the ledger but never SHOWN anywhere — you could see what a model had cost you
+// after the fact on Costs, but not what it would cost before you picked it.
+// With §9.2's picker offering eleven models across two providers, that gap is
+// the difference between an informed choice and a guess.
+//
+// Deliberately NOT merged with RateCardRow. An embedding model is priced on one
+// axis (per input token) and an LLM on two (input and output, at very different
+// rates), and it has no dimension while an LLM has a context window. A union row
+// would be half-null in both directions.
+
+export type LlmRateCardRow = {
+  id: string;
+  label: string;
+  provider: LlmProviderId;
+  contextTokens: number;
+  // Both null ⇒ render "—". Unlike the embedding card there is no `verified`
+  // flag to strip a rate (see llmRate); null here means the model is registered
+  // in llmModels but genuinely missing from LLM_PRICES, which is a bug worth
+  // seeing rather than hiding behind a plausible number.
+  inputPerM: number | null;
+  outputPerM: number | null;
+  note: string | null;
+  available: boolean; // the viewer holds a key for this provider
+  reason: string | null; // why not; null when available
+};
+
+// Every registered LLM with price + per-user availability, sorted ASCENDING BY
+// OUTPUT RATE. Output is the column that ranks the ladder honestly: at this
+// app's prompt sizes (a few thousand tokens of chunked context in, a short
+// answer out) generation spend is dominated by the output rate, so sorting on
+// input would put the cheap-to-prompt/expensive-to-answer models at the top and
+// misrepresent which one is actually cheap to run here.
+//
+// Ties break on input rate, then id, so the order is stable across renders
+// rather than depending on registry insertion order for the several models that
+// share an output rate.
+export function listLlmRateCard(availability: ProviderAvailability): LlmRateCardRow[] {
+  return Object.values(LLM_MODELS)
+    .map((spec) => {
+      const rate = llmRate(spec.id);
+      const available = availability.has(spec.provider);
+      return {
+        id: spec.id,
+        label: spec.label,
+        provider: spec.provider,
+        contextTokens: spec.contextTokens,
+        inputPerM: rate?.inputPerM ?? null,
+        outputPerM: rate?.outputPerM ?? null,
+        note: spec.note ?? null,
+        available,
+        reason: available ? null : llmUnavailableReason(spec.provider),
+      };
+    })
+    .sort(
+      (a, b) =>
+        (a.outputPerM ?? Infinity) - (b.outputPerM ?? Infinity) ||
+        (a.inputPerM ?? Infinity) - (b.inputPerM ?? Infinity) ||
+        a.id.localeCompare(b.id),
+    );
 }
 
 // --- 2. performance: moved ---
@@ -99,9 +170,10 @@ export function listModelRateCard(): RateCardRow[] {
 //
 // Best-effort like the rest of savingsStore: no 0034 tables → 0.
 export async function meteredEmbedTokens(configId?: string | null): Promise<number> {
+  const owned = sql`config_id in (select id from configs where user_id = ${activeUserId()})`;
   const scope = configId
-    ? sql`where surface = 'embed' and config_id = ${configId}`
-    : sql`where surface = 'embed'`;
+    ? sql`where surface = 'embed' and config_id = ${configId} and ${owned}`
+    : sql`where surface = 'embed' and ${owned}`;
   try {
     const [row] = await sql<{ tokens: string | null }[]>`
       select sum(tokens) as tokens from spend_totals ${scope}

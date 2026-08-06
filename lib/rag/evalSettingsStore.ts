@@ -10,6 +10,7 @@
 // The autotune.* fields are saved here now (the Settings dropdown edits them) but
 // aren't consumed until the Phase C engine lands.
 // ---------------------------------------------------------------------------
+import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";
 import type { Difficulty } from "@/lib/rag/eval";
@@ -137,7 +138,9 @@ const COLUMNS = sql`
 export async function getCriteria(configId: string): Promise<EvalCriteria | null> {
   if (!isUuid(configId)) return null;
   const rows = await sql<CriteriaRow[]>`
-    select ${COLUMNS} from configs where id = ${configId} limit 1
+    select ${COLUMNS} from configs
+    where id = ${configId} and user_id = ${activeUserId()}
+    limit 1
   `;
   return rows.length > 0 ? toCriteria(rows[0]) : null;
 }
@@ -204,7 +207,7 @@ export async function updateCriteria(
       autotune_fusion_pool = ${next.autotune.fusionPool},
       retrieval_fusion_pool = ${next.retrieval.fusionPool},
       updated_at          = now()
-    where id = ${configId}
+    where id = ${configId} and user_id = ${activeUserId()}
   `;
   // A live-pool change reshapes fusion ranks for every query — stamp + log it
   // so the stale badge can explain (no-op while the config has no overrides).

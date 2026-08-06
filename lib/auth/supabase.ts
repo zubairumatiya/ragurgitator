@@ -20,20 +20,6 @@ import { createBrowserClient, createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import type { NextRequest, NextResponse } from "next/server";
 
-// Is Supabase Auth wired up at all? Callers on the REQUEST PATH use this to
-// degrade instead of throwing.
-//
-// Without it, an unset env var takes down every route in the app — proxy.ts runs
-// on all of them, so even pages that need no session 500. That's a bad failure
-// mode locally and a worse one on a first deploy, where a variable missing from
-// the hosting dashboard would brick the whole site rather than just disabling
-// sign-in. Deliberately NOT used by the auth Server Actions: someone actively
-// submitting the login form should get config()'s explicit error, not a silent
-// no-op that looks like wrong credentials.
-export function supabaseConfigured(): boolean {
-  return Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && publishableKey());
-}
-
 // ---------------------------------------------------------------------------
 // PUBLISHABLE KEY (`sb_publishable_…`) — the successor to the legacy `anon` key.
 //

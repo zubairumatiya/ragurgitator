@@ -17,7 +17,6 @@ import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { getConfig } from "@/lib/rag/configStore";
-import { providerOfKind } from "@/lib/batch/types";
 import { handlerFor } from "@/lib/batch/jobs/registry";
 import { submitBatch } from "@/lib/batch/orchestrator";
 
@@ -62,7 +61,7 @@ export async function POST(request: Request) {
     try {
       const job = await submitBatch({
         kind,
-        provider: providerOfKind(kind),
+        provider: built.provider,
         configId,
         configLabel: config?.label ?? "—",
         requests: built.requests,

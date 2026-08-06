@@ -9,6 +9,7 @@
 // against other configs without re-authoring. (config is still imported for the
 // global evalQuestionsPerChunk target.)
 // ---------------------------------------------------------------------------
+import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { reciprocalRank, ndcg } from "@/lib/rag/evalMetrics";
@@ -1466,9 +1467,11 @@ export async function listModelTrials(chunkId: string): Promise<SavedModelTrial[
     select id, source_chunk_id, baseline_model, trial_model, kind, chunk_size,
            chunk_overlap, piece_count, k, pool_chunk_ids,
            question_count, hit_count, stored_hit_count, results, created_at
-    from eval_model_trials
-    where source_chunk_id = ${chunkId}
-    order by created_at desc
+    from eval_model_trials t
+    join document_embeddings de on de.id = t.document_embedding_id
+    where t.source_chunk_id = ${chunkId}
+      and de.config_id = ${activeConfig().id}
+    order by t.created_at desc
   `;
   return hydrateModelTrials(rows);
 }
@@ -1501,8 +1504,18 @@ export async function listModelTrialsByChunk(): Promise<
   return byChunk;
 }
 
+// eval_model_trials carries no config_id (see 0011) — it reaches one through
+// document_embedding_id, so that join IS the authorization check. Without it a
+// guessed trial id deletes another config's (or another account's) saved trial.
 export async function deleteModelTrial(id: string): Promise<boolean> {
-  const rows = await sql`delete from eval_model_trials where id = ${id} returning id`;
+  const rows = await sql`
+    delete from eval_model_trials t
+    using document_embeddings de
+    where de.id = t.document_embedding_id
+      and de.config_id = ${activeConfig().id}
+      and t.id = ${id}
+    returning t.id
+  `;
   return rows.length > 0;
 }
 
@@ -1661,21 +1674,42 @@ export async function createRunSnapshot(args: {
   `;
 }
 
-export async function updateQuestion(id: string, text: string): Promise<void> {
+// eval_questions has no config_id either — a question belongs to a DOCUMENT
+// (0002), so its owner is documents.user_id. Both mutations below take an id
+// straight from the URL, which is why they join through to that column: without
+// it, a guessed uuid rewrites or deletes another account's golden-set question.
+//
+// Returning the matched count rather than void lets the routes 404 on a
+// scoped-out id instead of reporting a success that changed nothing.
+export async function updateQuestion(id: string, text: string): Promise<boolean> {
   // The text changed, so every cached query vector for it (any model) is stale.
   // Drop them in the same transaction; they repopulate on the next score.
-  await sql.begin(async (tx) => {
-    await tx`
-      update eval_questions
+  return sql.begin(async (tx) => {
+    const rows = await tx`
+      update eval_questions q
       set question = ${text}, source = 'manual', updated_at = now()
-      where id = ${id}
+      from documents d
+      where d.id = q.document_id
+        and d.user_id = ${activeUserId()}
+        and q.id = ${id}
+      returning q.id
     `;
+    if (rows.length === 0) return false;
     await tx`delete from eval_question_embeddings where eval_question_id = ${id}`;
+    return true;
   });
 }
 
-export async function deleteQuestion(id: string): Promise<void> {
-  await sql`delete from eval_questions where id = ${id}`;
+export async function deleteQuestion(id: string): Promise<boolean> {
+  const rows = await sql`
+    delete from eval_questions q
+    using documents d
+    where d.id = q.document_id
+      and d.user_id = ${activeUserId()}
+      and q.id = ${id}
+    returning q.id
+  `;
+  return rows.length > 0;
 }
 
 // Assemble the active config's per-chunk override info for the /eval badges:

@@ -22,14 +22,23 @@ import { pairGenerationHandler } from "@/lib/batch/jobs/pairGeneration";
 
 export type BuiltBatch = {
   requests: BatchRequest[];
+  // Which batch API these requests go to. BUILD-TIME, not per-kind: the LLM jobs
+  // route by the provider of the model they just put in the requests, so a config
+  // on a gpt-* model batches through OpenAI and one on claude-* through Anthropic.
+  // It lives here rather than as a static field on the handler because the handler
+  // is the only thing that knows which model it used — cache_pair_generation, for
+  // one, runs on its own configured generateModel rather than the config's
+  // llmModel — and a second, hand-maintained copy of that answer is exactly the
+  // kind of disagreement that ends up billing the wrong provider's key.
+  provider: BatchProvider;
   // Persisted on the job row (jsonb) and handed back to apply verbatim.
   input: unknown;
-  // Batch-level params for Voyage (model/dims); {} for Anthropic.
+  // Batch-level params for Voyage (model/dims); {} for the LLM providers, which
+  // both carry the model per request.
   submitMeta: SubmitMeta;
 };
 
 export interface JobHandler {
-  provider: BatchProvider;
   build(scope: unknown): Promise<BuiltBatch | null>;
   apply(input: unknown, results: BatchResultRow[]): Promise<number>;
 }

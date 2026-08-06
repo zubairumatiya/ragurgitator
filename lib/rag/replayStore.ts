@@ -25,6 +25,7 @@
 // ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
 
+import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { EMBEDDING_MODELS } from "@/lib/rag/embeddingModels";
 import { ndcg } from "@/lib/rag/evalMetrics";
@@ -387,6 +388,7 @@ async function replayableConfigs(): Promise<
     from configs c
     join document_embeddings de on de.config_id = c.id
     join eval_labels l on l.document_embedding_id = de.id
+    where c.user_id = ${activeUserId()}
     order by c.tab_order, c.created_at
   `;
   return rows.map((r) => ({

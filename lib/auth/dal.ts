@@ -7,9 +7,10 @@
 // security boundary and must never be the only thing standing between a request
 // and someone's data.
 //
-// THIS is the boundary. Every Server Component, Server Action and Route Handler
-// that touches user data calls requireUser() (or requireConfigAccess() once
-// ownership lands in 0045), close to the data rather than at the edge.
+// THIS is the boundary. Every Server Component and Server Action that touches
+// user data calls withPageUser(); every route handler goes through
+// withRequestConfig / withRequestUser (lib/http/configScope.ts). Both end up
+// here, close to the data rather than at the edge.
 //
 // React's cache() memoizes per render pass, so a page whose layout, page, and
 // three leaf components each call requireUser() performs ONE getUser() round
@@ -21,8 +22,8 @@ import "server-only";
 import { cache } from "react";
 import { redirect } from "next/navigation";
 
-import { sql } from "@/lib/db";
-import { serverSupabase, supabaseConfigured } from "@/lib/auth/supabase";
+import { serverSupabase } from "@/lib/auth/supabase";
+import { withUser } from "@/lib/auth/userScope";
 
 // The DTO — deliberately NOT the auth.users row. Supabase's user object carries
 // app_metadata, identities, raw provider payloads and more; none of it belongs
@@ -39,12 +40,6 @@ export type SessionUser = {
 // Uses getUser(), never getSession(): getSession() trusts the cookie without
 // verifying its signature with the auth server. See lib/auth/supabase.ts.
 export const getSessionUser = cache(async (): Promise<SessionUser | null> => {
-  // Matches proxy.ts: with Supabase unconfigured there is no session to read, so
-  // report "nobody is signed in" rather than throwing. Keeps GET /api/auth/me a
-  // clean 401 instead of a 500, which is what the sidebar's account footer
-  // expects when it decides not to render.
-  if (!supabaseConfigured()) return null;
-
   const supabase = await serverSupabase();
   const { data, error } = await supabase.auth.getUser();
   if (error || !data.user?.email) return null;
@@ -53,27 +48,17 @@ export const getSessionUser = cache(async (): Promise<SessionUser | null> => {
 
 // The one every protected call site uses. Redirects to /login when there's no
 // valid session, so callers can treat the return value as guaranteed.
+//
+// No profile self-heal here: the 0046 trigger on auth.users creates the
+// user_profiles row inside the same transaction as the signup, so "auth user
+// with no profile" is unrepresentable for anyone created after that migration —
+// including users added through the Supabase dashboard, which the trigger also
+// covers. The upsert this used to do was only ever for pre-migration accounts,
+// of which none remain.
 export const requireUser = cache(async (): Promise<SessionUser> => {
   const user = await getSessionUser();
   if (!user) redirect("/login");
-  await ensureProfile(user);
   return user;
-});
-
-// Self-healing profile row. The 0044 trigger creates one for every auth.users
-// insert, so this is normally a no-op — it exists because a user created OUTSIDE
-// the trigger's reach (via the Supabase dashboard, or before the migration
-// applied) would otherwise hit a foreign-key violation the first time they
-// created a corpus, with an error message pointing nowhere useful.
-//
-// Cached per render pass alongside requireUser, so it costs one upsert per
-// request at most, and Postgres skips the write entirely on conflict.
-const ensureProfile = cache(async (user: SessionUser): Promise<void> => {
-  await sql`
-    insert into user_profiles (id, email)
-    values (${user.id}, ${user.email})
-    on conflict (id) do nothing
-  `;
 });
 
 // Route-handler variant: returns null instead of redirecting, so an API caller
@@ -87,4 +72,21 @@ export async function requireUserForApi(): Promise<SessionUser | null> {
 // The standard 401 for route handlers, so every route spells it the same way.
 export function unauthorizedJson(): Response {
   return Response.json({ error: "Not authenticated." }, { status: 401 });
+}
+
+// The page/action counterpart to withRequestConfig: require a session, then run
+// `fn` inside the user scope so the store layer can read activeUserId().
+//
+// Server Components need this explicitly per page rather than once in a layout.
+// A layout receives its children already-rendered as a prop, so a scope entered
+// in the layout body does not enclose the page's own data fetching — the ALS
+// context simply isn't active when the child renders. Wrapping each page's reads
+// is the honest version of that constraint.
+//
+// Cheap despite the repetition: requireUser is cache()d per render pass, so a
+// page whose layout and three components each wrap their reads still performs
+// one getUser() round trip.
+export async function withPageUser<T>(fn: (user: SessionUser) => Promise<T>): Promise<T> {
+  const user = await requireUser();
+  return withUser(user, () => fn(user));
 }

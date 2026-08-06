@@ -269,9 +269,16 @@ function AccountFooter() {
 
   return (
     <div className="mt-auto flex flex-col gap-1 border-t border-zinc-200 pt-2 dark:border-zinc-800">
-      <span className="truncate px-2 text-xs text-zinc-500" title={email}>
+      {/* The email doubles as the way into /account — provider keys and account
+          deletion live there, and the address is the thing a user looks for
+          when they want "my settings". */}
+      <Link
+        href="/account"
+        title={`${email} — account settings`}
+        className="truncate rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
+      >
         {email}
-      </span>
+      </Link>
       <form action={signOut}>
         <button
           type="submit"

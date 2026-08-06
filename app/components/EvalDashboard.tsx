@@ -26,6 +26,8 @@ import {
 import { useRouter } from "next/navigation";
 import { HIGH_NDCG } from "@/lib/config";
 import { apiFetch } from "@/lib/http/client";
+import { noteHeadline } from "@/lib/rag/embeddingModels";
+import { ApiErrorNotice, type ApiErrorBody } from "@/app/components/MissingKeyNotice";
 import { failsBar } from "@/lib/rag/evalBar";
 import type {
   ChunkOverrideInfo,
@@ -2973,7 +2975,10 @@ function ModelTrial({
 
   const [running, setRunning] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [runError, setRunError] = useState<string | null>(null);
+  // The parsed error BODY, not a string: a missing provider key needs the
+  // provider to render a link to /account (see ApiErrorNotice), and trying a
+  // model whose provider you have no key for is exactly what this panel invites.
+  const [runError, setRunError] = useState<ApiErrorBody | null>(null);
   const [result, setResult] = useState<ModelTrialResult | null>(null);
   // Phase 5: this chunk's persisted model override for the active config (null =
   // none). Setting it re-embeds the chunk under that model so retrieval ranks it
@@ -2998,7 +3003,10 @@ function ModelTrial({
           );
         }
         setState({ status: "ready", ctx: data });
-        setModel(data.models[0]?.id ?? "");
+        // The first SELECTABLE model, not the first listed: unkeyed models are
+        // shown greyed out (see the select below), so seeding with models[0]
+        // would open the panel pre-set to one the user can't run.
+        setModel(data.models.find((m) => m.selectable)?.id ?? "");
         setSelected(new Set(data.autoPool.map((c) => c.chunkId)));
         setOverride(data.currentOverride);
       })
@@ -3111,9 +3119,7 @@ function ModelTrial({
         | { result: ModelTrialResult; savedTrial: SavedModelTrial | null }
         | { error: string };
       if (!res.ok || "error" in data) {
-        setRunError(
-          "error" in data ? data.error : `Request failed (${res.status}).`,
-        );
+        setRunError("error" in data ? data : { error: `Request failed (${res.status}).` });
         return;
       }
       if (data.savedTrial) {
@@ -3127,7 +3133,7 @@ function ModelTrial({
         setResult(data.result);
       }
     } catch (err) {
-      setRunError(err instanceof Error ? err.message : "Network error.");
+      setRunError({ error: err instanceof Error ? err.message : "Network error." });
     } finally {
       setSaving(false);
       setRunning(false);
@@ -3148,12 +3154,12 @@ function ModelTrial({
         error?: string;
       } | null;
       if (!res.ok) {
-        setRunError(data?.error ?? `Request failed (${res.status}).`);
+        setRunError(data ?? { error: `Request failed (${res.status}).` });
         return;
       }
       setOverride(null);
     } catch (err) {
-      setRunError(err instanceof Error ? err.message : "Network error.");
+      setRunError({ error: err instanceof Error ? err.message : "Network error." });
     } finally {
       setOvBusy(false);
     }
@@ -3228,9 +3234,21 @@ function ModelTrial({
                   onChange={(e) => setModel(e.target.value)}
                   className="rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
                 >
+                  {/* Unkeyed models are LISTED, disabled, with the reason —
+                      never dropped. Same contract as the base-model, autotune
+                      and LLM pickers. The `note` is a trade-off (the Cohere v3
+                      input cap), not a blocker, so it shows on selectable rows
+                      too. */}
                   {state.ctx.models.map((m) => (
-                    <option key={m.id} value={m.id}>
+                    <option
+                      key={m.id}
+                      value={m.id}
+                      disabled={!m.selectable}
+                      title={m.reason ?? m.note ?? undefined}
+                    >
                       {m.label}
+                      {m.note ? ` — ${noteHeadline(m.note)}` : ""}
+                      {m.selectable ? "" : ` (${m.reason})`}
                     </option>
                   ))}
                 </select>
@@ -3401,7 +3419,9 @@ function ModelTrial({
           </div>
 
           {runError && (
-            <span className="text-red-600 dark:text-red-400">{runError}</span>
+            <span className="text-red-600 dark:text-red-400">
+              <ApiErrorNotice body={runError} fallback="Model trial failed." />
+            </span>
           )}
 
           {result && (

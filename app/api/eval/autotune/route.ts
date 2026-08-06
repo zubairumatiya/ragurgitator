@@ -7,6 +7,7 @@
 // Streams progress as NDJSON (one AutotuneEvent per line) so the dashboard can
 // show live per-chunk progress and collect pending choices.
 // ---------------------------------------------------------------------------
+import { streamError } from "@/lib/http/missingKeyServer";
 import { runAutotune, type AutotuneEvent } from "@/lib/rag/autotune";
 import { ndjsonStream } from "@/lib/http/ndjson";
 import { withRequestConfig } from "@/lib/http/configScope";
@@ -17,8 +18,7 @@ export async function POST(request: Request) {
       try {
         await runAutotune(send);
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Autotune failed.";
-        send({ type: "error", message });
+        send(streamError(err, "Autotune failed."));
       }
     }),
   );
