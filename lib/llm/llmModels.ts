@@ -93,6 +93,13 @@ const LLM_MODEL_ROWS: Record<string, LlmModelRow> = {
   // Excluded: gpt-5.5, gpt-5.2, gpt-5.1, gpt-5, the -pro variants (30/180 and
   // up), and everything gpt-4* / o*. All still served — this is curation, not
   // availability.
+  //
+  // EVERY OPENAI ID HERE MUST POST-DATE gpt-5.1. lib/llm/openaiChat.ts pins
+  // `reasoning_effort: "none"` on every translated request, so that a caller's
+  // max_tokens keeps meaning "visible output" after translation — and "none" is
+  // only supported from gpt-5.1 onward (everything earlier defaults to "medium"
+  // and rejects it). Registering an older id would need a different default
+  // there, not just a row here.
   "gpt-5.6-sol": { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", contextTokens: 272_000, note: "flagship" },
   "gpt-5.6-terra": { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", contextTokens: 272_000, note: "mid tier" },
   "gpt-5.6-luna": { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", contextTokens: 272_000, note: "cheap tier" },
