@@ -11,6 +11,7 @@
 // are untouched. Global (not config-scoped). `params` is a Promise in this
 // Next.js version.
 // ---------------------------------------------------------------------------
+import { withRequestUser } from "@/lib/http/configScope";
 import {
   deleteCorpus,
   getCorpus,
@@ -24,19 +25,23 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  try {
-    const corpus = await getCorpus(id);
-    if (!corpus) return Response.json({ error: "Corpus not found." }, { status: 404 });
-    const [documents, configs, availableDocuments] = await Promise.all([
-      listCorpusDocuments(id),
-      listCorpusConfigs(id),
-      listDocumentsNotInCorpus(id),
-    ]);
-    return Response.json({ corpus, documents, configs, availableDocuments });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to load corpus.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  return withRequestUser(async () => {
+    try {
+      // getCorpus is owner-scoped, so another user's corpus 404s here and the
+      // three follow-up reads are never reached.
+      const corpus = await getCorpus(id);
+      if (!corpus) return Response.json({ error: "Corpus not found." }, { status: 404 });
+      const [documents, configs, availableDocuments] = await Promise.all([
+        listCorpusDocuments(id),
+        listCorpusConfigs(id),
+        listDocumentsNotInCorpus(id),
+      ]);
+      return Response.json({ corpus, documents, configs, availableDocuments });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load corpus.";
+      return Response.json({ error: message }, { status: 500 });
+    }
+  });
 }
 
 export async function DELETE(
@@ -44,15 +49,17 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
-  try {
-    const corpus = await getCorpus(id);
-    if (!corpus) return Response.json({ error: "Corpus not found." }, { status: 404 });
-    const detached = await listCorpusConfigs(id);
-    await deleteCorpus(id);
-    // Report which configs lost their pointer so the UI can say so.
-    return Response.json({ ok: true, detachedConfigs: detached.map((c) => c.label) });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to delete corpus.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  return withRequestUser(async () => {
+    try {
+      const corpus = await getCorpus(id);
+      if (!corpus) return Response.json({ error: "Corpus not found." }, { status: 404 });
+      const detached = await listCorpusConfigs(id);
+      await deleteCorpus(id);
+      // Report which configs lost their pointer so the UI can say so.
+      return Response.json({ ok: true, detachedConfigs: detached.map((c) => c.label) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to delete corpus.";
+      return Response.json({ error: message }, { status: 500 });
+    }
+  });
 }

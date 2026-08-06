@@ -9,6 +9,7 @@ import { BackToConfigs } from "@/app/components/BackToConfigs";
 import { CorpusCreateForm } from "@/app/components/CorpusCreateForm";
 import { CorpusDeleteButton } from "@/app/components/CorpusDeleteButton";
 import { InfoDot } from "@/app/components/InfoDot";
+import { withPageUser } from "@/lib/auth/dal";
 import { listCorpora } from "@/lib/rag/corpusStore";
 
 export const dynamic = "force-dynamic";
@@ -21,7 +22,7 @@ const ABOUT =
   "changes flow both ways.";
 
 export default async function CorporaPage() {
-  const corpora = await listCorpora({ includeEmpty: true });
+  const corpora = await withPageUser(() => listCorpora({ includeEmpty: true }));
 
   return (
     <div className="flex flex-1 flex-col items-center bg-zinc-50 font-sans dark:bg-black">

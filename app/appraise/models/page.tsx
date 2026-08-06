@@ -13,6 +13,7 @@ import { BackToConfigs } from "@/app/components/BackToConfigs";
 import { InfoDot } from "@/app/components/InfoDot";
 import { ModelRateCard } from "@/app/components/ModelRateCard";
 import { ModelReplayTable } from "@/app/components/ModelReplayTable";
+import { withPageUser } from "@/lib/auth/dal";
 import { listConfigComparisons } from "@/lib/rag/appraiseStore";
 import { listModelRateCard, meteredEmbedTokens } from "@/lib/rag/modelAppraisal";
 import { listReplays } from "@/lib/rag/replayStore";
@@ -33,11 +34,9 @@ export default async function AppraiseModelsPage() {
   // vectors out of embedding_cache) and ~0.4s once cached in replay_metrics.
   // loading.tsx covers the cold case — see AppraiseLoading.
   const rateCard = listModelRateCard();
-  const [replays, comparisons, embedTokens] = await Promise.all([
-    listReplays(),
-    listConfigComparisons(),
-    meteredEmbedTokens(),
-  ]);
+  const [replays, comparisons, embedTokens] = await withPageUser(() =>
+    Promise.all([listReplays(), listConfigComparisons(), meteredEmbedTokens()]),
+  );
 
   return (
     <div className="flex flex-1 flex-col items-center bg-zinc-50 font-sans dark:bg-black">

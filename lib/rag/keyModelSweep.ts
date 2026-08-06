@@ -23,6 +23,7 @@
 // metered, and nearly free on re-runs.
 // ---------------------------------------------------------------------------
 import { config } from "@/lib/config";
+import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { embedQueryCached } from "@/lib/rag/embedCache";
 import { EMBEDDING_MODELS, isProviderAvailable } from "@/lib/rag/embeddingModels";
@@ -101,6 +102,7 @@ async function shadowPairs(): Promise<SweepPair[]> {
       select new_query, matched_query, verdict
       from semantic_cache_shadow
       where verdict is not null
+        and config_id in (select id from configs where user_id = ${activeUserId()})
     `;
     return rows.map((r) => ({
       textA: r.new_query,

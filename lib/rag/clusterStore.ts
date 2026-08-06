@@ -552,7 +552,9 @@ export async function getBucketChunks(clusterId: string): Promise<BucketChunk[]>
     from chunk_clusters cc
     join ${sql(table)} c on c.id = cc.chunk_id
     join documents d on d.id = c.document_id
+    join cluster_runs cr on cr.id = cc.cluster_run_id
     where cc.cluster_id = ${clusterId}
+      and cr.config_id = ${activeConfig().id}
     order by cc.similarity desc
   `;
   return rows.map((r) => ({
@@ -578,8 +580,15 @@ export async function representativeChunksForRun(
   const table = await activeChunksTable();
   if (!table) return [];
 
+  // runId arrives from the URL, so the run must be re-anchored to the active
+  // config here rather than trusted. An unowned id yields k = 0, which the
+  // callers already treat as "run not found".
   const [counts] = await sql<{ k: number }[]>`
-    select count(*)::int as k from clusters where cluster_run_id = ${runId}
+    select count(*)::int as k
+    from clusters cl
+    join cluster_runs cr on cr.id = cl.cluster_run_id
+    where cl.cluster_run_id = ${runId}
+      and cr.config_id = ${activeConfig().id}
   `;
   const k = counts?.k ?? 0;
   if (k === 0) return [];
@@ -627,8 +636,13 @@ export async function saveClusterLabels(
   await sql.begin(async (tx) => {
     for (const { ordinal, label } of labels) {
       await tx`
-        update clusters set label = ${label}
-        where cluster_run_id = ${runId} and ordinal = ${ordinal}
+        update clusters cl
+        set label = ${label}
+        from cluster_runs cr
+        where cr.id = cl.cluster_run_id
+          and cr.config_id = ${activeConfig().id}
+          and cl.cluster_run_id = ${runId}
+          and cl.ordinal = ${ordinal}
       `;
     }
   });
@@ -645,6 +659,10 @@ export async function saveRun(id: string, name: string): Promise<boolean> {
 }
 
 export async function deleteRun(id: string): Promise<boolean> {
-  const rows = await sql`delete from cluster_runs where id = ${id} returning id`;
+  const rows = await sql`
+    delete from cluster_runs
+    where id = ${id} and config_id = ${activeConfig().id}
+    returning id
+  `;
   return rows.length > 0;
 }

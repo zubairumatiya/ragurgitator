@@ -9,6 +9,7 @@
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { cancelJob } from "@/lib/batch/orchestrator";
+import { withRequestUser } from "@/lib/http/configScope";
 import { acknowledgeJob } from "@/lib/rag/batchStore";
 
 const Body = z.object({ action: z.enum(["cancel", "ack"]) });
@@ -21,12 +22,15 @@ export async function PATCH(
   const body = await parseBody(request, Body);
   if (body.response) return body.response;
 
-  try {
-    const job = body.data.action === "cancel" ? await cancelJob(id) : await acknowledgeJob(id);
-    if (!job) return Response.json({ error: "Batch job not found." }, { status: 404 });
-    return Response.json({ job });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Action failed.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  return withRequestUser(async () => {
+    try {
+      // Both are owner-scoped, so another user's job id returns null → 404.
+      const job = body.data.action === "cancel" ? await cancelJob(id) : await acknowledgeJob(id);
+      if (!job) return Response.json({ error: "Batch job not found." }, { status: 404 });
+      return Response.json({ job });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Action failed.";
+      return Response.json({ error: message }, { status: 500 });
+    }
+  });
 }

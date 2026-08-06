@@ -15,6 +15,7 @@
 // pricing.ts too, but nothing measures their quality, so they'd be a table of
 // prices with every metric dashed — they belong on the Costs tab, not here.
 // ---------------------------------------------------------------------------
+import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import {
   EMBEDDING_MODELS,
@@ -99,9 +100,10 @@ export function listModelRateCard(): RateCardRow[] {
 //
 // Best-effort like the rest of savingsStore: no 0034 tables → 0.
 export async function meteredEmbedTokens(configId?: string | null): Promise<number> {
+  const owned = sql`config_id in (select id from configs where user_id = ${activeUserId()})`;
   const scope = configId
-    ? sql`where surface = 'embed' and config_id = ${configId}`
-    : sql`where surface = 'embed'`;
+    ? sql`where surface = 'embed' and config_id = ${configId} and ${owned}`
+    : sql`where surface = 'embed' and ${owned}`;
   try {
     const [row] = await sql<{ tokens: string | null }[]>`
       select sum(tokens) as tokens from spend_totals ${scope}

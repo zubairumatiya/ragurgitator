@@ -15,6 +15,7 @@
 // so the feature is safe to ship ahead of the migration and never breaks a hot
 // path. Recording errors are swallowed (telemetry must not fail an answer).
 // ---------------------------------------------------------------------------
+import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import {
@@ -134,8 +135,15 @@ const EMPTY: CostsReport = {
 // Unknown lever/surface rows (hand-edited, or a lever retired from the
 // registry) are skipped rather than shown label-less. Missing tables → EMPTY.
 export async function getCostsReport(configId?: string | null): Promise<CostsReport> {
-  // One fragment reused by both queries: an empty fragment is a no-op WHERE.
-  const scope = configId ? sql`where config_id = ${configId}` : sql``;
+  // One fragment reused by both queries. Both tables carry a NOT NULL config_id,
+  // so restricting to the caller's configs is exact — and it is what keeps the
+  // "all configs" view (configId null) from summing other accounts' spend into
+  // this user's totals. A configId they don't own intersects to nothing, which
+  // reads as an empty report rather than an error.
+  const owned = sql`config_id in (select id from configs where user_id = ${activeUserId()})`;
+  const scope = configId
+    ? sql`where config_id = ${configId} and ${owned}`
+    : sql`where ${owned}`;
   try {
     const [savingsRows, spendRows] = await Promise.all([
       sql<{ lever: string; events: string; tokens: string; saved: string }[]>`

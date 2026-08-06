@@ -7,6 +7,7 @@ import { notFound } from "next/navigation";
 import { CorpusDeleteButton } from "@/app/components/CorpusDeleteButton";
 import { CorpusDocsPanel } from "@/app/components/CorpusDocsPanel";
 import { InfoDot } from "@/app/components/InfoDot";
+import { withPageUser } from "@/lib/auth/dal";
 import {
   getCorpus,
   listCorpusConfigs,
@@ -29,14 +30,22 @@ export default async function CorpusDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const corpus = await getCorpus(id);
-  if (!corpus) notFound();
 
-  const [documents, configs, availableDocuments] = await Promise.all([
-    listCorpusDocuments(id),
-    listCorpusConfigs(id),
-    listDocumentsNotInCorpus(id),
-  ]);
+  // getCorpus is owner-scoped, so another user's corpus id notFound()s here and
+  // the member/config reads below never run.
+  const data = await withPageUser(async () => {
+    const corpus = await getCorpus(id);
+    if (!corpus) return null;
+    const [documents, configs, availableDocuments] = await Promise.all([
+      listCorpusDocuments(id),
+      listCorpusConfigs(id),
+      listDocumentsNotInCorpus(id),
+    ]);
+    return { corpus, documents, configs, availableDocuments };
+  });
+  if (!data) notFound();
+
+  const { corpus, documents, configs, availableDocuments } = data;
   const syncedCount = configs.filter((c) => c.corpusSync).length;
 
   return (

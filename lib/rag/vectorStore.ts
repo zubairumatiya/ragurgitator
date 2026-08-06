@@ -5,6 +5,7 @@
 // neighbor queries. Vectors live in one table per (embedding-model, dim) so
 // different models stay in their own geometric spaces; see migrations/.
 // ---------------------------------------------------------------------------
+import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { modelSpec } from "@/lib/rag/embeddingModels";
@@ -65,10 +66,15 @@ export function vectorLiteral(v: number[]): string {
 export async function findDocumentByHash(
   contentHash: string,
 ): Promise<FoundDocument | null> {
+  // Scoped to the owner, which is the whole point of 0049's per-user unique key
+  // on (user_id, content_hash): dedup must not reach across accounts, or the
+  // second uploader silently adopts the first's document — and learns the file
+  // already exists somewhere on the system.
   const rows = await sql<{ id: string; file_name: string }[]>`
     select id, file_name
     from documents
     where content_hash = ${contentHash}
+      and user_id = ${activeUserId()}
     limit 1
   `;
   if (rows.length === 0) return null;
@@ -81,8 +87,8 @@ export async function insertDocument(
   content: string,
 ): Promise<string> {
   const rows = await sql<{ id: string }[]>`
-    insert into documents (file_name, content_hash, content)
-    values (${fileName}, ${contentHash}, ${content})
+    insert into documents (user_id, file_name, content_hash, content)
+    values (${activeUserId()}, ${fileName}, ${contentHash}, ${content})
     returning id
   `;
   return rows[0].id;
@@ -97,7 +103,7 @@ export async function insertDocument(
 export async function deleteDocument(id: string): Promise<boolean> {
   const rows = await sql`
     delete from documents
-    where id = ${id}
+    where id = ${id} and user_id = ${activeUserId()}
     returning id
   `;
   return rows.length > 0;
@@ -377,6 +383,7 @@ export async function listLibraryDocuments(): Promise<LibraryDocument[]> {
     select d.id, d.file_name, d.created_at
     from documents d
     where d.content is not null
+      and d.user_id = ${activeUserId()}
       and not exists (
         select 1 from document_embeddings de
         where de.document_id = d.id and de.config_id = ${cfg.id}

@@ -9,7 +9,10 @@
 // run inside withRequestConfig. See lib/rag/embeddingModels.listBaseModelOptions.
 // ---------------------------------------------------------------------------
 import { listBaseModelOptions } from "@/lib/rag/embeddingModels";
+import { withRequestUser } from "@/lib/http/configScope";
 
 export async function GET() {
-  return Response.json({ models: listBaseModelOptions() });
+  return withRequestUser(async () => {
+    return Response.json({ models: listBaseModelOptions() });
+  });
 }

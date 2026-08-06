@@ -18,6 +18,7 @@
 // ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody, requiredTrimmedString } from "@/lib/http/body";
+import { withRequestUser } from "@/lib/http/configScope";
 import {
   addDocumentToCorpus,
   createCorpus,
@@ -26,15 +27,17 @@ import {
 } from "@/lib/rag/corpusStore";
 
 export async function GET(request: Request) {
-  try {
-    const includeEmpty =
-      new URL(request.url).searchParams.get("includeEmpty") === "1";
-    const corpora = await listCorpora({ includeEmpty });
-    return Response.json({ corpora });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to list corpora.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  return withRequestUser(async () => {
+    try {
+      const includeEmpty =
+        new URL(request.url).searchParams.get("includeEmpty") === "1";
+      const corpora = await listCorpora({ includeEmpty });
+      return Response.json({ corpora });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to list corpora.";
+      return Response.json({ error: message }, { status: 500 });
+    }
+  });
 }
 
 const CreateBody = z.object({
@@ -43,19 +46,21 @@ const CreateBody = z.object({
 });
 
 export async function POST(request: Request) {
-  const parsed = await parseBody(request, CreateBody);
-  if (parsed.response) return parsed.response;
+  return withRequestUser(async () => {
+    const parsed = await parseBody(request, CreateBody);
+    if (parsed.response) return parsed.response;
 
-  try {
-    const id = await createCorpus(parsed.data.name);
-    const { docs, dupes } = await dedupCorporaDocuments(parsed.data.fromCorpusIds ?? []);
-    for (const d of docs) await addDocumentToCorpus(id, d.id);
-    return Response.json(
-      { corpus: { id, name: parsed.data.name, docCount: docs.length }, dupes },
-      { status: 201 },
-    );
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to create corpus.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+    try {
+      const id = await createCorpus(parsed.data.name);
+      const { docs, dupes } = await dedupCorporaDocuments(parsed.data.fromCorpusIds ?? []);
+      for (const d of docs) await addDocumentToCorpus(id, d.id);
+      return Response.json(
+        { corpus: { id, name: parsed.data.name, docCount: docs.length }, dupes },
+        { status: 201 },
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to create corpus.";
+      return Response.json({ error: message }, { status: 500 });
+    }
+  });
 }

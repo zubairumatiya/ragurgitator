@@ -9,9 +9,16 @@
 //
 // Global (not config-scoped): thresholds are keyed by vector-space, shared by
 // every config that uses that embedding model.
+//
+// STILL GLOBAL ACROSS USERS, and that is a known Phase 5 item, not an oversight:
+// `semantic_cache_thresholds` is primary-keyed by (space) alone, so one account's
+// calibration governs another's cache — and a threshold set too low makes the
+// cache serve WRONG ANSWERS. Phase 2 gates the endpoint behind a session; Phase 5
+// partitions the table by user_id (docs/user-accounts-plan.md §3, migration 0047).
 // ---------------------------------------------------------------------------
 import { z } from "zod";
 
+import { withRequestUser } from "@/lib/http/configScope";
 import { parseBody } from "@/lib/http/body";
 import { applyThreshold, listThresholdsWithStats } from "@/lib/rag/semanticCacheCalibration";
 
@@ -19,11 +26,13 @@ const msg = (err: unknown, fallback: string) =>
   err instanceof Error ? err.message : fallback;
 
 export async function GET() {
-  try {
-    return Response.json({ thresholds: await listThresholdsWithStats() });
-  } catch (err) {
-    return Response.json({ error: msg(err, "Failed to load thresholds.") }, { status: 500 });
-  }
+  return withRequestUser(async () => {
+    try {
+      return Response.json({ thresholds: await listThresholdsWithStats() });
+    } catch (err) {
+      return Response.json({ error: msg(err, "Failed to load thresholds.") }, { status: 500 });
+    }
+  });
 }
 
 const Body = z.object({
@@ -36,15 +45,17 @@ const Body = z.object({
 export async function POST(request: Request) {
   const parsed = await parseBody(request, Body);
   if (parsed.response) return parsed.response;
-  try {
-    await applyThreshold(
-      parsed.data.space,
-      parsed.data.threshold,
-      parsed.data.sampleSize ?? null,
-      parsed.data.notes ?? "manual",
-    );
-    return Response.json({ ok: true });
-  } catch (err) {
-    return Response.json({ error: msg(err, "Failed to apply threshold.") }, { status: 500 });
-  }
+  return withRequestUser(async () => {
+    try {
+      await applyThreshold(
+        parsed.data.space,
+        parsed.data.threshold,
+        parsed.data.sampleSize ?? null,
+        parsed.data.notes ?? "manual",
+      );
+      return Response.json({ ok: true });
+    } catch (err) {
+      return Response.json({ error: msg(err, "Failed to apply threshold.") }, { status: 500 });
+    }
+  });
 }

@@ -8,6 +8,7 @@
 // so Appraise is cheap and reflects exactly what each config last measured. A
 // config that has never been scored has no run row → null metrics.
 // ---------------------------------------------------------------------------
+import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 
 export type ConfigComparison = {
@@ -64,6 +65,7 @@ export async function listConfigComparisons(): Promise<ConfigComparison[]> {
       order by er.created_at desc
       limit 1
     ) r on true
+    where c.user_id = ${activeUserId()}
     order by co.created_at nulls last, co.id, c.tab_order, c.created_at
   `;
 

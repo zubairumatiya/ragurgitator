@@ -12,6 +12,7 @@
 // No provider I/O here — that's lib/batch/providers.ts. This module only reads
 // and writes rows; the orchestrator threads the two together.
 // ---------------------------------------------------------------------------
+import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";
 import {
@@ -29,7 +30,9 @@ import {
 export async function getBatchSavings(configId: string): Promise<BatchSavings> {
   if (!isUuid(configId)) return DEFAULT_BATCH_SAVINGS;
   const rows = await sql<{ batch_savings: unknown }[]>`
-    select batch_savings from configs where id = ${configId} limit 1
+    select batch_savings from configs
+    where id = ${configId} and user_id = ${activeUserId()}
+    limit 1
   `;
   return rows.length > 0 ? coerceBatchSavings(rows[0].batch_savings) : DEFAULT_BATCH_SAVINGS;
 }
@@ -63,7 +66,7 @@ export async function updateBatchSavings(
   });
   const done = await sql`
     update configs set batch_savings = ${sql.json(next)}, updated_at = now()
-    where id = ${configId}
+    where id = ${configId} and user_id = ${activeUserId()}
   `;
   return done.count > 0 ? next : null;
 }
@@ -139,9 +142,10 @@ export type NewBatchJob = {
 export async function createBatchJob(args: NewBatchJob): Promise<BatchJob> {
   const rows = await sql<BatchJobRow[]>`
     insert into batch_jobs
-      (provider, kind, config_id, config_label, input, request_count, status)
+      (user_id, provider, kind, config_id, config_label, input, request_count, status)
     values
-      (${args.provider}, ${args.kind}, ${args.configId}, ${args.configLabel},
+      (${activeUserId()}, ${args.provider}, ${args.kind}, ${args.configId},
+       ${args.configLabel},
        ${sql.json(args.input as Parameters<typeof sql.json>[0])}, ${args.requestCount},
        'submitting')
     returning ${JOB_COLUMNS}
@@ -152,7 +156,9 @@ export async function createBatchJob(args: NewBatchJob): Promise<BatchJob> {
 export async function getBatchJob(id: string): Promise<BatchJob | null> {
   if (!isUuid(id)) return null;
   const rows = await sql<BatchJobRow[]>`
-    select ${JOB_COLUMNS} from batch_jobs where id = ${id} limit 1
+    select ${JOB_COLUMNS} from batch_jobs
+    where id = ${id} and user_id = ${activeUserId()}
+    limit 1
   `;
   return rows.length > 0 ? toJob(rows[0]) : null;
 }
@@ -201,7 +207,7 @@ export async function updateBatchJob(
   if (Object.keys(row).length === 0) return getBatchJob(id);
   const rows = await sql<BatchJobRow[]>`
     update batch_jobs set ${sql(row)}, updated_at = now()
-    where id = ${id}
+    where id = ${id} and user_id = ${activeUserId()}
     returning ${JOB_COLUMNS}
   `;
   return rows.length > 0 ? toJob(rows[0]) : null;
@@ -209,11 +215,13 @@ export async function updateBatchJob(
 
 const TERMINAL = sql`('applied', 'failed', 'canceled', 'expired')`;
 
-// Newest-first, account-wide — backs the status panel. Terminal rows stay for
-// history; the panel can dim them.
+// Newest-first, for the signed-in user — backs the status panel. "Account-wide"
+// now means one user's jobs across their configs, not the whole table. Terminal
+// rows stay for history; the panel can dim them.
 export async function listBatchJobs(limit = 100): Promise<BatchJob[]> {
   const rows = await sql<BatchJobRow[]>`
     select ${JOB_COLUMNS} from batch_jobs
+    where user_id = ${activeUserId()}
     order by created_at desc
     limit ${limit}
   `;
@@ -227,6 +235,7 @@ export async function listActiveJobs(): Promise<BatchJob[]> {
   const rows = await sql<BatchJobRow[]>`
     select ${JOB_COLUMNS} from batch_jobs
     where status in ('in_progress', 'completed', 'canceling')
+      and user_id = ${activeUserId()}
     order by created_at asc
   `;
   return rows.map(toJob);
@@ -244,12 +253,14 @@ export async function inFlightForConfig(
     ? await sql<BatchJobRow[]>`
         select ${JOB_COLUMNS} from batch_jobs
         where config_id = ${configId} and status not in ${TERMINAL}
+          and user_id = ${activeUserId()}
           and kind in ${sql(kinds)}
         order by created_at desc
       `
     : await sql<BatchJobRow[]>`
         select ${JOB_COLUMNS} from batch_jobs
         where config_id = ${configId} and status not in ${TERMINAL}
+          and user_id = ${activeUserId()}
         order by created_at desc
       `;
   return rows.map(toJob);

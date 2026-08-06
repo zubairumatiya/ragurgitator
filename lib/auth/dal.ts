@@ -7,9 +7,10 @@
 // security boundary and must never be the only thing standing between a request
 // and someone's data.
 //
-// THIS is the boundary. Every Server Component, Server Action and Route Handler
-// that touches user data calls requireUser() (or requireConfigAccess() once
-// ownership lands in 0045), close to the data rather than at the edge.
+// THIS is the boundary. Every Server Component and Server Action that touches
+// user data calls withPageUser(); every route handler goes through
+// withRequestConfig / withRequestUser (lib/http/configScope.ts). Both end up
+// here, close to the data rather than at the edge.
 //
 // React's cache() memoizes per render pass, so a page whose layout, page, and
 // three leaf components each call requireUser() performs ONE getUser() round
@@ -22,6 +23,7 @@ import { cache } from "react";
 import { redirect } from "next/navigation";
 
 import { serverSupabase } from "@/lib/auth/supabase";
+import { withUser } from "@/lib/auth/userScope";
 
 // The DTO — deliberately NOT the auth.users row. Supabase's user object carries
 // app_metadata, identities, raw provider payloads and more; none of it belongs
@@ -70,4 +72,21 @@ export async function requireUserForApi(): Promise<SessionUser | null> {
 // The standard 401 for route handlers, so every route spells it the same way.
 export function unauthorizedJson(): Response {
   return Response.json({ error: "Not authenticated." }, { status: 401 });
+}
+
+// The page/action counterpart to withRequestConfig: require a session, then run
+// `fn` inside the user scope so the store layer can read activeUserId().
+//
+// Server Components need this explicitly per page rather than once in a layout.
+// A layout receives its children already-rendered as a prop, so a scope entered
+// in the layout body does not enclose the page's own data fetching — the ALS
+// context simply isn't active when the child renders. Wrapping each page's reads
+// is the honest version of that constraint.
+//
+// Cheap despite the repetition: requireUser is cache()d per render pass, so a
+// page whose layout and three components each wrap their reads still performs
+// one getUser() round trip.
+export async function withPageUser<T>(fn: (user: SessionUser) => Promise<T>): Promise<T> {
+  const user = await requireUser();
+  return withUser(user, () => fn(user));
 }

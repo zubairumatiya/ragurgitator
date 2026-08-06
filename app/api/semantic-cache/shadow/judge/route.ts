@@ -12,6 +12,7 @@
 import { z } from "zod";
 
 import { config } from "@/lib/config";
+import { withRequestUser } from "@/lib/http/configScope";
 import { parseBody } from "@/lib/http/body";
 import {
   JudgeAlreadyRunningError,
@@ -41,35 +42,37 @@ export async function POST(request: Request) {
   if (parsed.response) return parsed.response;
   const body = parsed.data;
 
-  try {
-    if (body.mode === "human") {
-      await setHumanVerdict(body.id, body.verdict);
-      return Response.json({ ok: true });
+  return withRequestUser(async () => {
+    try {
+      if (body.mode === "human") {
+        await setHumanVerdict(body.id, body.verdict);
+        return Response.json({ ok: true });
+      }
+      // Restrict to the offered judge models so a stray string can't run arbitrary
+      // (or non-existent) models.
+      if (!(config.semanticCache.judgeModelOptions as readonly string[]).includes(body.model)) {
+        return Response.json(
+          { error: `Unknown judge model: ${body.model}` },
+          { status: 400 },
+        );
+      }
+      const result = await judgeShadowEvents({
+        space: body.space,
+        model: body.model,
+        simMin: body.simMin,
+        simMax: body.simMax,
+        limit: body.limit,
+        rejudge: body.rejudge,
+      });
+      return Response.json({ result });
+    } catch (err) {
+      // A second run over the same space while one is in flight is a conflict, not
+      // a server fault — 409 so the UI can say "already running" rather than fail.
+      if (err instanceof JudgeAlreadyRunningError) {
+        return Response.json({ error: err.message }, { status: 409 });
+      }
+      const message = err instanceof Error ? err.message : "Judging failed.";
+      return Response.json({ error: message }, { status: 500 });
     }
-    // Restrict to the offered judge models so a stray string can't run arbitrary
-    // (or non-existent) models.
-    if (!(config.semanticCache.judgeModelOptions as readonly string[]).includes(body.model)) {
-      return Response.json(
-        { error: `Unknown judge model: ${body.model}` },
-        { status: 400 },
-      );
-    }
-    const result = await judgeShadowEvents({
-      space: body.space,
-      model: body.model,
-      simMin: body.simMin,
-      simMax: body.simMax,
-      limit: body.limit,
-      rejudge: body.rejudge,
-    });
-    return Response.json({ result });
-  } catch (err) {
-    // A second run over the same space while one is in flight is a conflict, not
-    // a server fault — 409 so the UI can say "already running" rather than fail.
-    if (err instanceof JudgeAlreadyRunningError) {
-      return Response.json({ error: err.message }, { status: 409 });
-    }
-    const message = err instanceof Error ? err.message : "Judging failed.";
-    return Response.json({ error: message }, { status: 500 });
-  }
+  });
 }
