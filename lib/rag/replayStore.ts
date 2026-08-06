@@ -181,9 +181,17 @@ function idealFor(
 // gains a cached chunk vector, which is the only way an under-covered model can
 // become scorable. It over-invalidates (an unrelated ingest bumps it too) — see
 // 0043's header for why that trade is deliberate.
+//
+// Scoped to the user's own rows since 0050. Unqualified, this count was the one
+// place that broke embedding_cache's implicit "every lookup brings its own
+// text_hash" invariant, and it was a functional bug on top of a tenancy one:
+// ANOTHER ACCOUNT'S INGEST bumped the count and threw away this user's replay.
+// Deliberate over-invalidation within one tenant is the trade 0043 accepted;
+// across tenants it was never anything but noise.
 async function fingerprint(configId: string, corpus: Corpus): Promise<string> {
   const [{ count }] = await sql<{ count: string }[]>`
-    select count(*) as count from embedding_cache where input_kind = 'document'
+    select count(*) as count from embedding_cache
+    where user_id = ${activeUserId()} and input_kind = 'document'
   `;
 
   const chunkPart = corpus.chunks.map((c) => sha256(c.text)).sort().join(",");
@@ -207,7 +215,10 @@ async function fingerprint(configId: string, corpus: Corpus): Promise<string> {
 // --- the computation --------------------------------------------------------
 
 // Cached vectors for `texts` under `model`. Cache-only: never calls a provider,
-// so a replay can't spend money by accident.
+// so a replay can't spend money by accident — and, since 0050, only over vectors
+// this account's own provider key paid for. That is what makes the "$0 model
+// comparison" honest rather than a subsidy: a model the user has never run under
+// stays under-covered and unscorable instead of borrowing someone else's pool.
 async function cachedVectors(
   model: string,
   texts: string[],
@@ -218,7 +229,8 @@ async function cachedVectors(
   const rows = await sql<{ text_hash: string; embedding: number[] }[]>`
     select text_hash, embedding
     from embedding_cache
-    where model = ${model} and input_kind = ${kind} and text_hash = any(${hashes})
+    where user_id = ${activeUserId()}
+      and model = ${model} and input_kind = ${kind} and text_hash = any(${hashes})
   `;
   const byHash = new Map(rows.map((r) => [r.text_hash, r.embedding]));
   const out = new Map<string, number[]>();

@@ -4,16 +4,26 @@
 // different model" trial (lib/rag/eval.runModelTrial), the graded-nDCG ranking
 // builder (lib/rag/ranking.ts), and delegate-space retrieval (lib/rag/retriever).
 //
-// L1 is the original in-process Map (dies with the server). L2 is the global
+// L1 is the original in-process Map (dies with the server). L2 is the
 // embedding_cache table (migration 0020): content-addressed by
 // (model, input_kind, sha256(text)) — no raw text stored — so any string ever
 // embedded under a model costs one provider API call across restarts, trials,
 // and queries. Misses embed via the provider and write back to both layers.
 // L2 is best-effort: if migration 0020 hasn't been applied (undefined_table,
 // 42P01) the cache degrades to the old memory-only behavior.
+//
+// BOTH LAYERS ARE PER-USER as of 0050. The table was global and content-
+// addressed, which under strict BYOK is a cost transfer (one account's key pays
+// to bank a vector another reads for free) and leaves a row nobody owns, so
+// "delete my account" can't reach it. L1 carries activeUserId() in its key for
+// the same reason — a process-global Map would hand back exactly the vectors the
+// table change just partitioned, and reopen the same existence oracle, for as
+// long as the server stays up. The two layers must agree or neither means
+// anything.
 // ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
 
+import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { embedQuery, embedTexts } from "@/lib/rag/embeddings";
 import { costEmbed, estimateTokens, estimateTokensAll } from "@/lib/rag/pricing";
@@ -66,8 +76,11 @@ export function cosine(a: number[], b: number[]): number {
 type InputKind = "document" | "query";
 
 const memory = new Map<string, number[]>();
+// Mirrors the L2 primary key (user_id, model, input_kind, text_hash), user first.
+// activeUserId() throws outside a request scope, which is the desired failure:
+// an unscoped caller would otherwise share one tenant's vectors with the next.
 const memKey = (model: string, kind: InputKind, text: string) =>
-  `${model} ${kind} ${text}`;
+  `${activeUserId()} ${model} ${kind} ${text}`;
 
 // Must match the backfill script and any SQL-side hashing:
 // encode(sha256(text::bytea), 'hex') over the exact input string (UTF-8).
@@ -90,7 +103,8 @@ async function readPersisted(
     const rows = await sql<{ text_hash: string; embedding: number[] }[]>`
       select text_hash, embedding
       from embedding_cache
-      where model = ${model} and input_kind = ${kind}
+      where user_id = ${activeUserId()}
+        and model = ${model} and input_kind = ${kind}
         and text_hash = any(${hashes})
     `;
     const byHash = new Map(rows.map((r) => [r.text_hash, r.embedding]));
@@ -108,16 +122,19 @@ async function readPersisted(
 
 // L2 write-back for freshly embedded texts. `on conflict do nothing`: a
 // concurrent request may have raced us to the same (deterministic) vector.
+// Since 0050 that conflict is only ever with THIS user's own row — two accounts
+// embedding the same text now bank a row each, which is the dedup we gave up.
 async function writePersisted(
   model: string,
   kind: InputKind,
   entries: { text: string; vector: number[] }[],
 ): Promise<void> {
+  const userId = activeUserId();
   try {
     for (const { text, vector } of entries) {
       await sql`
-        insert into embedding_cache (model, input_kind, text_hash, dimension, embedding)
-        values (${model}, ${kind}, ${hashText(text)}, ${vector.length}, ${vector}::real[])
+        insert into embedding_cache (user_id, model, input_kind, text_hash, dimension, embedding)
+        values (${userId}, ${model}, ${kind}, ${hashText(text)}, ${vector.length}, ${vector}::real[])
         on conflict do nothing
       `;
     }

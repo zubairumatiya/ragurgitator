@@ -12,6 +12,13 @@
 // ::real[] cast); no vectors cross the wire. `on conflict do nothing` makes
 // re-runs and duplicate texts free.
 //
+// OWNERSHIP (0050): embedding_cache is per-user, so every insert derives its
+// user_id from the vector's own provenance rather than taking one. That is why
+// this script needs no SCRIPT_USER_ID — each source row already reaches an owner
+// (chunks_* → document_embeddings → configs.user_id; config_chunk_overrides →
+// configs.user_id), and deriving is strictly better than an operator-supplied
+// id, which would mis-attribute every row on a multi-tenant database.
+//
 //   Usage: DATABASE_URL=… npx tsx scripts/backfill-embedding-cache.ts
 // ---------------------------------------------------------------------------
 import { sql } from "../lib/db";
@@ -40,11 +47,18 @@ async function main() {
       console.log(`- ${table}: does not exist, skipping`);
       continue;
     }
+    // distinct: one chunk text can appear under several configs of the same
+    // owner, and the insert is now keyed per user — without it the statement
+    // would try to write the same (user, model, kind, hash) row twice in one
+    // command, which `on conflict do nothing` does NOT cover.
     const inserted = await sql`
-      insert into embedding_cache (model, input_kind, text_hash, dimension, embedding)
-      select ${spec.id}, 'document', encode(sha256(text::bytea), 'hex'),
-             ${spec.dimension}, embedding::real[]
-      from ${sql(table)}
+      insert into embedding_cache (user_id, model, input_kind, text_hash, dimension, embedding)
+      select distinct on (cf.user_id, encode(sha256(c.text::bytea), 'hex'))
+             cf.user_id, ${spec.id}, 'document', encode(sha256(c.text::bytea), 'hex'),
+             ${spec.dimension}, c.embedding::real[]
+      from ${sql(table)} c
+      join document_embeddings de on de.id = c.document_embedding_id
+      join configs cf on cf.id = de.config_id
       on conflict do nothing
       returning 1
     `;
@@ -54,10 +68,13 @@ async function main() {
 
   // 2. Override pieces that carry their own text (size / size+model).
   const pieces = await sql`
-    insert into embedding_cache (model, input_kind, text_hash, dimension, embedding)
-    select model, 'document', encode(sha256(text::bytea), 'hex'), dimension, embedding
-    from config_chunk_overrides
-    where text is not null
+    insert into embedding_cache (user_id, model, input_kind, text_hash, dimension, embedding)
+    select distinct on (cf.user_id, o.model, encode(sha256(o.text::bytea), 'hex'))
+           cf.user_id, o.model, 'document', encode(sha256(o.text::bytea), 'hex'),
+           o.dimension, o.embedding
+    from config_chunk_overrides o
+    join configs cf on cf.id = o.config_id
+    where o.text is not null
     on conflict do nothing
     returning 1
   `;
@@ -66,8 +83,8 @@ async function main() {
 
   // 3. Whole-chunk model overrides: text lives on the source chunk in the
   //    owning config's base table.
-  const configs = await sql<{ id: string; base_model: string }[]>`
-    select id, base_model from configs
+  const configs = await sql<{ id: string; base_model: string; user_id: string }[]>`
+    select id, base_model, user_id from configs
   `;
   for (const cfg of configs) {
     const spec = EMBEDDING_MODELS[cfg.base_model];
@@ -78,8 +95,9 @@ async function main() {
     const table = chunksTable(spec.id, spec.dimension);
     if (!(await tableExists(table))) continue;
     const wholeChunk = await sql`
-      insert into embedding_cache (model, input_kind, text_hash, dimension, embedding)
-      select o.model, 'document', encode(sha256(c.text::bytea), 'hex'),
+      insert into embedding_cache (user_id, model, input_kind, text_hash, dimension, embedding)
+      select distinct on (o.model, encode(sha256(c.text::bytea), 'hex'))
+             ${cfg.user_id}, o.model, 'document', encode(sha256(c.text::bytea), 'hex'),
              o.dimension, o.embedding
       from config_chunk_overrides o
       join ${sql(table)} c on c.id = o.source_chunk_id

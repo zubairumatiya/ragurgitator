@@ -7,14 +7,11 @@
 // POST — apply/set a space's threshold `{space, threshold, sampleSize?, notes?}`
 //        (the "Apply recommended" / "Apply calibrated" buttons).
 //
-// Global (not config-scoped): thresholds are keyed by vector-space, shared by
-// every config that uses that embedding model.
-//
-// STILL GLOBAL ACROSS USERS, and that is a known Phase 5 item, not an oversight:
-// `semantic_cache_thresholds` is primary-keyed by (space) alone, so one account's
-// calibration governs another's cache — and a threshold set too low makes the
-// cache serve WRONG ANSWERS. Phase 2 gates the endpoint behind a session; Phase 5
-// partitions the table by user_id (docs/user-accounts-plan.md §3, migration 0047).
+// Not config-scoped: a threshold is keyed by vector-space, shared by every
+// config of YOURS that uses that embedding model. Since 0050 the table is
+// primary-keyed (user_id, space), so it stops there — one account's calibration
+// no longer governs another's cache, which mattered because a threshold set too
+// low makes the cache serve WRONG ANSWERS.
 // ---------------------------------------------------------------------------
 import { z } from "zod";
 

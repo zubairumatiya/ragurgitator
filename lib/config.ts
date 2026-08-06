@@ -94,12 +94,13 @@ export const config = {
     // judged semantic_cache_shadow row stays in its captured space and keeps
     // funding that space's calibration. Changing this moves every config that
     // holds no override into a NEW space, which falls back to
-    // defaultThreshold — see resolveKeyModel / assertKeyModelCalibrated.
+    // defaultThreshold — see resolveKeyModel / uncalibratedKeyModelSpace.
     keyModel: "voyage-4-lite",
-    // Conservative cosine trigger for any vector-space without a calibrated
+    // Conservative cosine trigger for any (user, space) without a calibrated
     // value in semantic_cache_thresholds. High on purpose: in RAG a false hit
     // is a wrong answer (see the plan doc). Phase 2 calibration lowers it per
-    // space only where the eval bank proves it's safe.
+    // space only where the eval bank proves it's safe, and only for the account
+    // that ran it (0050).
     defaultThreshold: 0.95,
     // Safety cap on cached queries scored (in JS) per lookup for one config.
     maxCandidates: 500,

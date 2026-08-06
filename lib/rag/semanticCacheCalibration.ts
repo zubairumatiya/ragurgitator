@@ -52,8 +52,9 @@ async function safe<T>(fn: () => Promise<T[]>, fallback: T[]): Promise<T[]> {
 // return real user content — new_query / matched_query / served_answer are a
 // user's questions and the answers served to them — so an unscoped read here is
 // a content leak, not merely a stats leak. The thresholds table is the one piece
-// of this subsystem that CANNOT be scoped this way: it is keyed by (space) alone
-// and needs migration 0047 in Phase 5.
+// of this subsystem that cannot be scoped this way — it has no config_id — so
+// 0050 gave it a user_id of its own; those queries filter on activeUserId()
+// directly.
 const ownedConfigs = () =>
   sql`config_id in (select id from configs where user_id = ${activeUserId()})`;
 
@@ -134,10 +135,12 @@ export async function computeCollisionFloor(): Promise<CollisionFloorReport> {
   };
 }
 
-// --- Threshold table (global) ----------------------------------------------
+// --- Threshold table (per user, per space) ----------------------------------
 
-// Upsert the calibrated threshold for a vector-space. `notes`/`sampleSize`
-// record where it came from (collision-floor vs shadow-judge n=…).
+// Upsert the calibrated threshold for one of THIS USER's vector-spaces.
+// `notes`/`sampleSize` record where it came from (collision-floor vs
+// shadow-judge n=…). Per (user, space) since 0050 — see that migration for why
+// a shared threshold is a wrong-answer bug rather than a tidiness one.
 export async function applyThreshold(
   space: string,
   threshold: number,
@@ -145,9 +148,9 @@ export async function applyThreshold(
   notes: string,
 ): Promise<void> {
   await sql`
-    insert into semantic_cache_thresholds (space, threshold, calibrated_at, sample_size, notes)
-    values (${space}, ${threshold}, now(), ${sampleSize}, ${notes})
-    on conflict (space) do update
+    insert into semantic_cache_thresholds (user_id, space, threshold, calibrated_at, sample_size, notes)
+    values (${activeUserId()}, ${space}, ${threshold}, now(), ${sampleSize}, ${notes})
+    on conflict (user_id, space) do update
       set threshold     = excluded.threshold,
           calibrated_at = excluded.calibrated_at,
           sample_size   = excluded.sample_size,
@@ -178,7 +181,8 @@ export async function listThresholdsWithStats(): Promise<ThresholdReport[]> {
       () =>
         sql<
           { space: string; threshold: number; calibrated_at: Date; sample_size: number | null; notes: string | null }[]
-        >`select space, threshold, calibrated_at, sample_size, notes from semantic_cache_thresholds`,
+        >`select space, threshold, calibrated_at, sample_size, notes
+          from semantic_cache_thresholds where user_id = ${activeUserId()}`,
       [] as { space: string; threshold: number; calibrated_at: Date; sample_size: number | null; notes: string | null }[],
     ),
     safe(

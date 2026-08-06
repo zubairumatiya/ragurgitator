@@ -1182,6 +1182,12 @@ export async function getModelTrialChunk(
 // candidates: delegate-space retrieval and past trials have already paid for
 // them. Hash must mirror lib/rag/embedCache (sha256 hex over the exact UTF-8
 // text). Cache table missing (0020 unapplied) → none.
+//
+// "Already paid for" means BY THIS ACCOUNT since 0050 — the join carries a
+// user_id predicate of its own. The config filter alone wouldn't supply it: the
+// cache row is content-addressed and reached by text hash, so without it a
+// chunk would count as free because a different tenant had embedded the same
+// text.
 export async function cachedChunkIdsForModel(model: string): Promise<string[]> {
   const table = await activeChunksTable();
   if (!table) return [];
@@ -1191,7 +1197,8 @@ export async function cachedChunkIdsForModel(model: string): Promise<string[]> {
       from ${sql(table)} c
       join document_embeddings de on de.id = c.document_embedding_id
       join embedding_cache ec
-        on ec.model = ${model}
+        on ec.user_id = ${activeUserId()}
+       and ec.model = ${model}
        and ec.input_kind = 'document'
        and ec.text_hash = encode(sha256(convert_to(c.text, 'UTF8')), 'hex')
       where de.config_id = ${activeConfig().id}

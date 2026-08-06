@@ -1,15 +1,26 @@
 -- ============================================================================
 -- 0020_embedding_cache.sql
 --
--- Global, content-addressed embedding cache: one row per unique
+-- Content-addressed embedding cache: one row per unique
 -- (model, input_kind, sha256(text)) ever embedded. Backs lib/rag/embedCache's
 -- persistent layer, so trial pools, delegate-space retrieval candidates, and
 -- repeated queries cost one provider API call ever.
 --
+-- ⚠ SUPERSEDED IN PART BY 0050, which adds user_id to the primary key. Two
+-- claims below were wrong and were acted on before that was noticed — corrected
+-- in place so a fresh-database reader doesn't inherit them:
+--
+--   - "without retaining anyone's content" is FALSE as a security claim. No raw
+--     text is stored, but the embedding is, and approximate reconstruction of
+--     source text from a vector is a published attack.
+--   - "lookups always arrive holding the text" was an invariant nothing
+--     enforced, and it was already violated by replayStore's unqualified
+--     count(*) — which made it a cross-tenant functional bug too.
+--
 -- Design decisions (see conversation with retriever option-1 fix):
 --   - NO raw text: the hash is the key and the text is never needed again —
---     lookups always arrive holding the text. Keeps the cache shareable across
---     future users/tenants without retaining anyone's content.
+--     lookups always arrive holding the text. That keeps the table small; it
+--     does NOT make it safe to share across tenants (see above).
 --   - input_kind ('document' | 'query') is part of the key: Voyage/Cohere embed
 --     the two differently (input_type), so a document vector must never be
 --     served for a query lookup.

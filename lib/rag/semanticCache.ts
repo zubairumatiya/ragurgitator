@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
 
+import { activeUserId } from "@/lib/auth/userScope";
 import { config } from "@/lib/config";
 import { sql } from "@/lib/db";
 import { activeConfig, type ResolvedConfig } from "@/lib/rag/activeConfig";
@@ -206,11 +207,16 @@ export type EffectiveThreshold = {
 // conservative default. Missing table → default. This is what a config with no
 // override of its own runs at, and what the Settings input shows as its
 // placeholder.
+//
+// Per (user, space) since 0050, and that predicate is load-bearing rather than
+// hygienic: without it the last account to calibrate sets the floor at which
+// EVERY account's cache serves a stored answer instead of computing a fresh one.
 export async function inheritedThreshold(model: string): Promise<EffectiveThreshold> {
   const space = spaceOf(model);
   try {
     const [row] = await sql<{ threshold: number }[]>`
-      select threshold from semantic_cache_thresholds where space = ${space}
+      select threshold from semantic_cache_thresholds
+      where user_id = ${activeUserId()} and space = ${space}
     `;
     if (row) return { space, threshold: Number(row.threshold), source: "calibrated" };
   } catch (err) {
