@@ -8,8 +8,13 @@
 //   • LLM    — the result bodies carry real per-request `usage`, so sum it.
 //   • Voyage — result rows carry only embedding vectors (no usage), so price
 //              the −33% from the embedded texts (char/4), like embed_cache.
-// Both are fire-and-forget; savingsStore swallows a missing table / any error.
+// Both defer through detached(); savingsStore swallows a missing table / any
+// error. /api/batch/poll is an ordinary request, so these ARE queued — and the
+// config each one captures is the JOB's, since the orchestrator enters a
+// different config scope per job (lib/batch/orchestrator.ts). A request-level
+// config snapshot would file every job's saving against one config.
 // ---------------------------------------------------------------------------
+import { detached } from "@/lib/detached";
 import { BATCH_DISCOUNT, costEmbed, costLlm, estimateTokensAll } from "@/lib/rag/pricing";
 import { llmProviderOf } from "@/lib/llm/llmModels";
 import { recordSaving } from "@/lib/rag/savingsStore";
@@ -25,7 +30,7 @@ import type { BatchResultRow } from "@/lib/batch/types";
 // both legs, and the discount is looked up from the model's own provider rather
 // than assumed. Today both are 0.5, which is exactly why hardcoding one would go
 // unnoticed until a provider changed its batch price.
-export function bankLlmBatchSaving(results: BatchResultRow[]): void {
+export async function bankLlmBatchSaving(results: BatchResultRow[]): Promise<void> {
   let inTok = 0;
   let outTok = 0;
   let model = "";
@@ -50,14 +55,14 @@ export function bankLlmBatchSaving(results: BatchResultRow[]): void {
     return;
   }
   const saved = costLlm(model, inTok, outTok) * discount;
-  void recordSaving("batch", saved, inTok + outTok);
+  await detached(() => recordSaving("batch", saved, inTok + outTok));
 }
 
 // Voyage-leg (ingest_embedding). `texts` are the chunk texts actually embedded
 // and stored; price the −33% off their estimated tokens.
-export function bankVoyageBatchSaving(texts: string[], model: string): void {
+export async function bankVoyageBatchSaving(texts: string[], model: string): Promise<void> {
   if (texts.length === 0) return;
   const tokens = estimateTokensAll(texts);
   const saved = costEmbed(model, tokens) * BATCH_DISCOUNT.voyage;
-  void recordSaving("batch", saved, tokens);
+  await detached(() => recordSaving("batch", saved, tokens));
 }

@@ -17,9 +17,17 @@
 //
 // For NDJSON streaming routes the scopes are captured into the stream producer
 // by lib/http/ndjson.ts, so wrapping the handler body is enough.
+//
+// Both wrappers also OWN THE DETACHED QUEUE (lib/detached.ts): they install it
+// and hand Next's `after` the flush that drains it once the response is out.
+// after() is called BEFORE withUser, so the async context it binds carries no
+// transaction handle — that ordering is load-bearing, not incidental.
 // ---------------------------------------------------------------------------
+import { after } from "next/server";
+
 import { requireUserForApi, unauthorizedJson } from "@/lib/auth/dal";
 import { withUser } from "@/lib/auth/userScope";
+import { withDetachedQueue } from "@/lib/detached";
 import { missingKeyResponse } from "@/lib/http/missingKeyServer";
 import { UnknownConfigError, resolveRequestConfig, withConfig } from "@/lib/rag/activeConfig";
 
@@ -52,21 +60,23 @@ export async function withRequestConfig<T>(
   const user = await requireUserForApi();
   if (!user) return unauthorizedJson();
 
-  return withUser(user, async () => {
-    let cfg;
-    try {
-      cfg = await resolveRequestConfig(request);
-    } catch (err) {
-      // 404, not 500 and not 403: a config that doesn't exist and a config owned
-      // by someone else must look identical from outside, or the status code
-      // itself confirms which ids are real.
-      if (err instanceof UnknownConfigError) {
-        return Response.json({ error: "Config not found." }, { status: 404 });
+  return withDetachedQueue(user, after, () =>
+    withUser(user, async () => {
+      let cfg;
+      try {
+        cfg = await resolveRequestConfig(request);
+      } catch (err) {
+        // 404, not 500 and not 403: a config that doesn't exist and a config
+        // owned by someone else must look identical from outside, or the status
+        // code itself confirms which ids are real.
+        if (err instanceof UnknownConfigError) {
+          return Response.json({ error: "Config not found." }, { status: 404 });
+        }
+        throw err;
       }
-      throw err;
-    }
-    return withConfig(cfg, () => catchingMissingKey(fn));
-  });
+      return withConfig(cfg, () => catchingMissingKey(fn));
+    }),
+  );
 }
 
 // Authenticate and enter the user scope only. For the handful of routes that are
@@ -77,5 +87,7 @@ export async function withRequestConfig<T>(
 export async function withRequestUser<T>(fn: () => Promise<T>): Promise<T | Response> {
   const user = await requireUserForApi();
   if (!user) return unauthorizedJson();
-  return withUser(user, () => catchingMissingKey(fn));
+  return withDetachedQueue(user, after, () =>
+    withUser(user, () => catchingMissingKey(fn)),
+  );
 }

@@ -22,7 +22,7 @@ import { parseQuestions, questionRequestParams } from "@/lib/rag/eval";
 import { chunksNeedingQuestionsByDifficulty, insertQuestionWithLabel } from "@/lib/rag/evalStore";
 import { bankLlmBatchSaving } from "@/lib/batch/savings";
 import { llmProviderOf } from "@/lib/llm/llmModels";
-import type { BatchResultRow } from "@/lib/batch/types";
+import { batchCustomId, type BatchResultRow } from "@/lib/batch/types";
 import type { BuiltBatch, JobHandler } from "@/lib/batch/jobs/registry";
 
 export type QuestionGenScope = {
@@ -81,7 +81,7 @@ export const questionGenerationHandler: JobHandler = {
       // independent generations rather than one asking for a pair.
       for (let slot = 0; slot < g.needed; slot += 1) {
         // Index-prefixed so custom_ids stay unique across chunks AND slots.
-        const customId = `${built.length}:${g.chunkId}:${g.difficulty}`;
+        const customId = batchCustomId(built.length, g.chunkId, g.difficulty);
         built.push({
           customId,
           chunkId: g.chunkId,
@@ -129,7 +129,7 @@ export const questionGenerationHandler: JobHandler = {
       });
       applied += 1;
     }
-    bankLlmBatchSaving(results);
+    await bankLlmBatchSaving(results);
     return applied;
   },
 };

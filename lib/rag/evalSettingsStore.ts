@@ -11,7 +11,7 @@
 // aren't consumed until the Phase C engine lands.
 // ---------------------------------------------------------------------------
 import { activeUserId } from "@/lib/auth/userScope";
-import { sql } from "@/lib/db";
+import { fragment, sql } from "@/lib/db";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";
 import type { Difficulty } from "@/lib/rag/eval";
 import { noteFusionPoolChange } from "@/lib/rag/overrideStore";
@@ -124,7 +124,7 @@ function toCriteria(row: CriteriaRow): EvalCriteria {
   };
 }
 
-const COLUMNS = sql`
+const COLUMNS = fragment`
   recall_enabled, recall_k, recall_min_rate,
   mrr_enabled, mrr_k, mrr_min_rate,
   ndcg_enabled, ndcg_k, ndcg_min_rate, ndcg_aggregate_models,

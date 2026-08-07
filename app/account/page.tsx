@@ -2,15 +2,21 @@
 // The account page: identity, provider keys, and account deletion.
 //
 // A Server Component, so the key list is read through the DAL rather than an API
-// route — requireUser() is the authorization boundary and it sits right next to
-// the query. listProviderKeys() returns DTOs with no ciphertext column in the
-// SELECT at all, so what crosses into the client tree structurally cannot
-// contain a credential.
+// route — the withPageUser() boundary is the authorization check and it sits
+// right next to the query. listProviderKeys() returns DTOs with no ciphertext
+// column in the SELECT at all, so what crosses into the client tree structurally
+// cannot contain a credential.
+//
+// withPageUser, NOT a bare requireUser(). Both authenticate, but only
+// withPageUser opens the transaction that carries the identity RLS reads (0051),
+// and `sql` throws outside one. This page read as `requireUser()` +
+// `listProviderKeys()` right up until 5b landed, which is why it was the last
+// place still doing it.
 //
 // Reached by clicking the email in the sidebar footer. proxy.ts already protects
 // it: only /login, /signup and /auth are public.
 // ---------------------------------------------------------------------------
-import { requireUser } from "@/lib/auth/dal";
+import { withPageUser } from "@/lib/auth/dal";
 import {
   listProviderKeys,
   PROVIDER_IDS,
@@ -23,8 +29,10 @@ import { ProviderKeyRow } from "@/app/components/ProviderKeyRow";
 export const metadata = { title: "Account" };
 
 export default async function AccountPage() {
-  const user = await requireUser();
-  const keys = await listProviderKeys(user.id);
+  const { user, keys } = await withPageUser(async (user) => ({
+    user,
+    keys: await listProviderKeys(user.id),
+  }));
 
   const byProvider = new Map<string, ProviderKeyDto>(keys.map((k) => [k.provider, k]));
 

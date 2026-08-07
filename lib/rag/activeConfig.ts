@@ -164,3 +164,12 @@ export function activeConfig(): ResolvedConfig {
   }
   return cfg;
 }
+
+// The same peek, without the throw — for the two callers whose contract is that
+// they must not be the thing that surfaces a missing scope: lib/detached.ts,
+// which captures the config to restore it at flush time, and savingsStore, whose
+// telemetry writes skip rather than fail. Everything else should use
+// activeConfig() and let a missing scope be the programming error it is.
+export function activeConfigOrNull(): ResolvedConfig | null {
+  return store.getStore() ?? null;
+}

@@ -500,7 +500,10 @@ function IngestProgress({ progress }: { progress: Progress | null }) {
   );
 }
 
-// Per-source breakdown: one line each, green for ingested, red for failures.
+// Per-source breakdown: one line each — green for ingested, red for failures,
+// amber for a file whose embeddings went to the batch API and haven't landed
+// yet. The amber case is stored-but-not-searchable, which is neither of the
+// other two and shouldn't be coloured like either.
 function IngestSummary({ results }: { results: IngestResult[] }) {
   return (
     <ul className="flex flex-col gap-1 text-sm">
@@ -508,6 +511,11 @@ function IngestSummary({ results }: { results: IngestResult[] }) {
         "error" in r ? (
           <li key={i} className="text-red-600 dark:text-red-400">
             ✕ <span className="font-mono">{r.fileName}</span> — {r.error}
+          </li>
+        ) : "queued" in r ? (
+          <li key={i} className="text-amber-600 dark:text-amber-400">
+            ⏳ <span className="font-mono">{r.fileName}</span> — queued for the
+            batch API; it becomes searchable once the batch is applied
           </li>
         ) : (
           <li key={i} className="text-green-600 dark:text-green-400">

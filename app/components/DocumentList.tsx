@@ -4,7 +4,15 @@
 //
 // Fetches on mount and re-fetches when FileUpload dispatches the
 // `rag:ingested` window event after a successful upload, or after a delete
-// here. Deleting a document removes its chunks and eval data (FK cascade).
+// here.
+//
+// Remove is scoped to the ACTIVE CONFIG — this config's chunks for the document
+// and the eval LABELS that point at them, and nothing else. The document stays
+// in the user's library, every other config keeps its own copy, and the eval
+// QUESTIONS stay too: those are per-document by design (0002), so one question
+// bank serves every config. That's what the list being per-config implies, and
+// the confirm text spells it out because a "Delete" next to a file name reads as
+// "delete the file" — which is why this button says Remove.
 // ---------------------------------------------------------------------------
 "use client";
 
@@ -55,9 +63,12 @@ export function DocumentList() {
 
   async function remove(doc: IngestedDocument) {
     const confirmed = window.confirm(
-      `Delete "${doc.fileName}"? This removes its ${doc.chunkCount} chunk` +
-        `${doc.chunkCount === 1 ? "" : "s"} and any eval questions/results for it. ` +
-        `This can't be undone.`,
+      `Remove "${doc.fileName}" from this config? This deletes its ` +
+        `${doc.chunkCount} chunk${doc.chunkCount === 1 ? "" : "s"} here, and the ` +
+        `ground-truth labels pointing at them. Other configs keep their copy, ` +
+        `your eval questions for this document stay (they're shared across ` +
+        `configs), and the file stays in your library — you can re-embed it ` +
+        `without re-uploading. This can't be undone.`,
     );
     if (!confirmed) return;
 
@@ -105,7 +116,7 @@ export function DocumentList() {
               disabled={deletingId === d.id}
               className="text-xs text-red-600 hover:underline disabled:opacity-50 dark:text-red-400"
             >
-              {deletingId === d.id ? "Deleting…" : "Delete"}
+              {deletingId === d.id ? "Removing…" : "Remove"}
             </button>
           </span>
         </li>

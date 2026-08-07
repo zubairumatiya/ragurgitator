@@ -94,20 +94,17 @@ export async function insertDocument(
   return rows[0].id;
 }
 
-// Delete a document and everything derived from it. The on-delete-cascade FKs
-// (documents -> document_embeddings -> chunks, and -> eval_questions -> labels
-// -> results) clear the vector AND eval data in one statement, across every
-// config the doc was processed under. eval_runs are intentionally NOT cascaded:
-// they're frozen aggregate snapshots kept for run-to-run comparison.
-// Returns false when no row matched (already gone), so the route can 404.
-export async function deleteDocument(id: string): Promise<boolean> {
-  const rows = await sql`
-    delete from documents
-    where id = ${id} and user_id = ${activeUserId()}
-    returning id
-  `;
-  return rows.length > 0;
-}
+// NOTE — deleteDocument USED TO LIVE HERE, and DELETE /api/documents/[id] called
+// it. One statement deleted the `documents` row and let the FK cascade take the
+// embeddings, chunks, eval questions/labels/results with it — ACROSS EVERY
+// CONFIG, which is not what a delete on one config's document list should mean.
+// That route now calls deleteEmbeddingRunFor (above), so a delete is scoped to
+// the config you performed it in and every other config keeps its copy.
+//
+// Nothing in the app purges a `documents` row any more. The row and its stored
+// text survive as a library entry (listLibraryDocuments), re-embeddable without
+// a re-upload; they are reachable only by "delete my account", which cascades
+// them through user_profiles.
 
 // Remove ONE config's embedding of a document (corpus auto-sync removal): the
 // document itself — and every other config's embedding of it — stays. Deleting
@@ -137,29 +134,27 @@ export async function deleteEmbeddingRunFor(
   });
 }
 
-// The SIZE of a document's existing run under the active config: how many chunks
-// it has and how many characters they total — i.e. what an ingest SKIP avoided
-// paying for. Null when there are no chunk rows.
+// Which of `documentIds` the ACTIVE config already has a run for, and how big
+// each one is. Absent from the map = not embedded here.
 //
-// PRICING ONLY. hasEmbeddingRun stays the gate (it reads document_embeddings,
-// the authoritative run row); this runs inside the skip branch it already chose,
-// so a run row that somehow had no chunks would cost us a savings line, never a
-// duplicate embed. Chars rather than text keeps a large document off the wire
-// just to price it — the caller converts via estimateTokensFromChars. Counts
-// chunk rows, not the source document: chunk overlap means the run really did
-// embed more text than the document holds, and that was genuinely paid for.
-export async function embeddedRunSize(
-  documentId: string,
-): Promise<{ chunks: number; chars: number } | null> {
-  const cfg = activeConfig();
-  const [row] = await sql<{ chunks: string; chars: string | null }[]>`
-    select count(*) as chunks, sum(length(text)) as chars
-    from ${sql(cfg.chunksTable)}
-    where config_id = ${cfg.id}
-      and document_id = ${documentId}
+// The chunk count comes off document_embeddings rather than counting chunk rows,
+// so this is a point-read per document however large the run is. Callers use it
+// to tell "this document was already here" from "this document's run landed
+// during the operation I'm reporting on" — which matters because the batch
+// builder can write a complete run out of the embedding cache before the inline
+// path ever looks (lib/batch/jobs/ingestEmbedding.build), and reporting that as
+// "no new chunks" describes work that did happen as work that didn't.
+export async function embeddingRunChunkCounts(
+  documentIds: string[],
+): Promise<Map<string, number>> {
+  if (documentIds.length === 0) return new Map();
+  const rows = await sql<{ document_id: string; chunk_count: number }[]>`
+    select document_id, chunk_count
+    from document_embeddings
+    where config_id = ${activeConfig().id}
+      and document_id = any(${documentIds}::uuid[])
   `;
-  const chunks = Number(row?.chunks ?? 0);
-  return chunks === 0 ? null : { chunks, chars: Number(row?.chars ?? 0) };
+  return new Map(rows.map((r) => [r.document_id, r.chunk_count]));
 }
 
 // Has this document already been embedded under the ACTIVE config? (config_id +
@@ -244,6 +239,17 @@ export async function insertEmbeddingRunWithChunks(args: {
     return inserted.map((r) => r.id);
   });
 }
+
+// NOTE — reuseEmbeddingRun USED TO LIVE HERE. It copied a sibling config's run
+// with one INSERT … SELECT when that config had embedded the same document under
+// identical settings, restoring the free second ingest that 0011's config-scoped
+// run key gave up. Routing ingest through embedding_cache (lib/rag/embedCache)
+// covers every case it covered and the one it could not — no sibling run
+// survives, because the document was deleted — and books the saving under
+// embed_cache rather than a second structural lever describing the same idea.
+// What we gave up, stated honestly: the copy never took the vectors out of the
+// database, where the cache route pulls them over the wire and rehashes the
+// texts. Slower, still free.
 
 export async function query(
   vector: number[],

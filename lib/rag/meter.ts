@@ -7,9 +7,10 @@
 // It reads the real `usage` the response already carries (input/output tokens —
 // previously discarded at every call site), records the cost against a Surface,
 // and returns the response so callers change only their import + the function
-// name. Recording is fire-and-forget and best-effort (savingsStore swallows a
-// missing table / any telemetry error), so metering never adds latency or a
-// failure mode to an answer. Non-streaming only — every metered site is.
+// name. Recording goes through detached() (lib/detached.ts) and is best-effort
+// (savingsStore swallows a missing table / any telemetry error), so metering
+// never adds latency or a failure mode to an answer. Non-streaming only — every
+// metered site is.
 //
 // THE SIGNATURE IS ANTHROPIC-SHAPED ON PURPOSE. All six generation callers
 // (generator, eval, ranking, clusterLabeler, semanticCacheCalibration,
@@ -39,6 +40,7 @@ import { anthropicFor, openaiFor } from "@/lib/llm/client";
 import { llmProviderOf } from "@/lib/llm/llmModels";
 import { toAnthropicMessage, toChatParams } from "@/lib/llm/openaiChat";
 import { activeUserId } from "@/lib/auth/userScope";
+import { detached } from "@/lib/detached";
 import { costLlm, type Surface } from "@/lib/rag/pricing";
 import { recordSpend } from "@/lib/rag/savingsStore";
 
@@ -58,7 +60,9 @@ export async function meteredMessage(
   if (u) {
     const inTok = u.input_tokens ?? 0;
     const outTok = u.output_tokens ?? 0;
-    void recordSpend(surface, costLlm(params.model, inTok, outTok), inTok + outTok);
+    await detached(() =>
+      recordSpend(surface, costLlm(params.model, inTok, outTok), inTok + outTok),
+    );
   }
   return response;
 }

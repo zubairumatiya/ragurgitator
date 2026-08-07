@@ -114,7 +114,6 @@ test("LEVERS: every lever id has metadata, so no saving is dropped on read", () 
     assert.ok(["realized", "structural"].includes(meta.category), `${id} category`);
     assert.ok(["exact", "estimate"].includes(meta.basis), `${id} basis`);
   }
-  assert.ok(LEVERS.ingest_skip, "ingest_skip must be registered to be reportable");
   assert.ok(LEVERS.eval_embed_reuse, "eval_embed_reuse must be registered to be reportable");
 });
 

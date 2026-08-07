@@ -21,7 +21,12 @@
 //
 //   Usage: DATABASE_URL=… npx tsx scripts/backfill-embedding-cache.ts
 // ---------------------------------------------------------------------------
-import { sql } from "../lib/db";
+// privilegedSql, not sql: this script is deliberately cross-tenant — it derives
+// each row's owner from the vector's own provenance rather than running as one
+// user — so it is the third and last legitimate caller of the bypassing pool.
+// The restricted handle would (correctly) return nothing here, since a script
+// has no request scope and therefore no app.user_id for 0051's policies to read.
+import { privilegedSql as sql } from "../lib/db";
 import { EMBEDDING_MODELS } from "../lib/rag/embeddingModels";
 
 // Mirrors vectorStore.chunksTable (not imported to keep this script off the

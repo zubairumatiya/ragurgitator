@@ -45,7 +45,11 @@ export type LeverId =
   // comes from a direct HNSW query, so there is no bucket-vs-corpus saving to
   // bank. Its historical rows are deleted by migrations/0039. The remaining ids
   // keep their doc numbers; the gap is intentional.)
-  | "ingest_skip" // #9 doc already embedded under this config — embed skipped
+  //
+  // (#9 "re-ingest skip" is RETIRED — see migrations/0054. It priced re-uploading
+  // a document that this config had already embedded, which the app no longer
+  // lets you do, and the reuse case it also covered is now the embedding cache's,
+  // banked as embed_cache. Same gap convention as #5.)
   | "eval_embed_reuse"; // #10 calibration reads banked eval vectors — no re-embed
 
 export const LEVERS: Record<
@@ -53,7 +57,6 @@ export const LEVERS: Record<
   { label: string; category: SavingsCategory; basis: SavingsBasis }
 > = {
   embed_cache: { label: "Embedding cache", category: "structural", basis: "estimate" },
-  ingest_skip: { label: "Re-ingest skip (already embedded)", category: "structural", basis: "estimate" },
   eval_embed_reuse: {
     label: "Eval-embedding reuse (calibration)",
     category: "structural",

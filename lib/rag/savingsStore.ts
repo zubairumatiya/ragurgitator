@@ -16,8 +16,8 @@
 // path. Recording errors are swallowed (telemetry must not fail an answer).
 // ---------------------------------------------------------------------------
 import { activeUserId } from "@/lib/auth/userScope";
-import { sql } from "@/lib/db";
-import { activeConfig } from "@/lib/rag/activeConfig";
+import { isolated, sql } from "@/lib/db";
+import { activeConfigOrNull } from "@/lib/rag/activeConfig";
 import {
   LEVERS,
   SURFACE_LABELS,
@@ -32,12 +32,12 @@ const isMissingTable = (err: unknown): boolean =>
 
 // activeConfig() throws outside a withConfig scope; a telemetry write must never
 // be the thing that surfaces that. No scope (and no explicit id) → skip silently.
+//
+// That silent skip is exactly why lib/detached.ts captures the config when a
+// task is QUEUED rather than reading it when the task runs: a deferred write
+// that lost its config scope would return here without so much as a warn.
 function scopeConfigId(): string | null {
-  try {
-    return activeConfig().id;
-  } catch {
-    return null;
-  }
+  return activeConfigOrNull()?.id ?? null;
 }
 
 // Add to a lever's signed running total. `saved` may be negative (cascade
@@ -53,15 +53,17 @@ export async function recordSaving(
   if (!configId) return;
   const events = opts.events ?? 1;
   try {
-    await sql`
-      insert into savings_totals (config_id, lever, event_count, tokens_saved, saved_usd, updated_at)
-      values (${configId}, ${lever}, ${events}, ${Math.round(tokensSaved)}, ${saved}, now())
-      on conflict (config_id, lever) do update set
-        event_count  = savings_totals.event_count  + excluded.event_count,
-        tokens_saved = savings_totals.tokens_saved + excluded.tokens_saved,
-        saved_usd    = savings_totals.saved_usd    + excluded.saved_usd,
-        updated_at   = now()
-    `;
+    await isolated(
+      () => sql`
+        insert into savings_totals (config_id, lever, event_count, tokens_saved, saved_usd, updated_at)
+        values (${configId}, ${lever}, ${events}, ${Math.round(tokensSaved)}, ${saved}, now())
+        on conflict (config_id, lever) do update set
+          event_count  = savings_totals.event_count  + excluded.event_count,
+          tokens_saved = savings_totals.tokens_saved + excluded.tokens_saved,
+          saved_usd    = savings_totals.saved_usd    + excluded.saved_usd,
+          updated_at   = now()
+      `,
+    );
   } catch (err) {
     if (isMissingTable(err)) return;
     console.warn(`[rag:savings] record ${lever} failed: ${(err as Error).message}`);
@@ -78,14 +80,16 @@ export async function recordSpend(
   const configId = opts.configId ?? scopeConfigId();
   if (!configId) return;
   try {
-    await sql`
-      insert into spend_totals (config_id, surface, tokens, spent_usd, updated_at)
-      values (${configId}, ${surface}, ${Math.round(tokens)}, ${spent}, now())
-      on conflict (config_id, surface) do update set
-        tokens     = spend_totals.tokens     + excluded.tokens,
-        spent_usd  = spend_totals.spent_usd  + excluded.spent_usd,
-        updated_at = now()
-    `;
+    await isolated(
+      () => sql`
+        insert into spend_totals (config_id, surface, tokens, spent_usd, updated_at)
+        values (${configId}, ${surface}, ${Math.round(tokens)}, ${spent}, now())
+        on conflict (config_id, surface) do update set
+          tokens     = spend_totals.tokens     + excluded.tokens,
+          spent_usd  = spend_totals.spent_usd  + excluded.spent_usd,
+          updated_at = now()
+      `,
+    );
   } catch (err) {
     if (isMissingTable(err)) return;
     console.warn(`[rag:savings] spend ${surface} failed: ${(err as Error).message}`);

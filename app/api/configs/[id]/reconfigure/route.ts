@@ -51,8 +51,8 @@ export async function POST(
   // Resolves the config from the path rather than the usual query param, so this
   // route takes withRequestUser and calls resolveConfig itself — which is now
   // owner-scoped, making another user's config indistinguishable from a missing
-  // one. ndjsonStream's AsyncResource.bind carries the user scope into the
-  // producer, so the re-embedding work below still sees it.
+  // one. ndjsonStream re-enters the user scope for its producer, so the
+  // re-embedding work below still sees it.
   return withRequestUser(async () => {
     const cfg = await resolveConfig(id);
     if (!cfg) return Response.json({ error: "Config not found." }, { status: 404 });

@@ -539,7 +539,7 @@ export async function scoreQuestions(
   await Promise.all(
     Array.from({ length: Math.min(SCORE_CONCURRENCY, questions.length) }, worker),
   );
-  meterEmbeds(cfg.embeddingModel, qHits, qMisses);
+  await meterEmbeds(cfg.embeddingModel, qHits, qMisses);
 
   await insertResults(results);
   return results.length;
@@ -927,7 +927,7 @@ async function rankExperiment(
   // them like any other paid embed path.
   const cachedQV = ctx.queryVector;
   const queryVector = cachedQV ?? (await embedQuery(ctx.question));
-  meterEmbeds(
+  await meterEmbeds(
     activeConfig().embeddingModel,
     cachedQV ? [ctx.question] : [],
     cachedQV ? [] : [ctx.question],

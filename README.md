@@ -61,7 +61,38 @@ scores retrieval quality with real information-retrieval metrics.
    up, and they are stored encrypted. See `.env.example` for the details.
 3. Apply the database schema — run the SQL files in `migrations/` against your
    database **in numerical order** (`0001…`, `0002…`, and so on).
-4. Start the dev server:
+4. Create the restricted database role and set `RAG_APP_DATABASE_URL`. Migration
+   `0051_rls.sql` creates the role `rag_app` but deliberately gives it **no
+   password** — a migration file is committed and a password should not be. Set
+   one out of band, as `postgres`:
+   ```sql
+   alter role rag_app password 'a-strong-password';
+   ```
+   Then put the matching connection string in `.env.local`. It is the same host,
+   port and database as `DATABASE_URL`; only the username and password change,
+   and through Supabase's pooler the username takes the form
+   `rag_app.<project-ref>`:
+   ```
+   RAG_APP_DATABASE_URL=postgresql://rag_app.<project-ref>:<password>@<same-host>:6543/postgres
+   ```
+
+   ### Why there are two connection strings
+
+   `RAG_APP_DATABASE_URL` is what the whole store layer runs as. `rag_app` holds
+   `NOBYPASSRLS`, so the row-level security policies in `0051_rls.sql` actually
+   apply to it and a store query that forgot its `where user_id = …` returns
+   nothing instead of returning every tenant's rows.
+
+   `DATABASE_URL` connects as `postgres`, which bypasses RLS, and is kept for
+   exactly three jobs: running migrations, deleting an `auth.users` row on
+   account deletion, and `scripts/backfill-embedding-cache.ts`, which is
+   deliberately cross-tenant. It should not gain a fourth.
+
+   There is **no fallback** if `RAG_APP_DATABASE_URL` is missing — the app
+   refuses to start. Falling back to `DATABASE_URL` would run the entire store
+   layer as a role that bypasses RLS while appearing to work perfectly, which is
+   the one failure mode worth refusing outright.
+5. Start the dev server:
    ```bash
    npm run dev
    ```

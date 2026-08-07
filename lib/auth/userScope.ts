@@ -18,11 +18,23 @@
 // has already verified a session (or is an operator running a script), so code
 // inside a scope can treat activeUser() as authenticated fact.
 //
-// Streaming routes need no special handling — lib/http/ndjson.ts binds the async
-// context with AsyncResource.bind before the stream producer runs, which carries
-// this scope along with the config scope.
+// The first two also own the DETACHED QUEUE (lib/detached.ts): they install it
+// and hand Next's `after` the flush that drains it once the response is out, and
+// the flush re-enters this scope from the RequestUser they captured. Scripts do
+// not, so telemetry there runs inline — which is why detached() has to work both
+// ways. Note that a deferred write has to carry the ACTIVE CONFIG too: the third
+// scope (lib/rag/activeConfig.ts) is where nine of the telemetry sites resolve
+// their config_id, and losing it makes them silently write nothing.
+//
+// Streaming routes are the one place that needs care. lib/http/ndjson.ts runs
+// its producer after the route handler has returned, so it re-enters this scope
+// itself rather than inheriting it — the async context AsyncResource.bind
+// restores carries a transaction that has already committed. See the ordering
+// note in that file; it is not a detail you can rearrange safely.
 // ---------------------------------------------------------------------------
 import { AsyncLocalStorage } from "node:async_hooks";
+
+import { withUserTransaction } from "@/lib/db";
 
 // Mirrors SessionUser in lib/auth/dal.ts rather than importing it: dal.ts is
 // "server-only" and pulls in the Supabase client, while this module is imported
@@ -36,8 +48,15 @@ const store = new AsyncLocalStorage<RequestUser>();
 
 // Run `fn` with `user` as the active user. Everything awaited inside the same
 // async chain — including deep store calls — sees it via activeUser().
+//
+// As of 0051 this also opens the database transaction that carries the identity
+// RLS checks (lib/db.ts). The two are deliberately the same boundary: a scope
+// that set activeUser() without setting the GUC would pass every store-layer
+// predicate and be denied every row, which is a confusing way to learn that the
+// two identities drifted. Nesting is free — withUserTransaction reuses an
+// already-open transaction for the same user.
 export function withUser<T>(user: RequestUser, fn: () => Promise<T>): Promise<T> {
-  return store.run(user, fn);
+  return store.run(user, () => withUserTransaction(user.id, fn));
 }
 
 // The active user for the current scope. Throws when called outside withUser,
@@ -59,12 +78,4 @@ export function activeUser(): RequestUser {
 // Sugar for the overwhelmingly common case — a SQL predicate needs the id only.
 export function activeUserId(): string {
   return activeUser().id;
-}
-
-// Whether a scope is active, WITHOUT throwing. For the rare call site that is
-// legitimately reachable both inside and outside a request (the batch poller's
-// per-job re-entry). Not an escape hatch for stores — if you find yourself
-// reaching for this to avoid a throw, the fix is to enter the scope earlier.
-export function hasActiveUser(): boolean {
-  return store.getStore() !== undefined;
 }

@@ -1,0 +1,39 @@
+-- ============================================================================
+-- 0054_drop_ingest_skip_savings.sql
+--
+-- RETIRES the 'ingest_skip' savings lever and deletes the dollars it banked.
+--
+-- The lever (docs/savings-accounting-plan.md §2 #9, "skip re-embed of ingested
+-- docs") priced two things that have both stopped being its to price:
+--
+--   1. Re-uploading a document THIS config had already embedded. The app no
+--      longer accepts a duplicate upload into the same config, so the branch it
+--      was banked from is not reachable by the flow it was written for.
+--   2. A sibling config already holding the same document's vectors. That is now
+--      the embedding cache's job — ingest reads embedding_cache
+--      (docs/ingest-embed-cache-plan.md), so the avoided embed books as
+--      'embed_cache' along with every other avoided embed in the app. Two levers
+--      describing one idea was the thing that change set out to fix.
+--
+-- lib/rag/ingestSavings.ts and its three call sites are deleted alongside this
+-- migration, and the id is removed from lib/rag/pricing.LEVERS.
+--
+-- WHY A DELETE AND NOT JUST DROPPING THE REGISTRY ENTRY — the same reasoning as
+-- 0039, which retired 'bucket_ndcg'. getCostsReport (lib/rag/savingsStore) skips
+-- rows whose lever isn't in LEVERS, so these stop being reported the moment the
+-- code lands. But savings_totals holds cumulative RUNNING TOTALS rather than
+-- events, so a stranded total is latent: a hand-written query, an export, or a
+-- future lever id that reuses the name would resurrect it as if it were live
+-- money. Note the difference from 0039 all the same — those totals were
+-- FICTIONAL, measured against a mechanism the app never had; these were real
+-- avoided embeds at the time. What makes them go is that they are no longer
+-- countable the same way, not that they were wrong.
+--
+-- Scope: savings_totals only. There is no matching spend to unwind — the whole
+-- point of the lever was work that was never billed.
+--
+-- On the database this was written against: 2 rows, 82 events, $0.000946.
+-- Idempotent, and a no-op on a database that never accrued this lever.
+-- ============================================================================
+
+delete from savings_totals where lever = 'ingest_skip';

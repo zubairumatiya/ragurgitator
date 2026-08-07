@@ -4,21 +4,29 @@
 // every config view. Jobs are global (a provider batch isn't config-scoped), so
 // each row is tagged with the config that launched it.
 //
-// Behavior (decision 4 — poll-while-open + Check now):
+// Behavior:
 //   • On mount: GET the list (seeds the badge). If anything is still running, do
 //     ONE poll so batches that finished while the app was closed get picked up
-//     and applied on this open — bounded to when there's actually pending work.
-//   • While open: poll every 10s (advance provider status, apply completions,
-//     email once) and re-list. "Check now" forces a poll immediately.
+//     and applied straight away — bounded to when there's actually pending work.
+//   • Always: poll every 60s in the background (this is in the Nav, so that
+//     means on every page), advancing provider status, applying completions and
+//     sending the completion email. Nothing else in the app does this — there is
+//     no cron — so a closed panel used to mean a finished batch stayed unapplied.
+//   • While open: poll every 10s instead, and re-list. "Check now" forces one.
 //   • Cancel (in_progress only) and dismiss ("ack") a finished job's badge.
 // ---------------------------------------------------------------------------
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "@/lib/http/client";
 import { JOB_LABELS, isCancelable, isTerminal, type BatchJob } from "@/lib/batch/types";
 
-const POLL_MS = 10_000;
+const OPEN_POLL_MS = 10_000;
+// The background cadence, which runs on every page because the panel is in the
+// Nav. A minute is the compromise: a batch is a minutes-to-hours affair, so this
+// is fast enough that a completion is applied promptly, and slow enough that an
+// idle tab isn't hammering the provider's API on the user's own key.
+const BACKGROUND_POLL_MS = 60_000;
 
 const STATUS_STYLE: Record<string, string> = {
   submitting: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
@@ -44,7 +52,6 @@ export function BatchRequestsPanel() {
   const [jobs, setJobs] = useState<BatchJob[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const list = useCallback(async (): Promise<BatchJob[]> => {
     const res = await apiFetch("/api/batch");
@@ -86,21 +93,29 @@ export function BatchRequestsPanel() {
     };
   }, [list, checkNow]);
 
-  // While open: poll on an interval. The first poll is deferred out of the
-  // effect body (a 0ms timer) so it doesn't set state synchronously during the
-  // effect (which would cascade renders).
+  // Poll on an interval FOR AS LONG AS THIS IS MOUNTED — which, since the panel
+  // lives in the Nav, is every page. Fast while open so the list feels live;
+  // every minute in the background so a batch that completes while you are
+  // elsewhere in the app still gets advanced, applied and emailed, instead of
+  // sitting untouched until somebody happens to open the panel. There is no
+  // server-side scheduler, so this loop is the only thing that ever calls
+  // apply().
+  //
+  // Deliberately NOT gated on a poll already being in flight. /api/batch/poll is
+  // idempotent per job (each handler's apply re-checks what it is about to
+  // write), so an overlap costs a duplicate request and nothing else — whereas
+  // skipping the tick means one slow or hung poll silently stops the loop, which
+  // is the failure that leaves a finished batch unapplied indefinitely.
   useEffect(() => {
-    if (!open) {
-      if (pollRef.current) clearInterval(pollRef.current);
-      pollRef.current = null;
-      return;
-    }
-    const kick = setTimeout(() => void checkNow(), 0);
-    pollRef.current = setInterval(() => void checkNow(), POLL_MS);
+    // Opening the panel polls immediately. Deferred out of the effect body (a
+    // 0ms timer) so it doesn't set state synchronously during the effect (which
+    // would cascade renders). No kick on the background cadence — the mount seed
+    // above already covers "what finished while the app was closed".
+    const kick = open ? setTimeout(() => void checkNow(), 0) : null;
+    const id = setInterval(() => void checkNow(), open ? OPEN_POLL_MS : BACKGROUND_POLL_MS);
     return () => {
-      clearTimeout(kick);
-      if (pollRef.current) clearInterval(pollRef.current);
-      pollRef.current = null;
+      if (kick) clearTimeout(kick);
+      clearInterval(id);
     };
   }, [open, checkNow]);
 

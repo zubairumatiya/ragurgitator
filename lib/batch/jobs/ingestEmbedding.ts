@@ -9,6 +9,12 @@
 // survive in the job's jsonb `input`), maps each position back to its returned
 // vector, and writes a complete embedding run.
 //
+// BOTH HALVES GO THROUGH THE EMBEDDING CACHE, and it has to be both or the two
+// ways of ingesting a document would disagree. build() withholds chunks the user
+// already owns (a batched request for bytes we have is still buying them);
+// apply() resolves those from the cache and banks what the batch DID buy, so a
+// batch-ingested document is as free to delete and re-upload as an inline one.
+//
 // apply is IDEMPOTENT and all-or-nothing per document: it skips a doc that's
 // already embedded (hasEmbeddingRun — a re-poll or a competing inline embed) and
 // inserts only when EVERY chunk got a vector (a partial run would leave the doc
@@ -19,8 +25,8 @@ import { activeConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";
 import { topUpSavedRuns } from "@/lib/rag/clusterStore";
 import { dedupCorporaDocuments, documentsForEmbedding } from "@/lib/rag/corpusStore";
+import { bankDocVectors, cachedDocVectors, meterEmbeds } from "@/lib/rag/embedCache";
 import { modelSpec } from "@/lib/rag/embeddingModels";
-import { recordIngestSkip } from "@/lib/rag/ingestSavings";
 import { hasEmbeddingRun, insertEmbeddingRunWithChunks } from "@/lib/rag/vectorStore";
 import { bankVoyageBatchSaving } from "@/lib/batch/savings";
 import type { BatchRequest, BatchResultRow } from "@/lib/batch/types";
@@ -100,14 +106,40 @@ export const ingestEmbeddingHandler: JobHandler = {
     const requests: BatchRequest[] = [];
     const included: string[] = [];
     for (const d of docs) {
-      if (await hasEmbeddingRun(d.id)) {
-        void recordIngestSkip(d.id); // already embedded under this config — avoided embed
-        continue;
-      }
+      // Already embedded under this config — nothing to batch. (No saving is
+      // banked here: the ingest_skip lever was retired in migrations/0054.)
+      if (await hasEmbeddingRun(d.id)) continue;
       const chunks = await chunkDocument(toSourceDoc(d), snapshot);
       if (chunks.length === 0) continue;
+
+      // The cache the inline paths read (lib/rag/embedCache): a chunk this user
+      // has already paid to embed under this model is ours, and batching a
+      // request for it is still buying it — at 67% of the price, but the whole
+      // chunk was free. Checked at BUILD time so those texts never reach the
+      // provider at all; apply() re-reads the cache for them.
+      const texts = chunks.map((c) => c.text);
+      const cached = await cachedDocVectors(texts, cfg.embeddingModel);
+
+      // Wholly cached: there is nothing to batch, so write the run here rather
+      // than submit an empty document and wait hours for it. The saving is the
+      // avoided embed, priced exactly as the inline path prices it.
+      if (chunks.every((c) => cached.has(c.text))) {
+        const chunkIds = await insertEmbeddingRunWithChunks({
+          documentId: d.id,
+          chunks: chunks.map((c) => ({
+            position: c.position,
+            text: c.text,
+            embedding: cached.get(c.text)!,
+          })),
+        });
+        await topUpSavedRuns(chunkIds);
+        await meterEmbeds(cfg.embeddingModel, texts, []);
+        continue;
+      }
+
       included.push(d.id);
       for (const c of chunks) {
+        if (cached.has(c.text)) continue; // already ours — apply() takes it from the cache
         // Voyage batch: model/input_type/dims live at the batch level (submitMeta);
         // each request body just carries its single text.
         requests.push({ customId: chunkCustomId(d.id, c.position), params: { input: [c.text] } });
@@ -182,7 +214,13 @@ export const ingestEmbeddingHandler: JobHandler = {
 
     const byId = new Map<string, BatchResultRow>(results.map((r) => [r.customId, r]));
     let embeddedChunks = 0;
-    const bankedTexts: string[] = [];
+    // Split by provenance, because the two are priced differently: `boughtTexts`
+    // went to the batch API and saved the −33% off the sync price; `cachedTexts`
+    // were already ours and saved the whole embed. Only the bought ones are
+    // banked INTO the cache — the cached ones are where they came from.
+    const boughtTexts: string[] = [];
+    const cachedTexts: string[] = [];
+    const toBank: { text: string; vector: number[] }[] = [];
 
     for (const documentId of documentIds) {
       // Idempotency, NOT a saving: this skip means a re-poll or a racing inline
@@ -194,17 +232,31 @@ export const ingestEmbeddingHandler: JobHandler = {
       const chunks = await chunkDocument(toSourceDoc(d), snapshot);
       if (chunks.length === 0) continue;
 
+      // build() withheld the chunks it already owned from the batch, so a chunk
+      // with no result row is not automatically a failure — look it up before
+      // deciding. Under the snapshot's model, since that is the space these
+      // vectors are in.
+      const cached = await cachedDocVectors(
+        chunks.map((c) => c.text),
+        snapshot.embeddingModel,
+      );
+
       // Require every chunk to have a vector — a partial run is worse than none.
       const inserts: { position: number; text: string; embedding: number[] }[] = [];
+      const bought: { text: string; vector: number[] }[] = [];
+      const fromCache: string[] = [];
       let complete = true;
       for (const c of chunks) {
         const res = byId.get(chunkCustomId(documentId, c.position));
         const body = res?.outcome === "succeeded" ? (res.body as VoyageBody) : null;
-        const embedding = body?.[0]?.embedding;
+        const returned = body?.[0]?.embedding;
+        const embedding = returned ?? cached.get(c.text);
         if (!embedding) {
           complete = false;
           break;
         }
+        if (returned) bought.push({ text: c.text, vector: returned });
+        else fromCache.push(c.text);
         inserts.push({ position: c.position, text: c.text, embedding });
       }
       if (!complete) continue;
@@ -220,10 +272,19 @@ export const ingestEmbeddingHandler: JobHandler = {
       // top up saved cluster runs with the newly ingested chunks.
       await topUpSavedRuns(chunkIds);
       embeddedChunks += inserts.length;
-      for (const ins of inserts) bankedTexts.push(ins.text);
+      // After the insert, not before: a document whose run didn't land banked
+      // nothing, exactly as it banked no batch saving.
+      toBank.push(...bought);
+      for (const b of bought) boughtTexts.push(b.text);
+      cachedTexts.push(...fromCache);
     }
 
-    bankVoyageBatchSaving(bankedTexts, embeddingModel);
+    // Into the cache, so a batch-ingested document is as free to delete and
+    // re-upload as an inline-ingested one. Best-effort inside (embedCache), so
+    // this can't fail an applied batch.
+    await bankDocVectors(toBank, embeddingModel);
+    await bankVoyageBatchSaving(boughtTexts, embeddingModel);
+    await meterEmbeds(embeddingModel, cachedTexts, []);
     return embeddedChunks;
   },
 };

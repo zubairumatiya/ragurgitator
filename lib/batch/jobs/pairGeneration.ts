@@ -27,7 +27,7 @@ import {
 } from "@/lib/rag/semanticCachePairs";
 import { bankLlmBatchSaving } from "@/lib/batch/savings";
 import { llmProviderOf } from "@/lib/llm/llmModels";
-import type { BatchResultRow } from "@/lib/batch/types";
+import { batchCustomId, type BatchResultRow } from "@/lib/batch/types";
 import type { BuiltBatch, JobHandler } from "@/lib/batch/jobs/registry";
 
 export type PairGenScope = { limit?: number };
@@ -53,7 +53,7 @@ export const pairGenerationHandler: JobHandler = {
     // Index-prefixed so custom_ids stay unique even if the gap query ever
     // returns a question twice.
     const origins: Origin[] = gaps.map((g, i) => ({
-      customId: `${i}:${g.questionId}`,
+      customId: batchCustomId(i, g.questionId),
       questionId: g.questionId,
       question: g.question,
     }));
@@ -88,7 +88,7 @@ export const pairGenerationHandler: JobHandler = {
       if (pairs.length === 0) continue;
       applied += await insertPairs(origin.questionId, pairs, generatedBy);
     }
-    bankLlmBatchSaving(results);
+    await bankLlmBatchSaving(results);
     return applied;
   },
 };

@@ -17,6 +17,7 @@
 import { config } from "@/lib/config";
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
+import { detached } from "@/lib/detached";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { getBatchSavings } from "@/lib/rag/batchStore";
 import { allLabeledQuestions, getCachedQueryEmbeddings } from "@/lib/rag/evalStore";
@@ -78,20 +79,24 @@ export type CollisionFloorReport = CollisionFloorResult & {
 // (eval.scoreQuestions meters its own hits/misses); this read has no paid leg
 // at all — a miss here doesn't embed, it just shrinks the sample.
 //
-// Best-effort and synchronous-by-void, like meterEmbeds: telemetry must never
-// be the reason a calibration fails to return its report.
-function recordEvalEmbedReuse(
+// Best-effort and deferred through detached(), like meterEmbeds: telemetry must
+// never be the reason a calibration fails to return its report, and it must not
+// outlive the request's transaction either (lib/detached.ts). The await costs
+// nothing — inside a request the write is queued for after the response.
+async function recordEvalEmbedReuse(
   model: string,
   questionText: Map<string, string>,
   vectors: Map<string, number[]>,
-): void {
+): Promise<void> {
   try {
     const served = [...vectors.keys()].map((id) => questionText.get(id) ?? "");
     if (served.length === 0) return;
     const tokens = estimateTokensAll(served);
-    void recordSaving("eval_embed_reuse", costEmbed(model, tokens), tokens, {
-      events: served.length,
-    });
+    await detached(() =>
+      recordSaving("eval_embed_reuse", costEmbed(model, tokens), tokens, {
+        events: served.length,
+      }),
+    );
   } catch (err) {
     console.warn(`[rag:savings] eval-embed-reuse record failed: ${(err as Error).message}`);
   }
@@ -121,7 +126,7 @@ export async function computeCollisionFloor(): Promise<CollisionFloorReport> {
   const questionText = new Map(labels.map((l) => [l.questionId, l.question]));
   const ids = [...questionText.keys()];
   const vectors = await getCachedQueryEmbeddings(ids, keyModel);
-  recordEvalEmbedReuse(keyModel, questionText, vectors);
+  await recordEvalEmbedReuse(keyModel, questionText, vectors);
   const result = collisionFloor(
     labels.map((l) => ({ questionId: l.questionId, sourceChunkId: l.sourceChunkId })),
     vectors,

@@ -10,8 +10,8 @@
 // global evalQuestionsPerChunk target.)
 // ---------------------------------------------------------------------------
 import { activeUserId } from "@/lib/auth/userScope";
-import { sql } from "@/lib/db";
-import { activeConfig } from "@/lib/rag/activeConfig";
+import { sql, toJsonb } from "@/lib/db";
+import { activeConfig, isUuid } from "@/lib/rag/activeConfig";
 import { reciprocalRank, ndcg } from "@/lib/rag/evalMetrics";
 import {
   effectiveK,
@@ -164,6 +164,15 @@ export type EvalConfigInfo = {
   topK: number;
 };
 
+// One chunk under the active config, with just enough to head a dashboard card.
+// Deliberately not the chunk TEXT: the summary already carries every question,
+// and a corpus's full text would dwarf the rest of the payload.
+export type ChunkRef = {
+  chunkId: string;
+  fileName: string;
+  position: number | null;
+};
+
 export type EvalSummary = {
   // `k` stays = recallK for back-compat (run progress / explain). recallK,
   // mrrK, and ndcgK are the effective per-metric depths (A1).
@@ -215,8 +224,14 @@ export type EvalSummary = {
   // first — the stale badge's hover list. Empty when nothing is stale.
   retrievalChanges: { description: string; at: number }[];
   // Total chunks under the active config — gates bulk "Add question" (no chunks
-  // = nothing to generate against).
+  // = nothing to generate against). Always equals `chunks.length`.
   chunkCount: number;
+  // EVERY chunk under the active config, in document order — not just the ones
+  // that have questions. The dashboard groups questions by chunk, and seeding
+  // those groups from this list is what lets a freshly ingested document show up
+  // straight away: you get a card per chunk with the "add question" and "try a
+  // model" affordances on it, before any question exists to hang them off.
+  chunks: ChunkRef[];
   // The saved eval criteria (metrics/k/min-rate/difficulties/autotune) and the
   // active config basics — for the Settings dropdown and Bulk-actions pre-fill.
   criteria: EvalCriteria;
@@ -889,6 +904,39 @@ export async function getExperimentContext(
   };
 }
 
+// One chunk's text, for the "chunk #N" toggle on a dashboard card header.
+//
+// Exists because the only way to read a chunk's text used to be through a
+// question's explain drill-down (retrieved chunks are expandable there), which
+// left a chunk with no questions unreadable — the gap that showed up as soon as
+// the dashboard started listing every chunk rather than only question-bearing
+// ones.
+//
+// Config-scoped through document_embeddings, so a chunk id belonging to another
+// config reads as missing rather than as someone else's text. Under RLS a chunk
+// belonging to another tenant is already invisible; this keeps the same answer
+// for the in-tenant, wrong-config case, which RLS says nothing about.
+export async function getChunkText(
+  chunkId: string,
+): Promise<{ text: string; fileName: string; position: number | null } | null> {
+  if (!isUuid(chunkId)) return null;
+  const table = await activeChunksTable();
+  if (!table) return null;
+  const [row] = await sql<
+    { text: string; file_name: string; position: number | null }[]
+  >`
+    select c.text, d.file_name, c.position
+    from ${sql(table)} c
+    join document_embeddings de on de.id = c.document_embedding_id
+    join documents d on d.id = c.document_id
+    where c.id = ${chunkId} and de.config_id = ${activeConfig().id}
+    limit 1
+  `;
+  return row
+    ? { text: row.text, fileName: row.file_name, position: row.position }
+    : null;
+}
+
 export type ChunkWindowRows = {
   testPosition: number;
   testChunkId: string;
@@ -1545,7 +1593,7 @@ export async function insertResults(rows: ResultInsert[]): Promise<void> {
         (${r.questionId}, ${r.labelId}, ${r.k}, ${r.hit}, ${r.foundRank},
          ${r.retrievedIds}::uuid[], ${r.retrievedScores}::real[],
          ${r.retrievalState},
-         ${r.screenCutoffs === null ? null : JSON.stringify(r.screenCutoffs)}::jsonb)
+         ${r.screenCutoffs === null ? null : toJsonb(r.screenCutoffs)})
     `;
     return;
   }
@@ -1560,7 +1608,7 @@ export async function insertResults(rows: ResultInsert[]): Promise<void> {
           (${r.questionId}, ${r.labelId}, ${r.k}, ${r.hit}, ${r.foundRank},
            ${r.retrievedIds}::uuid[], ${r.retrievedScores}::real[],
            ${r.retrievalState},
-           ${r.screenCutoffs === null ? null : JSON.stringify(r.screenCutoffs)}::jsonb)
+           ${r.screenCutoffs === null ? null : toJsonb(r.screenCutoffs)})
       `;
     }
   });
@@ -2106,6 +2154,7 @@ export async function getSummary(): Promise<EvalSummary> {
     retrievalStale: 0,
     retrievalChanges: [],
     chunkCount: 0,
+    chunks: [],
     criteria,
     config: configInfo,
     overrides: [],
@@ -2122,7 +2171,7 @@ export async function getSummary(): Promise<EvalSummary> {
     detail,
     runRows,
     pendingChunkRows,
-    chunkCountRows,
+    chunkRows,
     overrides,
     retrievalChangedAt,
     changeLog,
@@ -2231,11 +2280,17 @@ export async function getSummary(): Promise<EvalSummary> {
             and q.difficulty = d.difficulty
         )
     `,
-    sql<{ n: number }[]>`
-      select count(c.id)::int as n
+    // Every chunk, not a count of them: the dashboard needs one card per chunk
+    // whether or not it has questions, and `chunkCount` falls out of the length.
+    // Ordered to match the question detail query above (document, then position)
+    // so seeded groups and question-bearing groups interleave in one sequence.
+    sql<{ id: string; file_name: string; position: number | null }[]>`
+      select c.id, doc.file_name, c.position
       from ${sql(table)} c
       join document_embeddings de on de.id = c.document_embedding_id
+      join documents doc on doc.id = c.document_id
       where de.config_id = ${activeConfig().id}
+      order by doc.file_name, c.position
     `,
     listChunkOverrideInfo(table),
     getRetrievalChangedAt(),
@@ -2391,7 +2446,12 @@ export async function getSummary(): Promise<EvalSummary> {
       retrievalStale > 0
         ? changeLog.map((c) => ({ description: c.description, at: c.at.getTime() }))
         : [],
-    chunkCount: chunkCountRows[0]?.n ?? 0,
+    chunkCount: chunkRows.length,
+    chunks: chunkRows.map((r) => ({
+      chunkId: r.id,
+      fileName: r.file_name,
+      position: r.position,
+    })),
     criteria,
     config: configInfo,
     overrides,

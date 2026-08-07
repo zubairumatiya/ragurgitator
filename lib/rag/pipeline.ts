@@ -13,7 +13,9 @@
 // ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
 
+import { submitIngestBatchIfEnabled } from "@/lib/batch/ingestLever";
 import { cheapModelFor, config } from "@/lib/config";
+import { detached } from "@/lib/detached";
 import type { StreamErrorEvent } from "@/lib/http/missingKey";
 import { activeConfig, resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";
@@ -32,9 +34,7 @@ import {
 } from "@/lib/rag/corpusStore";
 import { topUpSavedRuns } from "@/lib/rag/clusterStore";
 import { getConfig, listSyncedConfigIds } from "@/lib/rag/configStore";
-import { meterEmbeds } from "@/lib/rag/embedCache";
-import { embedTexts } from "@/lib/rag/embeddings";
-import { recordIngestSkip } from "@/lib/rag/ingestSavings";
+import { embedDocsCached } from "@/lib/rag/embedCache";
 import { labelFor, loadDocument, type LoadInput } from "@/lib/rag/loader";
 import { getActiveBatchSavings } from "@/lib/rag/batchStore";
 import { retrieve, retrieveForQuery } from "@/lib/rag/retriever";
@@ -45,8 +45,8 @@ import {
 } from "@/lib/rag/semanticCache";
 import {
   deleteEmbeddingRunFor,
+  embeddingRunChunkCounts,
   findDocumentByHash,
-  hasEmbeddingRun,
   insertDocument,
   insertEmbeddingRunWithChunks,
 } from "@/lib/rag/vectorStore";
@@ -59,10 +59,14 @@ function sha256(text: string): string {
 // Ingestion stages, in order. The UI mirrors these as a step indicator.
 export type IngestStep = "load" | "chunk" | "embed" | "store";
 
-async function ingestOne(
-  doc: SourceDocument,
-  onStep: (step: IngestStep) => void = () => {},
-): Promise<number> {
+// The half of an upload that has to happen before any vector exists: dedup by
+// content hash, store the raw text, join the config's corpus when it's synced.
+// Returns the document id.
+//
+// SPLIT FROM THE EMBED HALF so the batch lever can be offered a document id —
+// an ingest_embedding batch is scoped to ids, so nothing can be embedded until
+// every input in the upload has one. See ingest().
+async function storeOne(doc: SourceDocument): Promise<string> {
   const cfg = activeConfig();
   const contentHash = sha256(doc.text);
 
@@ -84,15 +88,35 @@ async function ingestOne(
     await addDocumentToCorpus(cfg.corpusId, documentId);
   }
 
-  // Already embedded under the active config? Nothing to do — but the embed we
-  // just avoided is the ingest_skip lever, so price it before returning.
-  if (await hasEmbeddingRun(documentId)) {
+  return documentId;
+}
+
+// The embed half: chunk → embed → store a run for `documentId` under the active
+// config. Returns the number of chunks added (0 when the config already has it).
+async function embedOne(
+  documentId: string,
+  doc: SourceDocument,
+  onStep: (step: IngestStep) => void = () => {},
+): Promise<number> {
+  const cfg = activeConfig();
+
+  // A run already exists — nothing to buy. Returns the RUN'S OWN chunk count,
+  // not zero, because the callers here have already filtered out the documents
+  // that were embedded before they started (see ingest()). What's left is a run
+  // that landed during this operation: the batch builder writes one outright
+  // when the embedding cache covers the whole document, and calling that "no new
+  // chunks" would deny work that just happened.
+  //
+  // This used to bank the ingest_skip lever; it doesn't any more
+  // (migrations/0054) — the avoided embed worth counting is the cache's, and
+  // embedDocsCached banks it below as embed_cache.
+  const existingRun = (await embeddingRunChunkCounts([documentId])).get(documentId);
+  if (existingRun !== undefined) {
     console.log(
       `[rag:pipeline] skip embed: ${doc.metadata.fileName} already embedded under ` +
         `config=${cfg.id.slice(0, 8)} (${cfg.embeddingModel} size=${cfg.chunkSize} overlap=${cfg.chunkOverlap})`,
     );
-    void recordIngestSkip(documentId);
-    return 0;
+    return existingRun;
   }
 
   onStep("chunk");
@@ -101,11 +125,16 @@ async function ingestOne(
 
   onStep("embed");
   const chunkTexts = chunks.map((c) => c.text);
-  const vectors = await embedTexts(chunkTexts);
-  // Ingest buys these outright (no cache in front of the base-table embed), so
-  // they're pure spend. Without this the Batch API lever would show ingest
-  // savings with no matching cost line to have saved against.
-  meterEmbeds(cfg.embeddingModel, [], chunkTexts);
+  // Through the per-user embedding cache, not straight at the provider. A chunk
+  // this user has already paid to embed under this model is free however it got
+  // there: another config ingested it, or this very document did before it was
+  // deleted — the cache outlives the document (lib/rag/embedCache). Content
+  // addressing makes that safe with no invalidation to get wrong, since the key
+  // is sha256(text) under a model id.
+  //
+  // embedDocsCached meters itself — hits as embed_cache, misses as embed spend —
+  // so there is no meterEmbeds call here; a second one would double-count.
+  const vectors = await embedDocsCached(chunkTexts, cfg.embeddingModel);
 
   onStep("store");
   const chunkIds = await insertEmbeddingRunWithChunks({
@@ -123,8 +152,14 @@ async function ingestOne(
 
 // One entry per input source: a chunk count on success, an error string on
 // failure. A single bad file no longer sinks the whole batch.
+//
+// `queued` is the third outcome and it is neither of the other two: the document
+// is stored and its embeddings are with the batch API, so there are no chunks
+// yet and nothing went wrong. Reporting it as `chunksAdded: 0` would read as
+// "nothing happened" for work that will land hours later.
 export type IngestResult =
   | { fileName: string; chunksAdded: number }
+  | { fileName: string; queued: true }
   | { fileName: string; error: string };
 
 // Progress events streamed to the client during ingestion. The route serializes
@@ -143,6 +178,13 @@ type Emit = (event: IngestEvent) => void;
 
 // Sequential on purpose: ordered step events make for a clean progress UI, and
 // it keeps us from firing every file's embeddings at the provider at once.
+//
+// THREE PHASES, and the middle one is why the first two are separate. Load and
+// store every input, THEN offer the whole document set to the embedding leg's
+// batch preference, THEN embed inline whatever the batch didn't take. An
+// ingest_embedding batch is scoped to document ids, so it cannot be offered
+// anything until every input has been stored — which is the only reason storing
+// and embedding are no longer one pass per file.
 export async function ingest(
   inputs: LoadInput[],
   onEvent: Emit = () => {},
@@ -151,34 +193,84 @@ export async function ingest(
   console.log(`[rag:pipeline] ingest start (${inputs.length} source(s))`);
   onEvent({ type: "start", total: inputs.length });
 
-  const results: IngestResult[] = [];
+  // Indexed rather than pushed, so a file that fails to load in phase 1 still
+  // reports in its own position rather than ahead of files that loaded fine.
+  const byIndex: (IngestResult | undefined)[] = new Array(inputs.length);
+  const done = (index: number, fileName: string, result: IngestResult) => {
+    byIndex[index] = result;
+    onEvent({ type: "file-done", index, result });
+  };
+
+  // PHASE 1 — load + store.
+  const stored: {
+    index: number;
+    fileName: string;
+    documentId: string;
+    doc: SourceDocument;
+  }[] = [];
   for (let index = 0; index < inputs.length; index++) {
-    const input = inputs[index];
-    const fileName = labelFor(input);
-    let result: IngestResult;
+    const fileName = labelFor(inputs[index]);
     try {
       onEvent({ type: "step", index, fileName, step: "load" });
-      const doc = await loadDocument(input);
-      const chunksAdded = await ingestOne(doc, (step) =>
-        onEvent({ type: "step", index, fileName, step }),
-      );
-      result = { fileName, chunksAdded };
+      const doc = await loadDocument(inputs[index]);
+      stored.push({ index, fileName, documentId: await storeOne(doc), doc });
     } catch (err) {
       const error = err instanceof Error ? err.message : "Ingestion failed.";
       console.error(`[rag:pipeline] ingest failed for "${fileName}": ${error}`);
-      result = { fileName, error };
+      done(index, fileName, { fileName, error });
     }
-    results.push(result);
-    onEvent({ type: "file-done", index, result });
   }
 
+  // Which of these the config ALREADY held, snapshotted before the batch lever
+  // gets a chance to change the answer. Only these can honestly report "no new
+  // chunks"; anything embedded from here on was embedded by this ingest, however
+  // cheaply. Re-uploading a document the config already has is the one flow that
+  // lands here.
+  const preEmbedded = new Set(
+    (await embeddingRunChunkCounts(stored.map((s) => s.documentId))).keys(),
+  );
+
+  // PHASE 2 — the batch lever. True means these documents' vectors are with the
+  // provider and will be written by a later /api/batch/poll, so there is nothing
+  // to embed here and the progress stream closes; the BatchRequests panel is
+  // what tracks them from now on.
+  const queued =
+    stored.length > 0 &&
+    (await submitIngestBatchIfEnabled({ documentIds: stored.map((s) => s.documentId) }));
+
+  // PHASE 3 — inline for whatever is left. Note this also runs when the batch
+  // lever is ON but build() found nothing to submit: a document the embedding
+  // cache already covers is embedded here, for free, rather than waiting hours
+  // to buy vectors we own.
+  for (const s of stored) {
+    if (queued) {
+      done(s.index, s.fileName, { fileName: s.fileName, queued: true });
+      continue;
+    }
+    if (preEmbedded.has(s.documentId)) {
+      done(s.index, s.fileName, { fileName: s.fileName, chunksAdded: 0 });
+      continue;
+    }
+    try {
+      const chunksAdded = await embedOne(s.documentId, s.doc, (step) =>
+        onEvent({ type: "step", index: s.index, fileName: s.fileName, step }),
+      );
+      done(s.index, s.fileName, { fileName: s.fileName, chunksAdded });
+    } catch (err) {
+      const error = err instanceof Error ? err.message : "Ingestion failed.";
+      console.error(`[rag:pipeline] ingest failed for "${s.fileName}": ${error}`);
+      done(s.index, s.fileName, { fileName: s.fileName, error });
+    }
+  }
+
+  const results = byIndex.filter((r): r is IngestResult => r !== undefined);
   const chunksAdded = results.reduce(
     (sum, r) => sum + ("chunksAdded" in r ? r.chunksAdded : 0),
     0,
   );
   console.log(
-    `[rag:pipeline] ingest done: ${chunksAdded} chunks from ${results.length} source(s) in ` +
-      `${Math.round(performance.now() - t0)}ms`,
+    `[rag:pipeline] ingest done: ${queued ? "queued for batch" : `${chunksAdded} chunks`} from ` +
+      `${results.length} source(s) in ${Math.round(performance.now() - t0)}ms`,
   );
   onEvent({ type: "done", results });
   return { results };
@@ -188,14 +280,25 @@ export async function ingest(
 // each doc (raw text persisted at first ingest, migration 0010) into the ACTIVE
 // config; already-embedded docs are no-ops. Emits step/file-done events only —
 // the caller owns start/done so several passes can share one progress stream.
+//
 // `indexOffset` keeps indexes continuous across passes; `fileLabel` decorates
-// names (e.g. "doc.md → config-X" during a multi-config sync).
+// names (e.g. "doc.md → config-X" during a multi-config sync); `preEmbedded` is
+// the set of ids the config held BEFORE the caller started, and it is the only
+// thing that can distinguish "already had it" from "just got it" — see
+// vectorStore.embeddingRunChunkCounts.
+type EmbedStoredOpts = {
+  indexOffset?: number;
+  fileLabel?: (name: string) => string;
+  preEmbedded: Set<string>;
+};
+
 async function embedStoredDocs(
   docs: EmbeddableDoc[],
   onEvent: Emit,
-  indexOffset = 0,
-  fileLabel: (name: string) => string = (name) => name,
+  opts: EmbedStoredOpts,
 ): Promise<IngestResult[]> {
+  const indexOffset = opts.indexOffset ?? 0;
+  const fileLabel = opts.fileLabel ?? ((name: string) => name);
   const results: IngestResult[] = [];
   for (let i = 0; i < docs.length; i++) {
     const d = docs[i];
@@ -203,9 +306,15 @@ async function embedStoredDocs(
     const fileName = fileLabel(d.fileName);
     let result: IngestResult;
     try {
-      if (await hasEmbeddingRun(d.id)) {
-        void recordIngestSkip(d.id); // avoided embed — same lever as ingestOne's skip
-        result = { fileName, chunksAdded: 0 };
+      const existingRun = (await embeddingRunChunkCounts([d.id])).get(d.id);
+      if (existingRun !== undefined) {
+        // Zero only when it was already here; otherwise the run landed during
+        // this pass (the batch builder writes one straight out of the embedding
+        // cache) and its real size is what happened.
+        result = {
+          fileName,
+          chunksAdded: opts.preEmbedded.has(d.id) ? 0 : existingRun,
+        };
       } else {
         const doc: SourceDocument = {
           id: d.id,
@@ -216,8 +325,8 @@ async function embedStoredDocs(
         const chunks = await chunkDocument(doc);
         onEvent({ type: "step", index, fileName, step: "embed" });
         const texts = chunks.map((c) => c.text);
-        const vectors = await embedTexts(texts);
-        meterEmbeds(activeConfig().embeddingModel, [], texts); // paid outright, as above
+        // Cached, and self-metering — same as ingestOne, for the same reasons.
+        const vectors = await embedDocsCached(texts, activeConfig().embeddingModel);
         onEvent({ type: "step", index, fileName, step: "store" });
         const chunkIds = await insertEmbeddingRunWithChunks({
           documentId: d.id,
@@ -241,6 +350,41 @@ async function embedStoredDocs(
   return results;
 }
 
+// The batch lever, then whatever it didn't take — the stored-doc counterpart of
+// ingest()'s phases 2 and 3, so every user-initiated embed honours the config's
+// batch preference identically. The snapshot has to be taken HERE, before the
+// lever runs: build() can write a run outright for a document the embedding
+// cache already covers, and after that there is no way to tell that from a run
+// that was there all along.
+//
+// Auto-sync (syncDocsIntoConfigs) deliberately doesn't come through here. It is
+// a side effect of editing a corpus rather than someone asking to embed, and
+// deferring it by up to 12 hours per synced config isn't what "sync" means.
+async function embedOrQueue(
+  docs: EmbeddableDoc[],
+  onEvent: Emit,
+  opts: { indexOffset?: number; fileLabel?: (name: string) => string } = {},
+): Promise<IngestResult[]> {
+  const indexOffset = opts.indexOffset ?? 0;
+  const fileLabel = opts.fileLabel ?? ((name: string) => name);
+  const preEmbedded = new Set(
+    (await embeddingRunChunkCounts(docs.map((d) => d.id))).keys(),
+  );
+
+  if (
+    docs.length > 0 &&
+    (await submitIngestBatchIfEnabled({ documentIds: docs.map((d) => d.id) }))
+  ) {
+    return docs.map((d, i) => {
+      const result: IngestResult = { fileName: fileLabel(d.fileName), queued: true };
+      onEvent({ type: "file-done", index: indexOffset + i, result });
+      return result;
+    });
+  }
+
+  return embedStoredDocs(docs, onEvent, { indexOffset, fileLabel, preEmbedded });
+}
+
 // Embed the de-duplicated union of several corpora's stored documents into the
 // ACTIVE config — the "spawn a config from corpora" flow (multi-select create).
 // The same file uploaded twice (two doc rows, one content hash) embeds once.
@@ -259,7 +403,7 @@ export async function embedCorpora(
       `${docs.length}/${selected.length} doc(s) with stored text`,
   );
   onEvent({ type: "start", total: docs.length });
-  const results = await embedStoredDocs(docs, onEvent);
+  const results = await embedOrQueue(docs, onEvent);
   console.log(
     `[rag:pipeline] spawn-embed done: ${results.length} doc(s) in ${Math.round(performance.now() - t0)}ms`,
   );
@@ -285,7 +429,7 @@ export async function embedDocumentsById(
     for (const d of docs) await addDocumentToCorpus(cfg.corpusId, d.id);
   }
   onEvent({ type: "start", total: docs.length });
-  const results = await embedStoredDocs(docs, onEvent);
+  const results = await embedOrQueue(docs, onEvent);
   onEvent({ type: "done", results });
   return { results };
 }
@@ -324,8 +468,17 @@ export async function syncDocsIntoConfigs(
     if (!resolved) continue;
     const summary = await getConfig(configId);
     const label = summary?.label ?? configId.slice(0, 8);
-    const batch = await withConfig(resolved, () =>
-      embedStoredDocs(docs, onEvent, offset, (name) => `${name} → ${label}`),
+    const batch = await withConfig(resolved, async () =>
+      embedStoredDocs(docs, onEvent, {
+        indexOffset: offset,
+        fileLabel: (name: string) => `${name} → ${label}`,
+        // This config's existing runs. Nothing here writes one behind our back
+        // (auto-sync doesn't go through the batch lever), so the snapshot is
+        // just "what it already had" and the reporting reads as it always did.
+        preEmbedded: new Set(
+          (await embeddingRunChunkCounts(docs.map((d) => d.id))).keys(),
+        ),
+      }),
     );
     results.push(...batch);
     offset += docs.length;
@@ -476,15 +629,17 @@ async function answerWithCascade(
   // Record the NET cascade saving vs. the baseline (strong model every time). The
   // efficacy gate embeds the answer once per generation (rung 2) — priced here as
   // the one bit of overhead the cheap-first path adds. docs §2 #2.
-  void recordCascadeSaving({
-    strongModel,
-    cheapModel,
-    embeddingModel: cfg.embeddingModel,
-    cheap,
-    strong,
-    escalated,
-    answer,
-  });
+  await detached(() =>
+    recordCascadeSaving({
+      strongModel,
+      cheapModel,
+      embeddingModel: cfg.embeddingModel,
+      cheap,
+      strong,
+      escalated,
+      answer,
+    }),
+  );
 
   return { answer, sources, model, efficacy, escalated };
 }
@@ -496,6 +651,10 @@ async function answerWithCascade(
 //              ONCE, so the cheap attempt and the extra gate were wasted:
 //              saved = −cost(cheap) − two gate embeds.  NEGATIVE.
 // The running total over real traffic is therefore the true net.
+//
+// No try/catch of its own: detached() swallows on both of its paths, which also
+// finally covers the costLlm/costEmbed throw on an unpriced model — an unhandled
+// rejection back when this was `void`-ed.
 async function recordCascadeSaving(a: {
   strongModel: string;
   cheapModel: string;

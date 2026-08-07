@@ -15,7 +15,8 @@ import { createHash } from "node:crypto";
 
 import { activeUserId } from "@/lib/auth/userScope";
 import { config } from "@/lib/config";
-import { sql } from "@/lib/db";
+import { isolated, sql, toJsonb } from "@/lib/db";
+import { detached } from "@/lib/detached";
 import { activeConfig, type ResolvedConfig } from "@/lib/rag/activeConfig";
 import { getBatchSavings } from "@/lib/rag/batchStore";
 import { getConfig } from "@/lib/rag/configStore";
@@ -319,15 +320,17 @@ export async function semanticCacheLookup(
     // safety, and the only way to know what that trade cost is to judge the
     // rows it rejected.
     if (match && match.sim >= config.semanticCache.shadowLogFloor) {
-      void recordShadow(
-        cfg,
-        keyModel,
-        fingerprint,
-        question,
-        match.value.text,
-        match.value.result.answer,
-        match.sim,
-        guardBlocked,
+      await detached(() =>
+        recordShadow(
+          cfg,
+          keyModel,
+          fingerprint,
+          question,
+          match.value.text,
+          match.value.result.answer,
+          match.sim,
+          guardBlocked,
+        ),
       );
     }
 
@@ -351,9 +354,14 @@ export async function semanticCacheLookup(
             `served cached answer, skipped retrieval. new="${truncate(question)}" ` +
             `matched="${truncate(match.value.text)}"`,
         );
-        // Fire-and-forget telemetry bump; a failure here must not fail the answer.
-        void bumpHit(cfg.id, keyModel, fingerprint, match.value.text);
-        void recordSemanticSaving(match.value.result, question);
+        // Deferred telemetry; a failure here must not fail the answer, and the
+        // caller must not wait for it. These two are the reason lib/detached.ts
+        // exists: a served hit returns straight out of ask() and /api/chat does
+        // no further database work, so a bare `void` here issued its SQL after
+        // the request's transaction had already committed — i.e. the semantic
+        // cache under-reported on EVERY served hit, precisely when it worked.
+        await detached(() => bumpHit(cfg.id, keyModel, fingerprint, match.value.text));
+        await detached(() => recordSemanticSaving(match.value.result, question));
         return { hit: true, result: match.value.result, sim: match.sim, matchedQuery: match.value.text };
       }
       // Serving is off (Settings → Savings): shadow-log the would-be hit for
@@ -396,19 +404,26 @@ export async function semanticCacheStore(
   const cfg = activeConfig();
   try {
     const fingerprint = await currentFingerprint(cfg);
-    await sql`
-      insert into semantic_cache
-        (config_id, embedding_model, fingerprint, query_text, query_hash, query_vector, dimension, result)
-      values
-        (${cfg.id}, ${key.model}, ${fingerprint}, ${question}, ${sha256(question)},
-         ${key.vector}::real[], ${key.vector.length}, ${JSON.stringify(result)}::jsonb)
-      on conflict (config_id, embedding_model, fingerprint, query_hash) do nothing
-    `;
+    // isolated so the `isMissingTable` escape below is real: swallowing a 42P01
+    // that had already aborted the request's transaction would leave the caller
+    // continuing inside a transaction every later statement fails in.
+    await isolated(
+      () => sql`
+        insert into semantic_cache
+          (config_id, embedding_model, fingerprint, query_text, query_hash, query_vector, dimension, result)
+        values
+          (${cfg.id}, ${key.model}, ${fingerprint}, ${question}, ${sha256(question)},
+           ${key.vector}::real[], ${key.vector.length}, ${toJsonb(result)})
+        on conflict (config_id, embedding_model, fingerprint, query_hash) do nothing
+      `,
+    );
     // Self-prune: drop this config's entries left stale by a shape/corpus change.
-    await sql`
-      delete from semantic_cache
-      where config_id = ${cfg.id} and fingerprint <> ${fingerprint}
-    `;
+    await isolated(
+      () => sql`
+        delete from semantic_cache
+        where config_id = ${cfg.id} and fingerprint <> ${fingerprint}
+      `,
+    );
   } catch (err) {
     if (isMissingTable(err)) return;
     throw err;
@@ -455,15 +470,17 @@ async function recordShadow(
   guardBlocked: boolean,
 ): Promise<void> {
   try {
-    await sql`
-      insert into semantic_cache_shadow
-        (config_id, embedding_model, space, fingerprint,
-         new_query, new_query_hash, matched_query, served_answer, sim, guard_blocked)
-      values
-        (${cfg.id}, ${keyModel}, ${spaceOf(keyModel)}, ${fingerprint},
-         ${newQuery}, ${sha256(newQuery)}, ${matchedQuery}, ${servedAnswer}, ${sim}, ${guardBlocked})
-      on conflict (config_id, fingerprint, new_query_hash) do nothing
-    `;
+    await isolated(
+      () => sql`
+        insert into semantic_cache_shadow
+          (config_id, embedding_model, space, fingerprint,
+           new_query, new_query_hash, matched_query, served_answer, sim, guard_blocked)
+        values
+          (${cfg.id}, ${keyModel}, ${spaceOf(keyModel)}, ${fingerprint},
+           ${newQuery}, ${sha256(newQuery)}, ${matchedQuery}, ${servedAnswer}, ${sim}, ${guardBlocked})
+        on conflict (config_id, fingerprint, new_query_hash) do nothing
+      `,
+    );
   } catch (err) {
     if (isMissingTable(err)) return;
     // Migration 0038 not applied yet (undefined_column) → log the event without
@@ -489,15 +506,17 @@ async function recordShadowPreGuard(
   sim: number,
 ): Promise<void> {
   try {
-    await sql`
-      insert into semantic_cache_shadow
-        (config_id, embedding_model, space, fingerprint,
-         new_query, new_query_hash, matched_query, served_answer, sim)
-      values
-        (${cfg.id}, ${keyModel}, ${spaceOf(keyModel)}, ${fingerprint},
-         ${newQuery}, ${sha256(newQuery)}, ${matchedQuery}, ${servedAnswer}, ${sim})
-      on conflict (config_id, fingerprint, new_query_hash) do nothing
-    `;
+    await isolated(
+      () => sql`
+        insert into semantic_cache_shadow
+          (config_id, embedding_model, space, fingerprint,
+           new_query, new_query_hash, matched_query, served_answer, sim)
+        values
+          (${cfg.id}, ${keyModel}, ${spaceOf(keyModel)}, ${fingerprint},
+           ${newQuery}, ${sha256(newQuery)}, ${matchedQuery}, ${servedAnswer}, ${sim})
+        on conflict (config_id, fingerprint, new_query_hash) do nothing
+      `,
+    );
   } catch (err) {
     if (isMissingTable(err)) return;
     console.warn(`[rag:semantic-cache] shadow log failed: ${(err as Error).message}`);
@@ -511,12 +530,14 @@ async function bumpHit(
   matchedQuery: string,
 ): Promise<void> {
   try {
-    await sql`
-      update semantic_cache
-      set hit_count = hit_count + 1, last_hit_at = now()
-      where config_id = ${configId} and embedding_model = ${model}
-        and fingerprint = ${fingerprint} and query_hash = ${sha256(matchedQuery)}
-    `;
+    await isolated(
+      () => sql`
+        update semantic_cache
+        set hit_count = hit_count + 1, last_hit_at = now()
+        where config_id = ${configId} and embedding_model = ${model}
+          and fingerprint = ${fingerprint} and query_hash = ${sha256(matchedQuery)}
+      `,
+    );
   } catch (err) {
     if (isMissingTable(err)) return;
     // Telemetry only — swallow so a bump failure never breaks a served answer.
@@ -653,7 +674,7 @@ export async function backfillKeyModel(
           (config_id, embedding_model, fingerprint, query_text, query_hash, query_vector, dimension, result)
         values
           (${cfg.id}, ${keyModel}, ${fingerprint}, ${row.query_text}, ${row.query_hash},
-           ${vector}::real[], ${vector.length}, ${JSON.stringify(row.result)}::jsonb)
+           ${vector}::real[], ${vector.length}, ${toJsonb(row.result)})
         on conflict (config_id, embedding_model, fingerprint, query_hash) do nothing
       `;
       out.inserted += done.count;

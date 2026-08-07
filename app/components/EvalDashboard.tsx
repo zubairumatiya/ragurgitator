@@ -31,6 +31,7 @@ import { ApiErrorNotice, type ApiErrorBody } from "@/app/components/MissingKeyNo
 import { failsBar } from "@/lib/rag/evalBar";
 import type {
   ChunkOverrideInfo,
+  ChunkRef,
   EvalSummary,
   ExplainChunk,
   OverrideOutcome,
@@ -105,9 +106,31 @@ type ChunkGroup = {
 
 // Group questions by their labeled chunk, preserving the server's order (document
 // order, then oldest-first within a chunk) so groups appear in a stable sequence.
-function groupByChunk(questions: QuestionDetail[]): ChunkGroup[] {
+//
+// SEEDED FROM `chunks` FIRST, so every chunk under the config gets a card whether
+// or not it has questions. That is what makes a freshly ingested document visible
+// on this page immediately: the card's header, its "add question" form and its
+// "try a model" runner are all keyed by chunk id, none of them need a question to
+// exist. Before this, a chunk was reachable only once something had generated a
+// question against it, which left a new document looking as though it had not
+// been ingested at all.
+//
+// The questions loop still creates a group when it meets a chunk that isn't in
+// the list — `chunks` comes from the active config's chunk table, so a question
+// labeled to a chunk that has since been re-chunked away keeps rendering instead
+// of vanishing.
+function groupByChunk(questions: QuestionDetail[], chunks: ChunkRef[]): ChunkGroup[] {
   const groups: ChunkGroup[] = [];
   const indexByChunk = new Map<string, number>();
+  for (const c of chunks) {
+    indexByChunk.set(c.chunkId, groups.length);
+    groups.push({
+      chunkId: c.chunkId,
+      fileName: c.fileName,
+      position: c.position,
+      questions: [],
+    });
+  }
   for (const q of questions) {
     let i = indexByChunk.get(q.sourceChunkId);
     if (i === undefined) {
@@ -800,7 +823,7 @@ export function EvalDashboard() {
   // this used to run inline in the JSX, so every keystroke re-grouped all 164
   // questions before re-rendering all 80 cards.
   const groups = useMemo(
-    () => (summary === null ? [] : groupByChunk(summary.questions)),
+    () => (summary === null ? [] : groupByChunk(summary.questions, summary.chunks)),
     [summary],
   );
 
@@ -933,10 +956,15 @@ export function EvalDashboard() {
             <Stat label="Hits" value={String(summary.hits)} />
           </div>
 
+          {/* Disappears the moment any question exists, added by hand or
+              generated. The two cases read differently: with chunks below, the
+              page is working and just has nothing scored yet; with none, there
+              is genuinely nothing ingested under this config. */}
           {summary.total === 0 && (
             <p className="text-sm text-zinc-500">
-              No eval questions yet. Ingest a document, then click “Process new
-              chunks”.
+              {summary.chunkCount > 0
+                ? "No eval questions yet — your chunks are listed below. Add one by hand on any chunk, or pick a difficulty in Bulk actions and click “Process new chunks” to generate them."
+                : "Nothing ingested under this config yet. Add a document, and its chunks will appear here."}
             </p>
           )}
 
@@ -1006,11 +1034,16 @@ export function EvalDashboard() {
             </section>
           )}
 
-          {/* Question detail, grouped by the chunk each question is labeled to */}
-          {summary.questions.length > 0 && (
+          {/* One card per chunk under the config, carrying whatever questions are
+              labeled to it. Keyed off `groups` rather than `summary.questions`
+              because a chunk with no questions still gets a card. */}
+          {groups.length > 0 && (
             <section className="flex flex-col gap-2">
               <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
-                Questions
+                Chunks
+                <span className="ml-2 text-xs font-normal normal-case tracking-normal text-zinc-400">
+                  ({summary.chunkCount})
+                </span>
               </h2>
               <div className="flex flex-col gap-3">
                 {groups.map((group) => (
@@ -1150,6 +1183,32 @@ const ChunkGroupCard = memo(function ChunkGroupCard({
   const avgSim =
     sims.length > 0 ? sims.reduce((sum, s) => sum + s, 0) / sims.length : null;
   const override = summary.overrides.find((o) => o.chunkId === group.chunkId);
+  // "chunk #N" opens the chunk's text. Fetched on first open rather than carried
+  // in the summary — one chunk's text is small, a whole corpus of it is not — and
+  // kept once loaded so re-opening is instant. Local to the card so opening one
+  // leaves the other cards' props untouched and memo skips them.
+  const [peekOpen, setPeekOpen] = useState(false);
+  const [peekText, setPeekText] = useState<string | null>(null);
+  const [peekError, setPeekError] = useState<string | null>(null);
+  const togglePeek = useCallback(() => {
+    setPeekOpen((open) => {
+      if (!open && peekText === null && peekError === null) {
+        apiFetch(`/api/eval/chunks/${group.chunkId}`)
+          .then(async (res) => {
+            const data = (await res.json()) as { text: string } | { error: string };
+            if (!res.ok || "error" in data) {
+              setPeekError("error" in data ? data.error : `Request failed (${res.status}).`);
+              return;
+            }
+            setPeekText(data.text);
+          })
+          .catch((err: unknown) =>
+            setPeekError(err instanceof Error ? err.message : "Failed to load chunk."),
+          );
+      }
+      return !open;
+    });
+  }, [group.chunkId, peekText, peekError]);
   // A model-kind override = this chunk's DELEGATE model: retrieval ranks it
   // there instead of the config's base model.
   const delegateModel =
@@ -1161,8 +1220,20 @@ const ChunkGroupCard = memo(function ChunkGroupCard({
       <div className="flex items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-50 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900/40">
         <span className="flex min-w-0 items-center gap-1.5 font-mono text-xs text-zinc-600 dark:text-zinc-400">
           {override && <OverrideBadge info={override} />}
+          {/* Only "chunk #N" is the control; the file name stays plain text, so
+              what lights up on hover is exactly what clicking acts on. Dotted
+              underline is the standing affordance for an inline toggle here (see
+              "top-k" / "nDCG" on the question rows). */}
           <span className="truncate">
-            {group.fileName} · chunk #{group.position ?? "?"}
+            {group.fileName} ·{" "}
+            <button
+              type="button"
+              onClick={togglePeek}
+              title={peekOpen ? "Hide the chunk text" : "Show the chunk text"}
+              className="cursor-pointer underline decoration-dotted underline-offset-2 hover:text-zinc-700 dark:hover:text-zinc-300"
+            >
+              chunk #{group.position ?? "?"}
+            </button>
           </span>
           {delegateModel && (
             <span
@@ -1182,6 +1253,18 @@ const ChunkGroupCard = memo(function ChunkGroupCard({
           )}
         </span>
       </div>
+
+      {peekOpen && (
+        <div className="border-b border-zinc-200 p-2 text-xs dark:border-zinc-800">
+          {peekError !== null ? (
+            <p className="text-red-600 dark:text-red-400">{peekError}</p>
+          ) : peekText === null ? (
+            <p className="text-zinc-500">Loading…</p>
+          ) : (
+            <ChunkText text={peekText} />
+          )}
+        </div>
+      )}
 
       <ul className="flex flex-col divide-y divide-zinc-200 dark:divide-zinc-800">
         {group.questions.map((q) => (

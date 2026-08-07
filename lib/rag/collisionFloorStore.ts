@@ -23,7 +23,7 @@
 // computation: persistence is a different concern and the calibration module is
 // imported by paths that must not care whether 0037 exists.
 // ---------------------------------------------------------------------------
-import { sql } from "@/lib/db";
+import { isolated, sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import type { CollisionFloorReport } from "@/lib/rag/semanticCacheCalibration";
 
@@ -123,7 +123,8 @@ export async function readCollisionFloorState(): Promise<CollisionFloorState> {
 // to return it whether or not the save landed.
 export async function saveCollisionFloor(report: CollisionFloorReport): Promise<void> {
   try {
-    await sql`
+    await isolated(
+      () => sql`
       insert into semantic_cache_collision_floor (
         config_id, space, embedding_model, floor, same_answer_min,
         same_answer_median, recommended, distinct_pairs, same_answer_pairs,
@@ -147,7 +148,8 @@ export async function saveCollisionFloor(report: CollisionFloorReport): Promise<
         questions_total    = excluded.questions_total,
         overlap            = excluded.overlap,
         computed_at        = now()
-    `;
+    `,
+    );
   } catch (err) {
     if (isMissingTable(err)) return;
     console.warn(`[rag:collision-floor] save failed: ${(err as Error).message}`);
@@ -168,13 +170,15 @@ export async function saveCollisionFloor(report: CollisionFloorReport): Promise<
 // judge staleness" and shows no hint — never a false alarm.
 export async function countLabeledQuestions(): Promise<number | null> {
   try {
-    const rows = await sql<{ n: number }[]>`
-      select count(distinct q.id)::int as n
-      from eval_questions q
-      join eval_labels l on l.eval_question_id = q.id
-      join document_embeddings de on de.id = l.document_embedding_id
-      where de.config_id = ${activeConfig().id}
-    `;
+    const rows = await isolated(
+      () => sql<{ n: number }[]>`
+        select count(distinct q.id)::int as n
+        from eval_questions q
+        join eval_labels l on l.eval_question_id = q.id
+        join document_embeddings de on de.id = l.document_embedding_id
+        where de.config_id = ${activeConfig().id}
+      `,
+    );
     return rows[0]?.n ?? null;
   } catch (err) {
     console.warn(`[rag:collision-floor] labeled-question count failed: ${(err as Error).message}`);

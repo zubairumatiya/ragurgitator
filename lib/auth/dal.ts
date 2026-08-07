@@ -21,9 +21,11 @@ import "server-only";
 
 import { cache } from "react";
 import { redirect } from "next/navigation";
+import { after } from "next/server";
 
 import { serverSupabase } from "@/lib/auth/supabase";
 import { withUser } from "@/lib/auth/userScope";
+import { withDetachedQueue } from "@/lib/detached";
 
 // The DTO — deliberately NOT the auth.users row. Supabase's user object carries
 // app_metadata, identities, raw provider payloads and more; none of it belongs
@@ -86,7 +88,14 @@ export function unauthorizedJson(): Response {
 // Cheap despite the repetition: requireUser is cache()d per render pass, so a
 // page whose layout and three components each wrap their reads still performs
 // one getUser() round trip.
+//
+// Also installs the detached queue (lib/detached.ts). Page renders will mostly
+// install one and flush nothing — they read — and that is the intended cost:
+// flushDetached returns on an empty queue before touching the pool, so an idle
+// queue is one closure and one after() registration. Server Actions come through
+// the same door, and after() runs even when the response ends in redirect() or a
+// thrown error, so an action that queues work still flushes it.
 export async function withPageUser<T>(fn: (user: SessionUser) => Promise<T>): Promise<T> {
   const user = await requireUser();
-  return withUser(user, () => fn(user));
+  return withDetachedQueue(user, after, () => withUser(user, () => fn(user)));
 }

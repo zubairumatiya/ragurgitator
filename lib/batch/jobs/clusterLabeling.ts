@@ -52,7 +52,7 @@ export const clusterLabelingHandler: JobHandler = {
     const labels = parseBucketLabels(res.body as MessageBody, asked);
     if (labels.length === 0) return 0;
     await saveClusterLabels(runId, labels);
-    bankLlmBatchSaving(results);
+    await bankLlmBatchSaving(results);
     return labels.length;
   },
 };

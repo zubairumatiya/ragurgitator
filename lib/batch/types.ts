@@ -260,7 +260,25 @@ export function isCancelable(status: BatchStatus): boolean {
 // One request to submit. `params` is an Anthropic MessageCreateParams for both
 // LLM providers (the OpenAI adapter translates it per JSONL line — see
 // lib/llm/openaiChat.ts) or a Voyage embeddings body; the adapter shapes it.
+//
+// `customId` MUST match Anthropic's ^[a-zA-Z0-9_-]{1,64}$ — build it with
+// batchCustomId() below rather than by hand.
 export type BatchRequest = { customId: string; params: unknown };
+
+// Join parts into a provider-safe custom id.
+//
+// ANTHROPIC ENFORCES ^[a-zA-Z0-9_-]{1,64}$ AND REJECTS THE WHOLE BATCH when one
+// id fails it — a 400 at submit naming only `requests.0.custom_id`, which says
+// nothing about which builder produced it. `:` is the separator that reads
+// naturally and is not in that set; OpenAI accepts it, so the same id shape
+// works on one LLM leg and fails on the other, and nothing catches it until a
+// real submit. Underscore is safe, and uuids (hex + `-`) already are.
+//
+// Length is the other half: 64 characters is two uuids and little else. Every
+// current caller is one index + one uuid + a short discriminator (~48).
+export function batchCustomId(...parts: (string | number)[]): string {
+  return parts.join("_");
+}
 
 // A normalized result row, provider-agnostic. `body` is an Anthropic Message —
 // including on the OpenAI leg, whose ChatCompletion bodies are translated back

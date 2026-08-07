@@ -17,11 +17,6 @@ import { streamError } from "@/lib/http/missingKeyServer";
 import { ndjsonStream } from "@/lib/http/ndjson";
 import { resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { embedCorpora, embedExistingCorpus, type IngestEvent } from "@/lib/rag/pipeline";
-import { getActiveBatchSavings } from "@/lib/rag/batchStore";
-import { getConfig } from "@/lib/rag/configStore";
-import { isBatchEnabled } from "@/lib/batch/types";
-import { handlerFor } from "@/lib/batch/jobs/registry";
-import { submitBatch } from "@/lib/batch/orchestrator";
 import { withRequestUser } from "@/lib/http/configScope";
 
 export async function POST(
@@ -43,35 +38,10 @@ export async function POST(
     return ndjsonStream<IngestEvent>(async (send) => {
       try {
         await withConfig(cfg, async () => {
-          // Savings preference: when this config selected batch for the embedding
-          // leg AND there's Voyage-batchable work, submit an ingest_embedding batch
-          // instead of embedding inline. Additive — build() returns null for a
-          // non-Voyage base model or nothing to embed, and we fall through to the
-          // inline path (the default). The batch runs async; the BatchRequests
-          // panel tracks it, so we just close the progress stream with `done`.
-          const savings = await getActiveBatchSavings();
-          const handler = isBatchEnabled(savings, "ingest_embedding")
-            ? handlerFor("ingest_embedding")
-            : null;
-          const built = handler
-            ? await handler.build(corpusIds && corpusIds.length > 0 ? { corpusIds } : {})
-            : null;
-
-          if (built && built.requests.length > 0) {
-            const summary = await getConfig(cfg.id);
-            await submitBatch({
-              kind: "ingest_embedding",
-              provider: built.provider,
-              configId: cfg.id,
-              configLabel: summary?.label ?? "—",
-              requests: built.requests,
-              input: built.input,
-              submitMeta: built.submitMeta,
-            });
-            send({ type: "done", results: [] });
-            return;
-          }
-
+          // The config's batch preference for the embedding leg is applied
+          // inside these (lib/rag/pipeline.embedOrQueue), not here — same as a
+          // plain upload. A queued document reports as `queued`, so the dialog
+          // says so rather than showing a document with no chunks.
           await (corpusIds && corpusIds.length > 0
             ? embedCorpora(corpusIds, send)
             : embedExistingCorpus(send));

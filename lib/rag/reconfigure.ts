@@ -23,10 +23,9 @@ import { sql } from "@/lib/db";
 import { resolveConfig, withConfig, type ResolvedConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";
 import { updateConfigSettings } from "@/lib/rag/configStore";
-import { meterEmbeds } from "@/lib/rag/embedCache";
+import { embedDocsCached } from "@/lib/rag/embedCache";
 import { modelSpec, unavailableReason } from "@/lib/rag/embeddingModels";
 import { availableProviders } from "@/lib/rag/providerAvailability";
-import { embedTexts } from "@/lib/rag/embeddings";
 import {
   setChunkModelOverride,
   setChunkSizeModelOverride,
@@ -169,14 +168,18 @@ export async function reconfigureConfig(
         chunkDocument({ id: doc.id, text: content, metadata: { fileName } }),
       );
       onEvent({ type: "step", index, fileName, step: "embed" });
-      // Metered inside the NEW config's scope so the re-embed cost lands on the
-      // config that actually incurred it. Uncached base-table embed = pure spend.
-      const vectors = await withConfig(next, async () => {
-        const texts = chunks.map((c) => c.text);
-        const vecs = await embedTexts(texts);
-        meterEmbeds(next.embeddingModel, [], texts);
-        return vecs;
-      });
+      // Run inside the NEW config's scope so the re-embed cost (and any cache
+      // saving) lands on the config that actually incurred it. Cached, and
+      // worth caching even though the re-embed happens BECAUSE the settings
+      // changed: the new settings may be settings another config already used,
+      // and these texts are then already banked under the new model.
+      // embedDocsCached meters its own hits and misses.
+      const vectors = await withConfig(next, () =>
+        embedDocsCached(
+          chunks.map((c) => c.text),
+          next.embeddingModel,
+        ),
+      );
       onEvent({ type: "step", index, fileName, step: "store" });
       await withConfig(next, () =>
         insertEmbeddingRunWithChunks({

@@ -13,7 +13,7 @@
 // and writes rows; the orchestrator threads the two together.
 // ---------------------------------------------------------------------------
 import { activeUserId } from "@/lib/auth/userScope";
-import { sql } from "@/lib/db";
+import { fragment, sql } from "@/lib/db";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";
 import {
   type BatchJob,
@@ -96,7 +96,7 @@ type BatchJobRow = {
   applied_at: Date | null;
 };
 
-const JOB_COLUMNS = sql`
+const JOB_COLUMNS = fragment`
   id, provider, provider_batch_id, kind, config_id, config_label, status,
   request_count, succeeded_count, errored_count, applied_count, input,
   provider_output_file_id, error, acknowledged, email_sent,
@@ -213,7 +213,7 @@ export async function updateBatchJob(
   return rows.length > 0 ? toJob(rows[0]) : null;
 }
 
-const TERMINAL = sql`('applied', 'failed', 'canceled', 'expired')`;
+const TERMINAL = fragment`('applied', 'failed', 'canceled', 'expired')`;
 
 // Newest-first, for the signed-in user — backs the status panel. "Account-wide"
 // now means one user's jobs across their configs, not the whole table. Terminal
