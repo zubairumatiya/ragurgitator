@@ -25,6 +25,14 @@
 -- Applying this alone changes nothing: the app keeps connecting as `postgres`
 -- until RAG_APP_DATABASE_URL is set (see README). That is deliberate — the
 -- migration and the connection switch can be reverted independently.
+--
+-- WHAT THIS COSTS EVERY LATER MIGRATION. An event trigger, `ensure_rls`, enables
+-- RLS on every new table in `public`, so a table shipped WITHOUT a policy is
+-- deny-all to `rag_app` from the moment it exists: empty reads, rejected writes,
+-- no error. Grants are inherited (the `alter default privileges` below);
+-- policies have no such mechanism and must be written per table. The checklist
+-- and the two scripts that catch it are in the README under "Adding a
+-- migration".
 -- ============================================================================
 
 -- --- 1. the restricted role --------------------------------------------------

@@ -106,12 +106,109 @@ scores retrieval quality with real information-retrieval metrics.
 - `lib/config.ts` — model names and retrieval knobs (chunk size, overlap, top-k)
 - `migrations/` — the database schema, one SQL file per change
 
+## Rotating the key-encryption key
+
+Provider keys are sealed with envelope encryption: a per-secret DEK encrypts the
+key, and the DEK is wrapped by a KEK that never leaves Azure Key Vault. Rotating
+the KEK means adding a new **version** of the vault key `provider-key-kek`.
+
+Existing rows keep working throughout, and that is by design.
+`user_provider_keys.kek_id` stores the key **version** each row was sealed with,
+and `unwrap` uses the row's own version rather than the current one
+(`lib/crypto/azureKeyVault.ts`), so rotation orphans nothing and re-wrapping can
+happen later or never.
+
+1. **Grant yourself Crypto Officer, temporarily.** Day to day the developer
+   identity holds only **Key Vault Crypto User** — enough for `getKey`, wrap and
+   unwrap, which is everything the app does. Creating a key version is not in
+   that role. Grant **Crypto Officer** on the vault, rotate, then remove it.
+2. **Create the new version** of `provider-key-kek` in vault `rag-app-zube`
+   (Azure portal → the key → *New Version*, or `az keyvault key rotate`).
+3. **Restart the app.** `currentKeyId()` resolves the current version **once per
+   process and caches it forever** — the right call for a hot path that would
+   otherwise hit the vault on every save, but it means a running server keeps
+   sealing new keys under the *old* version until it restarts. On Vercel a
+   redeploy does this; locally, restart `npm run dev`.
+4. **Verify** with `npm run vault:check`, which round-trips wrap/unwrap against
+   the live vault.
+5. **Re-wrap when convenient**, or let rotation happen lazily — every user who
+   re-saves a key gets the new version automatically. To confirm where things
+   stand:
+   ```sql
+   select kek_id, count(*) from user_provider_keys group by 1;
+   ```
+6. **Do not disable or delete an old key version while any row still names it.**
+   Step 5's query is the only thing standing between a cleanup and every affected
+   user having to re-enter their provider keys — destroying a KEK version makes
+   the DEKs wrapped under it permanently unrecoverable.
+
+There is deliberately no re-wrap script. A pass would have to hold every user's
+plaintext key in memory to re-seal it, and the AAD binds each row to its
+`userId:provider` pair (`lib/crypto/envelope.ts`), so a re-seal that got the pair
+wrong would make the row permanently unopenable. Lazy rotation via step 5 avoids
+writing that code at all; if a forced pass is ever needed, those two constraints
+are what it has to respect.
+
+## Adding a migration
+
+Read this before writing a migration that **creates a table**. Since RLS became
+load-bearing (`0051_rls.sql`), a new table is deny-all by default and the app
+cannot read it.
+
+An event trigger, `ensure_rls`, enables row-level security on every new table in
+`public` automatically. The app connects as `rag_app`, which holds `NOBYPASSRLS`,
+so a table with RLS enabled and **no policy** returns zero rows to every query —
+in production, with no error anywhere. Reads come back empty, writes are rejected
+by `WITH CHECK`, and the page that uses the table looks like it has no data yet.
+
+Grants are handled for you: `0051` set `alter default privileges in schema
+public`, so a new table inherits `select, insert, update, delete` for `rag_app`.
+**Policies are not** — Postgres has no equivalent mechanism, so every new table
+needs its own.
+
+So, for each new table:
+
+1. Give it a path to an owner — a `user_id uuid not null references
+   user_profiles(id) on delete cascade`, or a `config_id` / `document_id` that
+   already reaches one.
+2. Ship a policy `to rag_app` **in the same migration**, matching the shape its
+   neighbours use in `0051_rls.sql`: a direct
+   `using (user_id = app.current_user_id())` for an owner-rooted table, or an
+   `exists (select 1 from configs …)` for a `config_id`-bearing one.
+3. Run both checks before and after applying it:
+   ```bash
+   npm run rls:check      # every table is reachable to its owner and nobody else
+   npm run cascade:check  # every table is destroyed by account deletion
+   ```
+   Each asserts an allowlist rather than printing a report, so a table that
+   forgot step 1 or step 2 fails by name without either script knowing about it
+   in advance.
+
 ## Scripts
 
 ```bash
-npm run dev     # start the dev server (port 3002)
-npm run build   # production build
-npm run start   # run the production build
-npm run lint    # eslint
-npm test        # run the test suite
+npm run dev            # start the dev server (port 3002)
+npm run build          # production build
+npm run start          # run the production build
+npm run lint           # eslint
+npm test               # run the test suite
+npm run guard          # multi-tenancy invariants: key handling, scopes, auth gates
+
+npm run vault:check    # Azure Key Vault wrap/unwrap round-trip
+npm run rls:check      # tenant isolation: owner sees all, stranger sees none
+npm run cascade:check  # deletion contract: keys delete alone, accounts delete all
 ```
+
+`guard` is pure static analysis — no database, no network, no env — so it is safe
+to run anywhere. The last three talk to live services and read `.env.local`:
+`rls:check` needs both connection strings, `cascade:check` needs `DATABASE_URL`
+only, and `vault:check` needs an `az login` session.
+
+What `guard` enforces, and why none of it can be a type: `.expose()` (the only
+way to unwrap a decrypted provider key) appears solely at the two provider-client
+construction sites and is never parked in a local; every `app/` entry point that
+touches the store enters a request scope, which since `0051` is also the database
+transaction carrying the user identity; and every exported API handler is behind
+the authentication boundary — checked **per method**, because a file-level sweep
+passes while a `DELETE` sharing a file with a gated `GET` stays open, which is
+exactly how ten handlers were missed once already.
