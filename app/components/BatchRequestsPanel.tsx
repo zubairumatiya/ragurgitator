@@ -12,7 +12,9 @@
 //     means on every page), advancing provider status, applying completions and
 //     sending the completion email. Nothing else in the app does this — there is
 //     no cron — so a closed panel used to mean a finished batch stayed unapplied.
-//   • While open: poll every 10s instead, and re-list. "Check now" forces one.
+//   • On open: ack every finished job (POST /api/batch/ack) — opening the panel
+//     is seeing them, so the green "something finished" dot clears — then poll
+//     every 10s while it stays open, and re-list. "Check now" forces one.
 //   • Cancel (in_progress only) and dismiss ("ack") a finished job's badge.
 // ---------------------------------------------------------------------------
 "use client";
@@ -93,6 +95,22 @@ export function BatchRequestsPanel() {
     };
   }, [list, checkNow]);
 
+  // Opening the panel IS seeing the finished jobs, so the green dot clears
+  // then — acked on the server (POST /api/batch/ack) rather than with a local
+  // "seen" flag, so it doesn't come back on the next reload. Best-effort: a
+  // failed ack leaves the dot up, which is the safe direction.
+  const ackAll = useCallback(async () => {
+    try {
+      const res = await apiFetch("/api/batch/ack", { method: "POST" });
+      const data = (await res.json().catch(() => null)) as { acknowledged?: string[] } | null;
+      if (!res.ok || !data?.acknowledged?.length) return;
+      const acked = new Set(data.acknowledged);
+      setJobs((js) => js.map((j) => (acked.has(j.id) ? { ...j, acknowledged: true } : j)));
+    } catch {
+      /* leave the badge up — it clears on the next open */
+    }
+  }, []);
+
   // Poll on an interval FOR AS LONG AS THIS IS MOUNTED — which, since the panel
   // lives in the Nav, is every page. Fast while open so the list feels live;
   // every minute in the background so a batch that completes while you are
@@ -107,17 +125,22 @@ export function BatchRequestsPanel() {
   // skipping the tick means one slow or hung poll silently stops the loop, which
   // is the failure that leaves a finished batch unapplied indefinitely.
   useEffect(() => {
-    // Opening the panel polls immediately. Deferred out of the effect body (a
-    // 0ms timer) so it doesn't set state synchronously during the effect (which
-    // would cascade renders). No kick on the background cadence — the mount seed
-    // above already covers "what finished while the app was closed".
-    const kick = open ? setTimeout(() => void checkNow(), 0) : null;
+    // Opening the panel acks the finished jobs, then polls immediately.
+    // Deferred out of the effect body (a 0ms timer) so it doesn't set state
+    // synchronously during the effect (which would cascade renders). No kick on
+    // the background cadence — the mount seed above already covers "what
+    // finished while the app was closed".
+    //
+    // Ack BEFORE the poll, not alongside it: the poll re-lists from the DB, so a
+    // concurrent ack that commits second would be overwritten by rows still
+    // reading acknowledged=false and the dot would flash back on.
+    const kick = open ? setTimeout(() => void ackAll().then(() => checkNow()), 0) : null;
     const id = setInterval(() => void checkNow(), open ? OPEN_POLL_MS : BACKGROUND_POLL_MS);
     return () => {
       if (kick) clearTimeout(kick);
       clearInterval(id);
     };
-  }, [open, checkNow]);
+  }, [open, checkNow, ackAll]);
 
   async function act(id: string, action: "cancel" | "ack") {
     try {

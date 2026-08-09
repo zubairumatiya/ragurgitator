@@ -23,6 +23,7 @@ import {
   PROVIDER_META,
   type ProviderKeyDto,
 } from "@/lib/auth/providerKeys";
+import { BackToConfigs } from "@/app/components/BackToConfigs";
 import { DeleteAccountForm } from "@/app/components/DeleteAccountForm";
 import { ProviderKeyRow } from "@/app/components/ProviderKeyRow";
 
@@ -37,8 +38,12 @@ export default async function AccountPage() {
   const byProvider = new Map<string, ProviderKeyDto>(keys.map((k) => [k.provider, k]));
 
   return (
-    <div className="mx-auto w-full max-w-2xl px-6 py-10">
-      <h1 className="text-lg font-medium">Account</h1>
+    <div className="mx-auto flex w-full max-w-2xl flex-col px-6 py-10">
+      {/* The way back. /account has no tab bar of its own, and "/" would dump
+          you on your first open config rather than the one you left. */}
+      <BackToConfigs />
+
+      <h1 className="mt-6 text-lg font-medium">Account</h1>
       <p className="mt-1 text-sm text-zinc-500">{user.email}</p>
 
       <section className="mt-10">

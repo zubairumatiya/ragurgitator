@@ -15,14 +15,25 @@
 // changed), then fires EVAL_CRITERIA_CHANGED
 // (the eval dashboard re-pulls its summary) and router.refresh() (the banner
 // re-renders). apiFetch scopes everything to the tab in the URL.
+//
+// The seed is CACHED per config and revalidated behind the open panel (see "the
+// seed cache" below), and warmed on hover — opening used to wait on two round
+// trips every time, for a payload that rarely changes between opens.
 // ---------------------------------------------------------------------------
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useState, type ReactNode } from "react";
+import { useParams, useRouter } from "next/navigation";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { SC_CHANGED } from "@/app/components/semanticCache/events";
 import { Tooltip } from "@/app/components/Tooltip";
-import { apiFetch } from "@/lib/http/client";
+import { apiFetch, currentConfigId } from "@/lib/http/client";
 import {
   DEFAULT_BATCH_SAVINGS,
   JOB_KINDS,
@@ -33,8 +44,15 @@ import {
 } from "@/lib/batch/types";
 import type { ConfigSummary } from "@/lib/rag/configStore";
 import type { LlmModelOption, LlmProviderId } from "@/lib/llm/llmModels";
-import { noteHeadline, type AutotuneModelOption } from "@/lib/rag/embeddingModels";
-import type { AutotuneApply, AutotuneSearch, EvalCriteria } from "@/lib/rag/evalSettingsStore";
+import {
+  noteHeadline,
+  type AutotuneModelOption,
+} from "@/lib/rag/embeddingModels";
+import type {
+  AutotuneApply,
+  AutotuneSearch,
+  EvalCriteria,
+} from "@/lib/rag/evalSettingsStore";
 import type { AutotuneScopeDocument } from "@/lib/rag/evalStore";
 
 // Fired (on window) after a successful save so config-scoped views (the eval
@@ -100,21 +118,12 @@ function parseThreshold(s: string): number | null | undefined {
   return rate >= 0 && rate <= 1 ? rate : undefined;
 }
 
-// The calibration PRECISION TARGET field. Same tri-state as parseThreshold ("" =>
-// inherit the global 0.99, undefined => block the save), but a NARROWER band:
-// coerceAcceptTarget in lib/batch/types.ts rejects anything under 0.5, so a value
-// this box accepts and the store then silently discards would be the worst
-// outcome — the user would see their number vanish on the next open with no
-// explanation. Rejecting it here means the error names the band instead.
-function parseAcceptTarget(s: string): number | null | undefined {
-  const t = s.trim();
-  if (t === "") return null;
-  const pct = t.endsWith("%");
-  const n = Number(pct ? t.slice(0, -1) : t);
-  if (!Number.isFinite(n)) return undefined;
-  const rate = pct || n > 1 ? n / 100 : n;
-  return rate >= 0.5 && rate <= 1 ? rate : undefined;
-}
+// The calibration PRECISION TARGET is deliberately NOT a field here. It reads at
+// a precision (0.99) but is not a cosine, and sitting one row under "Match
+// threshold" it read as a second, stricter version of it. It now lives beside
+// the slider it governs on Appraise → Semantic caching → Cache key model, where
+// you can see what each precision costs before storing one. The wire field
+// (semanticCache.acceptTarget) is unchanged; only where it is set moved.
 
 // What the config falls back to with no override of its own (GET /api/batch).
 type InheritedThreshold = {
@@ -132,11 +141,42 @@ type KeyModelStatus = {
   override: string | null; // this config's own, null when it inherits
   globalDefault: string;
   threshold: InheritedThreshold; // what the RESOLVED model's space serves at
-  candidates: { id: string; space: string; dimension: number; provider: string }[];
+  candidates: {
+    id: string;
+    space: string;
+    dimension: number;
+    provider: string;
+  }[];
+};
+
+// Everything one open needs, from both requests — the unit the cache below
+// stores. Held as raw payload rather than as the ~30 pieces of form state it
+// seeds, so a cached open and a cold one go through the identical apply path.
+type Seed = {
+  criteria: EvalCriteria;
+  config: ConfigSummary;
+  scopeOptions: AutotuneScopeDocument[];
+  autotuneModels: AutotuneModelOption[];
+  aggregateModels: AutotuneModelOption[];
+  llmModels: LlmModelOption[];
+  // GET /api/batch is non-fatal (the Savings section still renders without it),
+  // so it is nullable and the panel keeps its defaults when it fails.
+  batch: {
+    savings: BatchSavings;
+    emailConfigured: boolean;
+    inFlight: number;
+    cascadeEnabled: boolean;
+    inheritedThreshold: InheritedThreshold | null;
+    keyModel: KeyModelStatus | null;
+  } | null;
 };
 
 export function EvalSettings() {
   const router = useRouter();
+  // Only used to re-run the mount warm below when the tab changes; every read of
+  // the id that matters goes through currentConfigId() so it can't disagree with
+  // what apiFetch scopes the request to.
+  const { configId } = useParams<{ configId: string }>();
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [config, setConfig] = useState<ConfigSummary | null>(null);
@@ -204,12 +244,6 @@ export function EvalSettings() {
   // Empty = no override. `inherited` is what that empty box resolves to.
   const [threshold, setThreshold] = useState("");
   const [inherited, setInherited] = useState<InheritedThreshold | null>(null);
-  // Calibration precision target override, same TEXT-then-parse handling as the
-  // threshold. Empty = inherit the global 0.99. Deliberately NOT gated on
-  // `serve`, unlike the threshold: this governs the CALIBRATION sweeps, which are
-  // how you decide whether serving is safe to switch on in the first place, so
-  // hiding it until serving is on would hide it exactly when it's needed.
-  const [acceptTarget, setAcceptTarget] = useState("");
   // Cache-KEY model: the status the server resolved, plus the picker's value
   // ("" = inherit the global default). Held separately from `savings` because
   // the two are read back together after a save — a key-model change moves
@@ -224,110 +258,245 @@ export function EvalSettings() {
     space: string;
     fallbackThreshold: number;
   } | null>(null);
+  // Which action produced the 409 above, so "Switch anyway" retries the RIGHT
+  // one — the full form Save (other fields pending too) or the standalone
+  // apply-and-re-key button (key model only).
+  const [keyModelBlockedBy, setKeyModelBlockedBy] = useState<
+    "save" | "apply" | null
+  >(null);
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
-  const [backfilling, setBackfilling] = useState(false);
+  // The combined apply-and-re-key action, in its two phases, so the button can
+  // say which one it's doing rather than a single generic "Working…".
+  const [keyModelPhase, setKeyModelPhase] = useState<
+    null | "saving" | "rekeying"
+  >(null);
   // Saver mode (0032): the FrugalGPT cascade on/off for this config (its own
   // column, configs.cascade_enabled — separate from the BatchSavings blob).
   const [cascadeEnabled, setCascadeEnabled] = useState(false);
   const setJob = (kind: JobKind, v: BatchChoice) =>
     setSavings((s) => ({ ...s, jobs: { ...s.jobs, [kind]: v } }));
 
-  // Fetch the saved criteria + config and seed the form, then open — so it
-  // always reflects the latest saved state without a render-cascading effect.
-  async function seedAndOpen() {
+  // --- the seed cache (open latency) -------------------------------------
+  //
+  // Opening used to be "two round trips, THEN the panel appears", every time.
+  // The re-seed itself is not optional — an override applied from the
+  // collision-floor panel on Appraise has to show up here — so the fix is
+  // stale-while-revalidate rather than a plain memo: a cached open paints
+  // immediately from the last payload and reconciles behind it.
+  //
+  // Keyed by configId because every field in a Seed is config-scoped (apiFetch
+  // scopes both requests to the tab in the URL), so switching tabs must not show
+  // the previous config's numbers.
+  const seedCache = useRef(new Map<string, Seed>());
+  // A reconcile must never overwrite something the user has started editing.
+  // One capture-phase handler on the panel (below) sets this for every input in
+  // it — cheaper and harder to forget than dirty-tracking ~30 setters.
+  const touched = useRef(false);
+  // `open` for the async reconcile, which must not close over a stale render.
+  const openRef = useRef(false);
+  useEffect(() => {
+    openRef.current = open;
+  }, [open]);
+
+  // A save here, or a threshold/key-model change made on Appraise (SC_CHANGED),
+  // moves what an open would show — so the cache is dropped rather than
+  // reconciled: the next open should not paint a value we already know is gone.
+  useEffect(() => {
+    const invalidate = () => seedCache.current.clear();
+    window.addEventListener(EVAL_CRITERIA_CHANGED, invalidate);
+    window.addEventListener(SC_CHANGED, invalidate);
+    return () => {
+      window.removeEventListener(EVAL_CRITERIA_CHANGED, invalidate);
+      window.removeEventListener(SC_CHANGED, invalidate);
+    };
+  }, []);
+
+  // Both requests, as one payload. The criteria call is fatal (there is no panel
+  // without it); the batch call is not.
+  const fetchSeed = useCallback(async (): Promise<{
+    seed?: Seed;
+    error?: string;
+  }> => {
+    // Both requests fired together, not one after the other — /api/batch has
+    // nothing the criteria call depends on, and awaiting them in sequence was
+    // paying for two round trips back to back every time Settings opened.
+    // `jobs=0`: the account-wide job ledger is the expensive half of that
+    // payload and nothing here reads it — the panel that does (BatchRequestsPanel)
+    // asks for it separately.
+    const [res, bres] = await Promise.all([
+      apiFetch("/api/eval/criteria"),
+      apiFetch("/api/batch?jobs=0").catch(() => null),
+    ]);
+    const data = (await res.json().catch(() => null)) as {
+      criteria?: EvalCriteria;
+      config?: ConfigSummary;
+      scopeOptions?: AutotuneScopeDocument[];
+      autotuneModels?: AutotuneModelOption[];
+      aggregateModels?: AutotuneModelOption[];
+      llmModels?: LlmModelOption[];
+      error?: string;
+    } | null;
+    if (!res.ok || !data?.criteria || !data.config) {
+      return {
+        error: data?.error ?? `Failed to load settings (${res.status}).`,
+      };
+    }
+
+    let batch: Seed["batch"] = null;
+    try {
+      const bdata = bres
+        ? ((await bres.json().catch(() => null)) as {
+            savings?: BatchSavings;
+            emailConfigured?: boolean;
+            inFlight?: unknown[];
+            cascadeEnabled?: boolean;
+            inheritedThreshold?: InheritedThreshold;
+            keyModel?: KeyModelStatus;
+          } | null)
+        : null;
+      if (bres?.ok && bdata?.savings) {
+        batch = {
+          savings: bdata.savings,
+          emailConfigured: Boolean(bdata.emailConfigured),
+          inFlight: bdata.inFlight?.length ?? 0,
+          cascadeEnabled: Boolean(bdata.cascadeEnabled),
+          inheritedThreshold: bdata.inheritedThreshold ?? null,
+          keyModel: bdata.keyModel ?? null,
+        };
+      }
+    } catch {
+      /* leave null — the Savings section still renders */
+    }
+
+    return {
+      seed: {
+        criteria: data.criteria,
+        config: data.config,
+        scopeOptions: data.scopeOptions ?? [],
+        autotuneModels: data.autotuneModels ?? [],
+        aggregateModels: data.aggregateModels ?? [],
+        llmModels: data.llmModels ?? [],
+        batch,
+      },
+    };
+  }, []);
+
+  // Payload → form state. Pure application, no IO, so the cached and cold paths
+  // cannot drift apart.
+  const applySeed = useCallback((data: Seed) => {
+    const c = data.criteria;
+    setConfig(data.config);
+    setRecallOn(c.recall.enabled);
+    setRecallK(c.recall.k != null ? String(c.recall.k) : "");
+    setRecallMin(c.recall.minRate != null ? String(c.recall.minRate) : "");
+    setMrrOn(c.mrr.enabled);
+    setMrrK(c.mrr.k != null ? String(c.mrr.k) : "");
+    setMrrMin(c.mrr.minRate != null ? String(c.mrr.minRate) : "");
+    setNdcgOn(c.ndcg.enabled);
+    setNdcgK(c.ndcg.k != null ? String(c.ndcg.k) : "");
+    setNdcgMin(c.ndcg.minRate != null ? String(c.ndcg.minRate) : "");
+    setLadder(c.autotune.sizeLadder.join(", "));
+    setOverlap(String(Math.round(c.autotune.overlapPct * 100)));
+    setApply(c.autotune.apply);
+    setSearch(c.autotune.search);
+    setStopEarly(c.autotune.stopEarly);
+    setKeepBest(c.autotune.keepBest);
+    setAutotunePool(
+      c.autotune.fusionPool != null ? String(c.autotune.fusionPool) : "",
+    );
+    setRetrievalPool(
+      c.retrieval.fusionPool != null ? String(c.retrieval.fusionPool) : "",
+    );
+    setScopeDocs(data.scopeOptions);
+    setScopeSel(
+      c.autotune.chunkScope === null ? null : new Set(c.autotune.chunkScope),
+    );
+    setScopeExpanded(new Set());
+    // Seed the LLM picker from the config's saved model, and default the
+    // provider FILTER to that model's own provider — otherwise opening
+    // Settings on a GPT config would show the Anthropic list with the current
+    // selection nowhere in it.
+    const llmOptions = data.llmModels;
+    setLlmOpts(llmOptions);
+    setLlmModel(data.config.llmModel);
+    setSavedLlmModel(data.config.llmModel);
+    setLlmProvider(
+      llmOptions.find((m) => m.id === data.config.llmModel)?.provider ??
+        "anthropic",
+    );
+
+    setModelOpts(data.autotuneModels);
+    setAggOpts(data.aggregateModels);
+    setAggSel(
+      c.ndcg.aggregateModels === null ? null : new Set(c.ndcg.aggregateModels),
+    );
+    setModelSel(
+      c.autotune.modelScope === null ? null : new Set(c.autotune.modelScope),
+    );
+    setModelsOpen(false);
+    setSync(data.config.corpusSync);
+    setSavedSync(data.config.corpusSync);
+    // Savings preference + email/in-flight state (its own store; non-fatal —
+    // null leaves the section on its defaults).
+    const b = data.batch;
+    if (b) {
+      setSavings(b.savings);
+      setEmailReady(b.emailConfigured);
+      setInFlightCount(b.inFlight);
+      setCascadeEnabled(b.cascadeEnabled);
+      setInherited(b.inheritedThreshold);
+      setKeyModelInfo(b.keyModel);
+      setKeyModel(b.savings.semanticCache.keyModel ?? "");
+      setKeyModelBlock(null);
+      setKeyModelBlockedBy(null);
+      setBackfillMsg(null);
+      // Re-applied on every open (and on every reconcile), so an override
+      // applied from the collision-floor panel meanwhile shows up here.
+      const t = b.savings.semanticCache.threshold;
+      setThreshold(t === null ? "" : String(t));
+    }
+  }, []);
+
+  // Refresh the cache behind an already-painted panel, and fold the result in
+  // only if the user hasn't started editing and hasn't closed it — a reconcile
+  // that overwrote a half-typed threshold would be a worse bug than the latency
+  // it exists to hide.
+  const revalidate = useCallback(
+    async (key: string) => {
+      try {
+        const { seed } = await fetchSeed();
+        if (!seed) return;
+        seedCache.current.set(key, seed);
+        if (openRef.current && !touched.current) applySeed(seed);
+      } catch {
+        /* a failed reconcile leaves the painted (cached) values in place */
+      }
+    },
+    [fetchSeed, applySeed],
+  );
+
+  // The click path. Cached → paint now, reconcile behind it. Cold → the old
+  // fetch-then-open, because there is nothing honest to paint yet.
+  async function openPanel() {
+    const key = currentConfigId() ?? "";
+    touched.current = false;
+    const cached = seedCache.current.get(key);
+    if (cached) {
+      applySeed(cached);
+      setErr(null);
+      setOpen(true);
+      void revalidate(key);
+      return;
+    }
     setLoading(true);
     setErr(null);
     try {
-      const res = await apiFetch("/api/eval/criteria");
-      const data = (await res.json().catch(() => null)) as
-        | {
-            criteria?: EvalCriteria;
-            config?: ConfigSummary;
-            scopeOptions?: AutotuneScopeDocument[];
-            autotuneModels?: AutotuneModelOption[];
-            aggregateModels?: AutotuneModelOption[];
-            llmModels?: LlmModelOption[];
-            error?: string;
-          }
-        | null;
-      if (!res.ok || !data?.criteria || !data.config) {
-        setErr(data?.error ?? `Failed to load settings (${res.status}).`);
-        setOpen(true);
-        return;
-      }
-      const c = data.criteria;
-      setConfig(data.config);
-      setRecallOn(c.recall.enabled);
-      setRecallK(c.recall.k != null ? String(c.recall.k) : "");
-      setRecallMin(c.recall.minRate != null ? String(c.recall.minRate) : "");
-      setMrrOn(c.mrr.enabled);
-      setMrrK(c.mrr.k != null ? String(c.mrr.k) : "");
-      setMrrMin(c.mrr.minRate != null ? String(c.mrr.minRate) : "");
-      setNdcgOn(c.ndcg.enabled);
-      setNdcgK(c.ndcg.k != null ? String(c.ndcg.k) : "");
-      setNdcgMin(c.ndcg.minRate != null ? String(c.ndcg.minRate) : "");
-      setLadder(c.autotune.sizeLadder.join(", "));
-      setOverlap(String(Math.round(c.autotune.overlapPct * 100)));
-      setApply(c.autotune.apply);
-      setSearch(c.autotune.search);
-      setStopEarly(c.autotune.stopEarly);
-      setKeepBest(c.autotune.keepBest);
-      setAutotunePool(c.autotune.fusionPool != null ? String(c.autotune.fusionPool) : "");
-      setRetrievalPool(c.retrieval.fusionPool != null ? String(c.retrieval.fusionPool) : "");
-      setScopeDocs(data.scopeOptions ?? []);
-      setScopeSel(c.autotune.chunkScope === null ? null : new Set(c.autotune.chunkScope));
-      setScopeExpanded(new Set());
-      // Seed the LLM picker from the config's saved model, and default the
-      // provider FILTER to that model's own provider — otherwise opening
-      // Settings on a GPT config would show the Anthropic list with the current
-      // selection nowhere in it.
-      const llmOptions = data.llmModels ?? [];
-      setLlmOpts(llmOptions);
-      setLlmModel(data.config.llmModel);
-      setSavedLlmModel(data.config.llmModel);
-      setLlmProvider(
-        llmOptions.find((m) => m.id === data.config!.llmModel)?.provider ?? "anthropic",
-      );
-
-      setModelOpts(data.autotuneModels ?? []);
-      setAggOpts(data.aggregateModels ?? []);
-      setAggSel(c.ndcg.aggregateModels === null ? null : new Set(c.ndcg.aggregateModels));
-      setModelSel(c.autotune.modelScope === null ? null : new Set(c.autotune.modelScope));
-      setModelsOpen(false);
-      setSync(data.config.corpusSync);
-      setSavedSync(data.config.corpusSync);
-      // Savings preference + email/in-flight state (its own store; non-fatal).
-      try {
-        const bres = await apiFetch("/api/batch");
-        const bdata = (await bres.json().catch(() => null)) as
-          | {
-              savings?: BatchSavings;
-              emailConfigured?: boolean;
-              inFlight?: unknown[];
-              cascadeEnabled?: boolean;
-              inheritedThreshold?: InheritedThreshold;
-              keyModel?: KeyModelStatus;
-            }
-          | null;
-        if (bres.ok && bdata?.savings) {
-          setSavings(bdata.savings);
-          setEmailReady(Boolean(bdata.emailConfigured));
-          setInFlightCount(bdata.inFlight?.length ?? 0);
-          setCascadeEnabled(Boolean(bdata.cascadeEnabled));
-          setInherited(bdata.inheritedThreshold ?? null);
-          setKeyModelInfo(bdata.keyModel ?? null);
-          setKeyModel(bdata.savings.semanticCache.keyModel ?? "");
-          setKeyModelBlock(null);
-          setBackfillMsg(null);
-          // Re-seeded on every open, so an override applied from the
-          // collision-floor panel meanwhile shows up here.
-          const t = bdata.savings.semanticCache.threshold;
-          setThreshold(t === null ? "" : String(t));
-          const at = bdata.savings.semanticCache.acceptTarget;
-          setAcceptTarget(at === null ? "" : String(at));
-        }
-      } catch {
-        /* leave defaults — the Savings section still renders */
+      const { seed, error } = await fetchSeed();
+      if (seed) {
+        seedCache.current.set(key, seed);
+        applySeed(seed);
+      } else {
+        setErr(error ?? "Failed to load settings.");
       }
       setOpen(true);
     } catch (e) {
@@ -337,6 +506,44 @@ export function EvalSettings() {
       setLoading(false);
     }
   }
+
+  // Warm the cache on hover/focus, so even the FIRST open of a page paints
+  // instantly. Fills only when empty — a hover isn't a reason to re-fetch what
+  // an open would revalidate anyway — and never touches form state.
+  function prefetch() {
+    const key = currentConfigId() ?? "";
+    if (seedCache.current.has(key) || loading) return;
+    void fetchSeed()
+      .then(({ seed }) => {
+        if (seed) seedCache.current.set(key, seed);
+      })
+      .catch(() => {
+        /* the click path will try again and surface the error */
+      });
+  }
+
+  // Hover/focus only helps if there IS a hover: a straight click, a touch, or a
+  // keyboard open all reach openPanel cold, and that first open is the one that
+  // felt slow. So warm once per config at mount too, deferred to idle so the
+  // seed never competes with the page's own first paint. Same fill-only-when-
+  // empty rule as prefetch(), so this costs at most one extra pair of GETs per
+  // config visited, and only for the ones that don't get opened.
+  useEffect(() => {
+    const warm = () => prefetch();
+    // requestIdleCallback is typed as always present but isn't on every browser
+    // we care about, so the timeout fallback is a real path, not defensive noise.
+    const idle = typeof window.requestIdleCallback === "function";
+    const handle = idle
+      ? window.requestIdleCallback(warm, { timeout: 2000 })
+      : window.setTimeout(warm, 500);
+    return () => {
+      if (idle) window.cancelIdleCallback(handle);
+      else window.clearTimeout(handle);
+    };
+    // Re-warms when the tab (config) changes, which is exactly when the cache
+    // key changes too.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configId]);
 
   // `force` acknowledges the uncalibrated-space refusal on a key-model switch
   // (409). Only ever true from the explicit "Switch anyway" button.
@@ -349,7 +556,9 @@ export function EvalSettings() {
     // Normalize the chunk scope: full selection saves as null ("all", so chunks
     // labeled later are included automatically); a partial one keeps only ids
     // that still exist in the options (drops stale picks).
-    const allChunkIds = scopeDocs.flatMap((d) => d.chunks.map((c) => c.chunkId));
+    const allChunkIds = scopeDocs.flatMap((d) =>
+      d.chunks.map((c) => c.chunkId),
+    );
     const chunkScope =
       scopeSel === null || allChunkIds.every((id) => scopeSel.has(id))
         ? null
@@ -376,8 +585,16 @@ export function EvalSettings() {
         ? null
         : allAggIds.filter((id) => aggSel.has(id));
     const patch = {
-      recall: { enabled: recallOn, k: parseKOrNull(recallK), minRate: parseRateOrNull(recallMin) },
-      mrr: { enabled: mrrOn, k: parseKOrNull(mrrK), minRate: parseRateOrNull(mrrMin) },
+      recall: {
+        enabled: recallOn,
+        k: parseKOrNull(recallK),
+        minRate: parseRateOrNull(recallMin),
+      },
+      mrr: {
+        enabled: mrrOn,
+        k: parseKOrNull(mrrK),
+        minRate: parseRateOrNull(mrrMin),
+      },
       ndcg: {
         enabled: ndcgOn,
         k: parseKOrNull(ndcgK),
@@ -407,7 +624,9 @@ export function EvalSettings() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(patch),
       });
-      const data = (await res.json().catch(() => null)) as { error?: string } | null;
+      const data = (await res.json().catch(() => null)) as {
+        error?: string;
+      } | null;
       if (!res.ok) {
         setErr(data?.error ?? `Request failed (${res.status}).`);
         return;
@@ -418,8 +637,10 @@ export function EvalSettings() {
       // rather than costing two requests.
       if (config) {
         const configPatch: { corpusSync?: boolean; llmModel?: string } = {};
-        if (config.corpusId && sync !== savedSync) configPatch.corpusSync = sync;
-        if (llmModel && llmModel !== savedLlmModel) configPatch.llmModel = llmModel;
+        if (config.corpusId && sync !== savedSync)
+          configPatch.corpusSync = sync;
+        if (llmModel && llmModel !== savedLlmModel)
+          configPatch.llmModel = llmModel;
 
         if (Object.keys(configPatch).length > 0) {
           const res2 = await apiFetch(`/api/configs/${config.id}`, {
@@ -427,7 +648,9 @@ export function EvalSettings() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(configPatch),
           });
-          const data2 = (await res2.json().catch(() => null)) as { error?: string } | null;
+          const data2 = (await res2.json().catch(() => null)) as {
+            error?: string;
+          } | null;
           if (!res2.ok) {
             setErr(data2?.error ?? `Config update failed (${res2.status}).`);
             return;
@@ -438,14 +661,8 @@ export function EvalSettings() {
       // Savings preference lives in its own store (configs.batch_savings).
       const parsedThreshold = parseThreshold(threshold);
       if (parsedThreshold === undefined) {
-        setErr("Match threshold must be a cosine between 0 and 1 (e.g. 0.94), or empty to inherit.");
-        return;
-      }
-      const parsedTarget = parseAcceptTarget(acceptTarget);
-      if (parsedTarget === undefined) {
         setErr(
-          "Precision target must be between 0.5 and 1 (e.g. 0.95), or empty to inherit. " +
-            "Below 0.5 would mean accepting that most served answers may be wrong.",
+          "Match threshold must be a cosine between 0 and 1 (e.g. 0.94), or empty to inherit.",
         );
         return;
       }
@@ -456,9 +673,12 @@ export function EvalSettings() {
           jobs: savings.jobs,
           cascadeEnabled,
           semanticCache: {
-            ...savings.semanticCache,
+            // acceptTarget is deliberately OMITTED, not echoed back: it is set
+            // on Appraise now, and an omitted key means "leave the override
+            // alone" (see the route). Spreading the value we seeded with would
+            // silently revert a target stored there since this panel opened.
+            serve: savings.semanticCache.serve,
             threshold: parsedThreshold,
-            acceptTarget: parsedTarget,
             // "" = inherit the global default.
             keyModel: keyModel === "" ? null : keyModel,
           },
@@ -475,10 +695,16 @@ export function EvalSettings() {
         // rather than dropping the user's other edits over it.
         if (bres.status === 409 && bdata?.uncalibratedSpace) {
           setKeyModelBlock(bdata.uncalibratedSpace);
+          setKeyModelBlockedBy("save");
         }
         setErr(bdata?.error ?? `Savings update failed (${bres.status}).`);
         return;
       }
+      // What we just wrote is what the next open must show, and the payload the
+      // server would return now differs from the one we seeded from — so drop
+      // the cache rather than trying to patch it. (The event below also clears
+      // it; doing it here keeps the invalidation next to the write.)
+      seedCache.current.clear();
       setOpen(false);
       window.dispatchEvent(new Event(EVAL_CRITERIA_CHANGED));
       router.refresh();
@@ -489,45 +715,82 @@ export function EvalSettings() {
     }
   }
 
-  // Eagerly re-key this config's already-cached questions under the SAVED key
-  // model, so a switch has something to hit against without waiting for users to
-  // re-ask. Deliberately a separate button from Save: it spends provider tokens.
-  async function runBackfill() {
-    setBackfilling(true);
+  // Switching the cache key model used to be two steps — Save the picker, then
+  // a second click to re-key past questions — which left a config's cache cold
+  // (nothing matchable) for however long sat between them. One button now does
+  // both: it writes ONLY semanticCache.keyModel (a partial PATCH — the rest of
+  // this form's pending edits are untouched, see `save` for those), then
+  // immediately re-keys under whatever it just saved.
+  async function applyKeyModelAndRekey(force = false) {
+    setKeyModelPhase("saving");
     setBackfillMsg(null);
     try {
-      const res = await apiFetch("/api/semantic-cache/key-model", {
+      const res = await apiFetch("/api/batch", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          semanticCache: { keyModel: keyModel === "" ? null : keyModel },
+          forceKeyModel: force,
+        }),
+      });
+      const d = (await res.json().catch(() => null)) as {
+        savings?: BatchSavings;
+        error?: string;
+        uncalibratedSpace?: { space: string; fallbackThreshold: number };
+      } | null;
+      if (!res.ok || !d || d.error) {
+        if (res.status === 409 && d?.uncalibratedSpace) {
+          setKeyModelBlock(d.uncalibratedSpace);
+          setKeyModelBlockedBy("apply");
+        } else {
+          setBackfillMsg(d?.error ?? `Save failed (${res.status}).`);
+        }
+        return;
+      }
+      const saved = d.savings?.semanticCache.keyModel ?? null;
+      setKeyModelInfo((info) =>
+        info
+          ? { ...info, override: saved, keyModel: saved ?? info.globalDefault }
+          : info,
+      );
+      setKeyModelBlock(null);
+      setKeyModelBlockedBy(null);
+
+      setKeyModelPhase("rekeying");
+      const bres = await apiFetch("/api/semantic-cache/key-model", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "backfill" }),
       });
-      const d = (await res.json().catch(() => null)) as {
+      const bd = (await bres.json().catch(() => null)) as {
         keyModel?: string;
         candidates?: number;
         inserted?: number;
         failed?: number;
         error?: string;
       } | null;
-      if (!res.ok || !d || d.error) {
-        setBackfillMsg(d?.error ?? `Backfill failed (${res.status}).`);
+      if (!bres.ok || !bd || bd.error) {
+        setBackfillMsg(bd?.error ?? `Re-key failed (${bres.status}).`);
         return;
       }
       setBackfillMsg(
-        d.candidates === 0
-          ? `Nothing to re-key — every cached question already has a ${d.keyModel} vector.`
-          : `Re-keyed ${d.inserted ?? 0} of ${d.candidates} cached questions under ${d.keyModel}` +
-            (d.failed ? `; ${d.failed} failed to embed.` : "."),
+        bd.candidates === 0
+          ? `Applied — every cached question already has a ${bd.keyModel} vector.`
+          : `Applied and re-keyed ${bd.inserted ?? 0} of ${bd.candidates} cached questions under ${bd.keyModel}` +
+              (bd.failed ? `; ${bd.failed} failed to embed.` : "."),
       );
+      window.dispatchEvent(new Event(EVAL_CRITERIA_CHANGED));
     } catch (e) {
       setBackfillMsg(e instanceof Error ? e.message : "Network error.");
     } finally {
-      setBackfilling(false);
+      setKeyModelPhase(null);
     }
   }
 
   // The picker's value resolved through the same two layers the server uses, so
   // the line under it names the model that would actually be in force.
-  const resolvedKeyModel = keyModel === "" ? keyModelInfo?.globalDefault ?? "" : keyModel;
+  const resolvedKeyModel =
+    keyModel === "" ? (keyModelInfo?.globalDefault ?? "") : keyModel;
   // A pending change: backfill acts on the SAVED model, so it must not be
   // offered while the picker shows something else.
   const keyModelDirty = keyModel !== (keyModelInfo?.override ?? "");
@@ -549,7 +812,9 @@ export function EvalSettings() {
     <div className="relative">
       <button
         type="button"
-        onClick={() => (open ? setOpen(false) : seedAndOpen())}
+        onClick={() => (open ? setOpen(false) : openPanel())}
+        onMouseEnter={prefetch}
+        onFocus={prefetch}
         disabled={loading}
         title="Config settings: eval metrics, autotuning, corpus auto-sync"
         className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium cursor-pointer transition-colors hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
@@ -559,7 +824,13 @@ export function EvalSettings() {
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full z-20 mt-1 w-80 rounded-md border border-zinc-200 bg-white p-3 text-sm shadow-lg dark:border-zinc-800 dark:bg-zinc-900">
+          {/* One capture-phase pair marks the panel dirty for every control in
+              it, so a background reconcile knows to leave the form alone. */}
+          <div
+            onChangeCapture={() => (touched.current = true)}
+            onClickCapture={() => (touched.current = true)}
+            className="absolute right-0 top-full z-20 mt-1 w-80 rounded-md border border-zinc-200 bg-white p-3 text-sm shadow-lg dark:border-zinc-800 dark:bg-zinc-900"
+          >
             {/* LLM — the config's answer-generation model (§9.2).
                 First in the dropdown because it's the setting with the broadest
                 effect: every metric below is measured on answers this model
@@ -569,7 +840,9 @@ export function EvalSettings() {
             </p>
             <div className="mb-3 flex flex-col gap-1.5">
               <label className="flex items-center justify-between gap-2">
-                <span className="text-zinc-600 dark:text-zinc-400">Provider</span>
+                <span className="text-zinc-600 dark:text-zinc-400">
+                  Provider
+                </span>
                 <select
                   value={llmProvider}
                   onChange={(e) => {
@@ -581,7 +854,9 @@ export function EvalSettings() {
                     // an unkeyed provider has no selectable option, and leaving
                     // the field blank would read as "no model set" when the
                     // config still has one.
-                    const inProvider = llmOpts.filter((m) => m.provider === next);
+                    const inProvider = llmOpts.filter(
+                      (m) => m.provider === next,
+                    );
                     const target =
                       inProvider.find((m) => m.selectable) ?? inProvider[0];
                     if (target) setLlmModel(target.id);
@@ -680,7 +955,7 @@ export function EvalSettings() {
                   "Uncheck everything to fall back to the default set."
                 }
               >
-                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                <span className="text-zinc-600 transition-colors group-hover:text-zinc-900 dark:text-zinc-400 dark:group-hover:text-zinc-100">
                   Models in aggregate
                 </span>
               </Tooltip>
@@ -699,7 +974,9 @@ export function EvalSettings() {
                   type="button"
                   onClick={() => setAggOpen((v) => !v)}
                   aria-expanded={aggOpen}
-                  title={aggOpen ? "Hide the model list" : "Show the model list"}
+                  title={
+                    aggOpen ? "Hide the model list" : "Show the model list"
+                  }
                   className="cursor-pointer rounded border border-zinc-300 px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
                 >
                   {aggSelected} selected {aggOpen ? "\u25be" : "\u25b8"}
@@ -719,7 +996,9 @@ export function EvalSettings() {
               Autotuning
             </p>
             <label className="flex items-center justify-between gap-2 py-0.5">
-              <span className="text-zinc-600 dark:text-zinc-400">Size ladder</span>
+              <span className="text-zinc-600 dark:text-zinc-400">
+                Size ladder
+              </span>
               <input
                 value={ladder}
                 onChange={(e) => setLadder(e.target.value)}
@@ -728,7 +1007,9 @@ export function EvalSettings() {
               />
             </label>
             <label className="flex items-center justify-between gap-2 py-0.5">
-              <span className="text-zinc-600 dark:text-zinc-400">Overlap %</span>
+              <span className="text-zinc-600 dark:text-zinc-400">
+                Overlap %
+              </span>
               <input
                 type="number"
                 min={0}
@@ -751,7 +1032,7 @@ export function EvalSettings() {
                   "confirm time. Empty = match live retrieval."
                 }
               >
-                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                <span className="text-zinc-600 transition-colors group-hover:text-zinc-900 dark:text-zinc-400 dark:group-hover:text-zinc-100">
                   Fusion pool
                 </span>
               </Tooltip>
@@ -774,15 +1055,21 @@ export function EvalSettings() {
                   "automatically."
                 }
               >
-                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                <span className="text-zinc-600 transition-colors group-hover:text-zinc-900 dark:text-zinc-400 dark:group-hover:text-zinc-100">
                   When 1+ pass
                 </span>
               </Tooltip>
               <div className="flex gap-1">
-                <Seg active={apply === "choose"} onClick={() => setApply("choose")}>
+                <Seg
+                  active={apply === "choose"}
+                  onClick={() => setApply("choose")}
+                >
                   choose
                 </Seg>
-                <Seg active={apply === "auto_best"} onClick={() => setApply("auto_best")}>
+                <Seg
+                  active={apply === "auto_best"}
+                  onClick={() => setApply("auto_best")}
+                >
                   auto-best
                 </Seg>
               </div>
@@ -814,7 +1101,7 @@ export function EvalSettings() {
                   "min-rate, skipping the remaining below-bar chunks to save embedding cost."
                 }
               >
-                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                <span className="text-zinc-600 transition-colors group-hover:text-zinc-900 dark:text-zinc-400 dark:group-hover:text-zinc-100">
                   Stop once reached
                 </span>
               </Tooltip>
@@ -835,7 +1122,7 @@ export function EvalSettings() {
                   "real fix."
                 }
               >
-                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                <span className="text-zinc-600 transition-colors group-hover:text-zinc-900 dark:text-zinc-400 dark:group-hover:text-zinc-100">
                   Keep best effort
                 </span>
               </Tooltip>
@@ -855,12 +1142,15 @@ export function EvalSettings() {
                   "to the checked chunks, grouped by document."
                 }
               >
-                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                <span className="text-zinc-600 transition-colors group-hover:text-zinc-900 dark:text-zinc-400 dark:group-hover:text-zinc-100">
                   Chunks
                 </span>
               </Tooltip>
               <div className="flex gap-1">
-                <Seg active={scopeSel === null} onClick={() => setScopeSel(null)}>
+                <Seg
+                  active={scopeSel === null}
+                  onClick={() => setScopeSel(null)}
+                >
                   all
                 </Seg>
                 <Seg
@@ -868,7 +1158,12 @@ export function EvalSettings() {
                   onClick={() =>
                     setScopeSel(
                       (prev) =>
-                        prev ?? new Set(scopeDocs.flatMap((d) => d.chunks.map((c) => c.chunkId))),
+                        prev ??
+                        new Set(
+                          scopeDocs.flatMap((d) =>
+                            d.chunks.map((c) => c.chunkId),
+                          ),
+                        ),
                     )
                   }
                 >
@@ -898,7 +1193,7 @@ export function EvalSettings() {
                   "chunk size only."
                 }
               >
-                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                <span className="text-zinc-600 transition-colors group-hover:text-zinc-900 dark:text-zinc-400 dark:group-hover:text-zinc-100">
                   Models
                 </span>
               </Tooltip>
@@ -929,7 +1224,9 @@ export function EvalSettings() {
                   type="button"
                   onClick={() => setModelsOpen((v) => !v)}
                   aria-expanded={modelsOpen}
-                  title={modelsOpen ? "Hide the model list" : "Show the model list"}
+                  title={
+                    modelsOpen ? "Hide the model list" : "Show the model list"
+                  }
                   className="cursor-pointer rounded border border-zinc-300 px-1.5 py-0.5 text-zinc-500 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
                 >
                   {modelsSelected} selected {modelsOpen ? "▾" : "▸"}
@@ -962,7 +1259,7 @@ export function EvalSettings() {
                   "Empty = auto (4×top-k, min 50)."
                 }
               >
-                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                <span className="text-zinc-600 transition-colors group-hover:text-zinc-900 dark:text-zinc-400 dark:group-hover:text-zinc-100">
                   Fusion pool
                 </span>
               </Tooltip>
@@ -1025,7 +1322,7 @@ export function EvalSettings() {
                   "on easy questions with no quality change on the hard ones."
                 }
               >
-                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                <span className="text-zinc-600 transition-colors group-hover:text-zinc-900 dark:text-zinc-400 dark:group-hover:text-zinc-100">
                   Saver mode (cascade)
                 </span>
               </Tooltip>
@@ -1060,7 +1357,7 @@ export function EvalSettings() {
             </p>
 
             {/* Semantic answer cache: serving is opt-in; the cache always fills. */}
-            <label className="mt-2 flex items-center justify-between gap-2 border-t border-zinc-200 py-0.5 pt-2 dark:border-zinc-800">
+            <label className="mt-2 flex items-center justify-between gap-2 py-0.5 pt-2">
               <Tooltip
                 align="left"
                 text={
@@ -1069,7 +1366,7 @@ export function EvalSettings() {
                   "populated — this only controls whether close matches are served."
                 }
               >
-                <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                <span className="text-zinc-600 transition-colors group-hover:text-zinc-900 dark:text-zinc-400 dark:group-hover:text-zinc-100">
                   Serve cached answers
                 </span>
               </Tooltip>
@@ -1079,7 +1376,10 @@ export function EvalSettings() {
                 onChange={(e) =>
                   setSavings((s) => ({
                     ...s,
-                    semanticCache: { ...s.semanticCache, serve: e.target.checked },
+                    semanticCache: {
+                      ...s.semanticCache,
+                      serve: e.target.checked,
+                    },
                   }))
                 }
                 className="h-4 w-4 shrink-0 cursor-pointer accent-black dark:accent-white"
@@ -1103,7 +1403,7 @@ export function EvalSettings() {
                     "has its own calibrated threshold."
                   }
                 >
-                  <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                  <span className="text-zinc-600 transition-colors group-hover:text-zinc-900 dark:text-zinc-400 dark:group-hover:text-zinc-100">
                     Cache key model
                   </span>
                 </Tooltip>
@@ -1112,11 +1412,14 @@ export function EvalSettings() {
                   onChange={(e) => {
                     setKeyModel(e.target.value);
                     setKeyModelBlock(null);
+                    setKeyModelBlockedBy(null);
                     setBackfillMsg(null);
                   }}
                   className="max-w-52 rounded-md border border-zinc-300 bg-white px-1.5 py-0.5 text-xs text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
                 >
-                  <option value="">Default ({keyModelInfo?.globalDefault ?? "—"})</option>
+                  <option value="">
+                    Default ({keyModelInfo?.globalDefault ?? "—"})
+                  </option>
                   {(keyModelInfo?.candidates ?? []).map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.id} · {c.dimension}d
@@ -1126,28 +1429,46 @@ export function EvalSettings() {
               </div>
 
               <p className="text-xs text-zinc-400 dark:text-zinc-500">
-                Keying questions under{" "}
+                Currently keyed under{" "}
                 <span className="font-mono">{resolvedKeyModel || "—"}</span>
-                {keyModel === "" ? " (global default)." : " for this config only."}{" "}
+                {keyModel === ""
+                  ? " (global default)."
+                  : " for this config only."}{" "}
                 {keyModelDirty
-                  ? "Save to apply, then re-key past questions."
+                  ? "Applying keys this config under the picked model and re-keys past questions in one step."
                   : "Past questions keyed under another model won't match until they're re-keyed."}
               </p>
 
-              {!keyModelDirty && (
+              {/* Only offered once the picker actually differs from what's
+                  saved — a bare "re-key" button with nothing pending to apply
+                  read as a second, disconnected step. One click now both
+                  saves the picked model AND re-keys, instead of Save-then-
+                  re-key as two separate clicks. */}
+              {keyModelDirty && (
                 <div className="flex items-center justify-end gap-2">
                   {backfillMsg && (
-                    <span className="text-xs text-zinc-500 dark:text-zinc-400">{backfillMsg}</span>
+                    <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                      {backfillMsg}
+                    </span>
                   )}
                   <button
                     type="button"
-                    onClick={runBackfill}
-                    disabled={backfilling}
+                    onClick={() => applyKeyModelAndRekey(false)}
+                    disabled={keyModelPhase !== null}
                     className="rounded-md border border-zinc-300 px-2 py-0.5 text-xs text-zinc-600 cursor-pointer transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
                   >
-                    {backfilling ? "Re-keying…" : "Re-key cached questions"}
+                    {keyModelPhase === "saving"
+                      ? "Saving…"
+                      : keyModelPhase === "rekeying"
+                        ? "Re-keying…"
+                        : "Apply & re-key cached questions"}
                   </button>
                 </div>
+              )}
+              {!keyModelDirty && backfillMsg && (
+                <p className="text-right text-xs text-zinc-500 dark:text-zinc-400">
+                  {backfillMsg}
+                </p>
               )}
 
               {/* The refusal, made explicit. An uncalibrated target space falls
@@ -1157,17 +1478,22 @@ export function EvalSettings() {
               {keyModelBlock && (
                 <div className="flex flex-col items-end gap-1 rounded-md border border-amber-300 bg-amber-50 p-1.5 text-xs text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
                   <p className="text-left">
-                    <span className="font-mono">{keyModelBlock.space}</span> has no calibrated
-                    threshold — this config would serve at{" "}
+                    <span className="font-mono">{keyModelBlock.space}</span> has
+                    no calibrated threshold — this config would serve at{" "}
                     <span className="tabular-nums">
                       {keyModelBlock.fallbackThreshold.toFixed(3)}
                     </span>{" "}
-                    (the default). Calibrate it on Appraise → Semantic caching, or switch anyway.
+                    (the default). Calibrate it on Appraise → Semantic caching,
+                    or switch anyway.
                   </p>
                   <button
                     type="button"
-                    onClick={() => save(true)}
-                    disabled={saving}
+                    onClick={() =>
+                      keyModelBlockedBy === "apply"
+                        ? applyKeyModelAndRekey(true)
+                        : save(true)
+                    }
+                    disabled={saving || keyModelPhase !== null}
                     className="rounded-md border border-amber-400 px-2 py-0.5 font-medium cursor-pointer transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-amber-700 dark:hover:bg-amber-900/40"
                   >
                     Switch anyway
@@ -1180,7 +1506,7 @@ export function EvalSettings() {
                 is on — with serving off the number governs nothing, and offering
                 it there just invites tuning a knob that isn't connected. */}
             {savings.semanticCache.serve && (
-              <div className="mt-2 flex flex-col gap-1 pl-3">
+              <div className="mt-2 flex flex-col gap-1">
                 <div className="flex items-center justify-between gap-2">
                   <Tooltip
                     align="left"
@@ -1191,7 +1517,7 @@ export function EvalSettings() {
                       "Leave empty to inherit the calibrated value for this embedding space."
                     }
                   >
-                    <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                    <span className="text-zinc-600 transition-colors group-hover:text-zinc-900 dark:text-zinc-400 dark:group-hover:text-zinc-100">
                       Match threshold
                     </span>
                   </Tooltip>
@@ -1201,8 +1527,10 @@ export function EvalSettings() {
                       inputMode="decimal"
                       value={threshold}
                       onChange={(e) => setThreshold(e.target.value)}
-                      placeholder={inherited ? inherited.threshold.toFixed(3) : "0.950"}
-                      className="w-20 rounded-md border border-zinc-300 bg-white px-2 py-0.5 text-right text-xs tabular-nums text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
+                      placeholder={
+                        inherited ? inherited.threshold.toFixed(3) : "0.950"
+                      }
+                      className="w-20 rounded-md border border-zinc-300 bg-white px-2 py-0.5 text-left text-xs tabular-nums text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
                     />
                     <button
                       type="button"
@@ -1221,14 +1549,21 @@ export function EvalSettings() {
                       <span className="tabular-nums">
                         {inherited ? inherited.threshold.toFixed(3) : "—"}
                       </span>{" "}
-                      {inherited?.source === "calibrated" ? "calibrated for" : "(default) for"}{" "}
-                      <span className="font-mono">{inherited?.space ?? "this space"}</span>. Calibrate
-                      it on Appraise → Semantic caching.
+                      {inherited?.source === "calibrated"
+                        ? "calibrated for"
+                        : "(default) for"}{" "}
+                      <span className="font-mono">
+                        {inherited?.space ?? "this space"}
+                      </span>
+                      . Calibrate it on Appraise → Semantic caching.
                     </>
                   ) : (
                     <>
                       Overrides the{" "}
-                      <span className="font-mono">{inherited?.space ?? "space"}</span> value (
+                      <span className="font-mono">
+                        {inherited?.space ?? "space"}
+                      </span>{" "}
+                      value (
                       <span className="tabular-nums">
                         {inherited ? inherited.threshold.toFixed(3) : "—"}
                       </span>
@@ -1239,76 +1574,20 @@ export function EvalSettings() {
               </div>
             )}
 
-            {/* The precision the CALIBRATION sweeps hold themselves to. Shown
-                whether or not serving is on: it's the dial that decides what τ
-                the sweeps will even recommend, so it's needed before serving is
-                switched on, not after. */}
-            <div className="mt-2 flex flex-col gap-1 pl-3">
-              <div className="flex items-center justify-between gap-2">
-                <Tooltip
-                  align="left"
-                  text={
-                    "Precision the calibration sweeps must hold before they'll " +
-                    "recommend a threshold: of everything served at or above τ, the " +
-                    "share that a judge accepted. Higher = a stricter τ that serves " +
-                    "less; lower = more savings and more wrong answers.\n\n" +
-                    "This is NOT a cosine — it's the rule that DERIVES one. Leave " +
-                    "empty to inherit the global 0.99.\n\n" +
-                    "A high target needs a big judged set to be reachable at all: " +
-                    "clearing 99% while carrying r false positives takes a serve set " +
-                    "of 100r, so on a small set 99% means “zero false positives” " +
-                    "and no threshold gets recommended at all. Appraise → Semantic " +
-                    "caching now says so explicitly when that happens."
-                  }
-                >
-                  <span className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
-                    Precision target
-                  </span>
-                </Tooltip>
-                <div className="flex items-center gap-1">
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    value={acceptTarget}
-                    onChange={(e) => setAcceptTarget(e.target.value)}
-                    placeholder="0.99"
-                    className="w-20 rounded-md border border-zinc-300 bg-white px-2 py-0.5 text-right text-xs tabular-nums text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setAcceptTarget("")}
-                    disabled={acceptTarget.trim() === ""}
-                    className="rounded px-1 text-xs text-zinc-400 cursor-pointer transition-colors hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-30 dark:hover:text-zinc-200"
-                  >
-                    Reset
-                  </button>
-                </div>
-              </div>
-              <p className="text-xs text-zinc-400 dark:text-zinc-500">
-                {acceptTarget.trim() === "" ? (
-                  <>
-                    Inheriting the global <span className="tabular-nums">0.99</span>. Used by the
-                    shadow-judge sweep and the cache-key model leaderboard on Appraise → Semantic
-                    caching.
-                  </>
-                ) : (
-                  <>
-                    Overrides the global <span className="tabular-nums">0.99</span> for this config
-                    only. Reset to inherit again.
-                  </>
-                )}
-              </p>
-            </div>
-
             {inFlightCount > 0 && (
               <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
-                {inFlightCount} batch request{inFlightCount === 1 ? "" : "s"} processing for this
-                config — changes may be overwritten when {inFlightCount === 1 ? "it" : "they"}{" "}
-                complete{inFlightCount === 1 ? "s" : ""}.
+                {inFlightCount} batch request{inFlightCount === 1 ? "" : "s"}{" "}
+                processing for this config — changes may be overwritten when{" "}
+                {inFlightCount === 1 ? "it" : "they"} complete
+                {inFlightCount === 1 ? "s" : ""}.
               </p>
             )}
 
-            {err && <p className="mt-2 text-xs text-red-600 dark:text-red-400">{err}</p>}
+            {err && (
+              <p className="mt-2 text-xs text-red-600 dark:text-red-400">
+                {err}
+              </p>
+            )}
 
             <div className="mt-3 flex justify-end border-t border-zinc-200 pt-2 dark:border-zinc-800">
               <button
@@ -1350,7 +1629,11 @@ function MetricRow({
   return (
     <div className="flex items-center gap-2 py-0.5">
       <label className="flex w-20 cursor-pointer items-center gap-1.5">
-        <input type="checkbox" checked={on} onChange={(e) => setOn(e.target.checked)} />
+        <input
+          type="checkbox"
+          checked={on}
+          onChange={(e) => setOn(e.target.checked)}
+        />
         <span className="text-zinc-700 dark:text-zinc-300">{label}</span>
       </label>
       <label className="flex items-center gap-1 text-xs text-zinc-500">
@@ -1436,11 +1719,16 @@ function ChunkScopeTree({
   return (
     <div className="mt-1 max-h-44 overflow-y-auto rounded border border-zinc-200 dark:border-zinc-800">
       {docs.map((doc) => {
-        const inCount = doc.chunks.filter((c) => selected.has(c.chunkId)).length;
+        const inCount = doc.chunks.filter((c) =>
+          selected.has(c.chunkId),
+        ).length;
         const allIn = inCount === doc.chunks.length;
         const isOpen = expanded.has(doc.documentId);
         return (
-          <div key={doc.documentId} className="border-b border-zinc-100 last:border-b-0 dark:border-zinc-800/60">
+          <div
+            key={doc.documentId}
+            className="border-b border-zinc-100 last:border-b-0 dark:border-zinc-800/60"
+          >
             <div className="flex items-center gap-1.5 px-1.5 py-1">
               <button
                 type="button"
@@ -1649,7 +1937,9 @@ function ModelScopeChecklist({
                       </span>
                     )}
                   </span>
-                  <span className="shrink-0 text-[10px] text-zinc-400">{m.provider}</span>
+                  <span className="shrink-0 text-[10px] text-zinc-400">
+                    {m.provider}
+                  </span>
                 </label>
               ))}
             </div>
@@ -1689,7 +1979,9 @@ function ChoiceRow({
 }) {
   return (
     <label className="flex items-center justify-between gap-2 py-0.5">
-      <span className={`truncate text-zinc-600 dark:text-zinc-400 ${unavailable ? "opacity-50" : ""}`}>
+      <span
+        className={`truncate text-zinc-600 dark:text-zinc-400 ${unavailable ? "opacity-50" : ""}`}
+      >
         {label}
         {unavailable && " (coming soon)"}
       </span>

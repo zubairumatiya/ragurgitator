@@ -114,7 +114,7 @@ export function DocumentList() {
             <button
               onClick={() => remove(d)}
               disabled={deletingId === d.id}
-              className="text-xs text-red-600 hover:underline disabled:opacity-50 dark:text-red-400"
+              className="cursor-pointer text-xs text-red-600 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-400"
             >
               {deletingId === d.id ? "Removing…" : "Remove"}
             </button>

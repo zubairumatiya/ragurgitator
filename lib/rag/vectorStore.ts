@@ -403,6 +403,25 @@ export async function listLibraryDocuments(): Promise<LibraryDocument[]> {
   }));
 }
 
+// File names for a handful of document ids — what the chat's source cards need
+// to say "notes.pdf · chunk #3" instead of echoing a UUID. A RetrievedChunk
+// carries only documentId (it is the retriever's row shape, shared with eval,
+// and widening it for one label would push the join into every caller), so the
+// lookup happens once per response over the ids actually returned.
+//
+// Owner-scoped, not config-scoped: the semantic cache replays stored sources
+// whose chunks may predate the current config's embedding run, and a name is
+// not worth suppressing over that.
+export async function documentFileNames(ids: string[]): Promise<Record<string, string>> {
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) return {};
+  const rows = await sql<{ id: string; file_name: string }[]>`
+    select id, file_name from documents
+    where id in ${sql(unique)} and user_id = ${activeUserId()}
+  `;
+  return Object.fromEntries(rows.map((r) => [r.id, r.file_name]));
+}
+
 export async function listDocuments(): Promise<IngestedDocument[]> {
   const rows = await sql<
     {

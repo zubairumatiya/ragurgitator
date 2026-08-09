@@ -70,10 +70,12 @@ const PAIRS_ABOUT =
 
 const TARGET_ABOUT =
   "The precision every model's τ is held to, so their recall numbers are " +
-  "comparable. It's a PER-CONFIG setting (Settings → Savings), but this page " +
-  "isn't scoped to a config tab — so the target shown is the one belonging to " +
-  "the config named here, which is the Default config unless you arrived with " +
-  "one selected.\n\n" +
+  "comparable. It's a PER-CONFIG setting, stored by the button beside this " +
+  "slider — but this page isn't scoped to a config tab, so the target shown " +
+  "(and written) belongs to the config named here, which is the Default config " +
+  "unless you arrived with one selected.\n\n" +
+  "Dragging alone changes nothing: it re-reads the table at a precision you're " +
+  "considering. Only the button stores it.\n\n" +
   "Raising it picks a stricter τ that serves less; lowering it serves more and " +
   "admits more wrong answers. Note a high target needs a big judged set to be " +
   "reachable at all: clearing 99% while carrying r false positives takes a " +
@@ -274,7 +276,7 @@ export function KeyModelPanel() {
     fallbackThreshold: number;
   } | null>(null);
   const [busy, setBusy] = useState<
-    null | "sweep" | "pairs" | "apply" | "backfill"
+    null | "sweep" | "pairs" | "apply" | "backfill" | "target"
   >(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -283,9 +285,9 @@ export function KeyModelPanel() {
   // effect the moment the stats first land.
   const [genLimit, setGenLimit] = useState<number | null>(null);
   // The precision the table is being READ at. Null = the config's stored target,
-  // which is what a fresh sweep always opens on. Purely a lens: it re-derives
-  // what's displayed and writes nothing — the stored acceptTarget (Settings →
-  // Savings) still governs the live τ the shadow judge picks.
+  // which is what a fresh sweep always opens on. Dragging it is a LENS — it
+  // re-derives what's displayed and writes nothing; the stored acceptTarget is
+  // only moved by the explicit "Set as …'s target" button below it.
   const [targetOverride, setTargetOverride] = useState<number | null>(null);
 
   // The generate control's range and current position. Capped at the gap (asking
@@ -405,6 +407,56 @@ export function KeyModelPanel() {
     setNote(`Applied ${selected} to ${d.updated} config(s).`);
     setStatus(d.keyModel as Status);
     window.dispatchEvent(new Event(SC_CHANGED));
+  };
+
+  // Write the dragged position back as the config's STORED calibration target
+  // (configs.batch_savings → semanticCache.acceptTarget), which is what the
+  // shadow-judge sweep and this leaderboard read on their next run.
+  //
+  // It lives here, next to the slider, because this is where the number is
+  // chosen: you drag until the table shows a τ you'd accept, and the setting
+  // should be one click from there rather than in a dropdown on another page.
+  // It is NOT the apply box below — that writes which model a config keys under,
+  // and the two must not read as variations of one action, hence the wording.
+  //
+  // Not scoped by tab: Appraise sits outside /c/[configId], so apiFetch sends no
+  // configId and the write lands on the same config the sweep resolved its
+  // target from — the one named in the button.
+  const saveTarget = async () => {
+    if (!sweep || targetOverride === null) return;
+    setBusy("target");
+    setError(null);
+    setNote(null);
+    try {
+      const res = await apiFetch("/api/batch", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ semanticCache: { acceptTarget: targetOverride } }),
+      });
+      const d = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok) {
+        setError(d?.error ?? `Request failed (${res.status}).`);
+        return;
+      }
+      // The sweep result carries the target it was read at, so patch it locally
+      // rather than re-sweeping: the curves are unchanged, only whose number
+      // this now is has changed.
+      setSweep({
+        ...sweep,
+        target: targetOverride,
+        targetSource: { ...sweep.targetSource, target: targetOverride, source: "config" },
+      });
+      setTargetOverride(null);
+      setNote(
+        `${sweep.targetSource.configLabel} now calibrates at ${pct(targetOverride)}. ` +
+          "This governs which τ gets recommended, not what the cache serves at.",
+      );
+      window.dispatchEvent(new Event(SC_CHANGED));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Network error.");
+    } finally {
+      setBusy(null);
+    }
   };
 
   const backfill = async () => {
@@ -728,6 +780,26 @@ export function KeyModelPanel() {
                   className="underline underline-offset-2 cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
                 >
                   reset
+                </button>
+                {/* Named at length on purpose. The apply box at the foot of this
+                    panel writes a KEY MODEL, and a bare "Apply" a few hundred
+                    pixels away would read as a variation of it — so this one
+                    says whose setting it moves and what that setting governs. */}
+                <button
+                  type="button"
+                  onClick={saveTarget}
+                  disabled={busy !== null}
+                  title={
+                    "Stores this precision as the calibration target for " +
+                    `${sweep.targetSource.configLabel}. It governs which τ the sweeps ` +
+                    "RECOMMEND — not the cosine the cache serves at, which is the " +
+                    "threshold applied in step 3."
+                  }
+                  className="underline underline-offset-2 cursor-pointer hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:text-zinc-200"
+                >
+                  {busy === "target"
+                    ? "Setting…"
+                    : `set as ${sweep.targetSource.configLabel}'s calibration target`}
                 </button>
               </span>
             ) : (

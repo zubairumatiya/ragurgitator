@@ -34,16 +34,23 @@ import { emailConfigured } from "@/lib/batch/notify";
 export async function GET(request: Request) {
   return withRequestConfig(request, async () => {
     const configId = activeConfig().id;
-    const savings = await getBatchSavings(configId);
+    // `?jobs=0` — the ledger is account-wide and the widest query here, and the
+    // Settings dropdown reads none of it. Opt-out rather than a separate route,
+    // so the two callers stay on one payload shape.
+    const wantJobs = new URL(request.url).searchParams.get("jobs") !== "0";
+    // Started, not awaited: only keyModelStatus needs the saved preference, so
+    // awaiting it up front put a serial round trip in front of the other two.
+    const savingsPromise = getBatchSavings(configId);
     const [jobs, inFlight, keyModel] = await Promise.all([
-      listBatchJobs(),
+      wantJobs ? listBatchJobs() : Promise.resolve([]),
       inFlightForConfig(configId),
       // The CACHE-KEY model in force for this config, its candidates, and what
       // that model's space serves at. The threshold rides inside: it's keyed by
       // the KEY model's space, not the retrieval model's, so the two can't be
       // read independently without one of them being wrong.
-      keyModelStatus(savings.semanticCache.keyModel),
+      savingsPromise.then((s) => keyModelStatus(s.semanticCache.keyModel)),
     ]);
+    const savings = await savingsPromise;
     return Response.json({
       jobs,
       savings,

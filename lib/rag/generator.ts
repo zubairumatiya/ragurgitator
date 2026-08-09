@@ -10,6 +10,11 @@
 //     each one starts/ends (Claude is trained to follow this convention)
 //   - each chunk is labeled with its source so the model can cite if asked,
 //     and so a future re-ranker can use the same labels
+//   - the answer is asked for as PLAIN PROSE. Nothing renders Markdown (the chat
+//     bubble prints the string under whitespace-pre-wrap), so a model reaching
+//     for **bold** by habit put the asterisks on screen. MessageList also
+//     tolerates the marks if a model ignores this — belt and braces, because the
+//     rule is a request and the renderer is a guarantee.
 // ---------------------------------------------------------------------------
 import { config } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
@@ -30,7 +35,8 @@ const SYSTEM_PROMPT = `You are a helpful assistant answering questions about a u
 Rules:
 - Answer using ONLY the information inside the <context> block. Do not use outside knowledge.
 - If the context does not contain enough information to answer, say "I don't know based on the provided documents." Do not guess.
-- Be concise. Quote short snippets from the context when it strengthens the answer.`;
+- Be concise. Quote short snippets from the context when it strengthens the answer.
+- Write plain prose. No Markdown: no **bold**, no headings, no backticks. The answer is rendered as text, so the marks would show up literally.`;
 
 export async function generateAnswer(
   question: string,

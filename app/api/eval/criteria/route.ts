@@ -32,10 +32,14 @@ import { listAutotuneScopeOptions } from "@/lib/rag/evalStore";
 export async function GET(request: Request) {
   return withRequestConfig(request, async () => {
     try {
-      const [criteria, config, scopeOptions] = await Promise.all([
+      // One round trip, not two: availableProviders() is an independent,
+      // indexed row-existence query (see keyedProviders — no ciphertext, no
+      // Key Vault), so it has nothing to wait on from the other three.
+      const [criteria, config, scopeOptions, availability] = await Promise.all([
         getActiveCriteria(),
         getConfig(activeConfig().id),
         listAutotuneScopeOptions(),
+        availableProviders(),
       ]);
       if (!config) return Response.json({ error: "Config not found." }, { status: 404 });
       // The alternate models a run could try (ladder order), grouped by shared
@@ -43,7 +47,6 @@ export async function GET(request: Request) {
       // has no key — flagged unselectable with a reason, so the checklist can
       // grey them out instead of hiding whole spaces without explanation.
       // One availability lookup shared by both checklists below.
-      const availability = await availableProviders();
       const autotuneModels = listAutotuneModelOptions(
         availability,
         autotuneModelLadder,

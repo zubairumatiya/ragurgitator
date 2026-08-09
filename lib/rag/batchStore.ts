@@ -269,3 +269,18 @@ export async function inFlightForConfig(
 export async function acknowledgeJob(id: string): Promise<BatchJob | null> {
   return updateBatchJob(id, { acknowledged: true });
 }
+
+// Ack every finished-but-undismissed job for the signed-in user — "I opened the
+// panel, so I've seen them". Server-side rather than a client-only "seen" flag
+// so the badge doesn't come back on the next reload. Returns the ids it changed,
+// which is what the panel folds into its local rows.
+export async function acknowledgeAllTerminal(): Promise<string[]> {
+  const rows = await sql<{ id: string }[]>`
+    update batch_jobs set acknowledged = true, updated_at = now()
+    where user_id = ${activeUserId()}
+      and status in ${TERMINAL}
+      and acknowledged = false
+    returning id
+  `;
+  return rows.map((r) => r.id);
+}

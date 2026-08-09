@@ -1,9 +1,9 @@
 // ---------------------------------------------------------------------------
 // UI: the left-hand, togglable sidebar (Client Component), rendered by the root
 // layout so it frames every page (config tabs, Appraise, the corpora page). It
-// holds collapsible sections — "My corpora" (saved document sets) and "My
-// configs" (experiments/tabs) — ahead of user accounts, when this becomes the
-// account's home.
+// holds the signed-in account row, then collapsible sections — "My corpora"
+// (saved document sets) and "My configs" (experiments/tabs) — with sign-out
+// pinned to the bottom.
 //
 // Self-fetching (GET /api/corpora?includeEmpty=1, GET /api/configs) rather than
 // server-fed: the root layout must not read the DB (it also renders build-time
@@ -166,6 +166,8 @@ export function Sidebar() {
         </button>
       </div>
 
+      <AccountRow />
+
       <Section
         id="corpora"
         title="My corpora"
@@ -235,27 +237,41 @@ export function Sidebar() {
         })}
       </Section>
 
-      <AccountFooter />
+      <SignOutFooter />
     </aside>
   );
 }
 
-// Signed-in identity + sign out, pinned to the bottom of the sidebar. Fetches
-// its own DTO (GET /api/auth/me) for the same reason the lists above do: the
-// root layout must stay DB-free, so nothing is server-fed into this tree.
+// Signed-in identity, at the TOP of the sidebar — above the lists, under the
+// collapse row. It's the way into /account (provider keys, account deletion),
+// which is a thing you reach for often, so it gets the same weight as a corpus
+// or config row rather than the footnote size it used to have at the bottom.
+// Sign-out stays pinned to the bottom: the destructive action should not sit
+// under the cursor of the thing you now click regularly.
 //
-// Sign-out is a <form> posting to the signOut Server Action rather than an
-// onClick handler — it must clear httpOnly cookies, which only the server can
-// do, and this keeps working with JavaScript disabled.
-function AccountFooter() {
-  const [email, setEmail] = useState<string | null>(null);
+// Fetches its own DTO (GET /api/auth/me) for the same reason the lists above
+// do: the root layout must stay DB-free, so nothing is server-fed into this
+// tree. Renders nothing until the email lands — the row is the email, so there
+// is no useful skeleton, and a placeholder that resizes would jitter the lists.
+//
+// Collapsing the sidebar unmounts this (see the `!open` early return above),
+// so a module-level cache seeds the next mount's initial state — reopening
+// shows the email immediately instead of blanking and refetching. Still
+// refetches in the background to catch a changed email.
+let cachedEmail: string | null = null;
+
+function AccountRow() {
+  const pathname = usePathname();
+  const [email, setEmail] = useState<string | null>(cachedEmail);
 
   useEffect(() => {
     let cancelled = false;
     apiFetch("/api/auth/me")
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        if (!cancelled) setEmail(d?.user?.email ?? null);
+        const e = d?.user?.email ?? null;
+        cachedEmail = e;
+        if (!cancelled) setEmail(e);
       })
       .catch(() => {
         if (!cancelled) setEmail(null);
@@ -267,26 +283,43 @@ function AccountFooter() {
 
   if (!email) return null;
 
+  const active = pathname === "/account";
   return (
-    <div className="mt-auto flex flex-col gap-1 border-t border-zinc-200 pt-2 dark:border-zinc-800">
-      {/* The email doubles as the way into /account — provider keys and account
-          deletion live there, and the address is the thing a user looks for
-          when they want "my settings". */}
+    <div className="border-b border-zinc-200 pb-3 dark:border-zinc-800">
       <Link
         href="/account"
         title={`${email} — account settings`}
-        className="truncate rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
+        aria-current={active ? "page" : undefined}
+        className={rowClass(active)}
       >
-        {email}
+        <span className="flex min-w-0 items-center gap-2">
+          <span
+            aria-hidden
+            className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-zinc-200 text-[10px] font-semibold uppercase text-zinc-600 dark:bg-zinc-700 dark:text-zinc-200"
+          >
+            {email[0]}
+          </span>
+          <span className="truncate">{email}</span>
+        </span>
       </Link>
-      <form action={signOut}>
-        <button
-          type="submit"
-          className="w-full cursor-pointer rounded-md px-2 py-1 text-left text-sm text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
-        >
-          Sign out
-        </button>
-      </form>
     </div>
+  );
+}
+
+// Sign-out is a <form> posting to the signOut Server Action rather than an
+// onClick handler — it must clear httpOnly cookies, which only the server can
+// do, and this keeps working with JavaScript disabled. Unconditional: it does
+// not depend on /api/auth/me having landed, and a signed-out user never sees
+// the sidebar at all (AUTH_PREFIXES above).
+function SignOutFooter() {
+  return (
+    <form action={signOut} className="mt-auto border-t border-zinc-200 pt-2 dark:border-zinc-800">
+      <button
+        type="submit"
+        className="w-full cursor-pointer rounded-md px-2 py-1 text-left text-sm text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
+      >
+        Sign out
+      </button>
+    </form>
   );
 }
