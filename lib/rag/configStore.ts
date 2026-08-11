@@ -68,7 +68,11 @@ type ConfigJoinRow = {
 
 // The default label shown when a config is unnamed — short enough for a tab.
 // The reopen menu enriches this with the corpus name + date itself.
-function defaultLabel(baseModel: string, chunkSize: number, chunkOverlap: number): string {
+//
+// Exported because `label` is DERIVED, not a column: anything joining configs
+// for display (the /cache listing) has to apply the same `name ?? default`
+// fallback, and a second copy of the rule would drift.
+export function defaultLabel(baseModel: string, chunkSize: number, chunkOverlap: number): string {
   return `${baseModel} · ${chunkSize}/${chunkOverlap}`;
 }
 

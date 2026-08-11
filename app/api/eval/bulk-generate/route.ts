@@ -2,8 +2,11 @@
 // API route: POST /api/eval/bulk-generate
 //
 // "Bulk actions → Add question → {easy|medium|hard} ×N → Add" on /eval: adds the
-// requested difficulties to the active config's mix, then tops every chunk up to
-// N questions at each and scores the unscored. Streams progress as NDJSON (one
+// requested difficulties to the active config's mix, then adds N questions at
+// each to every chunk in scope (or, with `topUp`, tops each chunk up TO N,
+// skipping the ones already there) and scores the unscored. With `cachedOnly`, every chunk in
+// scope is instead topped up from question_cache — any difficulty, no counts, no
+// generation, no batch, no cost. Streams progress as NDJSON (one
 // EvalEvent per line) so the dashboard reuses the Process-new-chunks progress
 // bar. Body: { counts: { easy?: n, medium?: n, hard?: n } }, or the legacy
 // { difficulty: 'easy'|'medium'|'hard' } (one question per chunk).
@@ -14,6 +17,7 @@ import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
 import { ndjsonStream } from "@/lib/http/ndjson";
 import {
+  bulkAddCachedQuestions,
   bulkAddDifficulties,
   type Difficulty,
   type DifficultyTarget,
@@ -52,6 +56,16 @@ const Body = z.object({
   documentIds: z
     .array(z.uuid({ error: "`documentIds` must contain uuids." }))
     .optional(),
+  // "Add cached" rather than "Add": top every chunk in scope up from
+  // question_cache instead of generating. Takes no counts and no difficulty — a
+  // banked question is free at any difficulty — so it is the one form of this
+  // request that is valid with nothing but a document scope. Nothing is generated
+  // and nothing is batched, so it ignores the batch preference below entirely.
+  cachedOnly: z.boolean().optional(),
+  // The panel's "Top up" checkbox. Default false = "add N more to every chunk in
+  // scope"; true = the older "fill every chunk TO N", which skips chunks already
+  // there. Ignored by `cachedOnly`, which has no counts and no targets.
+  topUp: z.boolean().optional().default(false),
 });
 
 export async function POST(request: Request) {
@@ -71,7 +85,7 @@ export async function POST(request: Request) {
     : body.data.difficulty
       ? [{ difficulty: body.data.difficulty, count: 1 }]
       : [];
-  if (targets.length === 0) {
+  if (targets.length === 0 && !body.data.cachedOnly) {
     return Response.json(
       { error: "Pick at least one difficulty to add questions at." },
       { status: 400 },
@@ -79,8 +93,12 @@ export async function POST(request: Request) {
   }
 
   return withRequestConfig(request, async () =>
-    ndjsonStream<EvalEvent>(async (send) => {
+    ndjsonStream<EvalEvent>(async (send, shouldStop) => {
       try {
+        if (body.data.cachedOnly) {
+          await bulkAddCachedQuestions(send, documentIds, shouldStop);
+          return;
+        }
         // Savings preference: route question generation through the batch API
         // when this config selected it. Additive — the inline path below is
         // untouched and stays the default (batch is opt-in).
@@ -94,6 +112,7 @@ export async function POST(request: Request) {
             difficulties: targets.map((t) => t.difficulty),
             counts: targets.map((t) => t.count),
             documentIds,
+            topUp: body.data.topUp,
           });
           if (!built || built.requests.length === 0) {
             send({ type: "done", generated: 0, scored: 0, recall: null, mrr: null, ndcg: null });
@@ -113,7 +132,13 @@ export async function POST(request: Request) {
           return;
         }
 
-        await bulkAddDifficulties(targets, send, documentIds);
+        await bulkAddDifficulties(
+          targets,
+          send,
+          documentIds,
+          body.data.topUp,
+          shouldStop,
+        );
       } catch (err) {
         send(streamError(err, "Bulk generation failed."));
       }

@@ -54,6 +54,7 @@ const EXPECTED_UNREACHABLE: Record<string, string> = {
 // user_provider_keys (so key deletion does not).
 const MUST_SURVIVE_KEY_DELETION = [
   "embedding_cache",
+  "question_cache",
   "semantic_cache",
   "semantic_cache_thresholds",
   "document_embeddings",

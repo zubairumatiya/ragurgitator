@@ -14,9 +14,9 @@ import { withRequestConfig } from "@/lib/http/configScope";
 
 export async function POST(request: Request) {
   return withRequestConfig(request, async () =>
-    ndjsonStream<AutotuneEvent>(async (send) => {
+    ndjsonStream<AutotuneEvent>(async (send, shouldStop) => {
       try {
-        await runAutotune(send);
+        await runAutotune(send, shouldStop);
       } catch (err) {
         send(streamError(err, "Autotune failed."));
       }

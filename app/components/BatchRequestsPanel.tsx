@@ -36,8 +36,8 @@ const STATUS_STYLE: Record<string, string> = {
   completed: "bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300",
   applied: "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300",
   failed: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300",
-  canceling: "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300",
-  canceled: "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400",
+  cancelling: "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300",
+  cancelled: "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400",
   expired: "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400",
 };
 

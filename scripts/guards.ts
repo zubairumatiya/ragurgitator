@@ -1,19 +1,20 @@
 // ---------------------------------------------------------------------------
-// Three greppable invariants, each of which has already been violated once, and
-// none of which a typecheck, a unit test or a page that renders one account's
-// data can see.
+// Four greppable invariants, none of which a typecheck, a unit test or a page
+// that renders one account's data can see. The first three have each already
+// been violated once; the fourth guards a column that fails silently.
 //
 //   1. .expose() appears only where a provider client is constructed.
 //   2. Every app entry point that touches the store enters a request scope.
 //   3. Every API handler is behind the authentication boundary — per METHOD.
+//   4. Every read of eval_results has a view on is_baseline (0057).
 //
 // WHY A SCRIPT AND NOT CI. There is no CI in this repo, and standing up a
 // workflow to hold one job is more machinery than the invariants need. Adding it
 // later is `npm run guard && npm run lint && npm test` in a workflow file, so
 // nothing here has to change when that happens.
 //
-// WHY GREP AND NOT THE TYPE SYSTEM. All three are properties of where a call
-// APPEARS, not of what it returns, so there is no signature that could encode
+// WHY GREP AND NOT THE TYPE SYSTEM. All four are properties of where a call (or
+// a column) APPEARS, not of what it returns, so there is no signature that could encode
 // them. The mitigation for grep's bluntness is that every sweep asserts an
 // allowlist: a new violation fails by name, and a deliberate exception has to be
 // added here with a reason next to it.
@@ -208,13 +209,61 @@ function sweepApiGates() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 4. Every read of eval_results excludes baseline rows
+//
+// 0057 puts SHADOW rows in eval_results: the same questions measured with no
+// per-chunk overrides in effect, so the dashboard can show what tuning bought.
+// They are not results of the retrieval anyone is running, and a read that
+// mistakes one for "the latest result" does silent damage rather than failing —
+// a baselined question looks already-scored to questionsNeedingScoring and
+// never gets a real score, or a rate is computed over the wrong retrieval.
+//
+// The invariant is per QUERY, not per file: every `from eval_results` must
+// MENTION is_baseline in the same statement. Mentioning, not excluding — two
+// queries (labelsWithBaseline, baselineDetailRows) read baseline rows on
+// purpose, and no grep can tell a correct `where is_baseline` from a wrong one.
+// What it does catch is the failure that actually happens: a new query written
+// against eval_results by someone who has never heard of 0057, which omits the
+// column entirely. There is no allowlist because nothing needs one — a query
+// that reads eval_results without a view on this column is a bug either way.
+// ---------------------------------------------------------------------------
+function sweepBaselineReads() {
+  console.log("\n4. eval_results reads exclude baseline rows\n");
+  const files = walk(join(ROOT, "lib"), (p) => p.endsWith(".ts") && !p.endsWith(".test.ts"));
+  files.push(...walk(join(ROOT, "app"), (p) => p.endsWith(".ts") || p.endsWith(".tsx")));
+
+  let reads = 0;
+  for (const file of files) {
+    const source = read(file);
+    const path = rel(file);
+    // Split on the tagged-template boundary so each statement is judged alone.
+    const statements = source.split("sql");
+    let unguarded = 0;
+    for (const stmt of statements) {
+      // `from eval_results` = a read. Inserts say `into eval_results`; the one
+      // update targets it by name and is matched by its own `from eval_results`
+      // subselect, which is a read and does need the filter.
+      if (!/\bfrom\s+eval_results\b/.test(stmt)) continue;
+      reads++;
+      if (!/\bis_baseline\b/.test(stmt)) unguarded++;
+    }
+    if (unguarded === 0) continue;
+    fail(`${path} — ${unguarded} eval_results read(s) that never mention is_baseline`);
+  }
+
+  console.log(`   ${reads} eval_results read(s) across ${files.length} files, all accounted for`);
+}
+
 sweepExpose();
 sweepScopes();
 sweepApiGates();
+sweepBaselineReads();
 
 console.log(
   failures === 0
-    ? "\nOK — keys stay wrapped, scopes are entered, every handler is gated."
+    ? "\nOK — keys stay wrapped, scopes are entered, every handler is gated, " +
+        "baseline rows stay out of live reads."
     : `\nFAILED — ${failures} violation(s).`,
 );
 if (failures) process.exitCode = 1;

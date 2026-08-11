@@ -3,8 +3,8 @@
 //
 // Shows Recall@k, MRR@k, and nDCG for the active config, a per-document
 // breakdown, the run history, and a per-question detail table with inline
-// editing. The "Process new chunks" button generates + scores only new/edited
-// questions.
+// editing. The "Score pending" button scores only the questions without a fresh
+// result; generating new ones is Bulk actions → Add.
 //
 // Recall@k answers "did the ground truth land in the window"; MRR@k adds "how
 // close to the top" (1/rank, 0 past mrr_k) — two configs can tie on recall
@@ -27,11 +27,15 @@ import { useRouter } from "next/navigation";
 import { HIGH_NDCG } from "@/lib/config";
 import { apiFetch } from "@/lib/http/client";
 import { noteHeadline } from "@/lib/rag/embeddingModels";
-import { ApiErrorNotice, type ApiErrorBody } from "@/app/components/MissingKeyNotice";
+import {
+  ApiErrorNotice,
+  type ApiErrorBody,
+} from "@/app/components/MissingKeyNotice";
 import { failsBar } from "@/lib/rag/evalBar";
 import type {
   ChunkOverrideInfo,
   ChunkRef,
+  CorpusChunkListItem,
   EvalSummary,
   ExplainChunk,
   OverrideOutcome,
@@ -119,7 +123,10 @@ type ChunkGroup = {
 // the list — `chunks` comes from the active config's chunk table, so a question
 // labeled to a chunk that has since been re-chunked away keeps rendering instead
 // of vanishing.
-function groupByChunk(questions: QuestionDetail[], chunks: ChunkRef[]): ChunkGroup[] {
+function groupByChunk(
+  questions: QuestionDetail[],
+  chunks: ChunkRef[],
+): ChunkGroup[] {
   const groups: ChunkGroup[] = [];
   const indexByChunk = new Map<string, number>();
   for (const c of chunks) {
@@ -180,7 +187,13 @@ type EvalProgress =
     };
 
 type RunResult = {
+  // The run stopped early because Cancel was pressed. Everything below is still
+  // the real, committed count — cancelling keeps partial work.
+  cancelled?: boolean;
   generated: number;
+  // Questions served from the question cache rather than generated — free, so
+  // the notice reports them separately instead of folding them into `generated`.
+  reused?: number;
   scored: number;
   recall: number | null;
   mrr: number | null;
@@ -214,6 +227,12 @@ export function EvalDashboard() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [progress, setProgress] = useState<EvalProgress | null>(null);
+  // The in-flight run's id (from the stream's first line) and whether a cancel
+  // has been POSTed for it. Cancellation is cooperative — the run stops at its
+  // next checkpoint, so the button flips to "Cancelling…" rather than pretending
+  // the run is already over.
+  const [runId, setRunId] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
 
   // Which row is in edit mode. The draft text itself lives inside QuestionRow —
   // keeping it here re-rendered all 80 chunk cards on every keystroke.
@@ -287,7 +306,9 @@ export function EvalDashboard() {
       putExplain(id, { status: "loading" });
       apiFetch(`/api/eval/questions/${id}/explain`)
         .then(async (res) => {
-          const data = (await res.json()) as QuestionExplain | { error: string };
+          const data = (await res.json()) as
+            | QuestionExplain
+            | { error: string };
           if (!res.ok || "error" in data) {
             throw new Error(
               "error" in data ? data.error : `Request failed (${res.status}).`,
@@ -296,7 +317,8 @@ export function EvalDashboard() {
           putExplain(id, { status: "ready", data });
         })
         .catch((err: unknown) => {
-          const message = err instanceof Error ? err.message : "Failed to load.";
+          const message =
+            err instanceof Error ? err.message : "Failed to load.";
           putExplain(id, { status: "error", message });
         });
     },
@@ -398,7 +420,10 @@ export function EvalDashboard() {
   // its badge in place via patchQuestion, like any other row.
   function appendQuestion(g: GeneratedQuestionPayload) {
     setSummary((prev) => {
-      if (prev === null || prev.questions.some((q) => q.questionId === g.questionId)) {
+      if (
+        prev === null ||
+        prev.questions.some((q) => q.questionId === g.questionId)
+      ) {
         return prev;
       }
       return {
@@ -442,6 +467,8 @@ export function EvalDashboard() {
     setNotice(null);
     setError(null);
     setProgress(null);
+    setRunId(null);
+    setCancelling(false);
     try {
       const res = await apiFetch(
         url,
@@ -482,6 +509,12 @@ export function EvalDashboard() {
           if (!line.trim()) continue;
           const event = JSON.parse(line) as EvalEvent;
           switch (event.type) {
+            case "run-started":
+              // First line of every stream: the id Cancel needs to reach the
+              // producer, which outlives this page (it is detached from the
+              // request — see lib/http/ndjson.ts).
+              setRunId(event.runId);
+              break;
             case "generate-start":
               setProgress({ phase: "generate", done: 0, total: event.total });
               break;
@@ -538,7 +571,9 @@ export function EvalDashboard() {
               break;
             case "done":
               final = {
+                cancelled: event.cancelled,
                 generated: event.generated,
+                reused: event.reused,
                 scored: event.scored,
                 recall: event.recall,
                 mrr: event.mrr,
@@ -566,13 +601,43 @@ export function EvalDashboard() {
         }
       }
 
-      if (final) setNotice(label(final));
+      if (final) {
+        // A cancelled run reports what it KEPT — the transaction commits, so
+        // everything generated and scored before the stop is real.
+        setNotice(
+          final.cancelled
+            ? `Cancelled — kept ${final.generated + (final.reused ?? 0)} question(s), ` +
+              `${final.scored} scored.`
+            : label(final),
+        );
+      }
       reload();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Network error.");
     } finally {
       setBusy(false);
       setProgress(null);
+      setRunId(null);
+      setCancelling(false);
+    }
+  }
+
+  // Ask the server to stop the in-flight run. `found: false` means it already
+  // finished (or is streaming from another instance) — either way there is
+  // nothing left to stop, so it is not an error worth showing.
+  async function cancelRun() {
+    if (!runId) return;
+    setCancelling(true);
+    try {
+      await apiFetch("/api/eval/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runId }),
+      });
+    } catch {
+      // The run keeps going; the button stays as it is and the stream will say
+      // what happened.
+      setCancelling(false);
     }
   }
 
@@ -580,7 +645,7 @@ export function EvalDashboard() {
     runStream(
       "/api/eval/process",
       (r) =>
-        `Generated ${r.generated} question(s), scored ${r.scored}. ` +
+        `Scored ${r.scored} question(s). ` +
         `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
     );
 
@@ -593,12 +658,14 @@ export function EvalDashboard() {
       documentIds ? { documentIds } : undefined,
     );
 
-  // Bulk actions → Add question → {difficulty ×N} → Add: top every chunk up to
-  // N questions at each requested difficulty (corpus-wide, or the selected
-  // documents when scoped), then score. Same NDJSON stream.
+  // Bulk actions → Add question → {difficulty ×N} → Add: add N questions at each
+  // requested difficulty to every chunk in scope (corpus-wide, or the selected
+  // documents), or with `topUp` top each chunk up TO N, then score. Same NDJSON
+  // stream.
   const onBulkAdd = (
     counts: DifficultyCounts,
     documentIds: string[] | null,
+    topUp: boolean,
   ) => {
     const mix = (Object.entries(counts) as [Difficulty, number][])
       .map(([d, n]) => `${n}× ${d}`)
@@ -606,11 +673,29 @@ export function EvalDashboard() {
     return runStream(
       "/api/eval/bulk-generate",
       (r) =>
-        `Added ${r.generated} question(s) (${mix} per chunk), scored ${r.scored}. ` +
+        `Added ${r.generated} question(s) (${mix} per chunk${
+          topUp ? ", topped up" : ""
+        }), scored ${r.scored}. ` +
         `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
-      { counts, documentIds: documentIds ?? undefined },
+      { counts, documentIds: documentIds ?? undefined, topUp },
     );
   };
+
+  // Bulk actions → Add question → Add cached: hand every chunk in scope whatever
+  // was already generated for identical chunk text, at any difficulty. Free, and
+  // it generates nothing — chunks with nothing banked are simply left alone, and
+  // anything a chunk already shows is skipped, so pressing it twice adds nothing.
+  const onBulkAddCached = (documentIds: string[] | null) =>
+    runStream(
+      "/api/eval/bulk-generate",
+      (r) =>
+        r.reused
+          ? `Added ${r.reused} cached question(s) for $0, scored ${r.scored}. ` +
+            `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`
+          : `No new cached questions for these chunks — nothing added, nothing spent. ` +
+            `Use Add to generate them.`,
+      { documentIds: documentIds ?? undefined, cachedOnly: true },
+    );
 
   // Bulk actions → Add nDCG rankings: for every question in scope without a
   // ground truth, build the aggregate ranking and promote it (the panel's
@@ -675,18 +760,32 @@ export function EvalDashboard() {
     [reload],
   );
 
+  // `uncache` also unbanks the wording from question_cache (see the route). A
+  // failed uncache does NOT fail the delete — the question is gone either way —
+  // but it is reported, because silently leaving it in the bank is exactly the
+  // surprise ("it came back!") the checkbox exists to prevent.
   const remove = useCallback(
-    async (id: string) => {
+    async (id: string, uncache: boolean) => {
       setBusy(true);
       try {
-        const res = await apiFetch(`/api/eval/questions/${id}`, {
-          method: "DELETE",
-        });
+        const res = await apiFetch(
+          `/api/eval/questions/${id}${uncache ? "?uncache=1" : ""}`,
+          { method: "DELETE" },
+        );
+        const data = (await res.json()) as {
+          error?: string;
+          uncached?: number;
+          uncacheFailed?: boolean;
+        };
         if (!res.ok) {
-          const data = (await res.json()) as { error?: string };
           setError(data.error ?? `Request failed (${res.status}).`);
           return;
         }
+        setError(
+          uncache && data.uncacheFailed
+            ? "Question deleted, but it could not be removed from the question cache — it may return via “Add cached”."
+            : null,
+        );
         reload();
       } finally {
         setBusy(false);
@@ -798,7 +897,10 @@ export function EvalDashboard() {
     [],
   );
   const closeRanking = useCallback(() => setRankingOpenId(null), []);
-  const openAdd = useCallback((chunkId: string) => setAddingChunkId(chunkId), []);
+  const openAdd = useCallback(
+    (chunkId: string) => setAddingChunkId(chunkId),
+    [],
+  );
   const closeAdd = useCallback(() => setAddingChunkId(null), []);
 
   // Trial edits touch one chunk's list, so the other chunks' arrays keep their
@@ -823,15 +925,16 @@ export function EvalDashboard() {
   // this used to run inline in the JSX, so every keystroke re-grouped all 164
   // questions before re-rendering all 80 cards.
   const groups = useMemo(
-    () => (summary === null ? [] : groupByChunk(summary.questions, summary.chunks)),
+    () =>
+      summary === null ? [] : groupByChunk(summary.questions, summary.chunks),
     [summary],
   );
 
-  // Disable the actions when they'd be no-ops. "Process" generates questions for
-  // chunks below target and scores unscored/edited ones; "Re-score" re-runs every
-  // labeled question. While the summary is still loading we leave them enabled.
-  const canProcess =
-    summary === null || summary.pendingChunks > 0 || summary.pendingScoring > 0;
+  // Disable the actions when they'd be no-ops. "Score pending" scores whatever
+  // has no fresh result (new, edited, or retrieval-stale); "Re-score" re-runs
+  // every labeled question. While the summary is still loading we leave them
+  // enabled.
+  const canProcess = summary === null || summary.pendingScoring > 0;
   const canRescore = summary === null || summary.total > 0;
 
   return (
@@ -851,16 +954,17 @@ export function EvalDashboard() {
           disabled={busy || !canProcess}
           title={
             canProcess
-              ? "Generate the selected difficulties for new chunks and score anything unscored"
-              : "Nothing pending — pick a difficulty in Bulk actions, or there are no unscored questions"
+              ? "Score every question that has no fresh result — new, edited, or stale after a retrieval change"
+              : "Nothing pending to score"
           }
           className="rounded-md bg-black px-3 py-1.5 text-sm font-medium text-white cursor-pointer transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
         >
-          {busy ? "Processing…" : "Process new chunks"}
+          {busy ? "Scoring…" : "Score pending"}
         </button>
         <BulkActions
           busy={busy}
           onAddDifficulty={onBulkAdd}
+          onAddCached={onBulkAddCached}
           onAddNdcg={onBulkNdcg}
           onAddLlmNdcg={onBulkLlmNdcg}
           onChangeConfig={(docIds, docNames) =>
@@ -899,7 +1003,14 @@ export function EvalDashboard() {
         />
       )}
 
-      {progress && <RunProgress progress={progress} k={summary?.k ?? 0} />}
+      {progress && (
+        <RunProgress
+          progress={progress}
+          k={summary?.k ?? 0}
+          onCancel={runId ? cancelRun : undefined}
+          cancelling={cancelling}
+        />
+      )}
 
       {error && (
         <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
@@ -916,6 +1027,20 @@ export function EvalDashboard() {
                 label={`Recall@${summary.recallK}`}
                 value={pct(summary.recall)}
                 big
+                // The ticker sits in the label row so the headline number below
+                // stays the config's real, whole-golden-set rate — the delta is
+                // over the baselined subset and must not be read as part of it.
+                badge={
+                  summary.baseline && (
+                    <MetricTicker
+                      live={summary.baseline.liveRecall}
+                      base={summary.baseline.recall}
+                      unit="pp"
+                      questions={summary.baseline.questions}
+                      what="recall"
+                    />
+                  )
+                }
                 sub={
                   summary.criteria.recall.minRate != null
                     ? `min ${pct(summary.criteria.recall.minRate)}`
@@ -929,6 +1054,17 @@ export function EvalDashboard() {
                   label={`MRR@${summary.mrrK}`}
                   value={fmtScore(summary.mrr)}
                   big
+                  badge={
+                    summary.baseline && (
+                      <MetricTicker
+                        live={summary.baseline.liveMrr}
+                        base={summary.baseline.mrr}
+                        unit="score"
+                        questions={summary.baseline.questions}
+                        what="MRR"
+                      />
+                    )
+                  }
                   sub={
                     summary.criteria.mrr.minRate != null
                       ? `min ${summary.criteria.mrr.minRate.toFixed(2)}`
@@ -942,7 +1078,20 @@ export function EvalDashboard() {
                 label={`nDCG@${summary.ndcgK}`}
                 value={fmtScore(summary.ndcg)}
                 big
-                badge={<NdcgStaleBadge summary={summary} />}
+                badge={
+                  <>
+                    <NdcgStaleBadge summary={summary} />
+                    {summary.baseline && (
+                      <MetricTicker
+                        live={summary.baseline.liveNdcg}
+                        base={summary.baseline.ndcg}
+                        unit="score"
+                        questions={summary.baseline.questions}
+                        what="nDCG"
+                      />
+                    )}
+                  </>
+                }
                 sub={
                   `${summary.ndcgCovered}/${summary.total} graded` +
                   (summary.criteria.ndcg.minRate != null
@@ -963,7 +1112,7 @@ export function EvalDashboard() {
           {summary.total === 0 && (
             <p className="text-sm text-zinc-500">
               {summary.chunkCount > 0
-                ? "No eval questions yet — your chunks are listed below. Add one by hand on any chunk, or pick a difficulty in Bulk actions and click “Process new chunks” to generate them."
+                ? "No eval questions yet — your chunks are listed below. Add one by hand on any chunk, or pick a difficulty in Bulk actions → Add to generate them."
                 : "Nothing ingested under this config yet. Add a document, and its chunks will appear here."}
             </p>
           )}
@@ -1145,7 +1294,7 @@ const ChunkGroupCard = memo(function ChunkGroupCard({
   onStartEdit: (id: string) => void;
   onCancelEdit: () => void;
   onSaveEdit: (id: string, draft: string) => void;
-  onRemove: (id: string) => void;
+  onRemove: (id: string, uncache: boolean) => void;
   onToggleIgnore: (q: QuestionDetail) => void;
   onToggleExpand: (id: string) => void;
   onToggleRanking: (id: string) => void;
@@ -1195,15 +1344,23 @@ const ChunkGroupCard = memo(function ChunkGroupCard({
       if (!open && peekText === null && peekError === null) {
         apiFetch(`/api/eval/chunks/${group.chunkId}`)
           .then(async (res) => {
-            const data = (await res.json()) as { text: string } | { error: string };
+            const data = (await res.json()) as
+              | { text: string }
+              | { error: string };
             if (!res.ok || "error" in data) {
-              setPeekError("error" in data ? data.error : `Request failed (${res.status}).`);
+              setPeekError(
+                "error" in data
+                  ? data.error
+                  : `Request failed (${res.status}).`,
+              );
               return;
             }
             setPeekText(data.text);
           })
           .catch((err: unknown) =>
-            setPeekError(err instanceof Error ? err.message : "Failed to load chunk."),
+            setPeekError(
+              err instanceof Error ? err.message : "Failed to load chunk.",
+            ),
           );
       }
       return !open;
@@ -1249,7 +1406,10 @@ const ChunkGroupCard = memo(function ChunkGroupCard({
             ? `${hits}/${scored.length} hit${scored.length === 1 ? "" : "s"}`
             : "unscored"}
           {avgSim !== null && (
-            <span className="text-zinc-400"> · avg sim {avgSim.toFixed(3)}</span>
+            <span className="text-zinc-400">
+              {" "}
+              · avg sim {avgSim.toFixed(3)}
+            </span>
           )}
         </span>
       </div>
@@ -1351,7 +1511,7 @@ const QuestionRow = memo(function QuestionRow({
   onStartEdit: (id: string) => void;
   onCancelEdit: () => void;
   onSaveEdit: (id: string, draft: string) => void;
-  onRemove: (id: string) => void;
+  onRemove: (id: string, uncache: boolean) => void;
   onToggleIgnore: (q: QuestionDetail) => void;
   onToggleExpand: (id: string) => void;
   onToggleRanking: (id: string) => void;
@@ -1359,6 +1519,12 @@ const QuestionRow = memo(function QuestionRow({
   onRankingChange: () => void;
 }) {
   const [draft, setDraft] = useState(q.question);
+  // Delete confirmation, inline rather than a modal: window.confirm can't carry
+  // the uncache checkbox, and an expanding row suits this dense list better than
+  // new modal plumbing. Unchecked by default — uncaching throws away something
+  // that was paid for.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [alsoUncache, setAlsoUncache] = useState(false);
   // Re-seed the draft from the row's current text each time editing opens, so an
   // abandoned draft never resurfaces. This is the "adjusting state when a prop
   // changes" pattern — done during render rather than in an effect, which would
@@ -1508,7 +1674,10 @@ const QuestionRow = memo(function QuestionRow({
                 Edit
               </button>
               <button
-                onClick={() => onRemove(q.questionId)}
+                onClick={() => {
+                  setAlsoUncache(false);
+                  setConfirmingDelete(true);
+                }}
                 disabled={busy}
                 className="cursor-pointer text-red-600 hover:underline disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-400"
               >
@@ -1518,6 +1687,45 @@ const QuestionRow = memo(function QuestionRow({
           )}
         </span>
       </div>
+      {confirmingDelete && (
+        <div className="flex flex-col gap-1.5 rounded border border-red-300 bg-red-50 px-2 py-1.5 text-xs dark:border-red-900/50 dark:bg-red-900/15">
+          <span className="text-red-700 dark:text-red-300">
+            Delete this question?
+          </span>
+          <label className="flex cursor-pointer items-start gap-1.5 text-zinc-600 dark:text-zinc-400">
+            <input
+              type="checkbox"
+              checked={alsoUncache}
+              onChange={(e) => setAlsoUncache(e.target.checked)}
+              className="mt-0.5 cursor-pointer"
+            />
+            {/* The scope is wider than this config, and the copy has to say so. */}
+            <span>
+              Also delete from the question cache. It was generated once for this
+              passage and is shared across all your configs, so removing it stops
+              it returning via “Add cached” anywhere.
+            </span>
+          </label>
+          <span className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                setConfirmingDelete(false);
+                onRemove(q.questionId, alsoUncache);
+              }}
+              disabled={busy}
+              className="cursor-pointer rounded border border-red-300 px-2 py-0.5 font-medium text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900/30"
+            >
+              Delete
+            </button>
+            <button
+              onClick={() => setConfirmingDelete(false)}
+              className="cursor-pointer text-zinc-500 hover:underline"
+            >
+              Cancel
+            </button>
+          </span>
+        </div>
+      )}
       {expanded && <ExplainPanel state={explain} k={k} />}
       {rankingOpen && (
         <NdcgRankingPanel
@@ -1769,7 +1977,7 @@ function StaleBadge({
           )}
           <span className="text-red-600 dark:text-red-400">
             Re-scoring everything takes a while — batch up several changes, then
-            run Process new chunks once.
+            run Score pending once.
           </span>
         </span>
       </span>
@@ -1780,6 +1988,7 @@ function StaleBadge({
 function BulkActions({
   busy,
   onAddDifficulty,
+  onAddCached,
   onAddNdcg,
   onAddLlmNdcg,
   onChangeConfig,
@@ -1791,7 +2000,9 @@ function BulkActions({
   onAddDifficulty: (
     counts: DifficultyCounts,
     documentIds: string[] | null,
+    topUp: boolean,
   ) => void;
+  onAddCached: (documentIds: string[] | null) => void;
   onAddNdcg: (documentIds: string[] | null, rebuild: boolean) => void;
   onAddLlmNdcg: (documentIds: string[] | null) => void;
   onChangeConfig: (
@@ -1808,6 +2019,10 @@ function BulkActions({
   // it (badge = the count) — nothing runs until Add is clicked, so several
   // difficulties and quantities go out as ONE run.
   const [addCounts, setAddCounts] = useState<DifficultyCounts>({});
+  // Off (the default) = "add N more to every chunk in scope", so a second click
+  // buys N more again. On = the older fill-to-N: a chunk already holding N gets
+  // nothing, which makes the run idempotent and usually much cheaper.
+  const [addTopUp, setAddTopUp] = useState(false);
   // "Add nDCG rankings" section: its own collapsed block so the rebuild toggle
   // and the Run button read as deliberately as the LLM one below.
   const [ndcgOpen, setNdcgOpen] = useState(false);
@@ -1832,6 +2047,7 @@ function BulkActions({
     setLlmNdcgOpen(false);
     setDocsOpen(false);
     setAddCounts({});
+    setAddTopUp(false);
   };
 
   const toggleMenu = () => setOpen((o) => !o);
@@ -2019,25 +2235,73 @@ function BulkActions({
                 <span className="text-zinc-500">
                   {stagedTotal === 0
                     ? "Click a difficulty once per question you want."
-                    : `Tops every chunk in scope up to ${(
+                    : `${addTopUp ? "Tops every chunk in scope up to" : "Adds to every chunk in scope"} ${(
                         ["easy", "medium", "hard"] as const
                       )
                         .filter((d) => addCounts[d])
                         .map((d) => `${addCounts[d]} ${d}`)
                         .join(" · ")}.`}
                 </span>
+                {/* The mode switch for the badges above. Default OFF = every
+                    chunk in scope gets N more, so the run costs N × chunks and
+                    clicking twice buys twice. Ticking it restores fill-to-N,
+                    which skips chunks already there — cheaper, and idempotent. */}
+                <label
+                  className="flex cursor-pointer items-start gap-1.5 text-zinc-500"
+                  title="Only add what a chunk is missing — chunks already at N get nothing. Off, every chunk in scope gets N more however many it already has."
+                >
+                  <input
+                    type="checkbox"
+                    checked={addTopUp}
+                    onChange={(e) => setAddTopUp(e.target.checked)}
+                    className="mt-0.5 cursor-pointer"
+                  />
+                  <span>
+                    Top up{" "}
+                    <span className="text-zinc-400">
+                      (only add what a chunk is missing — chunks already at N get
+                      nothing)
+                    </span>
+                  </span>
+                </label>
+                {/* The cost the badges don't show: without Top up this is a flat
+                    N per chunk, so a corpus-wide Add is priced by the corpus. */}
+                {stagedTotal > 0 && !addTopUp && (
+                  <span className="text-amber-700 dark:text-amber-500">
+                    Every chunk in scope is generated for — {stagedTotal}{" "}
+                    question{stagedTotal === 1 ? "" : "s"} per chunk, including
+                    chunks that already have some.
+                  </span>
+                )}
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
                     disabled={stagedTotal === 0}
                     onClick={() => {
                       const counts = addCounts;
+                      const topUp = addTopUp;
                       close();
-                      onAddDifficulty(counts, scopeIds);
+                      onAddDifficulty(counts, scopeIds, topUp);
                     }}
                     className="cursor-pointer rounded bg-black px-2 py-0.5 font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
                   >
                     Add
+                  </button>
+                  {/* The free half of Add, and deliberately NOT tied to the
+                      badges: it takes every question already generated for an
+                      identical chunk (any difficulty, any config, same model),
+                      since a banked question costs nothing whatever difficulty it
+                      is. Generates nothing — what isn't banked, Add buys. */}
+                  <button
+                    type="button"
+                    title="Add every question already generated for identical chunks from all configs at any difficulty — skips dupe questions"
+                    onClick={() => {
+                      close();
+                      onAddCached(scopeIds);
+                    }}
+                    className="cursor-pointer rounded border border-zinc-300 px-2 py-0.5 font-medium text-zinc-700 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                  >
+                    Add cached
                   </button>
                   {stagedTotal > 0 && (
                     <button
@@ -2049,6 +2313,13 @@ function BulkActions({
                     </button>
                   )}
                 </div>
+                {/* Says the quiet part out loud: the badges size the PAID run
+                    only, so "Add cached" staying live at zero staged questions
+                    is the design, not a bug. */}
+                <span className="text-zinc-500">
+                  Add every question already generated for identical chunks from
+                  all configs at any difficulty — skips dupe questions
+                </span>
               </div>
             )}
             {/* Bulk nDCG grading: hit Run and every question in scope
@@ -2138,8 +2409,8 @@ function BulkActions({
                 </span>
                 <span className="text-amber-600 dark:text-amber-400">
                   Costs one LLM call per question. Skips questions with no
-                  aggregate ranking yet, and ones whose LLM re-ranking is already
-                  cached.
+                  aggregate ranking yet, and ones whose LLM re-ranking is
+                  already cached.
                 </span>
                 <button
                   type="button"
@@ -2237,6 +2508,72 @@ function Stat({
       </span>
       {sub && <span className="text-xs text-zinc-400">{sub}</span>}
     </div>
+  );
+}
+
+// The baseline ticker (0057): what this config's per-chunk tuning — autotune's
+// applied overrides and manual delegates — has bought on the corpus as it
+// stands, against the same config with no overrides in effect.
+//
+// UNITS. Recall moves in percentage POINTS, not percent: 40% → 42% is +2pp, and
+// "+5%" would be genuinely ambiguous between the two readings. MRR and nDCG are
+// already 0–1 scores, so they show raw deltas at two decimals.
+//
+// COLOUR IS NEVER THE ONLY SIGNAL. Red/green is exactly the pair that fails for
+// the most common colour-vision deficiency, so the arrow glyph carries the
+// direction on its own.
+//
+// Renders nothing (not a dash) when there is no baseline to compare with: the
+// caller only asks for one when the config has overrides, and a row of dashes
+// would imply a measurement that was never taken.
+function MetricTicker({
+  live,
+  base,
+  unit,
+  questions,
+  what,
+}: {
+  live: number | null;
+  base: number | null;
+  unit: "pp" | "score";
+  questions: number; // the comparable subset both sides are measured over
+  what: string; // metric name, for the tooltip sentence
+}) {
+  if (live === null || base === null) return null;
+  const delta = live - base;
+  const shown =
+    unit === "pp"
+      ? `${Math.abs(delta * 100).toFixed(1)}pp`
+      : Math.abs(delta).toFixed(2);
+  // Below half a display unit the arrow would point at a change the number
+  // can't show — read that as flat rather than as a rounded-away win.
+  const flat = unit === "pp" ? Math.abs(delta) < 0.0005 : Math.abs(delta) < 0.005;
+  const baseShown = unit === "pp" ? pct(base) : base.toFixed(2);
+  return (
+    <Tooltip
+      align="left"
+      text={
+        `Baseline ${what} ${baseShown} — this config's model and chunk shape with ` +
+        `no per-chunk overrides, over the same ${questions} question${
+          questions === 1 ? "" : "s"
+        }.\n\n` +
+        "The delta is what your overrides and delegates have bought. Both sides " +
+        "are measured over the questions that have a baseline, so this is not " +
+        "always the whole golden set."
+      }
+    >
+      <span
+        className={`text-xs font-medium ${
+          flat
+            ? "text-zinc-400"
+            : delta > 0
+              ? "text-green-600 dark:text-green-400"
+              : "text-red-600 dark:text-red-400"
+        }`}
+      >
+        {flat ? "—" : delta > 0 ? `▲ +${shown}` : `▼ −${shown}`}
+      </span>
+    </Tooltip>
   );
 }
 
@@ -2907,8 +3244,21 @@ function ChunkText({ text, expected }: { text: string; expected?: boolean }) {
 }
 
 // Live run panel: a per-phase bar (Generate, then Score). During scoring it also
-// shows a running hit count and Recall@k climbing as results stream in.
-function RunProgress({ progress, k }: { progress: EvalProgress; k: number }) {
+// shows a running hit count and Recall@k climbing as results stream in, and —
+// once the run has announced its id — a Cancel button.
+function RunProgress({
+  progress,
+  k,
+  onCancel,
+  cancelling,
+}: {
+  progress: EvalProgress;
+  k: number;
+  // Absent until the stream's run-started line lands (a fraction of a second),
+  // so the button appears rather than sitting there doing nothing.
+  onCancel?: () => void;
+  cancelling: boolean;
+}) {
   const fraction = progress.total > 0 ? progress.done / progress.total : 0;
   const percent = Math.round(fraction * 100);
   const scoring = progress.phase === "score";
@@ -2950,7 +3300,27 @@ function RunProgress({ progress, k }: { progress: EvalProgress; k: number }) {
               </span>
             )}
         </span>
-        <span className="tabular-nums">{percent}%</span>
+        <span className="flex items-center gap-2">
+          <span className="tabular-nums">{percent}%</span>
+          {/* Cooperative: the run stops at its next checkpoint, so the label
+              says "Cancelling…" instead of implying it already has. Whatever
+              landed before that point is kept. */}
+          {onCancel && (
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={cancelling}
+              title={
+                cancelling
+                  ? "Stopping at the next question — work already done is kept"
+                  : "Stop this run at the next question. Everything generated or scored so far is kept."
+              }
+              className="cursor-pointer rounded border border-zinc-300 px-2 py-0.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+            >
+              {cancelling ? "Cancelling…" : "Cancel"}
+            </button>
+          )}
+        </span>
       </div>
 
       <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
@@ -3049,6 +3419,9 @@ function ModelTrial({
   // server-side). Seeded with the auto pool — the questions' top-k — on load.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [showCorpus, setShowCorpus] = useState(false);
+  // Which document groups in "Rest of corpus" are expanded. All collapsed on
+  // open — a real corpus is hundreds of undifferentiated rows otherwise.
+  const [openDocs, setOpenDocs] = useState<Set<string>>(new Set());
   // Chunks whose text is already embedded under the selected trial model (0020
   // cache) — auto-added to the pool since they're free, tagged "(cached)".
   // prevCachedRef remembers the last auto-add so switching models removes the
@@ -3119,6 +3492,65 @@ function ModelTrial({
       ),
     [state],
   );
+
+  // "Rest of corpus" grouped by document. Pure derivation — the server already
+  // orders by file name then document then position, so each document's rows
+  // are contiguous and a single pass preserves that order.
+  const corpusGroups = useMemo<CorpusGroup[]>(() => {
+    if (state?.status !== "ready") return [];
+    const groups: CorpusGroup[] = [];
+    let current: CorpusGroup | null = null;
+    for (const c of state.ctx.restCorpus) {
+      if (!current || current.documentId !== c.documentId) {
+        current = { documentId: c.documentId, fileName: c.fileName, chunks: [] };
+        groups.push(current);
+      }
+      current.chunks.push(c);
+    }
+    return groups;
+  }, [state]);
+
+  // The pool as it will actually run: everything ticked, plus the test chunk.
+  const poolSize = selected.size + 1;
+  const cachedSelected = useMemo(
+    () => [...selected].filter((id) => cachedIds.has(id)).length,
+    [selected, cachedIds],
+  );
+
+  const allCorpusSelected =
+    corpusGroups.length > 0 &&
+    corpusGroups.every((g) => g.chunks.every((c) => selected.has(c.chunkId)));
+
+  function toggleAllCorpus() {
+    const ids = corpusGroups.flatMap((g) => g.chunks.map((c) => c.chunkId));
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allCorpusSelected) for (const id of ids) next.delete(id);
+      else for (const id of ids) next.add(id);
+      return next;
+    });
+  }
+
+  function toggleDocOpen(documentId: string) {
+    setOpenDocs((prev) => {
+      const next = new Set(prev);
+      if (next.has(documentId)) next.delete(documentId);
+      else next.add(documentId);
+      return next;
+    });
+  }
+
+  // Whole-document tick: all in → clear it, otherwise select all of it.
+  function toggleDocSelection(group: CorpusGroup) {
+    const ids = group.chunks.map((c) => c.chunkId);
+    const allIn = ids.every((id) => selected.has(id));
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allIn) for (const id of ids) next.delete(id);
+      else for (const id of ids) next.add(id);
+      return next;
+    });
+  }
 
   // Swap the auto-added cached set: drop the previous model's freebies (unless
   // they're regular auto-pool members the user keeps), add the new model's.
@@ -3202,7 +3634,9 @@ function ModelTrial({
         | { result: ModelTrialResult; savedTrial: SavedModelTrial | null }
         | { error: string };
       if (!res.ok || "error" in data) {
-        setRunError("error" in data ? data : { error: `Request failed (${res.status}).` });
+        setRunError(
+          "error" in data ? data : { error: `Request failed (${res.status}).` },
+        );
         return;
       }
       if (data.savedTrial) {
@@ -3216,7 +3650,9 @@ function ModelTrial({
         setResult(data.result);
       }
     } catch (err) {
-      setRunError({ error: err instanceof Error ? err.message : "Network error." });
+      setRunError({
+        error: err instanceof Error ? err.message : "Network error.",
+      });
     } finally {
       setSaving(false);
       setRunning(false);
@@ -3242,7 +3678,9 @@ function ModelTrial({
       }
       setOverride(null);
     } catch (err) {
-      setRunError({ error: err instanceof Error ? err.message : "Network error." });
+      setRunError({
+        error: err instanceof Error ? err.message : "Network error.",
+      });
     } finally {
       setOvBusy(false);
     }
@@ -3315,7 +3753,7 @@ function ModelTrial({
                 <select
                   value={model}
                   onChange={(e) => setModel(e.target.value)}
-                  className="rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
+                  className="w-full rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
                 >
                   {/* Unkeyed models are LISTED, disabled, with the reason —
                       never dropped. Same contract as the base-model, autotune
@@ -3434,9 +3872,27 @@ function ModelTrial({
 
           {/* Candidate pool: the chunk (always), its questions' top-k, + corpus */}
           <div className="flex flex-col gap-1">
-            <span className="font-medium uppercase tracking-wide text-zinc-500">
-              Test pool
-            </span>
+            <div className="flex items-center gap-1.5">
+              <span className="font-medium uppercase tracking-wide text-zinc-500">
+                Test pool
+              </span>
+              {/* Pool size is what decides whether a trial is honest and what it
+                  costs, so it's on screen at the point of widening it. +1 = the
+                  test chunk, always included server-side (see `selected` above). */}
+              <Tooltip
+                text={`${poolSize} chunk${poolSize === 1 ? "" : "s"} will be re-embedded under the trial model${
+                  cachedSelected > 0
+                    ? `, of which ${cachedSelected} ${cachedSelected === 1 ? "is" : "are"} already embedded and cost nothing`
+                    : ""
+                }.`}
+                align="left"
+              >
+                <span className="rounded-full border border-zinc-200 px-1.5 py-px text-[10px] text-zinc-400 dark:border-zinc-800">
+                  {poolSize} chunk{poolSize === 1 ? "" : "s"}
+                  {cachedSelected > 0 && ` · ${cachedSelected} cached`}
+                </span>
+              </Tooltip>
+            </div>
             <div className="flex flex-wrap items-center gap-1.5 rounded border border-green-300 bg-green-50 px-2 py-1 dark:border-green-900/50 dark:bg-green-900/15">
               <span className="font-medium text-green-700 dark:text-green-400">
                 ✓ test chunk
@@ -3450,8 +3906,8 @@ function ModelTrial({
             {cachedIds.size > 0 && (
               <span className="text-zinc-400">
                 {cachedIds.size} chunk{cachedIds.size === 1 ? "" : "s"} already
-                embedded under <span className="font-mono">{model}</span>{" "}
-                joined the pool automatically — cached, so they cost nothing.
+                embedded under <span className="font-mono">{model}</span> joined
+                the pool automatically — cached, so they cost nothing.
               </span>
             )}
             {state.ctx.autoPool.length > 0 ? (
@@ -3476,26 +3932,42 @@ function ModelTrial({
 
             {state.ctx.restCorpus.length > 0 && (
               <div className="mt-1 flex flex-col gap-0.5">
-                <button
-                  onClick={() => setShowCorpus((v) => !v)}
-                  className="cursor-pointer self-start text-zinc-500 hover:underline"
-                >
-                  {showCorpus ? "▾" : "▸"} Rest of corpus (
-                  {state.ctx.restCorpus.length})
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setShowCorpus((v) => !v)}
+                    className="cursor-pointer text-zinc-500 hover:underline"
+                  >
+                    {showCorpus ? "▾" : "▸"} Rest of corpus (
+                    {state.ctx.restCorpus.length})
+                  </button>
+                  {showCorpus && (
+                    // A toggle, not a one-way button: selecting 312 chunks by
+                    // mis-click is otherwise unwindable.
+                    <button
+                      onClick={toggleAllCorpus}
+                      className="cursor-pointer rounded border border-zinc-300 px-1.5 py-px text-[11px] text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    >
+                      {allCorpusSelected
+                        ? "Clear all"
+                        : `Add all ${state.ctx.restCorpus.length}`}
+                    </button>
+                  )}
+                </div>
                 {showCorpus && (
-                  <ul className="flex max-h-48 flex-col gap-0.5 overflow-auto rounded border border-zinc-200 p-1 dark:border-zinc-800">
-                    {state.ctx.restCorpus.map((c) => (
-                      <PoolRow
-                        key={c.chunkId}
-                        label={`${c.fileName} · #${c.position ?? "?"}`}
-                        preview={c.preview}
-                        checked={selected.has(c.chunkId)}
-                        cached={cachedIds.has(c.chunkId)}
-                        onToggle={() => toggleChunk(c.chunkId)}
+                  <div className="flex max-h-72 flex-col gap-0.5 overflow-auto rounded border border-zinc-200 p-1 dark:border-zinc-800">
+                    {corpusGroups.map((g) => (
+                      <PoolDocumentGroup
+                        key={g.documentId}
+                        group={g}
+                        selected={selected}
+                        cachedIds={cachedIds}
+                        open={openDocs.has(g.documentId)}
+                        onToggleOpen={() => toggleDocOpen(g.documentId)}
+                        onToggleDoc={() => toggleDocSelection(g)}
+                        onToggleChunk={toggleChunk}
                       />
                     ))}
-                  </ul>
+                  </div>
                 )}
               </div>
             )}
@@ -3745,10 +4217,7 @@ function ChunkExperiments({
         </div>
       )}
       {children}
-      <ModelTrial
-        chunkId={chunkId}
-        onSaved={(t) => onTrialSaved(chunkId, t)}
-      />
+      <ModelTrial chunkId={chunkId} onSaved={(t) => onTrialSaved(chunkId, t)} />
     </>
   );
 }
@@ -3816,6 +4285,94 @@ function TrialSection({
 }
 
 // One selectable pool chunk: a checkbox plus an expandable text/preview.
+// One document's worth of "Rest of corpus", built client-side from the ordered
+// chunk list (see corpusGroups in ModelTrial).
+type CorpusGroup = {
+  documentId: string;
+  fileName: string;
+  chunks: CorpusChunkListItem[];
+};
+
+// A collapsed document in the corpus picker: tri-state tick for the whole file,
+// counts, and its chunk rows when expanded.
+//
+// The tick state is DERIVED from `selected` on every render rather than held
+// locally — applyCached() adds and removes ids behind the user's back when the
+// trial model changes, and local state would silently disagree with reality
+// after a model switch.
+function PoolDocumentGroup({
+  group,
+  selected,
+  cachedIds,
+  open,
+  onToggleOpen,
+  onToggleDoc,
+  onToggleChunk,
+}: {
+  group: CorpusGroup;
+  selected: Set<string>;
+  cachedIds: Set<string>;
+  open: boolean;
+  onToggleOpen: () => void;
+  onToggleDoc: () => void;
+  onToggleChunk: (chunkId: string) => void;
+}) {
+  const inCount = group.chunks.filter((c) => selected.has(c.chunkId)).length;
+  const allIn = inCount === group.chunks.length;
+  return (
+    <div className="flex flex-col gap-0.5">
+      <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={onToggleOpen}
+          className="w-3 shrink-0 cursor-pointer text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+        >
+          {open ? "▾" : "▸"}
+        </button>
+        <input
+          type="checkbox"
+          checked={allIn}
+          // HTML has no indeterminate attribute — it's a DOM property only.
+          ref={(el) => {
+            if (el) el.indeterminate = inCount > 0 && !allIn;
+          }}
+          onChange={onToggleDoc}
+          className="cursor-pointer"
+        />
+        <button
+          type="button"
+          onClick={onToggleOpen}
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 text-left"
+        >
+          <span className="truncate font-mono text-zinc-600 dark:text-zinc-400">
+            {group.fileName}
+          </span>
+          <span className="shrink-0 text-zinc-400">
+            ({group.chunks.length})
+          </span>
+          {inCount > 0 && (
+            <span className="shrink-0 text-zinc-400">{inCount} selected</span>
+          )}
+        </button>
+      </div>
+      {open && (
+        <ul className="flex flex-col gap-0.5 pl-6">
+          {group.chunks.map((c) => (
+            <PoolRow
+              key={c.chunkId}
+              label={`${c.fileName} · #${c.position ?? "?"}`}
+              preview={c.preview}
+              checked={selected.has(c.chunkId)}
+              cached={cachedIds.has(c.chunkId)}
+              onToggle={() => onToggleChunk(c.chunkId)}
+            />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function PoolRow({
   label,
   preview,
@@ -4175,7 +4732,12 @@ function baselineFromOutcomes(outcomes: OverrideOutcome[]): {
 }[] {
   const byQ = new Map<
     string,
-    { questionId: string; question: string; hit: boolean | null; rank: number | null }
+    {
+      questionId: string;
+      question: string;
+      hit: boolean | null;
+      rank: number | null;
+    }
   >();
   for (const o of outcomes) {
     if (byQ.has(o.questionId) && o.metric !== "recall") continue;
@@ -4351,8 +4913,8 @@ function BaselineRow({
           </ul>
         ) : (
           <span className="text-zinc-500">
-            No stored baseline outcomes for this chunk — the delegate wasn&apos;t
-            applied from a saved trial or an autotune run.
+            No stored baseline outcomes for this chunk — the delegate
+            wasn&apos;t applied from a saved trial or an autotune run.
           </span>
         ))}
     </li>

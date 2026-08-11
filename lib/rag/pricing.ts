@@ -50,7 +50,8 @@ export type LeverId =
   // a document that this config had already embedded, which the app no longer
   // lets you do, and the reuse case it also covered is now the embedding cache's,
   // banked as embed_cache. Same gap convention as #5.)
-  | "eval_embed_reuse"; // #10 calibration reads banked eval vectors — no re-embed
+  | "eval_embed_reuse" // #10 calibration reads banked eval vectors — no re-embed
+  | "question_reuse"; // #11 eval question served from question_cache — no generation call
 
 export const LEVERS: Record<
   LeverId,
@@ -65,6 +66,12 @@ export const LEVERS: Record<
   cascade: { label: "Saver cascade (FrugalGPT-lite)", category: "realized", basis: "exact" },
   semantic_cache: { label: "Semantic answer cache", category: "realized", basis: "estimate" },
   batch: { label: "Batch API", category: "realized", basis: "exact" },
+  // Realized, not structural: it is behind the Savings toggle, so the
+  // counterfactual is this same config with reuse switched off (docs §4).
+  // `estimate` because the banked usage is the generating call's real tokens
+  // split across the N questions it returned, and a fresh call would not
+  // reproduce those counts exactly.
+  question_reuse: { label: "Eval question reuse", category: "realized", basis: "estimate" },
 };
 
 // --- price tables (USD per 1M tokens) --------------------------------------

@@ -42,6 +42,13 @@ import {
 } from "@/lib/rag/overrideStore";
 import type Anthropic from "@anthropic-ai/sdk";
 import { meteredMessage } from "@/lib/rag/meter";
+import { fingerprintFrom } from "@/lib/rag/semanticCacheCore";
+import {
+  bankQuestions,
+  bankedSlotCounts,
+  fillChunksFromCache,
+  hashChunkText,
+} from "@/lib/rag/questionCache";
 import { splitText, tokenizeWithOffsets } from "@/lib/rag/chunker";
 import {
   cachedQueryVectors,
@@ -50,6 +57,7 @@ import {
   embedQueryCached,
   meterEmbeds,
 } from "@/lib/rag/embedCache";
+import { NEVER_STOP, type ShouldStop } from "@/lib/http/cancelRegistry";
 import { embedQuery } from "@/lib/rag/embeddings";
 import { screenStoredResult, type ChangedChunkSims } from "@/lib/rag/dirtyScreen";
 import { stitchChunks } from "@/lib/rag/reconstruct";
@@ -62,6 +70,7 @@ import { chunkEmbeddings } from "@/lib/rag/vectorStore";
 import {
   allLabeledQuestions,
   chunksNeedingQuestionsByDifficulty,
+  chunksWithQuestions,
   createRunSnapshot,
   getCachedQueryEmbeddings,
   getChunkForGeneration,
@@ -76,6 +85,7 @@ import {
   insertModelTrial,
   insertQuestionWithLabel,
   insertResults,
+  labelsWithBaseline,
   latestResultsForScreening,
   listModelTrials,
   putCachedQueryEmbedding,
@@ -152,9 +162,19 @@ export type EvalEvent =
       ok: boolean;
       error?: string;
     }
+  // The run's id, first line of every stream — what POST /api/eval/cancel needs
+  // to reach it. Emitted by ndjsonStream itself, not by any of the jobs below.
+  | { type: "run-started"; runId: string }
   | {
       type: "done";
+      // The run stopped early because the user cancelled it. The counts are the
+      // REAL ones: partial work is committed, never rolled back (the whole run
+      // is one transaction — see lib/http/cancelRegistry.ts).
+      cancelled?: boolean;
       generated: number;
+      // Questions served from question_cache instead of generated — free. Only
+      // the "Add cached" run produces these; every other path leaves it absent.
+      reused?: number;
       scored: number;
       recall: number | null;
       mrr: number | null;
@@ -178,6 +198,15 @@ export type EvalEvent =
   | StreamErrorEvent;
 
 type Emit = (event: EvalEvent) => void;
+
+// Cancellation, as a flag the loops below poll between units of work. It is
+// NEVER thrown: the run is one transaction that commits when the stream ends, so
+// unwinding out of a loop would discard every question already generated (and
+// banked) with the tokens already paid for. Loops break and return normally, the
+// remaining phases are skipped, and `done` reports the real counts with
+// `cancelled: true`. A cancelled generation therefore leaves its questions
+// unscored — "Score pending" is the button that finishes them later.
+// See lib/http/cancelRegistry.ts.
 
 // On-demand synthetic questions can target a difficulty — a dial on how far the
 // question's wording drifts from the passage's surface form. Higher difficulty
@@ -253,6 +282,25 @@ const QUESTIONS_FORMAT = {
 
 type GeneratedQuestion = { question: string; expected_answer: string };
 
+// Identifies the INSTRUCTIONS a cached question was written to, so question_cache
+// can never serve one authored under different wording. Derived from the prompt
+// constants themselves rather than a hand-bumped literal: edit any of them and
+// the fingerprint changes, the cache misses, and the questions are regenerated —
+// there is no version number to forget to bump.
+//
+// `count` is deliberately absent. It changes the rendered user turn ("Write
+// exactly N question(s)") but not what a question for slot i of a passage IS,
+// and excluding it is what lets the inline path (N per call) and the batch path
+// (one per request) share banked rows instead of keeping two disjoint caches.
+export const QUESTION_PROMPT_VERSION = fingerprintFrom([
+  "qg-v1",
+  GENERATION_SYSTEM,
+  difficultyInstruction("easy"),
+  difficultyInstruction("medium"),
+  difficultyInstruction("hard"),
+  JSON.stringify(QUESTIONS_FORMAT),
+]);
+
 // The Anthropic request params for authoring `count` question(s) from one
 // passage — factored out so the inline path (authorQuestions) and the batch path
 // (lib/batch/jobs/questionGeneration) build the SAME prompt. `model` is passed
@@ -309,46 +357,56 @@ export function parseQuestions(
   }
 }
 
+// Returns the parsed questions alongside the call's real token usage, which the
+// question cache banks so a later reuse can be priced from what the work actually
+// cost rather than from a char/4 estimate of the question text.
 async function authorQuestions(
   text: string,
   count: number,
   difficulty?: Difficulty,
-): Promise<GeneratedQuestion[]> {
+): Promise<{ questions: GeneratedQuestion[]; inputTokens: number; outputTokens: number }> {
   const response = await meteredMessage(
     "question_gen",
     questionRequestParams(text, count, difficulty, activeConfig().llmModel),
   );
-  return parseQuestions(response, count);
+  return {
+    questions: parseQuestions(response, count),
+    inputTokens: response.usage?.input_tokens ?? 0,
+    outputTokens: response.usage?.output_tokens ?? 0,
+  };
 }
 
 // How many questions a bulk run wants per chunk at one difficulty. Bulk actions
 // → Add question lets the user click a difficulty several times; each click is
-// one more question per chunk, so {difficulty:'easy', count:2} tops every chunk
-// up to two easy questions.
+// one more question per chunk, so {difficulty:'easy', count:2} adds two easy
+// questions to every chunk — or, with Top up ticked, tops every chunk up TO two.
 export type DifficultyTarget = { difficulty: Difficulty; count: number };
 
-// Generate `count` question(s) per SELECTED difficulty for every chunk short of
-// that target (Phase A — criteria-driven generation). An empty difficulty set is
-// a no-op, so a config that hasn't opted into a difficulty mix never
-// auto-synthesizes (the user picks via Settings / Bulk actions). Each question
-// slot is its own progress step so the bar reflects the real amount of work; a
-// chunk needing several at one difficulty asks the model for them in ONE call,
-// which keeps them from coming back near-identical.
+// Generate `count` question(s) per SELECTED difficulty for every chunk in scope
+// — or, with `topUp`, only for chunks short of that target and only the
+// shortfall. An empty difficulty set is a no-op. Each question slot is its own
+// progress step so the bar reflects the real amount of work; a chunk needing
+// several at one difficulty asks the model for them in ONE call, which keeps
+// them from coming back near-identical.
 export async function generateMissingQuestions(
   targets: DifficultyTarget[],
   emit: Emit = () => {},
   documentIds?: string[],
+  topUp = false,
+  shouldStop: ShouldStop = NEVER_STOP,
 ): Promise<number> {
   if (targets.length === 0) return 0;
   const gaps = await chunksNeedingQuestionsByDifficulty(
     targets.map((t) => t.difficulty),
     documentIds,
     targets.map((t) => t.count),
+    topUp,
   );
   if (gaps.length === 0) return 0;
 
   // Progress is per question, not per gap: a gap needing 3 counts as 3 steps.
   const total = gaps.reduce((sum, g) => sum + g.needed, 0);
+  const model = activeConfig().llmModel;
   console.log(
     `[rag:eval] generating ${total} question(s) across difficulties ` +
       `[${targets.map((t) => `${t.difficulty}×${t.count}`).join(", ")}]`,
@@ -357,7 +415,29 @@ export async function generateMissingQuestions(
 
   let generated = 0;
   let done = 0;
-  for (const gap of gaps) {
+
+  // Where each passage's banked questions continue from, so what this run buys
+  // is banked ABOVE what another config already banked for the same text rather
+  // than colliding with it (the insert's `on conflict do nothing` would silently
+  // drop the collision). One grouped count for the whole run.
+  const hashes = gaps.map((g) => hashChunkText(g.text));
+  const banked0 = await bankedSlotCounts(
+    model,
+    QUESTION_PROMPT_VERSION,
+    gaps.map((g, i) => ({ textHash: hashes[i], difficulty: g.difficulty })),
+  );
+  // Slots this run has already banked per passage, so two gaps sharing a text
+  // hash (repeated boilerplate) stack instead of overwriting each other.
+  const bankedHere = new Map<string, number>();
+
+  for (const [gi, gap] of gaps.entries()) {
+    // Checkpoint: between gaps, i.e. between paid model calls. Breaking here
+    // keeps every question generated (and banked) so far — see the note on
+    // ShouldStop above.
+    if (shouldStop()) {
+      console.log(`[rag:eval] cancelled after ${generated} question(s)`);
+      break;
+    }
     const authored = await authorQuestions(
       gap.text,
       gap.needed,
@@ -366,23 +446,27 @@ export async function generateMissingQuestions(
     // One step per slot the gap asked for — a model that returned fewer (or
     // unparseable) questions still advances the bar; the chunk stays under
     // target and is retried on the next pass.
+    const banked: { question: string; expectedAnswer: string | null }[] = [];
     for (let i = 0; i < gap.needed; i += 1) {
-      const q = authored[i];
+      const q = authored.questions[i];
       let landed: GeneratedQuestionPayload | undefined;
       if (q && q.question.trim()) {
+        const question = q.question.trim();
+        const expectedAnswer = q.expected_answer?.trim() || null;
         const questionId = await insertQuestionWithLabel({
           documentId: gap.documentId,
           documentEmbeddingId: gap.documentEmbeddingId,
           sourceChunkId: gap.chunkId,
-          question: q.question.trim(),
-          expectedAnswer: q.expected_answer?.trim() || null,
-          generatorModel: activeConfig().llmModel,
+          question,
+          expectedAnswer,
+          generatorModel: model,
           difficulty: gap.difficulty,
         });
         generated += 1;
+        banked.push({ question, expectedAnswer });
         landed = {
           questionId,
-          question: q.question.trim(),
+          question,
           difficulty: gap.difficulty,
           documentId: gap.documentId,
           fileName: gap.fileName,
@@ -393,6 +477,22 @@ export async function generateMissingQuestions(
       done += 1;
       emit({ type: "generate-progress", done, total, question: landed });
     }
+    // Bank what we just paid for. Always — banking is unconditional; only
+    // SERVING is a deliberate act ("Add cached questions" in Bulk actions), and
+    // it needs data to hit against.
+    const bankKey = `${hashes[gi]} ${gap.difficulty}`;
+    const startSlot = (banked0.get(bankKey) ?? 0) + (bankedHere.get(bankKey) ?? 0);
+    await bankQuestions({
+      textHash: hashes[gi],
+      difficulty: gap.difficulty,
+      model,
+      promptVersion: QUESTION_PROMPT_VERSION,
+      startSlot,
+      questions: banked,
+      inputTokens: authored.inputTokens,
+      outputTokens: authored.outputTokens,
+    });
+    bankedHere.set(bankKey, (bankedHere.get(bankKey) ?? 0) + banked.length);
   }
 
   console.log(`[rag:eval] generated ${generated} question(s)`);
@@ -410,18 +510,38 @@ export async function generateQuestionForChunk(
 ): Promise<"ok" | "not-found" | "empty"> {
   const chunk = await getChunkForGeneration(chunkId);
   if (!chunk) return "not-found";
+  const model = activeConfig().llmModel;
 
-  const [q] = await authorQuestions(chunk.text, 1, difficulty);
+  const authored = await authorQuestions(chunk.text, 1, difficulty);
+  const [q] = authored.questions;
   if (!q || !q.question.trim()) return "empty";
 
+  const question = q.question.trim();
+  const expectedAnswer = q.expected_answer?.trim() || null;
   await insertQuestionWithLabel({
     documentId: chunk.documentId,
     documentEmbeddingId: chunk.documentEmbeddingId,
     sourceChunkId: chunkId,
-    question: q.question.trim(),
-    expectedAnswer: q.expected_answer?.trim() || null,
-    generatorModel: activeConfig().llmModel,
+    question,
+    expectedAnswer,
+    generatorModel: model,
     difficulty,
+  });
+  // Banked above whatever this passage already holds, so the row lands instead
+  // of colliding with an existing slot and being dropped.
+  const textHash = hashChunkText(chunk.text);
+  const banked = await bankedSlotCounts(model, QUESTION_PROMPT_VERSION, [
+    { textHash, difficulty },
+  ]);
+  await bankQuestions({
+    textHash,
+    difficulty,
+    model,
+    promptVersion: QUESTION_PROMPT_VERSION,
+    startSlot: banked.get(`${textHash} ${difficulty}`) ?? 0,
+    questions: [{ question, expectedAnswer }],
+    inputTokens: authored.inputTokens,
+    outputTokens: authored.outputTokens,
   });
   return "ok";
 }
@@ -451,6 +571,7 @@ const SCORE_CONCURRENCY = 4;
 export async function scoreQuestions(
   questions: QuestionToScore[],
   emit: Emit = () => {},
+  shouldStop: ShouldStop = NEVER_STOP,
 ): Promise<number> {
   if (questions.length === 0) return 0;
 
@@ -484,7 +605,26 @@ export async function scoreQuestions(
   const depth = retrievalDepth(criteria, cfg.topK);
   const recallK = effectiveK(criteria.recall, cfg.topK);
 
+  // BASELINE LEG (0057). When the config carries overrides, each question also
+  // gets a shadow measurement with none in effect — that's the "what has my
+  // tuning bought?" side of the dashboard ticker.
+  //
+  // Skipped entirely when the config has NO overrides: the live row already IS
+  // the baseline (it's stamped retrieval_state = 'baseline'), and writing a
+  // duplicate would double the table for nothing. Skipped per question when one
+  // already exists at the current baseline_key, so re-scores don't re-measure a
+  // baseline that cannot have moved.
+  //
+  // It costs one extra vector query and ZERO dollars: `{ ...ctx, overrides: [] }`
+  // takes retrieveWithCutoffs' single-ANN fast path against the same cached
+  // query vector — no fusion pool, no re-embedding, no provider call.
+  const baselineCtx = ctx.overrides.length > 0 ? { ...ctx, overrides: [] } : null;
+  const haveBaseline = baselineCtx
+    ? await labelsWithBaseline(questions.map((q) => q.labelId))
+    : new Set<string>();
+
   const results: ResultInsert[] = new Array<ResultInsert>(questions.length);
+  const baselineResults: ResultInsert[] = new Array<ResultInsert>(questions.length);
   let done = 0;
   let nextIndex = 0;
   // Cost accounting for the query-vector cache (eval_question_embeddings). It's
@@ -496,6 +636,10 @@ export async function scoreQuestions(
   const qMisses: string[] = [];
   const worker = async () => {
     for (let i = nextIndex++; i < questions.length; i = nextIndex++) {
+      // Checkpoint: between questions, in every worker. Each worker just stops
+      // claiming indices, so the ones already in flight finish and their results
+      // are inserted below with the rest.
+      if (shouldStop()) break;
       const q = questions[i];
       let vector = cached.get(q.questionId);
       if (vector) {
@@ -525,6 +669,26 @@ export async function scoreQuestions(
         retrievalState,
         screenCutoffs: cutoffs,
       };
+      if (baselineCtx && !haveBaseline.has(q.labelId)) {
+        const base = await retrieveWithCutoffs(q.question, vector!, depth, baselineCtx);
+        const baseIds = base.retrieved.map((r) => r.chunk.chunk.id);
+        const baseIdx = baseIds.indexOf(q.sourceChunkId);
+        const baseRank = baseIdx === -1 ? null : baseIdx + 1;
+        baselineResults[i] = {
+          questionId: q.questionId,
+          labelId: q.labelId,
+          k: recallK,
+          hit: baseRank !== null && baseRank <= recallK,
+          foundRank: baseRank,
+          retrievedIds: baseIds,
+          retrievedScores: base.retrieved.map((r) => r.score),
+          // The honest fingerprint for an override-free retrieval — and what
+          // makes these rows readable alongside the free historical ones.
+          retrievalState: "baseline",
+          screenCutoffs: base.cutoffs,
+          isBaseline: true,
+        };
+      }
       done += 1;
       emit({
         type: "score-result",
@@ -541,8 +705,19 @@ export async function scoreQuestions(
   );
   await meterEmbeds(cfg.embeddingModel, qHits, qMisses);
 
-  await insertResults(results);
-  return results.length;
+  // A cancelled run leaves holes in the pre-sized array (the slots no worker
+  // claimed), so insert what actually scored and report that count — not
+  // questions.length, which would claim work nobody did.
+  const landed = results.filter((r): r is ResultInsert => r !== undefined);
+  // One insert for both legs: the baseline rows are the same shape and a
+  // cancelled run leaves the same holes in their array.
+  await insertResults([
+    ...landed,
+    ...baselineResults.filter((r): r is ResultInsert => r !== undefined),
+  ]);
+  // The count is LIVE results only — baseline rows are shadow measurements, and
+  // reporting them would claim scoring work the user didn't ask for.
+  return landed.length;
 }
 
 // Score ONE question on demand (embed → retrieve → persist a result) so its graded
@@ -570,37 +745,42 @@ export async function rescoreChunkQuestions(chunkId: string): Promise<number> {
 }
 
 // Score every question that has no fresh result (new or edited since last score).
-export async function scoreUnscoredQuestions(emit: Emit = () => {}): Promise<number> {
+export async function scoreUnscoredQuestions(
+  emit: Emit = () => {},
+  shouldStop: ShouldStop = NEVER_STOP,
+): Promise<number> {
   const pending = await questionsNeedingScoring();
   if (pending.length === 0) return 0;
   console.log(`[rag:eval] scoring ${pending.length} question(s) @ k=${activeConfig().topK}`);
-  return scoreQuestions(pending, emit);
+  return scoreQuestions(pending, emit, shouldStop);
 }
 
-// The "Process new chunks" button: generate questions for new chunks, score
-// what's unscored, then freeze a comparison snapshot of the current aggregate.
-export async function processNewChunks(emit: Emit = () => {}): Promise<{
-  generated: number;
+// The "Score pending" button: score every question that has no fresh result —
+// new, edited, or retrieval-stale — then freeze a comparison snapshot of the
+// current aggregate. It GENERATES NOTHING: buying questions is Bulk actions →
+// Add, which is also the only generation path that can route through the batch
+// API. This button is the cheap incremental complement to "Re-score all", and
+// the button that finishes a cancelled generation's unscored leftovers.
+export async function scorePendingQuestions(
+  emit: Emit = () => {},
+  shouldStop: ShouldStop = NEVER_STOP,
+): Promise<{
   scored: number;
   recall: number | null;
 }> {
   const t0 = performance.now();
-  const criteria = await getActiveCriteria();
-  // One question per selected difficulty per new chunk — the standing mix, not
-  // the per-run multipliers Bulk actions can ask for.
-  const generated = await generateMissingQuestions(
-    criteria.difficulties.map((difficulty) => ({ difficulty, count: 1 })),
-    emit,
-  );
-  const scored = await scoreUnscoredQuestions(emit);
+  const scored = await scoreUnscoredQuestions(emit, shouldStop);
+  const cancelled = shouldStop();
   // Everything pending (incl. retrieval-stale) is fresh now — the logged
   // override changes are baked into the rates, so the stale badge can drop.
-  await clearRetrievalChanges();
+  // Skipped on cancel: questions this run never reached are still stale, and
+  // clearing the log would drop the badge that says so.
+  if (!cancelled) await clearRetrievalChanges();
 
   const summary = await getSummary();
   // Only snapshot when something actually changed, so repeated clicks don't
   // pile up identical run rows.
-  if (generated > 0 || scored > 0) {
+  if (scored > 0) {
     await createRunSnapshot({
       questionCount: summary.scored,
       hitCount: summary.hits,
@@ -611,32 +791,46 @@ export async function processNewChunks(emit: Emit = () => {}): Promise<{
   }
 
   console.log(
-    `[rag:eval] processNewChunks done: generated=${generated} scored=${scored} ` +
+    `[rag:eval] scorePendingQuestions done: scored=${scored} ` +
       `recall=${summary.recall ?? "n/a"} in ${Math.round(performance.now() - t0)}ms`,
   );
   emit({
+    // Nothing is generated here; the zero keeps the shared client event shape.
     type: "done",
-    generated,
+    cancelled,
+    generated: 0,
     scored,
     recall: summary.recall,
     mrr: summary.mrr,
     ndcg: summary.ndcg,
   });
-  return { generated, scored, recall: summary.recall };
+  return { scored, recall: summary.recall };
 }
 
 // "Bulk actions → Add question → {difficulty ×N} → Add": persist each requested
-// difficulty into the config's mix, then top every chunk up to N questions at
-// that difficulty, score the unscored, and freeze a snapshot. Streams EvalEvents
-// like processNewChunks so the dashboard reuses the same progress UI.
+// difficulty into the config's mix, then add N questions at that difficulty to
+// every chunk in scope (or, with `topUp`, top each chunk up TO N), score the
+// unscored, and freeze a snapshot. Streams the same EvalEvents as the other runs
+// so the dashboard reuses the same progress UI.
 export async function bulkAddDifficulties(
   targets: DifficultyTarget[],
   emit: Emit = () => {},
   documentIds?: string[],
+  topUp = false,
+  shouldStop: ShouldStop = NEVER_STOP,
 ): Promise<{ generated: number; scored: number; recall: number | null }> {
   for (const t of targets) await addDifficulty(t.difficulty);
-  const generated = await generateMissingQuestions(targets, emit, documentIds);
-  const scored = await scoreUnscoredQuestions(emit);
+  const generated = await generateMissingQuestions(
+    targets,
+    emit,
+    documentIds,
+    topUp,
+    shouldStop,
+  );
+  // Cancelling the generation half skips the scoring half outright rather than
+  // scoring the part that landed: the user asked the run to stop, and what it
+  // generated is left pending for "Score pending".
+  const scored = shouldStop() ? 0 : await scoreUnscoredQuestions(emit, shouldStop);
 
   const summary = await getSummary();
   if (generated > 0 || scored > 0) {
@@ -651,6 +845,7 @@ export async function bulkAddDifficulties(
 
   emit({
     type: "done",
+    cancelled: shouldStop(),
     generated,
     scored,
     recall: summary.recall,
@@ -660,15 +855,92 @@ export async function bulkAddDifficulties(
   return { generated, scored, recall: summary.recall };
 }
 
+// "Bulk actions → Add question → Add cached": the free counterpart to
+// bulkAddDifficulties. Every chunk in scope is handed whatever the bank holds
+// for its exact text — ANY difficulty, no target and no staged counts, since a
+// banked question costs nothing and there is no reason to turn one down for
+// being the wrong difficulty. Nothing is generated and nothing is batched; a
+// passage with nothing banked simply gets nothing, and "Add" is what buys it.
+//
+// Deliberate rather than automatic: reuse hands you wording authored under
+// another config, which is exactly what you want when comparing configs over one
+// corpus and exactly what you don't want when you asked for fresh questions.
+//
+// Duplicates are impossible by construction — fillChunksFromCache compares
+// question TEXT against everything the chunk already shows — so pressing the
+// button twice is a no-op.
+//
+// Scores and snapshots afterwards like the paid path, because a reused question
+// is a real labeled question; it just cost nothing.
+export async function bulkAddCachedQuestions(
+  emit: Emit = () => {},
+  documentIds?: string[],
+  shouldStop: ShouldStop = NEVER_STOP,
+): Promise<{ reused: number; scored: number; recall: number | null }> {
+  const chunks = await chunksWithQuestions(documentIds);
+  let total = 0;
+  let done = 0;
+  const { reused, difficulties } = await fillChunksFromCache(
+    chunks,
+    activeConfig().llmModel,
+    QUESTION_PROMPT_VERSION,
+    (question) => {
+      done += 1;
+      emit({ type: "generate-progress", done, total, question });
+    },
+    // The bar can only be sized once the bank has been read, so it opens here
+    // rather than before the query — and at 0 when nothing matched, which the
+    // dashboard renders as a run that finished without adding anything.
+    (n) => {
+      total = n;
+      emit({ type: "generate-start", total });
+    },
+  );
+  // Reflect what actually landed in the config's mix — a record of which
+  // difficulties this config has used, which is what eval_difficulties is now
+  // that nothing auto-generates from it.
+  for (const d of difficulties) await addDifficulty(d as Difficulty);
+  // The fill itself is one free query — the cancellable half is the scoring
+  // that follows it, which is where this run's time actually goes.
+  const scored = shouldStop() ? 0 : await scoreUnscoredQuestions(emit, shouldStop);
+
+  const summary = await getSummary();
+  if (reused > 0 || scored > 0) {
+    await createRunSnapshot({
+      questionCount: summary.scored,
+      hitCount: summary.hits,
+      mrr: summary.mrr,
+      ndcg: summary.ndcg,
+      k: summary.recallK,
+    });
+  }
+
+  console.log(
+    `[rag:eval] bulkAddCachedQuestions: reused=${reused} across ${chunks.length} chunk(s)`,
+  );
+  emit({
+    type: "done",
+    cancelled: shouldStop(),
+    generated: 0,
+    reused,
+    scored,
+    recall: summary.recall,
+    mrr: summary.mrr,
+    ndcg: summary.ndcg,
+  });
+  return { reused, scored, recall: summary.recall };
+}
+
 // The "Re-score all" button: re-run retrieval for EVERY labeled question under the
 // active config against the current corpus and freeze a snapshot. Unlike
-// processNewChunks this ignores existing results (it inserts fresh rows; history is
+// scorePendingQuestions this ignores existing results (it inserts fresh rows; history is
 // preserved), so recall stays apples-to-apples after the corpus changes — e.g. a newly
 // added doc introduces distractors that can push a previously-hit chunk out of the
 // top-k. Generation is untouched; this only scores.
 export async function rescoreAllQuestions(
   emit: Emit = () => {},
   documentIds?: string[],
+  shouldStop: ShouldStop = NEVER_STOP,
 ): Promise<{
   scored: number;
   recall: number | null;
@@ -678,10 +950,14 @@ export async function rescoreAllQuestions(
   console.log(
     `[rag:eval] re-scoring all ${questions.length} question(s) @ k=${activeConfig().topK}`,
   );
-  const scored = await scoreQuestions(questions, emit);
+  const scored = await scoreQuestions(questions, emit, shouldStop);
+  const cancelled = shouldStop();
   // An unscoped re-score refreshes every result; a document-scoped one leaves
-  // other documents' stale rows (and thus the badge's change log) in place.
-  if (!documentIds || documentIds.length === 0) await clearRetrievalChanges();
+  // other documents' stale rows (and thus the badge's change log) in place. A
+  // cancelled run refreshed only part of the corpus, so it clears nothing.
+  if (!cancelled && (!documentIds || documentIds.length === 0)) {
+    await clearRetrievalChanges();
+  }
 
   const summary = await getSummary();
   if (scored > 0) {
@@ -700,6 +976,7 @@ export async function rescoreAllQuestions(
   );
   emit({
     type: "done",
+    cancelled,
     generated: 0,
     scored,
     recall: summary.recall,

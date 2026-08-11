@@ -219,14 +219,18 @@ test("coerceBatchSavings migrates the legs+overrides shape — override, else le
 test("status predicates", () => {
   assert.equal(isTerminal("applied"), true);
   assert.equal(isTerminal("failed"), true);
-  assert.equal(isTerminal("canceled"), true);
+  assert.equal(isTerminal("cancelled"), true);
   assert.equal(isTerminal("expired"), true);
   assert.equal(isTerminal("in_progress"), false);
   assert.equal(isTerminal("completed"), false); // completed = not yet applied
 
   assert.equal(isCancelable("in_progress"), true);
-  assert.equal(isCancelable("submitting"), true);
+  // Not submitting: there is no provider_batch_id yet to cancel, so a Cancel
+  // button here is a click that does nothing. cancelJob refuses it too, and the
+  // two must agree — that disagreement is what put a dead button on the panel.
+  assert.equal(isCancelable("submitting"), false);
   assert.equal(isCancelable("completed"), false);
+  assert.equal(isCancelable("cancelling"), false); // already winding down
 
   assert.equal(isPollable("in_progress"), true);
   assert.equal(isPollable("completed"), true);

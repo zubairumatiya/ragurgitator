@@ -33,6 +33,7 @@ const PROBES = [
   "documents",
   "corpora",
   "embedding_cache",
+  "question_cache",
   "user_profiles",
   "chunks_voyage_4_lite_1024",
   "document_embeddings",

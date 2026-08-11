@@ -29,6 +29,7 @@ import {
   keyedModels,
   EMBEDDING_MODELS,
 } from "@/lib/rag/embeddingModels";
+import { NEVER_STOP, type ShouldStop } from "@/lib/http/cancelRegistry";
 import { availableProviders } from "@/lib/rag/providerAvailability";
 import { getActiveCriteria } from "@/lib/rag/evalSettingsStore";
 import { activeConfig } from "@/lib/rag/activeConfig";
@@ -488,6 +489,7 @@ export async function bulkBuildRankings(
   emit: (event: EvalEvent) => void = () => {},
   documentIds?: string[],
   rebuild = false,
+  shouldStop: ShouldStop = NEVER_STOP,
 ): Promise<{ graded: number; scored: number }> {
   const t0 = performance.now();
   const questions = await allLabeledQuestions(documentIds);
@@ -507,6 +509,9 @@ export async function bulkBuildRankings(
   let nextIndex = 0;
   const worker = async () => {
     for (let i = nextIndex++; i < pending.length; i = nextIndex++) {
+      // Checkpoint: between questions. Every ranking already promoted stays —
+      // this run's transaction still commits (lib/http/cancelRegistry.ts).
+      if (shouldStop()) break;
       const q = pending[i];
       let ok = true;
       let error: string | undefined;
@@ -544,10 +549,15 @@ export async function bulkBuildRankings(
   // stored retrieval reflects the topped-up corpus too — otherwise the ideal is
   // current but the retrieval still predates the new docs, and the drift badge's
   // re-score half stays lit.
-  const toScore = rebuild
-    ? questions.filter((q) => gradedIds.has(q.questionId))
-    : (await questionsNeedingScoring()).filter((q) => gradedIds.has(q.questionId));
-  const scored = await scoreQuestions(toScore, emit);
+  // Cancelling the grading half skips the scoring half rather than scoring what
+  // landed: the questions graded so far are left pending for "Score pending".
+  const cancelled = shouldStop();
+  const toScore = cancelled
+    ? []
+    : rebuild
+      ? questions.filter((q) => gradedIds.has(q.questionId))
+      : (await questionsNeedingScoring()).filter((q) => gradedIds.has(q.questionId));
+  const scored = await scoreQuestions(toScore, emit, shouldStop);
 
   const summary = await getSummary();
   if (gradedIds.size > 0 || scored > 0) {
@@ -566,6 +576,7 @@ export async function bulkBuildRankings(
   );
   emit({
     type: "done",
+    cancelled,
     generated: 0,
     scored,
     recall: summary.recall,
@@ -605,6 +616,7 @@ const BULK_LLM_RANKING_CONCURRENCY = 2;
 export async function bulkBuildLlmRankings(
   emit: (event: EvalEvent) => void = () => {},
   documentIds?: string[],
+  shouldStop: ShouldStop = NEVER_STOP,
 ): Promise<{ built: number; skippedNoAggregate: number; skippedCached: number }> {
   const t0 = performance.now();
   const questions = await allLabeledQuestions(documentIds);
@@ -651,6 +663,9 @@ export async function bulkBuildLlmRankings(
   let nextIndex = 0;
   const worker = async () => {
     for (let i = nextIndex++; i < pending.length; i = nextIndex++) {
+      // Checkpoint: between questions, i.e. between paid LLM calls — the whole
+      // point of cancelling this particular run.
+      if (shouldStop()) break;
       const q = pending[i];
       let ok = true;
       let error: string | undefined;
@@ -687,6 +702,7 @@ export async function bulkBuildLlmRankings(
   );
   emit({
     type: "done",
+    cancelled: shouldStop(),
     generated: 0,
     scored: 0,
     recall: summary.recall,

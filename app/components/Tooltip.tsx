@@ -8,17 +8,21 @@
 // ---------------------------------------------------------------------------
 import type { ReactNode } from "react";
 
+// `className` is for sizing the trigger inside a flex row — a truncating label
+// needs `min-w-0 flex-1` on this span, not just on the text inside it.
 export function Tooltip({
   text,
   align = "center",
+  className = "",
   children,
 }: {
   text: string;
   align?: "center" | "left" | "right";
+  className?: string;
   children: ReactNode;
 }) {
   return (
-    <span className="group relative inline-flex cursor-help">
+    <span className={`group relative inline-flex cursor-help ${className}`}>
       {children}
       <span
         className={`pointer-events-none absolute top-full z-30 mt-1 w-max max-w-72 whitespace-pre-line rounded-md border border-zinc-200 bg-white px-2.5 py-1.5 text-left text-xs font-normal normal-case tracking-normal text-zinc-700 opacity-0 shadow-lg transition-opacity duration-100 group-hover:opacity-100 group-hover:delay-150 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 ${

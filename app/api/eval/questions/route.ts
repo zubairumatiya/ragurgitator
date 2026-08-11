@@ -3,7 +3,7 @@
 //
 // Add a hand-written eval question labeled to a specific chunk (under the active
 // config). Body: { chunkId: string, question: string }. The new question is
-// unscored until the next "Process new chunks" / "Re-score all". Backs the
+// unscored until the next "Score pending" / "Re-score all". Backs the
 // "Add a question" form on each chunk group in /eval.
 // ---------------------------------------------------------------------------
 import { z } from "zod";

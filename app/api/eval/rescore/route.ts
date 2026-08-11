@@ -26,9 +26,9 @@ export async function POST(request: Request) {
       : undefined;
 
   return withRequestConfig(request, async () =>
-    ndjsonStream<EvalEvent>(async (send) => {
+    ndjsonStream<EvalEvent>(async (send, shouldStop) => {
       try {
-        await rescoreAllQuestions(send, documentIds);
+        await rescoreAllQuestions(send, documentIds, shouldStop);
       } catch (err) {
         send(streamError(err, "Re-scoring failed."));
       }

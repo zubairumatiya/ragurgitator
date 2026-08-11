@@ -213,7 +213,54 @@ export async function updateBatchJob(
   return rows.length > 0 ? toJob(rows[0]) : null;
 }
 
-const TERMINAL = fragment`('applied', 'failed', 'canceled', 'expired')`;
+// How long a row may sit in `submitting` before the sweep below calls it dead.
+// The state is meant to last one provider create() call — seconds, or tens of
+// seconds for an OpenAI file upload. Anything past this is not slow, it is a
+// submit whose process went away.
+const STALE_SUBMIT_MINUTES = 15;
+
+// Fail rows stranded in `submitting`, and return how many.
+//
+// THE STATE HAS NO OTHER EXIT. submitBatch writes the row, submits, then patches
+// it to in_progress; a submit that THROWS is caught and marked failed. But a
+// process that dies mid-submit (deploy, crash, platform timeout) marks nothing,
+// and `submitting` is excluded from both listActiveJobs and isPollable — so the
+// row is never looked at again, never terminal, and sits in the panel forever
+// with no action that does anything. This is the sweep the comment on
+// listActiveJobs has always promised.
+//
+// `provider_batch_id is null` is the safety rail, not decoration: a row that
+// somehow holds a provider id is a REAL batch we are being charged for, and
+// failing it locally would orphan it. Those are left alone deliberately.
+//
+// The honest gap, stated in the error text because we cannot resolve it here:
+// if the crash landed between the provider's create() returning and our patch,
+// the batch IS running on the provider under an id we never stored. Nothing
+// local can recover that id, so the user is told to check the provider console
+// rather than being quietly told the work never happened.
+//
+// Sweeping a submit that was merely very slow is self-healing rather than
+// destructive: when it does return, submitBatch's patch writes the real
+// provider_batch_id and status in_progress straight over the failed row.
+export async function failStaleSubmittingJobs(): Promise<number> {
+  const rows = await sql<{ id: string }[]>`
+    update batch_jobs
+       set status = 'failed',
+           error = 'Submit never completed — the process handling it went away. '
+                || 'If it had already reached the provider, the batch may still '
+                || 'be running there under an id we never recorded; check the '
+                || 'provider console before resubmitting.',
+           updated_at = now()
+     where user_id = ${activeUserId()}
+       and status = 'submitting'
+       and provider_batch_id is null
+       and created_at < now() - ${`${STALE_SUBMIT_MINUTES} minutes`}::interval
+    returning id
+  `;
+  return rows.length;
+}
+
+const TERMINAL = fragment`('applied', 'failed', 'cancelled', 'expired')`;
 
 // Newest-first, for the signed-in user — backs the status panel. "Account-wide"
 // now means one user's jobs across their configs, not the whole table. Terminal
@@ -229,12 +276,14 @@ export async function listBatchJobs(limit = 100): Promise<BatchJob[]> {
 }
 
 // Jobs the orchestrator still has work to do on: provider-side unfinished
-// (in_progress / canceling) or finished-but-unapplied (completed). Excludes the
-// transient `submitting` (a crashed submit is swept separately) and terminals.
+// (in_progress / cancelling) or finished-but-unapplied (completed). Excludes the
+// transient `submitting` — there is nothing to poll a provider for until we hold
+// a provider_batch_id — and the terminals. A submit that crashed before it got
+// one is swept by failStaleSubmittingJobs above, which pollAndApply runs first.
 export async function listActiveJobs(): Promise<BatchJob[]> {
   const rows = await sql<BatchJobRow[]>`
     select ${JOB_COLUMNS} from batch_jobs
-    where status in ('in_progress', 'completed', 'canceling')
+    where status in ('in_progress', 'completed', 'cancelling')
       and user_id = ${activeUserId()}
     order by created_at asc
   `;

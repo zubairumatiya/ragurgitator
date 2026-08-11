@@ -14,6 +14,7 @@
 import { withConfig, resolveConfig } from "@/lib/rag/activeConfig";
 import {
   createBatchJob,
+  failStaleSubmittingJobs,
   getBatchJob,
   listActiveJobs,
   listBatchJobs,
@@ -74,12 +75,12 @@ export async function advanceJob(job: BatchJob): Promise<BatchJob> {
   let current = job;
 
   // Refresh provider status while still running / winding down a cancel.
-  if (job.status === "in_progress" || job.status === "canceling") {
+  if (job.status === "in_progress" || job.status === "cancelling") {
     const st = await adapter.poll(job.providerBatchId);
     // A cancel that the provider reports as "ended" is a cancellation for us —
     // don't fall through and apply a batch the user asked to stop.
     let next = st.status;
-    if (job.status === "canceling" && next === "completed") next = "canceled";
+    if (job.status === "cancelling" && next === "completed") next = "cancelled";
     current =
       (await updateBatchJob(job.id, {
         status: next,
@@ -92,7 +93,7 @@ export async function advanceJob(job: BatchJob): Promise<BatchJob> {
   }
 
   if (current.status === "completed") return applyJob(current);
-  if (current.status === "canceled" || current.status === "failed" || current.status === "expired") {
+  if (current.status === "cancelled" || current.status === "failed" || current.status === "expired") {
     return maybeNotify(current);
   }
   return current;
@@ -139,7 +140,22 @@ async function maybeNotify(job: BatchJob): Promise<BatchJob> {
 
 // The panel's poll / "Check now": advance every active job, then return the full
 // (newest-first) list for the UI. One slow/failed job never blocks the rest.
+//
+// The sweep goes first and is deliberately part of the same tick rather than a
+// mechanism of its own: `submitting` is the one state nothing else can move, so
+// without it a crashed submit is stranded in the panel permanently. It only
+// touches rows old enough to be dead and holding no provider batch — see
+// failStaleSubmittingJobs. Best-effort: a failed sweep must not cost us the
+// poll, which is the part that applies finished work.
 export async function pollAndApply(): Promise<BatchJob[]> {
+  try {
+    const swept = await failStaleSubmittingJobs();
+    if (swept > 0) {
+      console.warn(`[batch:orchestrator] failed ${swept} stranded submitting job(s)`);
+    }
+  } catch (e) {
+    console.warn(`[batch:orchestrator] stale-submit sweep failed: ${msg(e)}`);
+  }
   const active = await listActiveJobs();
   for (const job of active) {
     try {
@@ -151,10 +167,15 @@ export async function pollAndApply(): Promise<BatchJob[]> {
   return listBatchJobs();
 }
 
+// Cancel is a message to the PROVIDER, so it needs a provider_batch_id — which
+// is exactly why `submitting` is not cancellable and isCancelable (lib/batch/
+// types) must keep agreeing with this guard. When the two disagreed, the panel
+// drew a Cancel button on submitting rows that fell straight through this line
+// and did nothing.
 export async function cancelJob(id: string): Promise<BatchJob | null> {
   const job = await getBatchJob(id);
   if (!job) return null;
   if (!job.providerBatchId || job.status !== "in_progress") return job;
   await adapterFor(job.provider).cancel(job.providerBatchId);
-  return updateBatchJob(id, { status: "canceling" });
+  return updateBatchJob(id, { status: "cancelling" });
 }

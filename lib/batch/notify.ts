@@ -40,13 +40,13 @@ export function emailConfigured(): boolean {
 function body(job: BatchJob): { subject: string; html: string } {
   const label = JOB_LABELS[job.kind];
   const failed = job.status === "failed" || job.status === "expired";
-  const canceled = job.status === "canceled";
-  const verb = failed ? "failed" : canceled ? "was canceled" : "is done";
+  const cancelled = job.status === "cancelled";
+  const verb = failed ? "failed" : cancelled ? "was cancelled" : "is done";
   const subject = `Your ${label} batch ${verb}`;
   const line = failed
     ? `The batch ended in an error: ${job.error ?? "unknown error"}.`
-    : canceled
-      ? `You canceled this batch. ${job.appliedCount} result(s) were still applied.`
+    : cancelled
+      ? `You cancelled this batch. ${job.appliedCount} result(s) were still applied.`
       : `${job.appliedCount} of ${job.requestCount} result(s) were applied` +
         (job.erroredCount > 0 ? `, ${job.erroredCount} errored.` : ".");
   const html =

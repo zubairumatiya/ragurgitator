@@ -115,6 +115,16 @@ test("LEVERS: every lever id has metadata, so no saving is dropped on read", () 
     assert.ok(["exact", "estimate"].includes(meta.basis), `${id} basis`);
   }
   assert.ok(LEVERS.eval_embed_reuse, "eval_embed_reuse must be registered to be reportable");
+  assert.ok(LEVERS.question_reuse, "question_reuse must be registered to be reportable");
+});
+
+test("LEVERS: question_reuse is realized and estimate-based", () => {
+  // Realized, not structural: it sits behind the Savings toggle, so its
+  // counterfactual is this same config with reuse switched off. Estimate,
+  // because the banked usage is the generating call's real tokens split across
+  // the N questions that call returned.
+  assert.equal(LEVERS.question_reuse.category, "realized");
+  assert.equal(LEVERS.question_reuse.basis, "estimate");
 });
 
 test("LEVERS: eval_embed_reuse is structural and estimate-based", () => {

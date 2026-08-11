@@ -175,6 +175,9 @@ export async function getRetrievedOrder(questionId: string): Promise<string[]> {
     join document_embeddings de on de.id = l.document_embedding_id
     where l.eval_question_id = ${questionId}
       and de.config_id = ${activeConfig().id}
+      -- Never a shadow baseline row (0057): nDCG grades the retrieval the
+      -- dashboard shows, not the override-free one measured beside it.
+      and not res.is_baseline
     order by (res.retrieval_state is not distinct from ${currentState}) desc,
              res.scored_at desc
     limit 1

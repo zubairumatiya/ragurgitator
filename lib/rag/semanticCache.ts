@@ -19,7 +19,7 @@ import { isolated, sql, toJsonb } from "@/lib/db";
 import { detached } from "@/lib/detached";
 import { activeConfig, type ResolvedConfig } from "@/lib/rag/activeConfig";
 import { getBatchSavings } from "@/lib/rag/batchStore";
-import { getConfig } from "@/lib/rag/configStore";
+import { defaultLabel, getConfig } from "@/lib/rag/configStore";
 import { embedQueryCached } from "@/lib/rag/embedCache";
 import { EMBEDDING_MODELS } from "@/lib/rag/embeddingModels";
 import type { EfficacyResult } from "@/lib/rag/efficacyGate";
@@ -682,6 +682,93 @@ export async function backfillKeyModel(
     return out;
   } catch (err) {
     if (isMissingTable(err)) return empty;
+    throw err;
+  }
+}
+
+// --- the "My cache" listing ------------------------------------------------
+
+// One row of the /cache page: a question this user has had answered, and the
+// answer banked for it.
+export type CacheEntrySummary = {
+  id: string;
+  question: string;
+  answer: string;
+  hitCount: number;
+  configLabel: string;
+  keyModel: string;
+  createdAt: number;
+  lastHitAt: number | null;
+};
+
+// Cap the listing. The table has no per-user bound — it grows with every
+// distinct question asked under every config — and this page is a "what has my
+// cache learned" browse, not an export, so an unbounded scan buys nothing.
+const LIST_LIMIT = 500;
+
+// Every cached answer this user owns, across all their configs, most-served
+// first. Scoped by joining configs: semantic_cache has no user_id of its own
+// (it inherits ownership through config_id — see 0049/0051), so the join IS the
+// tenant filter, not a convenience for the label.
+//
+// Deliberately reads `result->>'answer'` rather than the whole `result` blob:
+// the jsonb also holds `sources`, a full RetrievedChunk[] per row, which this
+// page never renders. Selecting it would pull megabytes of chunk text out of
+// the DB to display a truncated preview column.
+//
+// Same best-effort contract as the rest of this file: a missing table (0031 not
+// applied) lists nothing rather than throwing, so the page renders its empty
+// state instead of a 500.
+export async function listCacheEntries(): Promise<CacheEntrySummary[]> {
+  try {
+    const rows = await sql<
+      {
+        id: string;
+        query_text: string;
+        answer: string | null;
+        hit_count: number;
+        name: string | null;
+        base_model: string;
+        chunk_size: number;
+        chunk_overlap: number;
+        embedding_model: string;
+        created_at: Date;
+        last_hit_at: Date | null;
+      }[]
+    >`
+      select
+        sc.id,
+        sc.query_text,
+        sc.result->>'answer' as answer,
+        sc.hit_count,
+        c.name,
+        c.base_model,
+        c.chunk_size,
+        c.chunk_overlap,
+        sc.embedding_model,
+        sc.created_at,
+        sc.last_hit_at
+      from semantic_cache sc
+      join configs c on c.id = sc.config_id
+      where c.user_id = ${activeUserId()}
+      order by sc.hit_count desc, sc.created_at desc
+      limit ${LIST_LIMIT}
+    `;
+    return rows.map((r) => ({
+      id: r.id,
+      question: r.query_text,
+      // `answer` is null only if a row's jsonb predates the current shape or was
+      // hand-written; the cell renders empty rather than the string "null".
+      answer: r.answer ?? "",
+      hitCount: r.hit_count,
+      configLabel:
+        r.name ?? defaultLabel(r.base_model, r.chunk_size, r.chunk_overlap),
+      keyModel: r.embedding_model,
+      createdAt: r.created_at.getTime(),
+      lastHitAt: r.last_hit_at?.getTime() ?? null,
+    }));
+  } catch (err) {
+    if (isMissingTable(err)) return [];
     throw err;
   }
 }

@@ -2,8 +2,8 @@
 // UI: the left-hand, togglable sidebar (Client Component), rendered by the root
 // layout so it frames every page (config tabs, Appraise, the corpora page). It
 // holds the signed-in account row, then collapsible sections — "My corpora"
-// (saved document sets) and "My configs" (experiments/tabs) — with sign-out
-// pinned to the bottom.
+// (saved document sets), "My configs" (experiments/tabs) and "My cache" — with
+// sign-out pinned to the bottom.
 //
 // Self-fetching (GET /api/corpora?includeEmpty=1, GET /api/configs) rather than
 // server-fed: the root layout must not read the DB (it also renders build-time
@@ -235,6 +235,21 @@ export function Sidebar() {
             </Link>
           );
         })}
+      </Section>
+
+      {/* A Section with a single row today. The app has three distinct caches
+          (semantic answers, embeddings, generated questions) and only the first
+          has a page, so the header is the slot the other two land in rather
+          than a heading invented for one link. */}
+      <Section id="cache" title="My cache">
+        <Link
+          href="/cache"
+          title="Semantic cache — every question/answer pair it has banked"
+          aria-current={pathname === "/cache" ? "page" : undefined}
+          className={rowClass(pathname === "/cache")}
+        >
+          <span className="truncate">Semantic cache</span>
+        </Link>
       </Section>
 
       <SignOutFooter />

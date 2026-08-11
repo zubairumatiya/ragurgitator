@@ -13,7 +13,8 @@ import {
 
 test("mapAnthropicStatus: ended => completed (results fetchable)", () => {
   assert.equal(mapAnthropicStatus("in_progress"), "in_progress");
-  assert.equal(mapAnthropicStatus("canceling"), "canceling");
+  // Anthropic spells it single-l; we spell it double-l. This IS the boundary.
+  assert.equal(mapAnthropicStatus("canceling"), "cancelling");
   assert.equal(mapAnthropicStatus("ended"), "completed");
 });
 
@@ -22,8 +23,8 @@ test("mapVoyageStatus: running-family collapses; terminals map through; unknown 
     assert.equal(mapVoyageStatus(s), "in_progress");
   }
   assert.equal(mapVoyageStatus("completed"), "completed");
-  assert.equal(mapVoyageStatus("cancelling"), "canceling");
-  assert.equal(mapVoyageStatus("cancelled"), "canceled");
+  assert.equal(mapVoyageStatus("cancelling"), "cancelling");
+  assert.equal(mapVoyageStatus("cancelled"), "cancelled");
   assert.equal(mapVoyageStatus("expired"), "expired");
   assert.equal(mapVoyageStatus("failed"), "failed");
   // An unrecognized status must NOT terminate a live batch.
@@ -66,8 +67,8 @@ test("mapOpenAiStatus: finalizing is NOT completed — results aren't fetchable 
   }
   assert.equal(mapOpenAiStatus("completed"), "completed");
   // Their spelling is double-l, ours single.
-  assert.equal(mapOpenAiStatus("cancelling"), "canceling");
-  assert.equal(mapOpenAiStatus("cancelled"), "canceled");
+  assert.equal(mapOpenAiStatus("cancelling"), "cancelling");
+  assert.equal(mapOpenAiStatus("cancelled"), "cancelled");
   assert.equal(mapOpenAiStatus("expired"), "expired");
   assert.equal(mapOpenAiStatus("failed"), "failed");
   // As with Voyage: an unrecognized status must NOT terminate a live batch.

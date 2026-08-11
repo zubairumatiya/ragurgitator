@@ -58,37 +58,66 @@
 //
 // The consequence to keep in mind: an ingest holds one pooled connection for the
 // entire ingest, not for each query in it.
+//
+// CANCELLATION. Detachment is also why refreshing the page does not stop a run:
+// enqueue throws into the swallow below and the producer carries on spending. So
+// every stream registers itself in lib/http/cancelRegistry.ts, announces its id
+// as the first line (`run-started`), and hands `run` a `shouldStop` predicate to
+// poll between units of work. POST /api/eval/cancel flips the flag.
+//
+// `shouldStop` is a FLAG, not an abort signal: the producer's transaction commits
+// when the stream ends, so a run that throws its way out loses everything it
+// generated. Loops break and return normally. See cancelRegistry.ts.
+//
+// The `run-started` line goes out to EVERY stream, including the ones whose event
+// unions don't mention it (ingest, clusters, autotune). Their client consumers
+// switch on `type` and ignore what they don't know, so the extra line is inert
+// there — check that before adding another consumer.
 // ---------------------------------------------------------------------------
 import { AsyncResource } from "node:async_hooks";
 
 import { activeUser, withUser } from "@/lib/auth/userScope";
+import { registerRun, isCancelled, unregisterRun } from "@/lib/http/cancelRegistry";
 import { runOutsideUserTransaction } from "@/lib/db";
 import { runOutsideDetachedQueue } from "@/lib/detached";
 
+// The first line of every NDJSON stream, carrying the id a cancel request needs.
+// Not part of any route's event union — see the note above.
+export type RunStartedEvent = { type: "run-started"; runId: string };
+
 export function ndjsonStream<E>(
-  run: (send: (event: E) => void) => Promise<void>,
+  run: (send: (event: E) => void, shouldStop: () => boolean) => Promise<void>,
 ): Response {
   // Read while the caller's scope is still current; the producer runs later.
   const user = activeUser();
+  // Registered here rather than inside start(), so the run is cancellable from
+  // the moment the client has its id — there is no window where a cancel that
+  // arrives "too early" is silently dropped.
+  const runId = registerRun(user.id);
   // Bind the re-entry, not `run` itself — see the ordering note above.
   const boundRun = AsyncResource.bind((send: (event: E) => void) =>
     runOutsideDetachedQueue(() =>
-      runOutsideUserTransaction(() => withUser(user, () => run(send))),
+      runOutsideUserTransaction(() =>
+        withUser(user, () => run(send, () => isCancelled(runId))),
+      ),
     ),
   );
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const send = (event: E) => {
+      const emit = (event: unknown) => {
         try {
           controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
         } catch {
           // Client disconnected mid-stream; nothing left to do.
         }
       };
+      const send = (event: E) => emit(event);
+      emit({ type: "run-started", runId } satisfies RunStartedEvent);
       try {
         await boundRun(send);
       } finally {
+        unregisterRun(runId);
         try {
           controller.close();
         } catch {

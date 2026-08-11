@@ -223,8 +223,8 @@ export function coerceBatchSavings(raw: unknown): BatchSavings {
 //   completed   — provider done, results fetchable, NOT yet written back
 //   applied     — results written into the app's tables (terminal, success)
 //   failed      — submit failed, or provider/apply errored (terminal)
-//   canceling   — user requested cancel, provider winding down
-//   canceled    — cancel finished (terminal)
+//   cancelling  — user requested cancel, provider winding down
+//   cancelled   — cancel finished (terminal)
 //   expired     — provider dropped the batch past its window (terminal)
 export const BATCH_STATUSES = [
   "submitting",
@@ -232,8 +232,8 @@ export const BATCH_STATUSES = [
   "completed",
   "applied",
   "failed",
-  "canceling",
-  "canceled",
+  "cancelling",
+  "cancelled",
   "expired",
 ] as const;
 export type BatchStatus = (typeof BATCH_STATUSES)[number];
@@ -241,7 +241,7 @@ export type BatchStatus = (typeof BATCH_STATUSES)[number];
 export const TERMINAL_STATUSES: readonly BatchStatus[] = [
   "applied",
   "failed",
-  "canceled",
+  "cancelled",
   "expired",
 ];
 export function isTerminal(status: BatchStatus): boolean {
@@ -249,10 +249,17 @@ export function isTerminal(status: BatchStatus): boolean {
 }
 // Non-terminal AND not the transient submitting state = worth polling a provider for.
 export function isPollable(status: BatchStatus): boolean {
-  return status === "in_progress" || status === "completed" || status === "canceling";
+  return status === "in_progress" || status === "completed" || status === "cancelling";
 }
+// `in_progress` ONLY, and `submitting` is the interesting exclusion: cancelling
+// means telling the PROVIDER to stop, and a submitting row has no
+// provider_batch_id to name — cancelJob refuses it for exactly that reason. This
+// predicate gates the panel's Cancel button, so including submitting rendered a
+// button whose click did nothing at all: no provider call, no status change, no
+// error. A stranded submit's exit is failStaleSubmittingJobs (lib/rag/batchStore),
+// not a cancel it cannot perform.
 export function isCancelable(status: BatchStatus): boolean {
-  return status === "in_progress" || status === "submitting";
+  return status === "in_progress";
 }
 
 // --- provider I/O shapes ---------------------------------------------------
@@ -287,7 +294,7 @@ export function batchCustomId(...parts: (string | number)[]): string {
 // output; null on a non-success outcome.
 export type BatchResultRow = {
   customId: string;
-  outcome: "succeeded" | "errored" | "canceled" | "expired";
+  outcome: "succeeded" | "errored" | "cancelled" | "expired";
   body: unknown | null;
   error?: string;
 };

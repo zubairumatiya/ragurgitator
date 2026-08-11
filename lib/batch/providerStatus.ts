@@ -10,9 +10,13 @@ import type { BatchResultRow, BatchStatus } from "./types";
 
 // Anthropic: processing_status is a 3-state machine; "ended" means every request
 // settled and results are fetchable.
+//
+// NOTE THE SPELLING — Anthropic's value is single-l "canceling" (US) and ours is
+// double-l "cancelling"; this function is the boundary between them. The input
+// literal is THEIR contract, so it must not be respelled to match ours.
 export function mapAnthropicStatus(s: "in_progress" | "canceling" | "ended"): BatchStatus {
   if (s === "in_progress") return "in_progress";
-  if (s === "canceling") return "canceling";
+  if (s === "canceling") return "cancelling";
   return "completed";
 }
 
@@ -28,9 +32,9 @@ export function mapVoyageStatus(s: string): BatchStatus {
     case "completed":
       return "completed";
     case "cancelling":
-      return "canceling";
+      return "cancelling";
     case "cancelled":
-      return "canceled";
+      return "cancelled";
     case "expired":
       return "expired";
     case "failed":
@@ -57,9 +61,9 @@ export function mapOpenAiStatus(s: string): BatchStatus {
     case "completed":
       return "completed";
     case "cancelling":
-      return "canceling"; // note the spelling: theirs is double-l, ours single
+      return "cancelling"; // OpenAI/Voyage spell it double-l too — Anthropic doesn't
     case "cancelled":
-      return "canceled";
+      return "cancelled";
     case "expired":
       return "expired";
     case "failed":

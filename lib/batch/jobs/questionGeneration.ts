@@ -14,11 +14,19 @@
 // pair has against the target the batch was built for (the same comparison
 // chunksNeedingQuestionsByDifficulty made at build time), so a re-poll, retry, or
 // a competing inline generation can't push a chunk past its target.
+//
+// RESULTS ARE BANKED, NOT SERVED. apply writes every question it lands into
+// question_cache (0055) so a later config can pick it up for free, but build
+// never serves from that cache: reuse is a deliberate act — "Bulk actions → Add
+// question → Add cached" — so a batch submitted here buys exactly what was
+// asked for. Clear the cache first if you want the free half; the button is
+// idempotent and takes it without spending anything.
 // ---------------------------------------------------------------------------
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import type { Difficulty } from "@/lib/rag/eval";
-import { parseQuestions, questionRequestParams } from "@/lib/rag/eval";
+import { parseQuestions, questionRequestParams, QUESTION_PROMPT_VERSION } from "@/lib/rag/eval";
+import { bankedSlotCounts, bankQuestions, hashChunkText } from "@/lib/rag/questionCache";
 import { chunksNeedingQuestionsByDifficulty, insertQuestionWithLabel } from "@/lib/rag/evalStore";
 import { bankLlmBatchSaving } from "@/lib/batch/savings";
 import { llmProviderOf } from "@/lib/llm/llmModels";
@@ -30,6 +38,10 @@ export type QuestionGenScope = {
   documentIds?: string[];
   // Questions per chunk per difficulty, aligned with `difficulties` (default 1).
   counts?: number[];
+  // The Add panel's "Top up" checkbox. Must ride along on the job payload: a
+  // batched Add that lost it would build the wrong gap set entirely — filling
+  // chunks TO N instead of adding N to each, or the reverse.
+  topUp?: boolean;
 };
 
 type Gap = {
@@ -39,8 +51,12 @@ type Gap = {
   documentEmbeddingId: string;
   difficulty: string;
   // How many questions this (chunk, difficulty) pair should end up with — the
-  // ceiling apply refuses to insert past.
+  // ceiling apply refuses to insert past. Computed at build time as
+  // have + needed, so it is right in both top-up and absolute mode.
   target: number;
+  // sha256 of the chunk text, so apply can bank the result into question_cache
+  // without carrying every chunk's full text on the job row's jsonb.
+  textHash: string;
 };
 type QuestionGenInput = { generatorModel: string; gaps: Gap[] };
 
@@ -64,16 +80,20 @@ async function gapStillOpen(gap: Gap): Promise<boolean> {
 
 export const questionGenerationHandler: JobHandler = {
   async build(scope) {
-    const { difficulties, documentIds, counts } = scope as QuestionGenScope;
+    const { difficulties, documentIds, counts, topUp } = scope as QuestionGenScope;
     if (!difficulties || difficulties.length === 0) return null;
-    const gaps = await chunksNeedingQuestionsByDifficulty(difficulties, documentIds, counts);
+    // No cache serve here: reuse is an explicit Bulk-actions button ("Add
+    // cached"), so a batch submitted from this path buys exactly what was asked
+    // for. Results still get BANKED in apply below.
+    const gaps = await chunksNeedingQuestionsByDifficulty(
+      difficulties,
+      documentIds,
+      counts,
+      topUp ?? false,
+    );
     if (gaps.length === 0) return null;
 
     const model = activeConfig().llmModel;
-    // The absolute per-(chunk, difficulty) ceiling this batch was built for —
-    // apply re-checks against it, so a slot filled meanwhile is dropped.
-    const targetFor = (difficulty: string) =>
-      Math.max(1, Math.trunc(counts?.[difficulties.indexOf(difficulty as Difficulty)] ?? 1));
     const built: Gap[] = [];
     const requests: BuiltBatch["requests"] = [];
     for (const g of gaps) {
@@ -88,7 +108,12 @@ export const questionGenerationHandler: JobHandler = {
           documentId: g.documentId,
           documentEmbeddingId: g.documentEmbeddingId,
           difficulty: g.difficulty,
-          target: targetFor(g.difficulty),
+          // The ceiling apply refuses to insert past: what the pair held at
+          // build time plus what this batch was built to add. In top-up mode
+          // that is exactly the requested target; in absolute mode it is "N more
+          // than these", which a bare target could not express.
+          target: g.have + g.needed,
+          textHash: hashChunkText(g.text),
         });
         requests.push({
           customId,
@@ -112,22 +137,79 @@ export const questionGenerationHandler: JobHandler = {
     const { generatorModel, gaps } = input as QuestionGenInput;
     const byId = new Map<string, BatchResultRow>(results.map((r) => [r.customId, r]));
     let applied = 0;
+    // Grouped by passage so the cache write is one counts query plus one insert,
+    // rather than a round trip per result.
+    const toBank = new Map<
+      string,
+      {
+        textHash: string;
+        difficulty: string;
+        questions: { question: string; expectedAnswer: string | null }[];
+        inputTokens: number;
+        outputTokens: number;
+      }
+    >();
     for (const gap of gaps) {
       const res = byId.get(gap.customId);
       if (!res || res.outcome !== "succeeded" || !res.body) continue;
       const [q] = parseQuestions(res.body as MessageBody, 1);
       if (!q || !q.question.trim()) continue;
       if (!(await gapStillOpen(gap))) continue; // idempotency guard
+      const question = q.question.trim();
+      const expectedAnswer = q.expected_answer?.trim() || null;
       await insertQuestionWithLabel({
         documentId: gap.documentId,
         documentEmbeddingId: gap.documentEmbeddingId,
         sourceChunkId: gap.chunkId,
-        question: q.question.trim(),
-        expectedAnswer: q.expected_answer?.trim() || null,
+        question,
+        expectedAnswer,
         generatorModel,
         difficulty: gap.difficulty,
       });
       applied += 1;
+
+      // Bank it, so a batch-generated corpus feeds the cache exactly as an
+      // inline one does — otherwise which path you happened to use would
+      // silently decide whether the NEXT config pays.
+      const key = `${gap.textHash} ${gap.difficulty}`;
+      const entry = toBank.get(key) ?? {
+        textHash: gap.textHash,
+        difficulty: gap.difficulty,
+        questions: [],
+        inputTokens: 0,
+        outputTokens: 0,
+      };
+      entry.questions.push({ question, expectedAnswer });
+      const usage = (res.body as { usage?: { input_tokens?: number; output_tokens?: number } })
+        .usage;
+      entry.inputTokens += usage?.input_tokens ?? 0;
+      entry.outputTokens += usage?.output_tokens ?? 0;
+      toBank.set(key, entry);
+    }
+
+    if (toBank.size > 0) {
+      const entries = [...toBank.values()];
+      // Gaps carry a textHash only from builds that postdate the cache; an older
+      // job row replayed after deploy has undefined and is skipped rather than
+      // banked under the string "undefined".
+      const bankable = entries.filter((e) => typeof e.textHash === "string" && e.textHash);
+      const counts = await bankedSlotCounts(
+        generatorModel,
+        QUESTION_PROMPT_VERSION,
+        bankable.map((e) => ({ textHash: e.textHash, difficulty: e.difficulty })),
+      );
+      for (const e of bankable) {
+        await bankQuestions({
+          textHash: e.textHash,
+          difficulty: e.difficulty,
+          model: generatorModel,
+          promptVersion: QUESTION_PROMPT_VERSION,
+          startSlot: counts.get(`${e.textHash} ${e.difficulty}`) ?? 0,
+          questions: e.questions,
+          inputTokens: e.inputTokens,
+          outputTokens: e.outputTokens,
+        });
+      }
     }
     await bankLlmBatchSaving(results);
     return applied;

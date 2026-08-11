@@ -32,6 +32,7 @@
 // real metrics) is the arbiter either way — it also catches override state
 // drifting between a chunk's search and its apply.
 // ---------------------------------------------------------------------------
+import { NEVER_STOP, type ShouldStop } from "@/lib/http/cancelRegistry";
 import type { StreamErrorEvent } from "@/lib/http/missingKey";
 import { autotuneModelLadder } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
@@ -149,10 +150,17 @@ export type AutotuneEvent =
       mrr: number | null;
       ndcg: number | null;
     }
+  // The run's id, first line of every NDJSON stream (emitted by ndjsonStream
+  // itself, not by the engine) — what POST /api/eval/cancel needs to reach it.
+  | { type: "run-started"; runId: string }
   | { type: "rescore-start"; total: number }
   | { type: "rescore-progress"; done: number; total: number }
   | {
       type: "autotune-done";
+      // Cancel was pressed: the chunk search stopped early, exactly like
+      // early-stop does. Everything applied before that point is kept, and the
+      // run still re-scores, snapshots, and reports below.
+      cancelled?: boolean;
       targeted: number;
       resolved: number;
       unresolved: number;
@@ -578,7 +586,14 @@ export async function applyAutotuneCandidate(
 }
 
 // The run itself — driven by the streamed POST /api/eval/autotune route.
-export async function runAutotune(emit: Emit = () => {}): Promise<void> {
+// `shouldStop` is polled between chunks, the same seam early-stop already
+// breaks at: a cancelled run keeps every override it confirmed and still
+// finishes its re-score and outcome accounting. It is a flag, never an
+// exception — see lib/http/cancelRegistry.ts.
+export async function runAutotune(
+  emit: Emit = () => {},
+  shouldStop: ShouldStop = NEVER_STOP,
+): Promise<void> {
   const t0 = performance.now();
   // Per-phase wall-clock accounting on top of the total (durationMs): where the
   // run's time actually goes, so an optimization can be aimed before it's built.
@@ -750,6 +765,9 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
 
   let chunkIndex = 0;
   for (const [chunkId, chunkTargets] of orderedChunks) {
+    // Checkpoint: between chunks, i.e. between searches. Break, don't throw —
+    // the run's transaction commits, so the overrides confirmed so far stay.
+    if (shouldStop()) break;
     if (barsMet) {
       emit({ type: "early-stop", skippedChunks: orderedChunks.length - chunkIndex, ...latestRates });
       break;
@@ -1125,6 +1143,7 @@ export async function runAutotune(emit: Emit = () => {}): Promise<void> {
   );
   emit({
     type: "autotune-done",
+    cancelled: shouldStop(),
     targeted: targets.length,
     resolved,
     unresolved: targets.length - resolved,

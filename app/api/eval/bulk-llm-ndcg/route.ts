@@ -34,9 +34,9 @@ export async function POST(request: Request) {
   const { documentIds } = body.data;
 
   return withRequestConfig(request, async () =>
-    ndjsonStream<EvalEvent>(async (send) => {
+    ndjsonStream<EvalEvent>(async (send, shouldStop) => {
       try {
-        await bulkBuildLlmRankings(send, documentIds);
+        await bulkBuildLlmRankings(send, documentIds, shouldStop);
       } catch (err) {
         send(streamError(err, "Bulk LLM nDCG ranking failed."));
       }

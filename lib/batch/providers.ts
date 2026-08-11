@@ -109,7 +109,9 @@ const anthropicAdapter: ProviderAdapter = {
       const res = row.result;
       out.push({
         customId: row.custom_id,
-        outcome: res.type,
+        // Same spelling boundary as mapAnthropicStatus: their per-request result
+        // type is single-l "canceled", ours is double-l. Everything else agrees.
+        outcome: res.type === "canceled" ? "cancelled" : res.type,
         body: res.type === "succeeded" ? res.message : null,
         error:
           res.type === "errored"

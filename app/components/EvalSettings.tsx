@@ -1977,14 +1977,20 @@ function ChoiceRow({
   unavailable?: boolean;
   onChange: (v: BatchChoice) => void;
 }) {
+  // The label is `truncate`d — in the ~230px settings column most job names
+  // clip — so the tooltip carries the full text (with the same suffix that's
+  // on screen). `min-w-0 flex-1` on the Tooltip's inline-flex span is what
+  // keeps truncate working inside the flex row.
+  const full = `${label}${unavailable ? " (coming soon)" : ""}`;
   return (
     <label className="flex items-center justify-between gap-2 py-0.5">
-      <span
-        className={`truncate text-zinc-600 dark:text-zinc-400 ${unavailable ? "opacity-50" : ""}`}
-      >
-        {label}
-        {unavailable && " (coming soon)"}
-      </span>
+      <Tooltip text={full} align="left" className="min-w-0 flex-1">
+        <span
+          className={`min-w-0 flex-1 truncate text-zinc-600 dark:text-zinc-400 ${unavailable ? "opacity-50" : ""}`}
+        >
+          {full}
+        </span>
+      </Tooltip>
       <select
         value={value}
         disabled={unavailable}

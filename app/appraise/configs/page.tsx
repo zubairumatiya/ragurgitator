@@ -53,8 +53,8 @@ export default async function AppraiseConfigsPage() {
 
         {!anyScored && (
           <div className="rounded-lg border border-dashed border-zinc-300 p-6 text-center text-sm text-zinc-500 dark:border-zinc-700">
-            No eval runs yet. Open a config, add documents, then run{" "}
-            <strong>Process new chunks</strong> on its Eval tab — its metrics will
+            No eval runs yet. Open a config, add documents, then add questions
+            from <strong>Bulk actions</strong> on its Eval tab — its metrics will
             appear here for comparison.
           </div>
         )}

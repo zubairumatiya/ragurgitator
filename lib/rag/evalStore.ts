@@ -75,6 +75,10 @@ export type ResultInsert = {
   // post-autotune dirty screen prove the result unaffected by an override
   // change without re-retrieving. See retriever.ScreenCutoffs.
   screenCutoffs: ScreenCutoffs | null;
+  // A shadow measurement of the same question with no overrides in effect
+  // (0057), for the baseline ticker. NEVER a live result: every "latest result"
+  // read filters these out. Defaults to false.
+  isBaseline?: boolean;
 };
 
 export type QuestionDetail = {
@@ -173,6 +177,24 @@ export type ChunkRef = {
   position: number | null;
 };
 
+// The baseline comparison behind the dashboard tickers (0057).
+//
+// BOTH SIDES ARE MEASURED OVER THE SAME QUESTIONS. A baseline fills in
+// opportunistically (see scoreQuestions), so it is often partial — and a delta
+// between a 120-question live number and an 84-question baseline compares two
+// different question sets and means nothing. `questions` is the size of the
+// comparable subset, and the live figures here are that subset's, NOT the
+// headline ones.
+export type EvalBaseline = {
+  questions: number; // comparable subset size — what "vs baseline, n questions" reports
+  recall: number | null;
+  mrr: number | null;
+  ndcg: number | null;
+  liveRecall: number | null;
+  liveMrr: number | null;
+  liveNdcg: number | null;
+};
+
 export type EvalSummary = {
   // `k` stays = recallK for back-compat (run progress / explain). recallK,
   // mrrK, and ndcgK are the effective per-metric depths (A1).
@@ -207,12 +229,18 @@ export type EvalSummary = {
   // these alone, so they keep the badge lit until hand-fixed — named here (by
   // labeled chunk + kind) so the tooltip can point at them. Empty when none.
   ndcgStuckTruths: { chunk: string; kind: string }[];
+  // What the per-chunk tuning has bought (0057). Null when the config has no
+  // overrides — live IS baseline then, so there is no delta to show — and null
+  // when no question has a usable baseline measurement yet.
+  baseline: EvalBaseline | null;
   perDocument: DocumentBreakdown[];
   questions: QuestionDetail[];
   runs: RunSnapshot[];
-  // Work "Process new chunks" would actually do, so the UI can disable it when
+  // pendingScoring: questions never scored or edited since last score — the
+  // work "Score pending" would do, so the UI can disable the button when
   // there's nothing pending. pendingChunks: chunks below the per-chunk question
-  // target; pendingScoring: questions never scored or edited since last score.
+  // target at a difficulty this config has used. Reporting only since generation
+  // left that button — nothing gates on it.
   pendingChunks: number;
   pendingScoring: number;
   // Of pendingScoring, how many are stale ONLY because retrieval changed shape
@@ -239,6 +267,18 @@ export type EvalSummary = {
   // Active per-chunk overrides (Phase D badges) — empty when none.
   overrides: ChunkOverrideInfo[];
 };
+
+// The vector space a result was measured in (0057): the config's SELECTED
+// embedding model and chunk shape. Baseline rows are only comparable to live
+// rows carrying the same key — change the model or the chunk shape and the old
+// baseline is measuring something else, so it stops matching and is re-run.
+//
+// Deliberately excludes overrides: they're what the baseline is defined as the
+// absence of, and the 0022 fingerprint already tracks them.
+export function baselineKey(): string {
+  const cfg = activeConfig();
+  return `${cfg.embeddingModel}|${cfg.chunkSize}|${cfg.chunkOverlap}`;
+}
 
 // Resolve the chunks table for the active config. Returns null when nothing has
 // been ingested under this config yet (so callers can no-op cleanly).
@@ -291,6 +331,77 @@ export async function chunksNeedingQuestions(
   }));
 }
 
+// A chunk in scope together with the questions it ALREADY shows under the active
+// config — the shape the question cache needs to top a chunk up from the bank
+// without asking for a difficulty or a count.
+export type ChunkWithQuestions = {
+  chunkId: string;
+  text: string;
+  documentId: string;
+  documentEmbeddingId: string;
+  fileName: string;
+  position: number | null;
+  // Every question text currently labeled to this chunk, whatever its difficulty
+  // and whoever wrote it (generated, reused, or hand-added). The dedupe compares
+  // against this, so a hand-written question blocks its banked twin too.
+  existingQuestions: string[];
+};
+
+// Every chunk under the active config (optionally narrowed to some documents),
+// carrying the question texts it already holds. Unlike
+// chunksNeedingQuestionsByDifficulty this filters NOTHING by difficulty or
+// target: "Add cached" tops a chunk up with whatever the bank happens to hold
+// for its exact text, so the caller needs every chunk and every existing
+// question to compare against.
+export async function chunksWithQuestions(
+  documentIds?: string[],
+): Promise<ChunkWithQuestions[]> {
+  const table = await activeChunksTable();
+  if (!table) return [];
+  const docScope = documentIds && documentIds.length > 0 ? documentIds : null;
+
+  const rows = await sql<
+    {
+      id: string;
+      text: string;
+      document_id: string;
+      document_embedding_id: string;
+      file_name: string;
+      position: number | null;
+      existing: string[];
+    }[]
+  >`
+    select c.id, c.text, c.document_id, c.document_embedding_id,
+           doc.file_name, c.position,
+           coalesce(
+             array_agg(q.question) filter (where q.question is not null),
+             '{}'
+           ) as existing
+    from ${sql(table)} c
+    join document_embeddings de on de.id = c.document_embedding_id
+    join documents doc on doc.id = c.document_id
+    left join eval_labels l
+      on l.source_chunk_id = c.id
+     and l.document_embedding_id = c.document_embedding_id
+    left join eval_questions q on q.id = l.eval_question_id
+    where de.config_id = ${activeConfig().id}
+      and (${docScope}::uuid[] is null or c.document_id = any(${docScope}::uuid[]))
+    group by c.id, c.text, c.document_id, c.document_embedding_id,
+             doc.file_name, c.position
+    order by c.position
+  `;
+
+  return rows.map((r) => ({
+    chunkId: r.id,
+    text: r.text,
+    documentId: r.document_id,
+    documentEmbeddingId: r.document_embedding_id,
+    fileName: r.file_name,
+    position: r.position,
+    existingQuestions: r.existing,
+  }));
+}
+
 // One (chunk, difficulty) generation gap: a chunk under the active config that
 // is short of the requested number of questions at `difficulty`. Drives the
 // difficulty-driven generator (Phase A) — generation is "N questions per
@@ -302,25 +413,40 @@ export type ChunkDifficultyGap = {
   documentId: string;
   documentEmbeddingId: string;
   difficulty: string;
-  // How many more questions this chunk needs at this difficulty: the requested
-  // target minus what it already has. Always >= 1 (rows at target are dropped).
+  // How many questions to generate for this chunk at this difficulty. In top-up
+  // mode that's the requested target minus what the chunk already has (always
+  // >= 1 — rows at target are dropped); in absolute mode it's the requested
+  // count flat, whatever the chunk already holds.
   needed: number;
+  // What the chunk already has at this difficulty, as of the query. The batch
+  // path adds `needed` to it for the ceiling its idempotency guard re-checks
+  // against — the only way absolute mode can express "N MORE than these".
+  have: number;
   // For the live "question landed" stream event: where the dashboard should
   // file the new row (its chunk group header) without waiting for a reload.
   fileName: string;
   position: number | null;
 };
 
-// For each requested difficulty, the chunks under the active config that have
-// fewer than `targets[i]` questions at that difficulty (targets default to 1,
-// the historical "lacks one" behaviour). The cross join fans every chunk out
-// across the requested difficulties; the lateral counts what each pair already
-// has, and the filter keeps only the ones still short.
+// The generation gaps for each requested difficulty, in one of two modes.
+//
+// `topUp` (the historical behaviour): the chunks under the active config that
+// have fewer than `targets[i]` questions at that difficulty, each needing the
+// difference. Chunks already at target are skipped, so "2 easy" means "fill
+// every chunk to 2 easy" and a second click costs nothing.
+//
+// Absolute (the default): EVERY chunk in scope, each needing `targets[i]` flat
+// — "add 2 more easy to every chunk", so a second click buys two more again.
+//
+// One query either way: the cross join fans every chunk out across the requested
+// difficulties and the lateral counts what each pair already has; only the
+// `needed` expression and the drop-at-target filter differ.
 // `documentIds` (bulk-actions document scope) narrows to those documents.
 export async function chunksNeedingQuestionsByDifficulty(
   difficulties: string[],
   documentIds?: string[],
   targets?: number[],
+  topUp = false,
 ): Promise<ChunkDifficultyGap[]> {
   const table = await activeChunksTable();
   if (!table || difficulties.length === 0) return [];
@@ -337,12 +463,14 @@ export async function chunksNeedingQuestionsByDifficulty(
       document_embedding_id: string;
       difficulty: string;
       needed: number;
+      have: number;
       file_name: string;
       position: number | null;
     }[]
   >`
     select c.id, c.text, c.document_id, c.document_embedding_id, d.difficulty,
-           (d.target - e.have)::int as needed,
+           (case when ${topUp}::boolean then d.target - e.have else d.target end)::int as needed,
+           e.have,
            doc.file_name, c.position
     from ${sql(table)} c
     join document_embeddings de on de.id = c.document_embedding_id
@@ -358,7 +486,7 @@ export async function chunksNeedingQuestionsByDifficulty(
     ) e
     where de.config_id = ${activeConfig().id}
       and (${docScope}::uuid[] is null or c.document_id = any(${docScope}::uuid[]))
-      and e.have < d.target
+      and (not ${topUp}::boolean or e.have < d.target)
     order by c.position, d.difficulty
   `;
 
@@ -369,6 +497,7 @@ export async function chunksNeedingQuestionsByDifficulty(
     documentEmbeddingId: r.document_embedding_id,
     difficulty: r.difficulty,
     needed: r.needed,
+    have: r.have,
     fileName: r.file_name,
     position: r.position,
   }));
@@ -413,7 +542,7 @@ export async function insertQuestionWithLabel(args: {
 // Resolves the chunk to its document + embedding-run so the label is correct, then
 // inserts as a 'manual' question. Returns false when the chunk isn't part of the
 // active config's corpus (stale id, wrong config). Scoring happens on the next
-// "Process new chunks" / "Re-score all" like any other unscored question.
+// "Score pending" / "Re-score all" like any other unscored question.
 export async function addManualQuestion(
   chunkId: string,
   question: string,
@@ -506,6 +635,10 @@ export async function questionsNeedingScoring(): Promise<QuestionToScore[]> {
       and not exists (
         select 1 from eval_results r
         where r.eval_label_id = l.id
+          -- Shadow baseline rows (0057) are not scores of the retrieval the
+          -- user is running: counting one here would leave the question
+          -- permanently "already scored" and never really scored at all.
+          and not r.is_baseline
           and r.scored_at >= q.updated_at
           and (
             r.retrieval_state = ${currentState}
@@ -528,7 +661,7 @@ export async function questionsNeedingScoring(): Promise<QuestionToScore[]> {
 // already has a (fresh) result. Backs "Re-score all": re-running retrieval for all
 // of these against the current corpus keeps recall apples-to-apples after the corpus
 // changes (e.g. a doc was added/removed and now competes in the top-k).
-// questionsNeedingScoring() is the incremental counterpart used by "Process new chunks".
+// questionsNeedingScoring() is the incremental counterpart used by "Score pending".
 // `documentIds` (bulk-actions scope) narrows to those documents' questions;
 // null/empty = every document.
 export async function allLabeledQuestions(
@@ -712,6 +845,7 @@ export async function getQuestionExplain(
     select retrieved_ids, retrieved_scores, k, scored_at
     from eval_results
     where eval_label_id = ${label.label_id}
+      and not is_baseline
       and (${retrievalState ?? null}::text is null
            or retrieval_state = ${retrievalState ?? null})
     order by (retrieval_state is not distinct from ${preferState}) desc,
@@ -1121,6 +1255,10 @@ export type PoolChunk = {
 
 export type CorpusChunkListItem = {
   chunkId: string;
+  // The owning document's id, not just its name: nothing stops two documents
+  // sharing a file name, and the picker groups on this so same-named uploads
+  // stay separate groups.
+  documentId: string;
   fileName: string;
   position: number | null;
   preview: string;
@@ -1287,6 +1425,7 @@ export async function getModelTrialQuestions(
         r.eval_question_id, r.hit, r.found_rank, r.retrieved_ids
       from eval_results r
       join active_labels al on al.label_id = r.eval_label_id
+      where not r.is_baseline
       order by r.eval_question_id,
         (r.retrieval_state is not distinct from ${currentState}) desc,
         r.scored_at desc
@@ -1347,19 +1486,29 @@ export async function getCorpusChunkList(
   if (!table) return [];
 
   // any('{}') matches nothing, so an empty exclude list returns the whole corpus.
+  // d.id in the ordering keeps two same-named documents from interleaving —
+  // the client groups these rows by document and relies on each group's rows
+  // being contiguous.
   const rows = await sql<
-    { id: string; position: number | null; preview: string; file_name: string }[]
+    {
+      id: string;
+      position: number | null;
+      preview: string;
+      document_id: string;
+      file_name: string;
+    }[]
   >`
-    select c.id, c.position, left(c.text, 200) as preview, d.file_name
+    select c.id, c.position, left(c.text, 200) as preview, d.id as document_id, d.file_name
     from ${sql(table)} c
     join documents d on d.id = c.document_id
     join document_embeddings de on de.id = c.document_embedding_id
     where de.config_id = ${activeConfig().id}
       and not (c.id = any(${excludeIds}::uuid[]))
-    order by d.file_name, c.position
+    order by d.file_name, d.id, c.position
   `;
   return rows.map((r) => ({
     chunkId: r.id,
+    documentId: r.document_id,
     fileName: r.file_name,
     position: r.position,
     preview: r.preview,
@@ -1519,9 +1668,10 @@ async function hydrateModelTrials(
 
 export async function listModelTrials(chunkId: string): Promise<SavedModelTrial[]> {
   const rows = await sql<ModelTrialRow[]>`
-    select id, source_chunk_id, baseline_model, trial_model, kind, chunk_size,
-           chunk_overlap, piece_count, k, pool_chunk_ids,
-           question_count, hit_count, stored_hit_count, results, created_at
+    select t.id, t.source_chunk_id, t.baseline_model, t.trial_model, t.kind,
+           t.chunk_size, t.chunk_overlap, t.piece_count, t.k, t.pool_chunk_ids,
+           t.question_count, t.hit_count, t.stored_hit_count, t.results,
+           t.created_at
     from eval_model_trials t
     join document_embeddings de on de.id = t.document_embedding_id
     where t.source_chunk_id = ${chunkId}
@@ -1576,6 +1726,10 @@ export async function deleteModelTrial(id: string): Promise<boolean> {
 
 export async function insertResults(rows: ResultInsert[]): Promise<void> {
   if (rows.length === 0) return;
+  // Stamped on live and baseline rows alike (0057): the vector space a result
+  // was measured in, so a later model or chunk-shape change can be told apart
+  // from a same-space re-score.
+  const key = baselineKey();
 
   // L13: a single row needs no transaction — one INSERT is already atomic, and
   // wrapping it costs a BEGIN and a COMMIT round trip on top of the statement.
@@ -1588,12 +1742,14 @@ export async function insertResults(rows: ResultInsert[]): Promise<void> {
     await sql`
       insert into eval_results
         (eval_question_id, eval_label_id, k, hit, found_rank, retrieved_ids,
-         retrieved_scores, retrieval_state, screen_cutoffs)
+         retrieved_scores, retrieval_state, screen_cutoffs, is_baseline,
+         baseline_key)
       values
         (${r.questionId}, ${r.labelId}, ${r.k}, ${r.hit}, ${r.foundRank},
          ${r.retrievedIds}::uuid[], ${r.retrievedScores}::real[],
          ${r.retrievalState},
-         ${r.screenCutoffs === null ? null : toJsonb(r.screenCutoffs)})
+         ${r.screenCutoffs === null ? null : toJsonb(r.screenCutoffs)},
+         ${r.isBaseline ?? false}, ${key})
     `;
     return;
   }
@@ -1603,12 +1759,14 @@ export async function insertResults(rows: ResultInsert[]): Promise<void> {
       await tx`
         insert into eval_results
           (eval_question_id, eval_label_id, k, hit, found_rank, retrieved_ids,
-           retrieved_scores, retrieval_state, screen_cutoffs)
+           retrieved_scores, retrieval_state, screen_cutoffs, is_baseline,
+           baseline_key)
         values
           (${r.questionId}, ${r.labelId}, ${r.k}, ${r.hit}, ${r.foundRank},
            ${r.retrievedIds}::uuid[], ${r.retrievedScores}::real[],
            ${r.retrievalState},
-           ${r.screenCutoffs === null ? null : toJsonb(r.screenCutoffs)})
+           ${r.screenCutoffs === null ? null : toJsonb(r.screenCutoffs)},
+           ${r.isBaseline ?? false}, ${key})
       `;
     }
   });
@@ -1659,6 +1817,7 @@ export async function latestResultsForScreening(
         r.scored_at
       from eval_results r
       join labels lb on lb.label_id = r.eval_label_id
+      where not r.is_baseline
       order by r.eval_label_id,
         (r.retrieval_state is not distinct from ${preferState}) desc,
         r.scored_at desc
@@ -1685,6 +1844,27 @@ export async function latestResultsForScreening(
   );
 }
 
+// Which of these labels already hold a usable baseline measurement (0057), so
+// the scoring pass only pays for the ones that don't.
+//
+// TWO SOURCES, one query. A row counts when it is either a shadow row from the
+// baseline pass (is_baseline) or a live row scored while the config genuinely
+// had no overrides (retrieval_state = 'baseline') — the second is why an
+// untuned config, and every question scored before the first override landed,
+// has a baseline for free. Both must carry the CURRENT baseline_key: an older
+// key measured a different vector space.
+export async function labelsWithBaseline(labelIds: string[]): Promise<Set<string>> {
+  if (labelIds.length === 0) return new Set();
+  const rows = await sql<{ eval_label_id: string }[]>`
+    select distinct eval_label_id
+    from eval_results
+    where eval_label_id = any(${labelIds}::uuid[])
+      and baseline_key = ${baselineKey()}
+      and (is_baseline or retrieval_state = 'baseline')
+  `;
+  return new Set(rows.map((r) => r.eval_label_id));
+}
+
 // Re-stamp each label's newest `fromState` result as scored-under `toState` —
 // for results the dirty screen PROVED identical under the new override state
 // (eval.rescoreAffectedQuestions). Only the fingerprint changes; the scores
@@ -1702,6 +1882,7 @@ export async function restampLatestResults(
       select distinct on (eval_label_id) id
       from eval_results
       where eval_label_id = any(${labelIds}::uuid[])
+        and not is_baseline
         and retrieval_state = ${fromState}
       order by eval_label_id, scored_at desc
     )
@@ -1755,7 +1936,39 @@ export async function updateQuestion(id: string, text: string): Promise<boolean>
   });
 }
 
-export async function deleteQuestion(id: string): Promise<boolean> {
+// What an uncache needs to find the banked twin of a question being deleted:
+// the wording, and the text of the passage it was written for (the cache is
+// keyed on sha256 of that text). Read BEFORE the delete — the label row that
+// points at the chunk goes with the question.
+export type DeletedQuestion = {
+  question: string;
+  chunkText: string | null; // null when the chunk table is gone or the label is orphaned
+};
+
+export async function deleteQuestion(
+  id: string,
+): Promise<DeletedQuestion | null> {
+  const table = await activeChunksTable();
+  const [pre] = table
+    ? await sql<{ question: string; chunk_text: string | null }[]>`
+        select q.question, c.text as chunk_text
+        from eval_questions q
+        join documents d on d.id = q.document_id
+        left join eval_labels l on l.eval_question_id = q.id
+        left join ${sql(table)} c on c.id = l.source_chunk_id
+        where d.user_id = ${activeUserId()}
+          and q.id = ${id}
+        limit 1
+      `
+    : await sql<{ question: string; chunk_text: string | null }[]>`
+        select q.question, null::text as chunk_text
+        from eval_questions q
+        join documents d on d.id = q.document_id
+        where d.user_id = ${activeUserId()}
+          and q.id = ${id}
+        limit 1
+      `;
+
   const rows = await sql`
     delete from eval_questions q
     using documents d
@@ -1764,7 +1977,8 @@ export async function deleteQuestion(id: string): Promise<boolean> {
       and q.id = ${id}
     returning q.id
   `;
-  return rows.length > 0;
+  if (rows.length === 0) return null;
+  return { question: pre?.question ?? "", chunkText: pre?.chunk_text ?? null };
 }
 
 // Assemble the active config's per-chunk override info for the /eval badges:
@@ -2016,6 +2230,98 @@ function mapQuestionDetails(
   return { questions, retrievalStale, editStaleIds };
 }
 
+// The baseline half of the dashboard's detail set (0057): each question's most
+// recent OVERRIDE-FREE measurement, in the exact row shape the live detail
+// query produces, so mapQuestionDetails + reduceMetrics can be reused verbatim.
+//
+// Two sources, one `latest` (see labelsWithBaseline): rows from the baseline
+// pass, and live rows scored while the config genuinely had no overrides —
+// the free historical ones. is_baseline rows are preferred at equal recency
+// because they were measured deliberately against today's corpus.
+async function baselineDetailRows(table: string): Promise<EvalDetailRow[]> {
+  return sql<EvalDetailRow[]>`
+    with active_labels as (
+      select l.id as label_id, l.eval_question_id, l.source_chunk_id
+      from eval_labels l
+      join document_embeddings de on de.id = l.document_embedding_id
+      where de.config_id = ${activeConfig().id}
+    ),
+    latest as (
+      select distinct on (r.eval_question_id)
+        r.eval_question_id, r.hit, r.found_rank, r.retrieved_ids,
+        r.retrieved_scores, r.scored_at, r.retrieval_state
+      from eval_results r
+      join active_labels al on al.label_id = r.eval_label_id
+      where r.baseline_key = ${baselineKey()}
+        and (r.is_baseline or r.retrieval_state = 'baseline')
+      order by r.eval_question_id, r.scored_at desc, r.is_baseline desc
+    )
+    select
+      q.id as question_id, q.question, q.source, q.difficulty, q.document_id,
+      q.updated_at, d.file_name, al.source_chunk_id,
+      c.position as expected_position,
+      lt.hit, lt.found_rank, lt.retrieved_ids, lt.retrieved_scores,
+      lt.scored_at, lt.retrieval_state,
+      (ig.eval_question_id is not null) as ignored
+    from eval_questions q
+    join active_labels al on al.eval_question_id = q.id
+    join documents d on d.id = q.document_id
+    left join ${sql(table)} c on c.id = al.source_chunk_id
+    join latest lt on lt.eval_question_id = q.id
+    left join config_question_ignores ig
+      on ig.eval_question_id = q.id and ig.config_id = ${activeConfig().id}
+  `;
+}
+
+// QuestionDetail[] → the headline rates. One function so the live summary and
+// the baseline aggregate CANNOT drift: the ticker is a subtraction between the
+// two, and a rate computed two slightly different ways would show a delta that
+// is an artefact of the arithmetic rather than of any tuning.
+function reduceMetrics(
+  questions: QuestionDetail[],
+  editStaleIds: Set<string>,
+): {
+  scoredRows: QuestionDetail[];
+  hits: number;
+  recall: number | null;
+  mrr: number | null;
+  ndcg: number | null;
+  ndcgCovered: number;
+} {
+  // Scored rows count toward recall — including retrieval-stale ones (badged,
+  // approximate until the next run). Unscored and edit-stale are pending, and
+  // ignored questions are excluded from every rate (§7) — they still render.
+  const scoredRows = questions.filter(
+    (q) => q.hit !== null && !editStaleIds.has(q.questionId) && !q.ignored,
+  );
+  const hits = scoredRows.filter((q) => q.hit === true).length;
+
+  // MRR@mrr_k over the same scored set, from the per-question rr (single-relevant)
+  // — no extra retrieval, so already-scored questions are covered retroactively.
+  const mrr =
+    scoredRows.length > 0
+      ? scoredRows.reduce((sum, q) => sum + (q.rr ?? 0), 0) / scoredRows.length
+      : null;
+
+  // Mean graded nDCG over exactly the questions that have one (ranked + freshly
+  // scored, not ignored). ndcgCovered is that set's size — the dashboard's 5/n.
+  const graded = questions
+    .filter((q) => !q.ignored)
+    .map((q) => q.ndcg)
+    .filter((v): v is number => v !== null);
+  const ndcg =
+    graded.length > 0 ? graded.reduce((sum, v) => sum + v, 0) / graded.length : null;
+
+  return {
+    scoredRows,
+    hits,
+    recall: scoredRows.length > 0 ? hits / scoredRows.length : null,
+    mrr,
+    ndcg,
+    ndcgCovered: graded.length,
+  };
+}
+
 // ONE CHUNK's questions, in the exact shape getSummary would give them (L6 of
 // docs/autotune-speedups-plan.md).
 //
@@ -2082,6 +2388,7 @@ export async function getChunkQuestions(
         r.retrieved_scores, r.scored_at, r.retrieval_state
       from eval_results r
       join active_labels al on al.label_id = r.eval_label_id
+      where not r.is_baseline
       order by r.eval_question_id,
         (r.retrieval_state is not distinct from ${currentState}) desc,
         r.scored_at desc
@@ -2146,6 +2453,7 @@ export async function getSummary(): Promise<EvalSummary> {
     ndcgStaleRescore: false,
     ndcgStaleRebuild: false,
     ndcgStuckTruths: [],
+    baseline: null,
     perDocument: [],
     questions: [],
     runs: [],
@@ -2212,6 +2520,7 @@ export async function getSummary(): Promise<EvalSummary> {
           r.retrieved_scores, r.scored_at, r.retrieval_state
         from eval_results r
         join active_labels al on al.label_id = r.eval_label_id
+        where not r.is_baseline
         order by r.eval_question_id,
           (r.retrieval_state is not distinct from ${currentState}) desc,
           r.scored_at desc
@@ -2261,8 +2570,9 @@ export async function getSummary(): Promise<EvalSummary> {
       order by created_at desc
       limit 20
     `,
-    // Count of chunks under the active config missing a question for at least one
-    // SELECTED difficulty — the generation half of "Process new chunks" (Phase A).
+    // Count of chunks under the active config missing a question for at least
+    // one difficulty this config has used — scope reporting for Bulk actions →
+    // Add, not a gate on anything.
     // Mirrors chunksNeedingQuestionsByDifficulty; 0 when no difficulty is selected
     // (the cross join over an empty array yields no rows).
     sql<{ n: number }[]>`
@@ -2314,30 +2624,54 @@ export async function getSummary(): Promise<EvalSummary> {
     truthOrders,
   });
 
-  // Scored rows count toward recall — including retrieval-stale ones (badged,
-  // approximate until the next run). Unscored and edit-stale are pending, and
-  // ignored questions are excluded from every rate (§7) — they still render.
-  const scoredRows = questions.filter(
-    (q) => q.hit !== null && !editStaleIds.has(q.questionId) && !q.ignored,
-  );
-  const hits = scoredRows.filter((q) => q.hit === true).length;
+  const { scoredRows, hits, recall, mrr, ndcg: ndcgValue, ndcgCovered } =
+    reduceMetrics(questions, editStaleIds);
 
-  // MRR@mrr_k over the same scored set, from the per-question rr (single-relevant)
-  // — no extra retrieval, so already-scored questions are covered retroactively.
-  const mrr =
-    scoredRows.length > 0
-      ? scoredRows.reduce((sum, q) => sum + (q.rr ?? 0), 0) / scoredRows.length
-      : null;
-
-  // Mean graded nDCG over exactly the questions that have one (ranked + freshly
-  // scored, not ignored). ndcgCovered is that set's size — the dashboard's 5/n.
-  const graded = questions
-    .filter((q) => !q.ignored)
-    .map((q) => q.ndcg)
-    .filter((v): v is number => v !== null);
-  const ndcgValue =
-    graded.length > 0 ? graded.reduce((sum, v) => sum + v, 0) / graded.length : null;
-  const ndcgCovered = graded.length;
+  // What the per-chunk tuning has bought. Only when overrides exist: without
+  // them live IS baseline and the delta is zero by construction, so the one
+  // extra query is skipped along with the row of dashes it would produce.
+  let baseline: EvalBaseline | null = null;
+  if (overrides.length > 0) {
+    const baseRows = await baselineDetailRows(table);
+    // currentState 'baseline' is the fingerprint these rows were genuinely
+    // scored under, so none is mislabelled stale; retrievalChangedAt is not
+    // consulted for them for the same reason.
+    const { questions: baseQuestions, editStaleIds: baseStale } = mapQuestionDetails(
+      baseRows,
+      {
+        currentState: "baseline",
+        retrievalChangedAt: null,
+        recallK,
+        mrrK,
+        ndcgK,
+        truthOrders,
+      },
+    );
+    // BOTH SIDES OVER THE SAME QUESTIONS — the intersection of what counts
+    // live and what counts on the baseline. A delta between differently sized
+    // question sets is meaningless, and the UI reports this size.
+    const baseCountable = new Set(
+      reduceMetrics(baseQuestions, baseStale).scoredRows.map((q) => q.questionId),
+    );
+    const liveSubset = scoredRows.filter((q) => baseCountable.has(q.questionId));
+    const subsetIds = new Set(liveSubset.map((q) => q.questionId));
+    if (subsetIds.size > 0) {
+      const base = reduceMetrics(
+        baseQuestions.filter((q) => subsetIds.has(q.questionId)),
+        baseStale,
+      );
+      const live = reduceMetrics(liveSubset, editStaleIds);
+      baseline = {
+        questions: subsetIds.size,
+        recall: base.recall,
+        mrr: base.mrr,
+        ndcg: base.ndcg,
+        liveRecall: live.recall,
+        liveMrr: live.mrr,
+        liveNdcg: live.ndcg,
+      };
+    }
+  }
 
   // nDCG corpus-drift: documents that entered this config after the graded set's
   // ideals were built and/or after it was scored. Each input ages the number
@@ -2385,7 +2719,7 @@ export async function getSummary(): Promise<EvalSummary> {
   }
   const ndcgStuckTruths = [...stuckTruths].map(([chunk, kind]) => ({ chunk, kind }));
 
-  // Questions "Process new chunks" would score: never scored, or edited since.
+  // Questions "Score pending" would score: never scored, or edited since.
   // Matches questionsNeedingScoring() — no extra query needed.
   const pendingScoring = questions.filter((q) => q.hit === null || q.stale).length;
 
@@ -2418,7 +2752,7 @@ export async function getSummary(): Promise<EvalSummary> {
     total: questions.length,
     scored: scoredRows.length,
     hits,
-    recall: scoredRows.length > 0 ? hits / scoredRows.length : null,
+    recall,
     mrr,
     ndcg: ndcgValue,
     ndcgCovered,
@@ -2426,6 +2760,7 @@ export async function getSummary(): Promise<EvalSummary> {
     ndcgStaleRescore,
     ndcgStaleRebuild,
     ndcgStuckTruths,
+    baseline,
     perDocument: [...byDoc.values()],
     questions,
     runs: runRows.map((r) => ({

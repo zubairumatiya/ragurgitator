@@ -53,6 +53,9 @@ type Progress =
   | { phase: "rescore"; done: number; total: number };
 
 type DoneStats = {
+  // The run was cancelled mid-search: the counts below are real, they just
+  // cover the chunks it reached. Nothing is rolled back.
+  cancelled?: boolean;
   targeted: number;
   resolved: number;
   unresolved: number;
@@ -86,6 +89,11 @@ export function AutotunePanel({
   const [running, setRunning] = useState(false);
   const [ran, setRan] = useState(false);
   const [progress, setProgress] = useState<Progress | null>(null);
+  // The run's id (its stream's first line) and whether Cancel has been POSTed.
+  // Autotune stops between CHUNKS, so the in-flight chunk's search finishes
+  // first — the button says "Cancelling…" rather than implying otherwise.
+  const [runId, setRunId] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [choices, setChoices] = useState<PendingChoice[]>([]);
   const [done, setDone] = useState<DoneStats | null>(null);
@@ -123,6 +131,8 @@ export function AutotunePanel({
     onBusyChange(true);
     setError(null);
     setDone(null);
+    setRunId(null);
+    setCancelling(false);
     try {
       const res = await apiFetch("/api/eval/autotune", { method: "POST" });
       if (!res.ok || !res.body) {
@@ -143,6 +153,9 @@ export function AutotunePanel({
           if (!line.trim()) continue;
           const event = JSON.parse(line) as AutotuneEvent;
           switch (event.type) {
+            case "run-started":
+              setRunId(event.runId);
+              break;
             case "autotune-start":
               pushLog(
                 `Targeting ${event.targeted} question(s) across ${event.chunks} chunk(s) ` +
@@ -214,7 +227,27 @@ export function AutotunePanel({
     } finally {
       setRunning(false);
       setProgress(null);
+      setRunId(null);
+      setCancelling(false);
       onBusyChange(false);
+    }
+  }
+
+  // Stop the run after the chunk it is currently searching. Every override
+  // already confirmed stays, and the run still does its final re-score and
+  // reports — cancelling is a flag, not a rollback (lib/http/cancelRegistry.ts).
+  // A `found: false` reply means it had already finished; nothing to report.
+  async function cancelRun() {
+    if (!runId) return;
+    setCancelling(true);
+    try {
+      await apiFetch("/api/eval/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runId }),
+      });
+    } catch {
+      setCancelling(false);
     }
   }
 
@@ -348,11 +381,26 @@ export function AutotunePanel({
             )}
 
             {progress && (
-              <p className="text-xs text-zinc-500">
-                {progress.phase === "search"
-                  ? `Chunk ${progress.chunkIndex}/${progress.chunkTotal} — ${progress.detail} · ${progress.attempts} experiment(s)`
-                  : `Final re-score ${progress.done}/${progress.total}…`}
-              </p>
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs text-zinc-500">
+                  {progress.phase === "search"
+                    ? `Chunk ${progress.chunkIndex}/${progress.chunkTotal} — ${progress.detail} · ${progress.attempts} experiment(s)`
+                    : `Final re-score ${progress.done}/${progress.total}…`}
+                </p>
+                {/* Stops after the chunk being searched; overrides already
+                    confirmed are kept and the final re-score still runs. */}
+                {runId && (
+                  <button
+                    type="button"
+                    onClick={cancelRun}
+                    disabled={cancelling}
+                    title="Stop after the current chunk. Overrides already applied are kept, and the run still re-scores."
+                    className="shrink-0 cursor-pointer rounded border border-zinc-300 px-2 py-0.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                  >
+                    {cancelling ? "Cancelling…" : "Cancel"}
+                  </button>
+                )}
+              </div>
             )}
 
             {log.length > 0 && (
@@ -415,7 +463,7 @@ export function AutotunePanel({
 
             {done && (
               <p className="text-zinc-700 dark:text-zinc-300">
-                Done: {done.resolved}/{done.targeted} resolved
+                {done.cancelled ? "Cancelled" : "Done"}: {done.resolved}/{done.targeted} resolved
                 {done.improved > 0
                   ? `, ${done.improved} improved (still below bar)`
                   : ""}

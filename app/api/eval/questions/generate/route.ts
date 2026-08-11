@@ -4,7 +4,7 @@
 // Author one synthetic eval question for a specific chunk (under the active
 // config) at a target difficulty. Body: { chunkId: string, difficulty:
 // 'easy' | 'medium' | 'hard' }. The new question lands unscored until the next
-// "Process new chunks" / "Re-score all". Backs the synthetic side of the
+// "Score pending" / "Re-score all". Backs the synthetic side of the
 // "Add a question" form on each chunk group in /eval.
 // ---------------------------------------------------------------------------
 import { z } from "zod";
