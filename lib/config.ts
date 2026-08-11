@@ -102,8 +102,29 @@ export const config = {
     // space only where the eval bank proves it's safe, and only for the account
     // that ran it (0050).
     defaultThreshold: 0.95,
-    // Safety cap on cached queries scored (in JS) per lookup for one config.
-    maxCandidates: 500,
+    // Safety cap on cached queries scored (in JS) per lookup, newest first.
+    // Raised from 500 when the cache moved from per-config to per-user
+    // (migration 0058): rows that used to be split across N configs now pool
+    // into one bucket, so the old cap was reached ~N× sooner and the oldest
+    // entries silently stopped being reachable.
+    //
+    // Not raised further without measuring. query_vector is real[], which
+    // postgres.js decodes TEXT-encoded, so the wire cost isn't the float count:
+    // at voyage-4-lite (1024 dims) a 2,000-row candidate set is tens of MB
+    // pulled per lookup on the answer hot path, plus ~2M multiply-adds in the JS
+    // cosine loop. If this ever needs to be large, the real fix is pushing the
+    // narrowing into SQL (pgvector on the key vector), not a bigger number here.
+    maxCandidates: 1000,
+    // Volume pruning (docs/semantic-cache-user-scope-plan.md §4). Replaces the
+    // eager fingerprint GC, which became a data-loss bug under user scoping: a
+    // user now holds SEVERAL live fingerprints at once (one per document set ×
+    // saver-mode combination), so "delete this user's rows under any other
+    // fingerprint" would wipe one config's live cache on every store by another.
+    // Stale rows here are merely unreachable, never wrong, so they can age out
+    // by volume instead. Runs opportunistically — 1 store in `pruneEvery` — and
+    // drops the coldest, oldest rows beyond `maxEntriesPerUser`.
+    maxEntriesPerUser: 2000,
+    pruneEvery: 20,
     // Entity/number guard (docs/semantic-cache-key-model-plan.md, Phase 0): a
     // match whose numerals, ALLCAPS acronyms or quoted spans DIFFER from the
     // incoming question is refused, however high its cosine. "2023 revenue" vs

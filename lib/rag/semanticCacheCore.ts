@@ -170,12 +170,48 @@ export function entityGuardPasses(a: string, b: string): boolean {
 }
 
 // Deterministic fingerprint of everything that determines a cached answer. Two
-// entries with the same fingerprint were produced by the same config shape
-// (embedding model, chunking, top-k, fusion pool, LLM) over the same corpus and
-// override state, so serving one for the other is safe. Any change flips the
-// fingerprint; stale entries then stop matching (and get GC'd on the next
-// store). Null-safe: a null part (e.g. auto fusion pool) is encoded distinctly
-// from the string "null" or "" so "auto" and an actual value can't collide.
+// entries with the same fingerprint were produced over the same document set by
+// the same answering model, so serving one for the other is safe. Any change
+// flips the fingerprint and the stale entries stop matching.
+//
+// WHAT the caller puts in is deliberately not decided here — see
+// currentFingerprint in semanticCache.ts, which keys on the documents and the
+// answering model only and explains why the retrieval knobs are excluded.
+//
+// Null-safe: a null part is encoded distinctly from the string "null" or "" so
+// an absent value and a present one can't collide.
+// WHAT actually goes in the cache's validity key — the one decision this whole
+// re-scoping turns on, kept here (pure, DB-free) so it can be asserted without a
+// database. semanticCache.currentFingerprint supplies the two inputs and does
+// nothing else. See docs/semantic-cache-user-scope-plan.md §2.
+//
+//   documents       md5 of the DOCUMENT IDS this config has ingested. Different
+//                   documents ⇒ possibly a different answer. Ids only — no chunk
+//                   count — so the signature is comparable across configs and
+//                   re-chunking doesn't invalidate through the back door.
+//   cascadeEnabled  saver mode. With it ON the answer comes from
+//                   cheapModelFor(llmModel) and only escalates on an efficacy
+//                   failure, so two configs with an IDENTICAL llm_model answer
+//                   from different models. Without this in the key, user scoping
+//                   would let a saver-mode config's cheap answer be served to a
+//                   strong-model config — the exact failure keying on the
+//                   answering model exists to prevent.
+//
+// NOT in here, on purpose: chunkSize, chunkOverlap, topK, fusionPool, the
+// retrieval embedding model, the override state. Route, not truth. And not
+// llmModel or the cache-key model — both are COLUMNS on semantic_cache, matched
+// in SQL rather than hashed.
+export function answerFingerprint(input: {
+  cascadeEnabled: boolean;
+  documents: string;
+}): string {
+  return fingerprintFrom([
+    "sc-v2", // bump by hand to invalidate every entry (e.g. on a SYSTEM_PROMPT edit)
+    input.cascadeEnabled ? "cascade" : "single",
+    input.documents,
+  ]);
+}
+
 export function fingerprintFrom(parts: (string | number | null)[]): string {
   // "∅" marks null; every present value is prefixed with "·" so it can NEVER
   // equal the null marker — even a part whose literal value is "∅". "␟"

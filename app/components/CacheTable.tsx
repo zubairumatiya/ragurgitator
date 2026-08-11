@@ -40,7 +40,8 @@ export function CacheTable({ entries }: { entries: CacheEntrySummary[] }) {
           <tr className="border-b border-zinc-200 bg-zinc-100 text-left text-xs uppercase tracking-wide text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900">
             <th className="px-3 py-2 font-medium">Question</th>
             <th className="px-3 py-2 font-medium">Answer</th>
-            <th className="px-3 py-2 font-medium">Config</th>
+            <th className="px-3 py-2 font-medium">Answered by</th>
+            <th className="px-3 py-2 font-medium">Banked by</th>
             <th className="px-3 py-2 text-right font-medium">Served</th>
             <th className="px-3 py-2 text-right font-medium">Last hit</th>
           </tr>
@@ -141,10 +142,25 @@ function CacheRow({ entry }: { entry: CacheEntrySummary }) {
           {entry.answer}
         </div>
       </td>
+      {/* The answering model, not the config, is what identifies an entry now
+          that one entry is shared across every config of yours that holds the
+          same documents (migration 0058). */}
       <td className="px-3 py-2 text-zinc-600 dark:text-zinc-400">
         <div className="truncate" title={`Keyed under ${entry.keyModel}`}>
-          {entry.configLabel}
+          {entry.llmModel}
         </div>
+      </td>
+      {/* Provenance only — which config first paid for this answer. Any of your
+          configs over the same documents can be served it, and it outlives the
+          one that banked it. */}
+      <td className="px-3 py-2 text-zinc-600 dark:text-zinc-400">
+        {entry.configLabel === null ? (
+          <span className="text-zinc-400" title="The config that banked this answer has been deleted">
+            deleted config
+          </span>
+        ) : (
+          <div className="truncate">{entry.configLabel}</div>
+        )}
       </td>
       <td className="px-3 py-2 text-right tabular-nums text-zinc-600 dark:text-zinc-400">
         {entry.hitCount === 0 ? <span className="text-zinc-400">—</span> : entry.hitCount}

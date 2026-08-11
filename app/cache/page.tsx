@@ -8,11 +8,12 @@
 // Dynamic — it reads the DB per request.
 //
 // Read-only on purpose. The cache maintains itself: entries are written by
-// semanticCacheStore on a miss and self-pruned when a config's fingerprint
-// changes (lib/rag/semanticCache.ts). There is no delete control here because
-// there is no state a user can usefully hand-edit — a wrong answer is fixed by
-// changing the config or the threshold, both of which invalidate the entry
-// anyway. Calibration lives on Appraise → Semantic caching.
+// semanticCacheStore on a miss, invalidated when the documents or the answering
+// model change, and pruned by volume once the account holds more than the cap
+// (lib/rag/semanticCache.ts). There is no delete control here because there is
+// no state a user can usefully hand-edit — a wrong answer is fixed by changing
+// the documents, the model or the threshold. Calibration lives on Appraise →
+// Semantic caching.
 import { BackToConfigs } from "@/app/components/BackToConfigs";
 import { CacheTable } from "@/app/components/CacheTable";
 import { InfoDot } from "@/app/components/InfoDot";
@@ -26,9 +27,10 @@ const ABOUT =
   "you've asked before, the stored answer is served and the whole retrieval " +
   "and generation step is skipped.\n\n" +
   "'Served' counts how many times each entry has been reused — every one of " +
-  "those is an answer you didn't pay for. Entries are scoped to the config " +
-  "that produced them, because the same question has a different answer " +
-  "against a different corpus, chunking or model.";
+  "those is an answer you didn't pay for. Entries belong to YOU, not to one " +
+  "config: any of your configs holding the same documents and answering with " +
+  "the same model can be served the same entry, however differently they " +
+  "retrieve. 'Banked by' is just which config paid for it first.";
 
 export default async function CachePage() {
   const entries = await withPageUser(() => listCacheEntries());

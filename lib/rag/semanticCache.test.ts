@@ -9,6 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  answerFingerprint,
   auc,
   bestMatch,
   calibrateFromJudged,
@@ -163,6 +164,44 @@ test("entityGuardPasses: symmetric in its arguments", () => {
   const a = "what was 2023 revenue";
   const b = "what was revenue";
   assert.equal(entityGuardPasses(a, b), entityGuardPasses(b, a));
+});
+
+// --- the validity key: what invalidates a cached answer, and what doesn't -----
+//
+// The whole point of the user-scoping change (docs/semantic-cache-user-scope-
+// plan.md). answerFingerprint takes ONLY the document set and saver mode, so
+// "changing topK no longer nukes the cache" is enforced by the signature rather
+// than by a test — what needs asserting is the other half: that the two things
+// still in the key really do separate buckets.
+
+test("answerFingerprint: the same documents and saver mode share one bucket", () => {
+  // Two configs differing on every retrieval knob there is — chunk size, topK,
+  // fusion pool, even the retrieval embedding model — reach the SAME key,
+  // because none of them can reach this function. Ask under one, hit under the
+  // other. That is the feature.
+  assert.equal(
+    answerFingerprint({ cascadeEnabled: false, documents: "docs-abc" }),
+    answerFingerprint({ cascadeEnabled: false, documents: "docs-abc" }),
+  );
+});
+
+test("answerFingerprint: saver mode separates buckets", () => {
+  // The correctness case. With saver mode ON the answer comes from the cheap
+  // model, so a saver-mode config's answer must never be served to one running
+  // the strong model — and llm_model, being identical for both, cannot tell them
+  // apart. Under the old config_id scoping this was hidden; under user scoping
+  // it is live.
+  assert.notEqual(
+    answerFingerprint({ cascadeEnabled: true, documents: "docs-abc" }),
+    answerFingerprint({ cascadeEnabled: false, documents: "docs-abc" }),
+  );
+});
+
+test("answerFingerprint: a different document set separates buckets", () => {
+  assert.notEqual(
+    answerFingerprint({ cascadeEnabled: false, documents: "docs-abc" }),
+    answerFingerprint({ cascadeEnabled: false, documents: "docs-xyz" }),
+  );
 });
 
 test("fingerprintFrom: deterministic for identical inputs", () => {

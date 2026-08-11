@@ -1363,7 +1363,12 @@ export function EvalSettings() {
                 text={
                   "Serve a stored answer when a new question is close enough to a " +
                   "past one, skipping retrieval and the LLM. The cache is always " +
-                  "populated — this only controls whether close matches are served."
+                  "populated — this only controls whether close matches are served.\n\n" +
+                  "Entries are shared across your configs and no longer expire when " +
+                  "you change chunking, top-k or the retrieval model, so turn this " +
+                  "OFF while you tune retrieval — otherwise a cached answer can be " +
+                  "served instead of one computed under your new settings. " +
+                  "Off still fills the cache and logs what it would have served."
                 }
               >
                 <span className="text-zinc-600 transition-colors group-hover:text-zinc-900 dark:text-zinc-400 dark:group-hover:text-zinc-100">

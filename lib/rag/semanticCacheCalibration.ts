@@ -48,14 +48,17 @@ async function safe<T>(fn: () => Promise<T[]>, fallback: T[]): Promise<T[]> {
 // --- A. Collision floor (config-scoped) ------------------------------------
 
 
-// Ownership fragment (0049). semantic_cache_shadow and semantic_cache both carry
-// config_id, so "my rows" is exactly "rows under a config I own". These reads
-// return real user content — new_query / matched_query / served_answer are a
-// user's questions and the answers served to them — so an unscoped read here is
-// a content leak, not merely a stats leak. The thresholds table is the one piece
-// of this subsystem that cannot be scoped this way — it has no config_id — so
-// 0050 gave it a user_id of its own; those queries filter on activeUserId()
-// directly.
+// Ownership fragment (0049) for the CONFIG-ROOTED tables of this subsystem —
+// semantic_cache_shadow and semantic_cache_collision_floor. "My rows" is exactly
+// "rows under a config I own". These reads return real user content — new_query
+// / matched_query / served_answer are a user's questions and the answers served
+// to them — so an unscoped read here is a content leak, not merely a stats leak.
+//
+// semantic_cache itself is NO LONGER one of these: 0058 moved its tenancy from
+// config_id to a user_id of its own, so it filters on activeUserId() directly,
+// as semantic_cache_thresholds has since 0050. Using this fragment on it would
+// still work but would silently drop every row whose banking config was deleted
+// — rows that are live and servable.
 const ownedConfigs = () =>
   sql`config_id in (select id from configs where user_id = ${activeUserId()})`;
 
@@ -197,7 +200,7 @@ export async function listThresholdsWithStats(): Promise<ThresholdReport[]> {
                  count(*)::int as entries,
                  coalesce(sum(hit_count), 0)::int as hits,
                  max(last_hit_at) as last_hit
-          from semantic_cache where ${ownedConfigs()} group by embedding_model`,
+          from semantic_cache where user_id = ${activeUserId()} group by embedding_model`,
       [] as { embedding_model: string; entries: number; hits: number; last_hit: Date | null }[],
     ),
     safe(

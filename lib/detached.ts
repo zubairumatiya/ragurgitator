@@ -44,8 +44,12 @@
 // withConfig is a bare store.run with no I/O, so that costs nothing.
 //
 // The flush passes RLS on the strength of the user alone: savings_totals,
-// spend_totals and the semantic_cache* tables all authorize through `configs`
-// (migrations/0051_rls.sql), which the flush's own withUser GUC satisfies.
+// spend_totals and semantic_cache_shadow authorize through `configs`
+// (migrations/0051_rls.sql), and semantic_cache authorizes on its own user_id
+// (0058) — both forms are satisfied by the flush's own withUser GUC. Nothing
+// changes for the config capture: only activeConfig() ever needed it, and
+// activeUserId() resolves inside a detached task because the flush enters
+// withUser around it.
 //
 // WHY NOT lib/db.ts, next to isolated(), whose header already explains the
 // best-effort-write contract this extends: the flush needs withUser from
