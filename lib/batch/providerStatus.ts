@@ -1,10 +1,8 @@
-// ---------------------------------------------------------------------------
 // Pure provider status-mapping + result-parsing — the parts of providers.ts
 // most likely to be wrong, split out so the unit suite can exercise them with
 // canned payloads (no SDK, no network). Imports only ./types (which imports
 // nothing), so it loads under the tsx test runner, which doesn't resolve the
 // "@/" alias.
-// ---------------------------------------------------------------------------
 import type OpenAI from "openai";
 import type { BatchResultRow, BatchStatus } from "./types";
 

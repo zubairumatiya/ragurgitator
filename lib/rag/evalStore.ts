@@ -1,14 +1,10 @@
-// ---------------------------------------------------------------------------
-// DB layer for retrieval evals (Recall@k). Mirrors vectorStore.ts: raw SQL via
-// the shared `sql` client, no business logic. The orchestration lives in
-// eval.ts.
+// DB layer for retrieval evals (Recall@k). Mirrors vectorStore.ts: raw SQL, no
+// business logic — orchestration lives in eval.ts.
 //
-// Everything here is scoped to the ACTIVE config via de.config_id (resolved from
-// activeConfig()). Questions are document-scoped; their ground-truth chunk for a
-// given config lives in eval_labels, so the same question can later be scored
-// against other configs without re-authoring. (config is still imported for the
-// global evalQuestionsPerChunk target.)
-// ---------------------------------------------------------------------------
+// Everything here is scoped to the ACTIVE config via de.config_id. Questions are
+// document-scoped; their ground-truth chunk for a given config lives in
+// eval_labels, so the same question can later be scored against other configs
+// without re-authoring.
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql, toJsonb } from "@/lib/db";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";
@@ -180,11 +176,10 @@ export type ChunkRef = {
 // The baseline comparison behind the dashboard tickers (0057).
 //
 // BOTH SIDES ARE MEASURED OVER THE SAME QUESTIONS. A baseline fills in
-// opportunistically (see scoreQuestions), so it is often partial — and a delta
-// between a 120-question live number and an 84-question baseline compares two
-// different question sets and means nothing. `questions` is the size of the
-// comparable subset, and the live figures here are that subset's, NOT the
-// headline ones.
+// opportunistically, so it is often partial — and a delta between a 120-question
+// live number and an 84-question baseline compares two different question sets
+// and means nothing. `questions` is the comparable subset's size, and the live
+// figures here are that subset's, NOT the headline ones.
 export type EvalBaseline = {
   questions: number; // comparable subset size — what "vs baseline, n questions" reports
   recall: number | null;
@@ -215,12 +210,10 @@ export type EvalSummary = {
   // How many questions feed that nDCG average — the "5" in the dashboard's 5/n
   // (n = total). Questions without a ground-truth ranking aren't graded.
   ndcgCovered: number;
-  // nDCG corpus-drift signal (headline badge). Documents that entered this
-  // config AFTER a graded question's ideal was built and/or after it was scored:
-  // their chunks were never candidates for the ideals, yet retrieval now
-  // competes them in (0-gain, evalMetrics.ndcg), so this nDCG can understate
-  // quality. staleDocs = how many such documents; the two flags say which remedy
-  // the tooltip points at. All zero/false = the number reflects the corpus.
+  // nDCG corpus-drift signal. Documents that entered this config AFTER a graded
+  // question's ideal was built and/or after it was scored: their chunks were never
+  // candidates for the ideals, yet retrieval now competes them in, so this nDCG can
+  // understate quality. All zero/false = the number reflects the corpus.
   ndcgStaleDocs: number;
   ndcgStaleRescore: boolean; // some graded question was scored before a doc arrived
   ndcgStaleRebuild: boolean; // some AGGREGATE ideal predates a doc — bulk rebuild fixes it
@@ -269,9 +262,9 @@ export type EvalSummary = {
 };
 
 // The vector space a result was measured in (0057): the config's SELECTED
-// embedding model and chunk shape. Baseline rows are only comparable to live
-// rows carrying the same key — change the model or the chunk shape and the old
-// baseline is measuring something else, so it stops matching and is re-run.
+// embedding model and chunk shape. Baseline rows are only comparable to live rows
+// carrying the same key — change either and the old baseline is measuring
+// something else, so it stops matching and is re-run.
 //
 // Deliberately excludes overrides: they're what the baseline is defined as the
 // absence of, and the 0022 fingerprint already tracks them.
@@ -349,10 +342,9 @@ export type ChunkWithQuestions = {
 
 // Every chunk under the active config (optionally narrowed to some documents),
 // carrying the question texts it already holds. Unlike
-// chunksNeedingQuestionsByDifficulty this filters NOTHING by difficulty or
-// target: "Add cached" tops a chunk up with whatever the bank happens to hold
-// for its exact text, so the caller needs every chunk and every existing
-// question to compare against.
+// chunksNeedingQuestionsByDifficulty this filters NOTHING: "Add cached" tops a
+// chunk up with whatever the bank holds for its exact text, so the caller needs
+// every chunk and every existing question to compare against.
 export async function chunksWithQuestions(
   documentIds?: string[],
 ): Promise<ChunkWithQuestions[]> {
@@ -430,18 +422,15 @@ export type ChunkDifficultyGap = {
 
 // The generation gaps for each requested difficulty, in one of two modes.
 //
-// `topUp` (the historical behaviour): the chunks under the active config that
-// have fewer than `targets[i]` questions at that difficulty, each needing the
-// difference. Chunks already at target are skipped, so "2 easy" means "fill
-// every chunk to 2 easy" and a second click costs nothing.
+// `topUp`: chunks with fewer than `targets[i]` questions at that difficulty, each
+// needing the difference — "fill every chunk to 2 easy", so a second click costs
+// nothing.
 //
-// Absolute (the default): EVERY chunk in scope, each needing `targets[i]` flat
-// — "add 2 more easy to every chunk", so a second click buys two more again.
+// Absolute (the default): EVERY chunk in scope, each needing `targets[i]` flat —
+// "add 2 more easy to every chunk", so a second click buys two more again.
 //
-// One query either way: the cross join fans every chunk out across the requested
-// difficulties and the lateral counts what each pair already has; only the
-// `needed` expression and the drop-at-target filter differ.
-// `documentIds` (bulk-actions document scope) narrows to those documents.
+// One query either way; only the `needed` expression and the drop-at-target
+// filter differ.
 export async function chunksNeedingQuestionsByDifficulty(
   difficulties: string[],
   documentIds?: string[],
@@ -658,12 +647,9 @@ export async function questionsNeedingScoring(): Promise<QuestionToScore[]> {
 }
 
 // Every question with a label under the active config, regardless of whether it
-// already has a (fresh) result. Backs "Re-score all": re-running retrieval for all
-// of these against the current corpus keeps recall apples-to-apples after the corpus
-// changes (e.g. a doc was added/removed and now competes in the top-k).
-// questionsNeedingScoring() is the incremental counterpart used by "Score pending".
-// `documentIds` (bulk-actions scope) narrows to those documents' questions;
-// null/empty = every document.
+// already has a fresh result. Backs "Re-score all", which keeps recall
+// apples-to-apples after the corpus changes. questionsNeedingScoring() is the
+// incremental counterpart used by "Score pending".
 export async function allLabeledQuestions(
   documentIds?: string[],
 ): Promise<(QuestionToScore & { documentId: string })[]> {
@@ -803,9 +789,9 @@ export type QuestionExplain = {
 // `retrievalState` narrows the drill-down to results scored under a specific
 // override state (0022) — the baseline row passes 'baseline' to show what pure
 // base-model retrieval returned while a delegate is active. When absent, the
-// newest result matching the CURRENT state wins (falling back to newest
-// overall), mirroring getSummary — so the drill-down always explains the same
-// result the badge shows, including after a delegate revert.
+// newest result matching the CURRENT state wins (falling back to newest overall),
+// mirroring getSummary — so the drill-down always explains the same result the
+// badge shows, including after a delegate revert.
 export async function getQuestionExplain(
   questionId: string,
   retrievalState?: string,
@@ -869,12 +855,10 @@ export async function getQuestionExplain(
 
   // On a miss the expected chunk isn't in the top-k, so its score/rank weren't
   // stored. Compute them on demand from the cached query vector (0003): rank the
-  // WHOLE corpus exactly (row_number, full scan — no HNSW), pull the expected
-  // chunk's rank + score, and return the chunks sitting between the top-k cut-off
-  // and it (ranks k+1 .. rank-1) — the "what beat it" gap. Best-effort: stays null
-  // / empty if the vector isn't cached (e.g. edited since scoring) so the
-  // drill-down never breaks over it. Exact ranking means rank <= k here would mean
-  // HNSW dropped a chunk it should have surfaced.
+  // WHOLE corpus exactly (row_number, full scan — no HNSW), then return the chunks
+  // between the top-k cut-off and it. Best-effort: stays null/empty if the vector
+  // isn't cached, so the drill-down never breaks over it. Exact ranking means
+  // rank <= k here would mean HNSW dropped a chunk it should have surfaced.
   const expectedInRetrieved = retrievedIds.includes(label.source_chunk_id);
   const kForRank = result?.k ?? activeConfig().topK;
   let expectedScore: number | null = null;
@@ -1038,18 +1022,14 @@ export async function getExperimentContext(
   };
 }
 
-// One chunk's text, for the "chunk #N" toggle on a dashboard card header.
-//
-// Exists because the only way to read a chunk's text used to be through a
-// question's explain drill-down (retrieved chunks are expandable there), which
-// left a chunk with no questions unreadable — the gap that showed up as soon as
-// the dashboard started listing every chunk rather than only question-bearing
-// ones.
+// One chunk's text, for the "chunk #N" toggle on a dashboard card header. Exists
+// because reading a chunk's text used to be possible only through a question's
+// explain drill-down, leaving a chunk with no questions unreadable.
 //
 // Config-scoped through document_embeddings, so a chunk id belonging to another
-// config reads as missing rather than as someone else's text. Under RLS a chunk
-// belonging to another tenant is already invisible; this keeps the same answer
-// for the in-tenant, wrong-config case, which RLS says nothing about.
+// config reads as missing rather than as someone else's text. RLS already hides
+// other tenants; this covers the in-tenant, wrong-config case, which RLS says
+// nothing about.
 export async function getChunkText(
   chunkId: string,
 ): Promise<{ text: string; fileName: string; position: number | null } | null> {
@@ -1364,16 +1344,14 @@ export async function getModelTrialChunk(
 }
 
 // Chunk ids under the active config whose TEXT already has a cached 'document'
-// embedding under `model` (0020 content-addressed cache) — free trial-pool
-// candidates: delegate-space retrieval and past trials have already paid for
-// them. Hash must mirror lib/rag/embedCache (sha256 hex over the exact UTF-8
-// text). Cache table missing (0020 unapplied) → none.
+// embedding under `model` (0020) — free trial-pool candidates. Hash must mirror
+// lib/rag/embedCache (sha256 hex over the exact UTF-8 text). Cache table missing
+// → none.
 //
-// "Already paid for" means BY THIS ACCOUNT since 0050 — the join carries a
-// user_id predicate of its own. The config filter alone wouldn't supply it: the
-// cache row is content-addressed and reached by text hash, so without it a
-// chunk would count as free because a different tenant had embedded the same
-// text.
+// "Already paid for" means BY THIS ACCOUNT since 0050 — the join carries its own
+// user_id predicate. The config filter alone wouldn't supply it: the cache row is
+// content-addressed and reached by text hash, so without it a chunk would count
+// as free because a different tenant had embedded the same text.
 export async function cachedChunkIdsForModel(model: string): Promise<string[]> {
   const table = await activeChunksTable();
   if (!table) return [];
@@ -1731,12 +1709,10 @@ export async function insertResults(rows: ResultInsert[]): Promise<void> {
   // from a same-space re-score.
   const key = baselineKey();
 
-  // L13: a single row needs no transaction — one INSERT is already atomic, and
-  // wrapping it costs a BEGIN and a COMMIT round trip on top of the statement.
-  // Measured 2026-08-03 against this database: 193.9ms wrapped vs 65.3ms bare,
-  // i.e. 66% of the call was transaction bookkeeping. It matters because
-  // autotune scores ONE question at a time (scoreQuestionNow → scoreQuestions
-  // ([q]) → here), so the single-row case is the hot one, not the batch.
+  // A single row needs no transaction — one INSERT is already atomic, and wrapping
+  // it costs a BEGIN and a COMMIT round trip. Measured 2026-08-03: 193.9ms wrapped
+  // vs 65.3ms bare. It matters because autotune scores ONE question at a time, so
+  // the single-row case is the hot one, not the batch.
   if (rows.length === 1) {
     const r = rows[0];
     await sql`
@@ -1844,15 +1820,14 @@ export async function latestResultsForScreening(
   );
 }
 
-// Which of these labels already hold a usable baseline measurement (0057), so
-// the scoring pass only pays for the ones that don't.
+// Which of these labels already hold a usable baseline measurement (0057), so the
+// scoring pass only pays for the ones that don't.
 //
 // TWO SOURCES, one query. A row counts when it is either a shadow row from the
-// baseline pass (is_baseline) or a live row scored while the config genuinely
-// had no overrides (retrieval_state = 'baseline') — the second is why an
-// untuned config, and every question scored before the first override landed,
-// has a baseline for free. Both must carry the CURRENT baseline_key: an older
-// key measured a different vector space.
+// baseline pass (is_baseline) or a live row scored while the config genuinely had
+// no overrides — the second is why an untuned config has a baseline for free.
+// Both must carry the CURRENT baseline_key: an older key measured a different
+// vector space.
 export async function labelsWithBaseline(labelIds: string[]): Promise<Set<string>> {
   if (labelIds.length === 0) return new Set();
   const rows = await sql<{ eval_label_id: string }[]>`
@@ -1910,10 +1885,10 @@ export async function createRunSnapshot(args: {
   `;
 }
 
-// eval_questions has no config_id either — a question belongs to a DOCUMENT
-// (0002), so its owner is documents.user_id. Both mutations below take an id
-// straight from the URL, which is why they join through to that column: without
-// it, a guessed uuid rewrites or deletes another account's golden-set question.
+// eval_questions has no config_id — a question belongs to a DOCUMENT (0002), so
+// its owner is documents.user_id. Both mutations below take an id straight from
+// the URL, which is why they join through to that column: without it, a guessed
+// uuid rewrites or deletes another account's golden-set question.
 //
 // Returning the matched count rather than void lets the routes 404 on a
 // scoped-out id instead of reporting a success that changed nothing.
@@ -1981,14 +1956,12 @@ export async function deleteQuestion(
   return { question: pre?.question ?? "", chunkText: pre?.chunk_text ?? null };
 }
 
-// Assemble the active config's per-chunk override info for the /eval badges:
-// one row per overridden chunk (kind/model/piece count), its hover outcomes
-// from the most recent autotune run that applied an override there, and the
-// red-❗ gap flag. Gap detection (§6.4): only pieces that carry token spans can
-// leave one (whole-chunk and uniform re-splits store NULL spans = full
-// coverage); for those we tokenize the source chunk and check the spans cover
-// [0, tokenCount) without holes. Both tables are tolerated missing (0013/0015
-// or 0016 unapplied) so /eval keeps working pre-migration.
+// Assemble the active config's per-chunk override info for the /eval badges: one
+// row per overridden chunk, its hover outcomes from the most recent autotune run
+// that applied an override there, and the red-❗ gap flag. Only pieces carrying
+// token spans can leave a gap (whole-chunk and uniform re-splits store NULL spans
+// = full coverage); for those we check the spans cover [0, tokenCount) without
+// holes. Both tables are tolerated missing so /eval keeps working pre-migration.
 async function listChunkOverrideInfo(table: string): Promise<ChunkOverrideInfo[]> {
   const cfg = activeConfig();
   let pieces: {
@@ -2231,13 +2204,12 @@ function mapQuestionDetails(
 }
 
 // The baseline half of the dashboard's detail set (0057): each question's most
-// recent OVERRIDE-FREE measurement, in the exact row shape the live detail
-// query produces, so mapQuestionDetails + reduceMetrics can be reused verbatim.
+// recent OVERRIDE-FREE measurement, in the exact row shape the live detail query
+// produces, so mapQuestionDetails + reduceMetrics are reused verbatim.
 //
-// Two sources, one `latest` (see labelsWithBaseline): rows from the baseline
-// pass, and live rows scored while the config genuinely had no overrides —
-// the free historical ones. is_baseline rows are preferred at equal recency
-// because they were measured deliberately against today's corpus.
+// Two sources, one `latest`: rows from the baseline pass, and live rows scored
+// while the config had no overrides. is_baseline rows win at equal recency —
+// they were measured deliberately against today's corpus.
 async function baselineDetailRows(table: string): Promise<EvalDetailRow[]> {
   return sql<EvalDetailRow[]>`
     with active_labels as (
@@ -2322,45 +2294,32 @@ function reduceMetrics(
   };
 }
 
-// ONE CHUNK's questions, in the exact shape getSummary would give them (L6 of
-// docs/autotune-speedups-plan.md).
+// ONE CHUNK's questions, in the exact shape getSummary would give them.
 //
-// Why it exists: autotune's confirm step (applyAutotuneCandidate) called the
-// whole-config getSummary() two or three times per confirm and then immediately
-// filtered to a single chunk. Measured 2026-08-02 that call is ~1.1s against a
-// 162-question corpus, and a run makes ~150 of them — ~167s of an 894s run, all
-// to read 1–2 questions at a time.
+// Autotune's confirm step called the whole-config getSummary() two or three times
+// per confirm and then filtered to a single chunk — ~1.1s each against a
+// 162-question corpus, ~150 per run, so ~167s of an 894s run to read 1–2
+// questions at a time.
 //
-// The savings are twofold: the `latest` CTE now runs over one chunk's results
-// instead of the whole corpus, and the five aggregate queries getSummary fires in
-// parallel (run history, pending counts, chunk count, override info, change log)
-// plus the corpus-wide nDCG drift analysis are skipped entirely — the confirm
-// step reads none of them.
+// The savings are twofold: the `latest` CTE runs over one chunk's results instead
+// of the whole corpus, and the five aggregate queries plus the corpus-wide nDCG
+// drift analysis are skipped entirely.
 //
 // Shares mapQuestionDetails with getSummary, so `stale`, `hit`, `rr` and `ndcg`
-// are computed identically. That matters: the keep/revert comparison puts a
-// `before` from this function against an `after` from it, and failingMetrics
-// treats stale as not-failing.
+// are computed identically — the keep/revert comparison puts a `before` from this
+// function against an `after` from it.
 export async function getChunkQuestions(
   chunkId: string,
 ): Promise<{ questions: QuestionDetail[]; criteria: EvalCriteria }> {
   const cfg = activeConfig();
 
-  // L11 (docs/autotune-speedups-plan.md): these four reads have no data
-  // dependency on each other — criteria only feeds effectiveK below, table only
-  // gates the early return, and the other two are consumed by the query and the
-  // mapper. Run sequentially they cost four round trips; measured 2026-08-03 at
-  // ~129ms EACH against this database, i.e. 40% of the whole function spent
-  // waiting rather than working. One Promise.all makes it one round trip.
+  // These four reads have no data dependency on each other, and run sequentially
+  // cost four round trips — measured 2026-08-03 at ~129ms EACH, i.e. 40% of the
+  // function spent waiting. One Promise.all makes it one round trip.
   //
-  // Deliberately NOT hoisted to run scope: `criteria` and the table are
-  // constant for a run, but the fingerprint is not — it changes as overrides
-  // land mid-run, and a stale one silently mis-labels fresh results. Fetching
-  // all four fresh every call keeps that correctness property exactly as it was
-  // and still captures the saving.
-  //
-  // Costs one wasted fingerprint query when `table` is null (config with no
-  // embedded documents) — the early return below used to short-circuit it.
+  // Deliberately NOT hoisted to run scope: `criteria` and the table are constant
+  // for a run, but the fingerprint is not — it changes as overrides land mid-run,
+  // and a stale one silently mis-labels fresh results.
   const [criteria, table, currentState, retrievalChangedAt] = await Promise.all([
     getActiveCriteria(),
     activeChunksTable(),
@@ -2675,10 +2634,9 @@ export async function getSummary(): Promise<EvalSummary> {
 
   // nDCG corpus-drift: documents that entered this config after the graded set's
   // ideals were built and/or after it was scored. Each input ages the number
-  // independently — a doc after the ideal makes it incomplete (rebuild fixes),
-  // a doc after the score makes retrieval stale (re-score fixes). staleDocs is
-  // sized off the EARLIEST such input, so it counts every document the current
-  // number can't fully account for. Skipped entirely when nothing is graded.
+  // independently — a doc after the ideal makes it incomplete (rebuild fixes), a
+  // doc after the score makes retrieval stale (re-score fixes). staleDocs is sized
+  // off the EARLIEST such input. Skipped entirely when nothing is graded.
   let ndcgStaleDocs = 0;
   let ndcgStaleRescore = false;
   let ndcgStaleRebuild = false;

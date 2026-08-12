@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // PER-USER PROVIDER CLIENTS — strict BYOK (docs/user-accounts-plan.md §5).
 //
 // There are no server API keys any more. Every provider client is constructed
@@ -27,7 +26,6 @@
 // and a longer one would keep serving a key the user has already rotated away
 // from. 60s is the window in which a revoked key still works; that is the
 // deliberate trade, and it is bounded.
-// ---------------------------------------------------------------------------
 import "server-only";
 
 import Anthropic from "@anthropic-ai/sdk";

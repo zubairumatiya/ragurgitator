@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // THE MCP ENDPOINT. JSON-RPC over HTTP, authenticated by an OAuth bearer token.
 //
 // This is the only route in the app not behind a session cookie, which is the
@@ -16,7 +15,6 @@
 // No `export const runtime`: Node is already the default, and postgres.js plus
 // AsyncLocalStorage rule out edge anyway. There is no runtime export anywhere
 // else in this repo and this is not the file to start.
-// ---------------------------------------------------------------------------
 import { createMcpHandler } from "@modelcontextprotocol/server";
 
 import { mcpIdentity } from "@/lib/auth/mcpToken";

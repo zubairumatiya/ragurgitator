@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // One-shot (idempotent, re-runnable) backfill of embedding_cache (0020) from
 // every vector the app has already paid for:
 //

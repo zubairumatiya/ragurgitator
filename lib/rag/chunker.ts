@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // STEP 2 of ingestion: CHUNK
 //
 // Splits a SourceDocument into smaller, overlapping `Chunk`s. Retrieval happens
@@ -7,7 +6,6 @@
 // Sizing is measured in tokens of the embedding model's own tokenizer
 // (voyageai/<model> on the HF Hub), so a chunk's length matches what Voyage
 // actually sees when it embeds that chunk.
-// ---------------------------------------------------------------------------
 import { AutoTokenizer } from "@huggingface/transformers";
 
 import { activeConfig } from "@/lib/rag/activeConfig";

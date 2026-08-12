@@ -1,26 +1,19 @@
-// ---------------------------------------------------------------------------
-// Four greppable invariants, none of which a typecheck, a unit test or a page
-// that renders one account's data can see. The first three have each already
-// been violated once; the fourth guards a column that fails silently.
+// Four greppable invariants, none of which a typecheck, a unit test or a page that
+// renders one account's data can see. The first three have each already been
+// violated once; the fourth guards a column that fails silently.
 //
 //   1. .expose() appears only where a provider client is constructed.
 //   2. Every app entry point that touches the store enters a request scope.
 //   3. Every API handler is behind the authentication boundary — per METHOD.
 //   4. Every read of eval_results has a view on is_baseline (0057).
 //
-// WHY A SCRIPT AND NOT CI. There is no CI in this repo, and standing up a
-// workflow to hold one job is more machinery than the invariants need. Adding it
-// later is `npm run guard && npm run lint && npm test` in a workflow file, so
-// nothing here has to change when that happens.
-//
-// WHY GREP AND NOT THE TYPE SYSTEM. All four are properties of where a call (or
-// a column) APPEARS, not of what it returns, so there is no signature that could encode
-// them. The mitigation for grep's bluntness is that every sweep asserts an
-// allowlist: a new violation fails by name, and a deliberate exception has to be
-// added here with a reason next to it.
+// WHY GREP AND NOT THE TYPE SYSTEM. All four are properties of where a call (or a
+// column) APPEARS, not of what it returns, so no signature could encode them. The
+// mitigation for grep's bluntness is that every sweep asserts an allowlist: a new
+// violation fails by name, and a deliberate exception has to be added here with a
+// reason next to it.
 //
 //   Usage: npm run guard   (no database, no network, no env)
-// ---------------------------------------------------------------------------
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
@@ -46,19 +39,16 @@ function walk(dir: string, match: (path: string) => boolean): string[] {
 const read = (path: string) => readFileSync(path, "utf8");
 const rel = (path: string) => relative(ROOT, path);
 
-// ---------------------------------------------------------------------------
 // 1. The .expose() allowlist
 //
-// lib/crypto/secretKey.ts wraps a decrypted provider key so it cannot reach a
-// log, a JSON response or a stack trace by accident: it overrides toString,
-// toJSON and the inspect symbol, and only .expose() yields the real string. The
-// wrapper is worth exactly as much as the discipline about where that call
-// appears, and nothing but this sweep enforces it.
+// lib/crypto/secretKey.ts wraps a decrypted provider key so it cannot reach a log,
+// a JSON response or a stack trace by accident: only .expose() yields the real
+// string. The wrapper is worth exactly as much as the discipline about where that
+// call appears, and nothing but this sweep enforces it.
 //
 // The rule is "inline at the construction site" — `build(secret.expose())`, not
 // `const key = secret.expose()`, because a local variable is a plain string that
 // outlives the expression and can be logged, spread or serialised downstream.
-// ---------------------------------------------------------------------------
 const EXPOSE_ALLOWED: Record<string, string> = {
   "lib/crypto/secretKey.ts": "defines it",
   "lib/llm/client.ts": "inline in build(secret.expose())",
@@ -100,19 +90,16 @@ function sweepExpose() {
   }
 }
 
-// ---------------------------------------------------------------------------
 // 2. The request-scope sweep
 //
 // Since 0051 a request scope IS a database transaction carrying `set local
-// app.user_id`. Touching the store outside one does not raise a permission
-// error — lib/db.ts's fail-closed Proxy throws only if no handle exists at all,
-// and a handle that has escaped its scope reads as a user of NULL, which every
-// policy denies. So the symptom is EMPTY RESULTS, everywhere, with no error.
+// app.user_id`. Touching the store outside one does not raise a permission error —
+// the fail-closed Proxy throws only if no handle exists at all, and a handle that
+// has escaped its scope reads as a user of NULL, which every policy denies. So the
+// symptom is EMPTY RESULTS, everywhere, with no error.
 //
 // This sweep is how the account page was found throwing "sql used outside a
-// withUser() scope": requireUser() authenticates but does NOT open a scope, and
-// four call sites were still using it.
-// ---------------------------------------------------------------------------
+// withUser() scope": requireUser() authenticates but does NOT open a scope.
 const SCOPE_EXEMPT: Record<string, string> = {
   "app/api/auth/me/route.ts": "pure Supabase session read, no store call",
   "app/auth/actions.ts": "sign in / sign up / sign out, no store call",
@@ -158,18 +145,15 @@ function sweepScopes() {
   }
 }
 
-// ---------------------------------------------------------------------------
 // 3. The authentication boundary, per METHOD
 //
 // proxy.ts deliberately does not redirect /api (a fetch that follows a 307 to
-// /login and parses the HTML as JSON reports an error with nothing to do with
-// the real problem), so each handler returns its own 401 — which the wrappers in
-// lib/http/configScope.ts do.
+// /login and parses the HTML as JSON reports an error with nothing to do with the
+// real problem), so each handler returns its own 401.
 //
-// PER METHOD, NOT PER FILE, and that distinction is the entire reason this
-// exists. Phase 2's first sweep was file-level, passed, and left ten handlers
-// open: each shared a file with a gated sibling, so the filename matched.
-// ---------------------------------------------------------------------------
+// PER METHOD, NOT PER FILE, and that distinction is the entire reason this exists.
+// The first sweep was file-level, passed, and left ten handlers open: each shared a
+// file with a gated sibling, so the filename matched.
 const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 // withMcpRequest (lib/http/mcpScope.ts) is the bearer-token boundary for
 // /api/mcp: it verifies the OAuth token, rejects anything that is not an MCP
@@ -232,25 +216,19 @@ function sweepApiGates() {
   }
 }
 
-// ---------------------------------------------------------------------------
 // 4. Every read of eval_results excludes baseline rows
 //
 // 0057 puts SHADOW rows in eval_results: the same questions measured with no
-// per-chunk overrides in effect, so the dashboard can show what tuning bought.
-// They are not results of the retrieval anyone is running, and a read that
-// mistakes one for "the latest result" does silent damage rather than failing —
-// a baselined question looks already-scored to questionsNeedingScoring and
-// never gets a real score, or a rate is computed over the wrong retrieval.
+// per-chunk overrides in effect. They are not results of the retrieval anyone is
+// running, and a read that mistakes one for "the latest result" does silent damage
+// rather than failing — a baselined question looks already-scored to
+// questionsNeedingScoring and never gets a real score.
 //
-// The invariant is per QUERY, not per file: every `from eval_results` must
-// MENTION is_baseline in the same statement. Mentioning, not excluding — two
-// queries (labelsWithBaseline, baselineDetailRows) read baseline rows on
-// purpose, and no grep can tell a correct `where is_baseline` from a wrong one.
-// What it does catch is the failure that actually happens: a new query written
-// against eval_results by someone who has never heard of 0057, which omits the
-// column entirely. There is no allowlist because nothing needs one — a query
-// that reads eval_results without a view on this column is a bug either way.
-// ---------------------------------------------------------------------------
+// The invariant is per QUERY, not per file: every `from eval_results` must MENTION
+// is_baseline in the same statement. Mentioning, not excluding — two queries read
+// baseline rows on purpose, and no grep can tell a correct `where is_baseline` from
+// a wrong one. What it does catch is a new query written by someone who has never
+// heard of 0057, which omits the column entirely.
 function sweepBaselineReads() {
   console.log("\n4. eval_results reads exclude baseline rows\n");
   const files = walk(join(ROOT, "lib"), (p) => p.endsWith(".ts") && !p.endsWith(".test.ts"));

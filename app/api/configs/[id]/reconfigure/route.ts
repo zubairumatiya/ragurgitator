@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/configs/[id]/reconfigure
 //
 // Change THIS config in place (bulk actions → change base model / chunk size —
@@ -12,7 +11,6 @@
 //
 // Streams IngestEvents as NDJSON so the dialog shows progress. Scoped to the
 // config named in the path. `params` is a Promise in this Next.js version.
-// ---------------------------------------------------------------------------
 import { streamError } from "@/lib/http/missingKeyServer";
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";

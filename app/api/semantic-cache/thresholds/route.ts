@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: GET/POST /api/semantic-cache/thresholds
 //
 // GET  — per vector-space calibrated threshold (or the default) plus cache and
@@ -12,7 +11,6 @@
 // primary-keyed (user_id, space), so it stops there — one account's calibration
 // no longer governs another's cache, which mattered because a threshold set too
 // low makes the cache serve WRONG ANSWERS.
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 
 import { withRequestUser } from "@/lib/http/configScope";

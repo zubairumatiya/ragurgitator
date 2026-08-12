@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // NOTIFY — "we'll email you when it's done", the real half.
 //
 // In-app notification is DERIVED, not stored: the status panel treats any
@@ -12,7 +11,6 @@
 // Recipient is BATCH_NOTIFY_EMAIL (a single address until real user accounts
 // land — see the plan doc). Sender is BATCH_NOTIFY_FROM, defaulting to Resend's
 // shared onboarding sender so it works before a domain is verified.
-// ---------------------------------------------------------------------------
 import { Resend } from "resend";
 import { JOB_LABELS, type BatchJob } from "@/lib/batch/types";
 

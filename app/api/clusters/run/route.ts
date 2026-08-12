@@ -1,11 +1,9 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/clusters/run
 //
 // Run k-means over the active corpus at the requested k. Produces several random
 // restarts (candidates) the user can compare and keep; prior unsaved candidates
 // are pruned first (see lib/rag/clusterStore.runClustering). Streams progress as
 // NDJSON (one ClusterEvent per line) so the dashboard shows a live bar.
-// ---------------------------------------------------------------------------
 import { streamError } from "@/lib/http/missingKeyServer";
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";

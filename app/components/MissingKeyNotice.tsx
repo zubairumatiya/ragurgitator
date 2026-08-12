@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: the error surface for "you have no key for the provider this needs".
 //
 // Under strict BYOK this is the first thing a new account sees when it tries to
@@ -11,7 +10,6 @@
 // of failure, so it is a drop-in for `<p>{message}</p>`. Surfaces whose error
 // state is a bare string (chat bubbles) use errorTextFrom() instead and say the
 // same thing without the link.
-// ---------------------------------------------------------------------------
 "use client";
 
 import Link from "next/link";

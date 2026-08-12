@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // CLUSTER LABELING — the "Claude-naming step" referenced in
 // migrations/0008_clusters.sql (clusters.label is null until this runs).
 //
@@ -9,7 +8,6 @@
 // produce distinct, non-overlapping labels — and is far cheaper than k calls.
 // (Very large k makes for a big prompt; batch the buckets if that becomes a
 // problem.) Reuses config.llmModel so the label model tracks answer generation.
-// ---------------------------------------------------------------------------
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { meteredMessage } from "@/lib/rag/meter";

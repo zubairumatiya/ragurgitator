@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // SAVE-TIME KEY VERIFICATION.
 //
 // One cheap live call per provider, made with the CANDIDATE key before it is
@@ -14,7 +13,6 @@
 // The calls are chosen to be the cheapest thing that still proves the key is
 // accepted: a model list where the provider offers one, a single-token embed
 // where it doesn't. None of them bill meaningfully.
-// ---------------------------------------------------------------------------
 import "server-only";
 
 import Anthropic from "@anthropic-ai/sdk";

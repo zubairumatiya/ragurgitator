@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: the /cache listing table (Client Component). Split out of the page — which
 // stays a Server Component that reads the store — because rows expand, and that
 // needs both state and measurement in the browser.
@@ -20,7 +19,6 @@
 // `import type` for the row shape: the type is erased at compile time, so this
 // client module never pulls the server-only store chain behind it (same pattern
 // as Sidebar's ConfigSummary import).
-// ---------------------------------------------------------------------------
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";

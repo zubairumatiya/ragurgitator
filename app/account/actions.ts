@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // Account Server Actions — save / delete a provider key, delete the account.
 //
 // Server Actions rather than Route Handlers for the same reason as the auth
@@ -18,7 +17,6 @@
 //
 // Form validation happens BEFORE entering the scope in both, so a malformed
 // submission never opens a transaction it has no use for.
-// ---------------------------------------------------------------------------
 "use server";
 
 import { redirect } from "next/navigation";
@@ -81,7 +79,6 @@ export async function deleteKey(_prev: KeyFormState, formData: FormData): Promis
   return { provider };
 }
 
-// ---------------------------------------------------------------------------
 // MCP ACCESS — the kill switch, and per-client revocation.
 //
 // Two different kinds of "off", and both exist because they fail differently.
@@ -95,7 +92,6 @@ export async function deleteKey(_prev: KeyFormState, formData: FormData): Promis
 // Neither takes an id from the form for the user, same rule as above.
 // revokeMcpGrant does take a clientId, which is safe because Supabase scopes the
 // revocation to the caller's own grants: a forged client id revokes nothing.
-// ---------------------------------------------------------------------------
 export type McpFormState = {
   error?: string;
   saved?: boolean;
@@ -148,7 +144,6 @@ export async function revokeMcpGrant(
   return { saved: true };
 }
 
-// ---------------------------------------------------------------------------
 // ACCOUNT DELETION
 //
 // Deletes the auth.users row directly over our own pooled connection. This is
@@ -172,7 +167,6 @@ export async function revokeMcpGrant(
 // Sign-out happens FIRST. Reversing the order leaves a cookie whose user no
 // longer exists, and every subsequent request pays a failed getUser() round trip
 // before landing on /login.
-// ---------------------------------------------------------------------------
 export async function deleteAccount(): Promise<void> {
   const user = await requireUser();
 

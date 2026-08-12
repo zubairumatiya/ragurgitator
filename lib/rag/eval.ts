@@ -1,19 +1,17 @@
-// ---------------------------------------------------------------------------
 // EVAL ENGINE: synthetic Recall@k for retrieval.
 //
 // For each chunk we ask the LLM to author a natural question the chunk answers
 // (the chunk is the ground-truth label). Scoring is pure retrieval — embed the
-// question, vector-search, and check whether the labeled chunk is in the top-k.
-// No LLM runs at scoring time.
+// question, vector-search, check whether the labeled chunk is in the top-k. No
+// LLM runs at scoring time.
 //
-// Known limitations (by design for v1):
-//   - Strict chunk-id match can undercount when overlapping/duplicate chunks
-//     legitimately answer the same question — a recall floor, not a bug.
+// Known limitations, by design:
+//   - Strict chunk-id match undercounts when overlapping chunks legitimately
+//     answer the same question — a recall floor, not a bug.
 //   - Synthetic questions skew easier than real user queries, so recall is an
-//     optimistic estimate; the generation prompt mitigates lexical copying.
+//     optimistic estimate.
 //   - Retrieval searches the whole model+dim chunks table (all docs/configs that
-//     share it); fine with today's single fixed config.
-// ---------------------------------------------------------------------------
+//     share it).
 import type { StreamErrorEvent } from "@/lib/http/missingKey";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import {
@@ -139,15 +137,13 @@ export type EvalEvent =
       hit: boolean;
       foundRank: number | null;
     }
-  // Bulk nDCG grading (ranking.bulkBuildRankings): one aggregate ranking built +
-  // promoted per question. `ok: false` carries the per-question failure so one
-  // bad question doesn't abort the run.
+  // Bulk nDCG grading: one aggregate ranking built + promoted per question.
+  // `ok: false` carries the per-question failure so one bad question doesn't abort
+  // the run.
   //
-  // The bulk LLM pass (ranking.bulkBuildLlmRankings) reuses both events, and
-  // reports what it decided NOT to spend on up front: `total` is only the
-  // questions that will actually hit the LLM, and the two skip counts explain
-  // the rest — no aggregate to re-rank, or a cached (fresh) llm_rerank already
-  // on file. Absent for the aggregate pass, which skips nothing silently.
+  // The bulk LLM pass reuses both events and reports what it decided NOT to spend
+  // on up front: `total` is only the questions that will actually hit the LLM, and
+  // the two skip counts explain the rest.
   | {
       type: "ranking-start";
       total: number;
@@ -199,14 +195,12 @@ export type EvalEvent =
 
 type Emit = (event: EvalEvent) => void;
 
-// Cancellation, as a flag the loops below poll between units of work. It is
-// NEVER thrown: the run is one transaction that commits when the stream ends, so
-// unwinding out of a loop would discard every question already generated (and
-// banked) with the tokens already paid for. Loops break and return normally, the
-// remaining phases are skipped, and `done` reports the real counts with
-// `cancelled: true`. A cancelled generation therefore leaves its questions
-// unscored — "Score pending" is the button that finishes them later.
-// See lib/http/cancelRegistry.ts.
+// Cancellation, as a flag the loops below poll between units of work. It is NEVER
+// thrown: the run is one transaction that commits when the stream ends, so
+// unwinding out of a loop would discard every question already generated and
+// banked with the tokens already paid for. Loops break and return normally, and
+// `done` reports the real counts with `cancelled: true`. A cancelled generation
+// therefore leaves its questions unscored — "Score pending" finishes them later.
 
 // On-demand synthetic questions can target a difficulty — a dial on how far the
 // question's wording drifts from the passage's surface form. Higher difficulty
@@ -285,13 +279,11 @@ type GeneratedQuestion = { question: string; expected_answer: string };
 // Identifies the INSTRUCTIONS a cached question was written to, so question_cache
 // can never serve one authored under different wording. Derived from the prompt
 // constants themselves rather than a hand-bumped literal: edit any of them and
-// the fingerprint changes, the cache misses, and the questions are regenerated —
-// there is no version number to forget to bump.
+// the fingerprint changes, the cache misses, and the questions are regenerated.
 //
-// `count` is deliberately absent. It changes the rendered user turn ("Write
-// exactly N question(s)") but not what a question for slot i of a passage IS,
-// and excluding it is what lets the inline path (N per call) and the batch path
-// (one per request) share banked rows instead of keeping two disjoint caches.
+// `count` is deliberately absent. It changes the rendered user turn but not what
+// a question for slot i of a passage IS, and excluding it is what lets the inline
+// path (N per call) and the batch path (one per request) share banked rows.
 export const QUESTION_PROMPT_VERSION = fingerprintFrom([
   "qg-v1",
   GENERATION_SYSTEM,
@@ -382,12 +374,11 @@ async function authorQuestions(
 // questions to every chunk — or, with Top up ticked, tops every chunk up TO two.
 export type DifficultyTarget = { difficulty: Difficulty; count: number };
 
-// Generate `count` question(s) per SELECTED difficulty for every chunk in scope
-// — or, with `topUp`, only for chunks short of that target and only the
-// shortfall. An empty difficulty set is a no-op. Each question slot is its own
-// progress step so the bar reflects the real amount of work; a chunk needing
-// several at one difficulty asks the model for them in ONE call, which keeps
-// them from coming back near-identical.
+// Generate `count` question(s) per SELECTED difficulty for every chunk in scope —
+// or, with `topUp`, only for chunks short of that target and only the shortfall.
+// Each question slot is its own progress step so the bar reflects the real work;
+// a chunk needing several at one difficulty asks the model for them in ONE call,
+// which keeps them from coming back near-identical.
 export async function generateMissingQuestions(
   targets: DifficultyTarget[],
   emit: Emit = () => {},
@@ -546,26 +537,23 @@ export async function generateQuestionForChunk(
   return "ok";
 }
 
-// Embed each question, vector-search, and record whether its labeled chunk landed in
-// the top-k. Pure retrieval — no LLM at scoring time. Shared by the incremental
-// (scoreUnscoredQuestions) and full (rescoreAllQuestions) scoring paths.
+// Embed each question, vector-search, and record whether its labeled chunk landed
+// in the top-k. Pure retrieval — no LLM at scoring time. Shared by the incremental
+// and full scoring paths.
 //
 // A question's query vector depends only on (text, model), so we reuse cached
-// vectors and embed only cache misses (caching them as we go). On a warm cache
-// each iteration is just a fast vector search — the win that makes repeat
-// "Re-score all" runs cheap.
+// vectors and embed only misses. On a warm cache each iteration is just a fast
+// vector search — the win that makes repeat "Re-score all" runs cheap.
 //
-// The override state is loaded ONCE for the batch (buildRetrievalContext) —
-// it can't change mid-run, and re-reading the override rows + every model's
-// pieces per question was the dominant repeat cost under override configs. A
-// few questions score concurrently; every shared cache they touch (embedding
-// cache, query-vector cache) upserts idempotently, so races cost at most a
+// The override state is loaded ONCE for the batch: it can't change mid-run, and
+// re-reading the override rows + every model's pieces per question was the
+// dominant repeat cost under override configs. A few questions score
+// concurrently; every shared cache upserts idempotently, so races cost at most a
 // duplicate embed of the same text.
 // Tried at 8 (2026-08-03) on the theory that scoring is latency-bound and the
-// postgres.js pool has 10 connections, so 4 left most of it idle. Measured: no
-// effect — `rescore` 44.5s → 45.4s, confirm's scoring 82.3s → 81.4s. Reverted.
-// Whatever bounds a batch here, it is not pool width; don't re-raise it without
-// finding out what actually is. See docs/autotune-speedups-plan.md.
+// pool has 10 connections. Measured: no effect — rescore 44.5s → 45.4s, confirm
+// 82.3s → 81.4s. Reverted. Whatever bounds a batch here, it is not pool width;
+// don't re-raise it without finding out what actually is.
 const SCORE_CONCURRENCY = 4;
 
 export async function scoreQuestions(
@@ -578,19 +566,15 @@ export async function scoreQuestions(
   emit({ type: "score-start", total: questions.length });
 
   const cfg = activeConfig();
-  // Retrieve a superset deep enough for every enabled metric, then judge recall
-  // at recall_k (A1). Loading criteria once per run (not per question) is cheap.
+  // Retrieve a superset deep enough for every enabled metric, then judge recall at
+  // recall_k. These four reads are the batch's fixed setup and have no data
+  // dependency on each other — one round trip instead of four, measured at ~129ms
+  // each. "Once per batch" is only cheap when the batch is big: autotune scores one
+  // question per call, so it re-pays all of it per question.
   //
-  // L9 (0042): these four reads are the batch's fixed setup, timed as one
-  // bucket. "Once per batch" is only cheap when the batch is big — autotune
-  // scores one question per call, so it re-pays all of it per question.
-  // L11: four independent reads, so one round trip instead of four. Measured
-  // 2026-08-03 at ~129ms each against this database — sequentially that is pure
-  // waiting, and autotune re-pays it per question because it scores one at a
-  // time. Nothing here feeds anything else here.
-  // Stamp every result with the override state it's scored under (0022) — the
-  // state can't change mid-run, so one fingerprint covers the batch. L12 hands
-  // the same promise to buildRetrievalContext as its piece-cache key, so the
+  // Every result is stamped with the override state it's scored under (0022) — the
+  // state can't change mid-run, so one fingerprint covers the batch. The same
+  // promise is handed to buildRetrievalContext as its piece-cache key, so the
   // fingerprint is still fetched in parallel here rather than ahead of it.
   const statePromise = retrievalStateFingerprint();
   const [criteria, cached, retrievalState, ctx] = await Promise.all([
@@ -605,19 +589,17 @@ export async function scoreQuestions(
   const depth = retrievalDepth(criteria, cfg.topK);
   const recallK = effectiveK(criteria.recall, cfg.topK);
 
-  // BASELINE LEG (0057). When the config carries overrides, each question also
-  // gets a shadow measurement with none in effect — that's the "what has my
-  // tuning bought?" side of the dashboard ticker.
+  // BASELINE LEG (0057). When the config carries overrides, each question also gets
+  // a shadow measurement with none in effect — the "what has my tuning bought?"
+  // side of the dashboard ticker.
   //
-  // Skipped entirely when the config has NO overrides: the live row already IS
-  // the baseline (it's stamped retrieval_state = 'baseline'), and writing a
-  // duplicate would double the table for nothing. Skipped per question when one
-  // already exists at the current baseline_key, so re-scores don't re-measure a
-  // baseline that cannot have moved.
+  // Skipped entirely when the config has NO overrides: the live row already IS the
+  // baseline. Skipped per question when one exists at the current baseline_key, so
+  // re-scores don't re-measure a baseline that cannot have moved.
   //
   // It costs one extra vector query and ZERO dollars: `{ ...ctx, overrides: [] }`
-  // takes retrieveWithCutoffs' single-ANN fast path against the same cached
-  // query vector — no fusion pool, no re-embedding, no provider call.
+  // takes retrieveWithCutoffs' single-ANN fast path against the same cached query
+  // vector — no fusion pool, no re-embedding, no provider call.
   const baselineCtx = ctx.overrides.length > 0 ? { ...ctx, overrides: [] } : null;
   const haveBaseline = baselineCtx
     ? await labelsWithBaseline(questions.map((q) => q.labelId))
@@ -755,12 +737,12 @@ export async function scoreUnscoredQuestions(
   return scoreQuestions(pending, emit, shouldStop);
 }
 
-// The "Score pending" button: score every question that has no fresh result —
-// new, edited, or retrieval-stale — then freeze a comparison snapshot of the
-// current aggregate. It GENERATES NOTHING: buying questions is Bulk actions →
-// Add, which is also the only generation path that can route through the batch
-// API. This button is the cheap incremental complement to "Re-score all", and
-// the button that finishes a cancelled generation's unscored leftovers.
+// The "Score pending" button: score every question with no fresh result — new,
+// edited, or retrieval-stale — then freeze a comparison snapshot. It GENERATES
+// NOTHING: buying questions is Bulk actions → Add, which is also the only
+// generation path that can route through the batch API. This is the cheap
+// incremental complement to "Re-score all", and what finishes a cancelled
+// generation's unscored leftovers.
 export async function scorePendingQuestions(
   emit: Emit = () => {},
   shouldStop: ShouldStop = NEVER_STOP,
@@ -856,22 +838,16 @@ export async function bulkAddDifficulties(
 }
 
 // "Bulk actions → Add question → Add cached": the free counterpart to
-// bulkAddDifficulties. Every chunk in scope is handed whatever the bank holds
-// for its exact text — ANY difficulty, no target and no staged counts, since a
-// banked question costs nothing and there is no reason to turn one down for
-// being the wrong difficulty. Nothing is generated and nothing is batched; a
-// passage with nothing banked simply gets nothing, and "Add" is what buys it.
+// bulkAddDifficulties. Every chunk in scope is handed whatever the bank holds for
+// its exact text — ANY difficulty, no target and no staged counts, since a banked
+// question costs nothing. Nothing is generated and nothing is batched.
 //
 // Deliberate rather than automatic: reuse hands you wording authored under
-// another config, which is exactly what you want when comparing configs over one
-// corpus and exactly what you don't want when you asked for fresh questions.
+// another config, which is what you want when comparing configs over one corpus
+// and what you don't want when you asked for fresh questions.
 //
 // Duplicates are impossible by construction — fillChunksFromCache compares
-// question TEXT against everything the chunk already shows — so pressing the
-// button twice is a no-op.
-//
-// Scores and snapshots afterwards like the paid path, because a reused question
-// is a real labeled question; it just cost nothing.
+// question TEXT against everything the chunk already shows.
 export async function bulkAddCachedQuestions(
   emit: Emit = () => {},
   documentIds?: string[],
@@ -931,12 +907,11 @@ export async function bulkAddCachedQuestions(
   return { reused, scored, recall: summary.recall };
 }
 
-// The "Re-score all" button: re-run retrieval for EVERY labeled question under the
-// active config against the current corpus and freeze a snapshot. Unlike
-// scorePendingQuestions this ignores existing results (it inserts fresh rows; history is
-// preserved), so recall stays apples-to-apples after the corpus changes — e.g. a newly
-// added doc introduces distractors that can push a previously-hit chunk out of the
-// top-k. Generation is untouched; this only scores.
+// The "Re-score all" button: re-run retrieval for EVERY labeled question under
+// the active config and freeze a snapshot. Unlike scorePendingQuestions this
+// ignores existing results (inserting fresh rows; history is preserved), so recall
+// stays apples-to-apples after the corpus changes — e.g. a newly added doc
+// introduces distractors that push a previously-hit chunk out of the top-k.
 export async function rescoreAllQuestions(
   emit: Emit = () => {},
   documentIds?: string[],
@@ -986,18 +961,15 @@ export async function rescoreAllQuestions(
   return { scored, recall: summary.recall };
 }
 
-// ---------------------------------------------------------------------------
 // DIRTY-SET RE-SCORE — autotune's replacement for the final full re-score.
 //
-// An autotune run only changes the representation of the chunks it overrode
-// (or cleared); every other chunk's vectors are untouched. Per question, the
-// pure screen in dirtyScreen.ts decides from the stored 0028 cutoffs and a
-// couple of cached-vector cosines whether the run's changed chunks could have
-// altered the stored result at all. Questions proven unaffected keep their
-// stored rows, re-stamped with the final fingerprint; only the rest re-run
-// real retrieval. Same end state as rescoreAllQuestions, minus the redundant
-// retrievals — see dirtyScreen.ts for the screens and their soundness rules.
-// ---------------------------------------------------------------------------
+// An autotune run only changes the representation of the chunks it overrode; every
+// other chunk's vectors are untouched. Per question, the pure screen in
+// dirtyScreen.ts decides from the stored 0028 cutoffs and a couple of cached-vector
+// cosines whether the run's changed chunks could have altered the stored result at
+// all. Questions proven unaffected keep their stored rows, re-stamped with the
+// final fingerprint; only the rest re-run real retrieval. Same end state as
+// rescoreAllQuestions, minus the redundant retrievals.
 
 // One chunk whose override state differs between an autotune run's start and
 // end. `finalModel` = the override's model in the END state (null = override
@@ -1023,12 +995,11 @@ export async function rescoreAffectedQuestions(
   const latest = await latestResultsForScreening(finalState);
   const qids = questions.map((q) => q.questionId);
 
-  // Everything the screens compare is prefetched, batched, and CACHE-ONLY —
-  // a cache miss marks the question dirty rather than paying a provider call
-  // (the re-score would have to embed it anyway). Base-model query vectors
-  // live in eval_question_embeddings (keyed by question id); override-model
-  // ones live in embedding_cache (keyed by text — embedQueryCached banks them
-  // during every fused retrieval), hence the two lookups.
+  // Everything the screens compare is prefetched, batched, and CACHE-ONLY — a miss
+  // marks the question dirty rather than paying a provider call (the re-score would
+  // have to embed it anyway). Base-model query vectors live in
+  // eval_question_embeddings (keyed by question id); override-model ones live in
+  // embedding_cache (keyed by text), hence the two lookups.
   const baseQVecs = await getCachedQueryEmbeddings(qids, cfg.embeddingModel);
   const models = [...new Set(changed.flatMap((c) => (c.finalModel ? [c.finalModel] : [])))];
   const modelQVecs = new Map<string, Map<string, number[]>>(); // model → question TEXT → vec
@@ -1145,21 +1116,17 @@ export async function rescoreAffectedQuestions(
   return { scored, skipped, recall: summary.recall };
 }
 
-// ---------------------------------------------------------------------------
 // Re-chunk experiment: an ephemeral per-chunk "what-if" (autotune Stage 1).
 //
 // Re-split ONE labeled chunk at a trial (size, overlap), embed the pieces, and
 // re-rank the question against a corpus where that chunk is replaced by its
-// sub-chunks. Nothing is persisted — no new chunks, no scores, no config change
-// — so the live retrieval index and every other question's score are untouched.
+// sub-chunks. Nothing is persisted, so live retrieval and every other question's
+// score are untouched.
 //
-// This is a LOCAL APPROXIMATION of a full re-chunk: the chunk's document
-// neighbors stay frozen, so the seams between this chunk and its neighbors are
-// not re-formed (overlap only moves this chunk's INTERNAL seams). Size is the
-// high-signal knob here; read overlap results with that caveat. Ranking is an
-// exact full-scan against the substituted corpus (see rankWithSubstitutedChunk)
-// — no pool approximation, unlike the model trials below.
-// ---------------------------------------------------------------------------
+// This is a LOCAL APPROXIMATION of a full re-chunk: the chunk's document neighbors
+// stay frozen, so the seams between this chunk and its neighbors are not re-formed.
+// Size is the high-signal knob; read overlap results with that caveat. Ranking is
+// an exact full-scan against the substituted corpus — no pool approximation.
 
 // One sub-chunk's standing in the experiment ranking.
 export type RechunkSubChunk = {
@@ -1274,13 +1241,11 @@ export async function runRechunkExperiment(
   return result;
 }
 
-// ---------------------------------------------------------------------------
 // Boundary editor: assemble the local window the "resize one custom chunk" mode
 // renders. Stitches the labeled chunk + neighbors back into contiguous text (see
 // reconstruct.ts), tokenizes it to map token borders to char offsets, and reports
 // each chunk's token span so the UI can draw frozen-neighbor bands and the test
 // chunk's editable [start, end). Read-only; nothing is persisted.
-// ---------------------------------------------------------------------------
 export type ChunkWindow = {
   testPosition: number;
   totalChunks: number; // chunks in the doc (so the UI knows the range bounds)
@@ -1347,32 +1312,24 @@ export async function buildChunkWindow(
   };
 }
 
-// ---------------------------------------------------------------------------
 // "Try a different model" experiment: an ephemeral per-chunk model A/B.
 //
-// Re-rank ONE labeled chunk's questions against a small CANDIDATE POOL — the
-// chunk itself, the top-k chunks its questions already retrieved, and any corpus
-// chunks the user hand-picked — all re-embedded under an ALTERNATE model. For
-// each question we cosine-rank the ground-truth chunk within the pool and check
-// the top-k. Nothing touches the live index; results are ephemeral unless the
-// user saves a snapshot (eval_model_trials).
+// Re-rank ONE labeled chunk's questions against a small CANDIDATE POOL — the chunk
+// itself, the top-k chunks its questions already retrieved, and any hand-picked
+// corpus chunks — all re-embedded under an ALTERNATE model. Nothing touches the
+// live index; results are ephemeral unless saved (eval_model_trials).
 //
-// The in-pool rank is a LOCAL APPROXIMATION: the new-model rank is WITHIN the
-// pool, not the full corpus, and it's compared against the question's STORED
-// full-corpus result (the baseline). The pool is far smaller than the corpus,
-// so read a rescued miss as "this model re-orders the candidates better," not
-// as true recall. We re-embed in memory and rank by cosine (not pgvector), so
-// the trial is decoupled from the chunks_<model>_<dim> tables and any output
-// dimension works.
+// The in-pool rank is a LOCAL APPROXIMATION: it's WITHIN the pool, not the full
+// corpus, and it's compared against the question's STORED full-corpus result. Read
+// a rescued miss as "this model re-orders the candidates better", not as true
+// recall. Re-embedding in memory and ranking by cosine decouples the trial from
+// the chunks_<model>_<dim> tables, so any output dimension works.
 //
-// Each question ALSO gets a FUSED DRY-RUN (fusedRank/fusedHit): the real
-// rank-interleave fusion (retriever.fuseWithOverrides) run with a hypothetical
-// override for this chunk layered onto the config's existing overrides — the
-// exact merged position the chunk would occupy if the variation were applied.
-// This is the honest number: the in-pool rank routinely over-promises (a chunk
-// that's #1 among ~10 pool chunks can be #3+ against the base ANN's full
-// candidate list), which is exactly what used to surprise on promotion.
-// ---------------------------------------------------------------------------
+// Each question ALSO gets a FUSED DRY-RUN: the real rank-interleave fusion run
+// with a hypothetical override for this chunk layered onto the config's existing
+// ones — the exact merged position the chunk would occupy if applied. This is the
+// honest number: the in-pool rank routinely over-promises, which is what used to
+// surprise on promotion.
 
 // What the trial UI needs to set up a run: the chunk, its questions (with the
 // stored baseline), the auto pool (top-k union), and the rest of the corpus to
@@ -1595,11 +1552,11 @@ export async function setChunkSizeModelOverride(
 
 // Run the trial: embed the pool (with the test chunk replaced by its variation
 // pieces) + each question under the variation's model, cosine-rank the chunk
-// within the pool per question, and (optionally) persist the snapshot. For size
-// variations the chunk competes as its pieces — its standing per question is the
-// BEST piece (hit = any piece in top-k), matching the rechunk experiment and the
-// override retriever. Returns null when the chunk has no questions / isn't under
-// the active config; throws on an unknown model or invalid re-split.
+// within the pool per question, and optionally persist the snapshot. For size
+// variations the chunk competes as its pieces — its standing is the BEST piece
+// (hit = any piece in top-k), matching the rechunk experiment and the override
+// retriever. Returns null when the chunk has no questions / isn't under the active
+// config; throws on an unknown model or invalid re-split.
 export async function runModelTrial(
   chunkId: string,
   variation: TrialVariation,

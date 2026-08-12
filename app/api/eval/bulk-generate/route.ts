@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/eval/bulk-generate
 //
 // "Bulk actions → Add question → {easy|medium|hard} ×N → Add" on /eval: adds the
@@ -10,7 +9,6 @@
 // EvalEvent per line) so the dashboard reuses the Process-new-chunks progress
 // bar. Body: { counts: { easy?: n, medium?: n, hard?: n } }, or the legacy
 // { difficulty: 'easy'|'medium'|'hard' } (one question per chunk).
-// ---------------------------------------------------------------------------
 import { streamError } from "@/lib/http/missingKeyServer";
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";

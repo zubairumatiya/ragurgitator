@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // Per-question graded-nDCG ranking builder, opened from a question row on /eval.
 //
 // Flow (see lib/rag/ranking): build the cross-model AGGREGATE ideal ranking —
@@ -8,7 +7,6 @@
 // ranking as ground truth. nDCG scores the active model's retrieval against
 // whichever is ground truth, so promoting one refreshes the question's chip +
 // the headline via onChange.
-// ---------------------------------------------------------------------------
 "use client";
 
 import { useEffect, useState } from "react";

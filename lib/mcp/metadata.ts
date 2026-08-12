@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // OAUTH DISCOVERY — the URLs the whole flow is pinned to, and Supabase's own
 // authorization-server metadata.
 //
@@ -26,7 +25,6 @@
 // fetch and a FAILED fetch is discarded rather than memoised — a transient
 // network blip during boot must not poison discovery for the life of the
 // process.
-// ---------------------------------------------------------------------------
 import { type OAuthMetadata, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/server";
 
 // Falls back to the dev port rather than throwing, matching app/auth/actions.ts.

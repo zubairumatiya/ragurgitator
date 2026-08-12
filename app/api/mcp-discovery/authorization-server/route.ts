@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // RFC 8414 AUTHORIZATION SERVER METADATA — a pass-through of Supabase's own.
 //
 // Reached at /.well-known/oauth-authorization-server via a rewrite in
@@ -16,7 +15,6 @@
 //
 // Unauthenticated, like its neighbour, and for the same reason: a client reads
 // this before it could possibly hold a credential.
-// ---------------------------------------------------------------------------
 import { authorizationServerMetadata } from "@/lib/mcp/metadata";
 
 const CORS = { "Access-Control-Allow-Origin": "*" };

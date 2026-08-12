@@ -1,11 +1,9 @@
-// ---------------------------------------------------------------------------
 // API route: PATCH /api/batch/[id]
 //
 // Two per-job actions (jobs are account-wide, addressed by id — no config scope):
 //   { action: "cancel" } — provider cancel + local status → cancelling.
 //                          (No-op unless the job is still in_progress.)
 //   { action: "ack" }    — dismiss the in-app "done" toast (acknowledged=true).
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { cancelJob } from "@/lib/batch/orchestrator";

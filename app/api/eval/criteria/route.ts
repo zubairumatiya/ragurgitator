@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: GET/PATCH /api/eval/criteria
 //
 // GET returns the active config's saved criteria + the config summary (top-k
@@ -13,7 +12,6 @@
 // the changed fields are sent; updateCriteria read-merge-writes the rest.
 //
 // Config-scoped (withRequestConfig) so it acts on the tab the dropdown is on.
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 import { autotuneModelLadder } from "@/lib/config";
 import { parseBody } from "@/lib/http/body";

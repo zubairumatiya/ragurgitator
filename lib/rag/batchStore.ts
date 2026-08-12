@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // DB layer for BATCH API savings (migration 0029, Phase E1).
 //
 // Two concerns, both raw SQL via the shared `sql` client:
@@ -11,7 +10,6 @@
 //
 // No provider I/O here — that's lib/batch/providers.ts. This module only reads
 // and writes rows; the orchestrator threads the two together.
-// ---------------------------------------------------------------------------
 import { activeUserId } from "@/lib/auth/userScope";
 import { fragment, sql } from "@/lib/db";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";

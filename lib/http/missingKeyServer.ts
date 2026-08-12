@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // MISSING-KEY DETECTION (server side) — turns a thrown MissingProviderKeyError
 // into the wire shapes declared in ./missingKey.
 //
@@ -7,7 +6,6 @@
 // importable from a client component. Everything here is one-line glue, and it
 // exists so the JSON path and the NDJSON path cannot drift into two different
 // answers to the same failure.
-// ---------------------------------------------------------------------------
 import "server-only";
 
 import { isMissingProviderKey } from "@/lib/llm/client";

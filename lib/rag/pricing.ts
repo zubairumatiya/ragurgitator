@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // PRICING + LEVER REGISTRY — the single source of truth the model registry never
 // had (autotuneModelLadder's comment: "no cost field exists in the registry to
 // derive it from"). Everything that costs an API call reads its price here, and
@@ -9,7 +8,6 @@
 // lite/4/large $0.02/$0.06/$0.12). An UNKNOWN model costs 0 (with a one-time
 // warn) — we never fabricate a price, so a missing entry under-counts rather
 // than lies. Add models here as they enter the app.
-// ---------------------------------------------------------------------------
 
 // The offline/interactive surfaces that spend money, for the gross-spend tally.
 export type Surface =

@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // THE MCP REQUEST SCOPE — the bearer-token sibling of withRequestUser.
 //
 // lib/http/configScope.ts opens a request scope from a session COOKIE. This file
@@ -27,7 +26,6 @@
 // whole of the integration. That property is worth protecting: if some future
 // code path starts reading cookies() to decide what a user may see, this file
 // quietly stops being equivalent to its sibling.
-// ---------------------------------------------------------------------------
 import "server-only";
 
 import { type AuthInfo, requireBearerAuth } from "@modelcontextprotocol/server";
@@ -63,7 +61,6 @@ async function mcpEnabled(): Promise<boolean> {
   return rows[0]?.mcp_enabled ?? false;
 }
 
-// ---------------------------------------------------------------------------
 // THE HTTP BOUNDARY for /api/mcp — the exact counterpart of withRequestUser in
 // configScope.ts, and registered in scripts/guards.ts by name for the same
 // reason: a route handler is only as authenticated as the named gate its body
@@ -86,7 +83,6 @@ async function mcpEnabled(): Promise<boolean> {
 // the tool surface and confirm the account exists is a strange sort of off. The
 // price is one single-row transaction per request, which is the right trade for
 // a switch whose entire job is to deny.
-// ---------------------------------------------------------------------------
 const gate = requireBearerAuth({
   verifier: mcpTokenVerifier,
   resourceMetadataUrl: resourceMetadataUrl(),

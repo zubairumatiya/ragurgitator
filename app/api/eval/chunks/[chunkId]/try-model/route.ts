@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: /api/eval/chunks/[chunkId]/try-model
 //
 // The per-chunk "try a different model" experiment (see lib/rag/eval):
@@ -13,7 +12,6 @@
 //
 // Ranking is ephemeral and in-memory; the live index is never touched. `params`
 // is a Promise in this Next.js version — await it.
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 import { EMBEDDING_MODELS } from "@/lib/rag/embeddingModels";
 import { parseBody } from "@/lib/http/body";

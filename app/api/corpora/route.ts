@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: GET/POST /api/corpora
 //
 // GET lists corpora with document counts for the config-creation corpus picker,
@@ -15,7 +14,6 @@
 // a synced config's uploads.
 //
 // Both are global (not config-scoped), so no withRequestConfig.
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody, requiredTrimmedString } from "@/lib/http/body";
 import { withRequestUser } from "@/lib/http/configScope";

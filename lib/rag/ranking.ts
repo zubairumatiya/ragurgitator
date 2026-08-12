@@ -1,26 +1,23 @@
-// ---------------------------------------------------------------------------
 // GRADED-nDCG RANKING BUILDER (/eval).
 //
 // A question's nDCG is only meaningful against a GRADED ideal ranking of several
-// chunks (a single ground-truth chunk makes IDCG=1, see evalMetrics). We build
-// that ranking synthetically and let the user pick which one is ground truth:
+// chunks (a single ground-truth chunk makes IDCG=1). We build that ranking
+// synthetically and let the user pick which one is ground truth:
 //
 //   1. embed the question under the active model
 //   2. pull a bounded candidate pool — the top-N chunks by config-filtered HNSW
-//      search over the whole active corpus (rankingStore.poolNearest), i.e. the
-//      same neighbourhood live retrieval searches
+//      search over the whole active corpus, i.e. the same neighbourhood live
+//      retrieval searches
 //   3. AGGREGATE: rank the pool under several embedding models, average the
 //      per-model ranks -> one ideal order (the cross-model consensus)
 //   4. optional LLM rankings as a comparison: rank the pool ('llm_pool'), or
 //      re-order the aggregate's top-k ('llm_rerank')
 //   5. optional MANUAL order the user hand-edits
 //
-// Each is stored as an eval_rankings row (one per kind per question/config). The
-// user promotes ONE to is_truth via setOfficialRanking; that's what nDCG scores
-// the active model's retrieval against. Pool re-embedding goes through embedCache
-// — nothing here touches the chunks_<model>_<dim> tables, so the alternate models
-// never enter the live index.
-// ---------------------------------------------------------------------------
+// Each is stored as an eval_rankings row. The user promotes ONE to is_truth; that's
+// what nDCG scores the active model's retrieval against. Pool re-embedding goes
+// through embedCache — nothing here touches the chunks_<model>_<dim> tables, so the
+// alternate models never enter the live index.
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { config } from "@/lib/config";
@@ -227,14 +224,12 @@ export async function getRankingContext(
 // Step 3: build the cross-model aggregate ranking over the whole active corpus.
 // Throws on a stale question / empty pool so the route can surface it.
 export // Which models vote in this config's ideal ranking (migration 0045).
-//
-// Settings → Metrics → nDCG → "Models in aggregate" overrides the hard-coded
-// default. Three guards, all of which fall back rather than fail:
-//   - unkeyed models are dropped (usable-ladder rule, same as autotune)
+// Settings → Metrics → nDCG → "Models in aggregate" overrides the default. Three
+// guards, all of which fall back rather than fail:
+//   - unkeyed models are dropped (same rule as autotune)
 //   - an unknown id (registry entry removed since it was saved) is dropped
-//   - an empty result falls back to the default set — an aggregate with no
-//     voters can't produce a ranking at all, and silently building nothing
-//     would look like the feature was broken
+//   - an empty result falls back to the default set — an aggregate with no voters
+//     can't produce a ranking, and silently building nothing would look broken
 //
 // Order is canonical (registry order), never the saved click order, so the same
 // selection always yields the same ideal.
@@ -463,26 +458,20 @@ export async function setOfficialRanking(
 }
 
 // "Bulk actions → Add nDCG rankings": for every labeled question in scope with NO
-// ground truth yet, run the same aggregate builder the per-question panel uses
-// and promote the result to ground truth, then score whatever is still unscored
-// so the nDCG chips fill in. Questions that already have a truth are untouched —
-// a manual/LLM choice the user made shouldn't be clobbered by a bulk pass.
-// Per-question failures are reported on the stream and skipped rather than
-// aborting the run.
+// ground truth yet, run the same aggregate builder the per-question panel uses and
+// promote the result, then score whatever is still unscored. Questions that already
+// have a truth are untouched — a manual/LLM choice shouldn't be clobbered by a bulk
+// pass. Per-question failures are streamed and skipped rather than aborting.
 //
-// `rebuild` means "the CORPUS changed": it ALSO refreshes questions whose truth
-// is the aggregate, so chunks ingested after their ideal was built can enter it.
-// (Each pool is a live ANN over the whole active corpus, so a rebuild simply
-// re-runs that search against today's index.) A manual/LLM truth is still left
-// alone. To keep the number honest, a rebuild re-scores everything it rebuilt, in
-// that order: the new chunk enters the ideal FIRST, so re-scored retrieval that
+// `rebuild` means "the CORPUS changed": it ALSO refreshes questions whose truth is
+// the aggregate, so chunks ingested after their ideal was built can enter it. A
+// manual/LLM truth is still left alone. A rebuild re-scores everything it rebuilt,
+// in that order: the new chunk enters the ideal FIRST, so re-scored retrieval that
 // now surfaces it scores real gain instead of 0 against a stale ideal.
 //
-// Modest concurrency: each build now fans its aggregate models out in parallel
-// (one embed call per model), so a single build is already several in-flight
-// requests; keeping this low stops a bulk pass from multiplying that into a
-// provider rate-limit. The shared embed caches upsert idempotently, so races
-// cost at most a duplicate embed.
+// Modest concurrency: each build already fans its aggregate models out in parallel,
+// so keeping this low stops a bulk pass from multiplying that into a provider
+// rate-limit. The shared embed caches upsert idempotently.
 const BULK_RANKING_CONCURRENCY = 2;
 
 export async function bulkBuildRankings(
@@ -587,30 +576,21 @@ export async function bulkBuildRankings(
   return { graded: gradedIds.size, scored };
 }
 
-// "Bulk actions → Add LLM nDCG rankings": build the llm_rerank ranking (the
-// aggregate's own top-k, re-ordered by the LLM) for every labeled question in
-// scope, as a COMPARISON candidate. Nothing is promoted to ground truth — that
-// stays an explicit per-question "Set as ground truth" in the panel, so a bulk
-// pass can never silently redefine what nDCG scores against.
+// "Bulk actions → Add LLM nDCG rankings": build the llm_rerank ranking for every
+// labeled question in scope, as a COMPARISON candidate. Nothing is promoted to
+// ground truth — that stays an explicit per-question action, so a bulk pass can
+// never silently redefine what nDCG scores against.
 //
-// This one spends real LLM tokens per question, so the plan phase is about NOT
-// spending. Two skips, both counted and streamed so the dashboard can say why:
-//   - no aggregate: llm_rerank re-orders the aggregate's top-k, so with no
-//     aggregate row there is nothing to re-rank (buildLlmRanking would throw).
-//     Run "Add nDCG rankings" first — these questions are simply not candidates.
-//   - cached: an llm_rerank whose stored signature still matches the current
-//     inputs (same llm model, prompt version, question text, and top-k slice).
-//     buildLlmRanking would serve it from cache anyway; skipping up front keeps
-//     the progress bar's total honest about what actually costs money.
-// Everything else runs through buildLlmRanking — the same code path (prompt,
-// parse, cache check, upsert) the per-question panel's "Re-rank top-k" uses.
+// This spends real LLM tokens per question, so the plan phase is about NOT
+// spending. Two skips, both counted and streamed:
+//   - no aggregate: llm_rerank re-orders the aggregate's top-k, so there is nothing
+//     to re-rank. Run "Add nDCG rankings" first.
+//   - cached: an llm_rerank whose stored signature still matches the current inputs.
+//     buildLlmRanking would serve it from cache anyway; skipping up front keeps the
+//     progress bar's total honest about what actually costs money.
 //
-// Per-question failures are reported on the stream and skipped rather than
-// aborting: a truncated/garbled LLM reply on one question shouldn't waste the
-// spend already made on the rest.
-//
-// Concurrency is deliberately low — these are LLM calls, not embeds, and they
-// go through the same metered client as everything else.
+// Per-question failures are streamed and skipped: a garbled reply on one question
+// shouldn't waste the spend already made on the rest.
 const BULK_LLM_RANKING_CONCURRENCY = 2;
 
 export async function bulkBuildLlmRankings(

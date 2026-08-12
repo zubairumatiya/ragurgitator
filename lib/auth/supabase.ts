@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // SUPABASE AUTH CLIENTS.
 //
 // Four call sites need a client and each needs different cookie plumbing, so
@@ -16,13 +15,11 @@
 // — a forged cookie yields a forged session. Every server-side read in this
 // codebase goes through getUser(), and lib/auth/dal.ts is the only place that
 // should be calling it at all.
-// ---------------------------------------------------------------------------
 import { createBrowserClient, createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 import type { NextRequest, NextResponse } from "next/server";
 
-// ---------------------------------------------------------------------------
 // PUBLISHABLE KEY (`sb_publishable_…`) — the successor to the legacy `anon` key.
 //
 // Supabase replaced the JWT-based anon/service_role pair with opaque publishable
@@ -35,7 +32,6 @@ import type { NextRequest, NextResponse } from "next/server";
 // rotated or revoked on its own, whereas the legacy anon key is a JWT signed
 // with the project's JWT secret — rotating it invalidates every other token
 // signed by that secret at the same time.
-// ---------------------------------------------------------------------------
 function publishableKey(): string | undefined {
   return (
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
@@ -90,7 +86,6 @@ export async function serverSupabase() {
   });
 }
 
-// ---------------------------------------------------------------------------
 // SESSION-LESS variant, for verifying a BEARER TOKEN that arrived in a header
 // rather than a cookie (lib/auth/mcpToken.ts, and nothing else).
 //
@@ -107,7 +102,6 @@ export async function serverSupabase() {
 // one call, getClaims(jwt), which verifies a signature against the cached JWKS
 // and returns. Leaving them on would let it acquire state it has no business
 // having.
-// ---------------------------------------------------------------------------
 export function tokenSupabase() {
   const { url, key } = config();
   return createClient(url, key, {

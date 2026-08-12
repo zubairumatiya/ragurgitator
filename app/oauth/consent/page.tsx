@@ -1,56 +1,40 @@
-// ---------------------------------------------------------------------------
-// THE OAUTH CONSENT SCREEN — the reason this whole design uses OAuth instead of
-// a pasted API key.
+// THE OAUTH CONSENT SCREEN — the reason this design uses OAuth instead of a
+// pasted API key.
 //
-// Supabase runs the authorization server, but it does not decide who says yes.
-// It redirects the user's browser HERE (the project's Authorization Path is set
-// to /oauth/consent), and this page is where a human looks at "Claude Code wants
-// access to your account" and clicks a button. The credential is minted only
-// after that. Nothing is ever copied into a config file, and the grant is
-// revocable from /account afterwards.
+// Supabase runs the authorization server, but it does not decide who says yes. It
+// redirects the user's browser HERE, and this page is where a human approves.
+// The credential is minted only after that, and the grant is revocable from
+// /account. An unauthenticated visit REDIRECTS TO LOGIN rather than erroring:
+// arriving without a session is the normal first-time path. Signing in IS the
+// identity proof — the agent that sent you here cannot approve on your behalf.
 //
-// That is also why an unauthenticated visit REDIRECTS TO LOGIN rather than
-// erroring: arriving here without a session is the normal first-time path, not a
-// fault. Signing in IS the identity proof — the agent that sent you here cannot
-// approve on your behalf.
-//
-// THIS PAGE IS THE MITIGATION FOR DYNAMIC CLIENT REGISTRATION, so it carries
-// more weight than a consent screen normally would. Read this before simplifying
-// it.
+// THIS PAGE IS THE MITIGATION FOR DYNAMIC CLIENT REGISTRATION, so it carries more
+// weight than a consent screen normally would. Read this before simplifying it.
 //
 // DCR means any party can register an OAuth client, unauthenticated, under any
-// name they like — including "Claude Code". Registration alone grants nothing:
-// no token exists until a signed-in human approves one here. So the attack DCR
-// enables is not theft, it is CONSENT PHISHING — lure the user to an authorize
-// URL, show them a consent screen that looks legitimate, and collect the grant
-// they hand over.
+// name they like — including "Claude Code". Registration alone grants nothing, so
+// the attack it enables is not theft but CONSENT PHISHING: lure the user to an
+// authorize URL, show a legitimate-looking screen, and collect the grant.
 //
 // What the design relies on to blunt that:
 //
-//   - The client NAME is untrusted input and is presented as a claim ("calling
-//     itself X"), never as an identity. Emphasising it would be doing the
-//     attacker's typography for them.
+//   - The client NAME is untrusted input, presented as a claim ("calling itself
+//     X"), never as an identity. Emphasising it would be doing the attacker's
+//     typography for them.
 //   - The REDIRECT URI is shown, because it is the one field an attacker cannot
-//     forge into something reassuring: OAuth 2.1 mandates exact matching, so the
-//     credential can only be delivered where the client registered it. A fake
-//     "Claude Code" pointing at evil.example is legible here.
-//   - client.logo_uri and client.uri are deliberately NOT rendered. A remote
-//     image controlled by the registrant is a tracking pixel and a credibility
-//     prop at once, and a clickable link is a phishing hop.
-//   - PKCE (mandatory in OAuth 2.1) means a spoofed client cannot intercept a
-//     legitimate client's code — only receive codes for grants approved to it.
+//     forge into something reassuring: OAuth 2.1 mandates exact matching, so a
+//     fake "Claude Code" pointing at evil.example is legible here.
+//   - client.logo_uri and client.uri are deliberately NOT rendered. A remote image
+//     controlled by the registrant is a tracking pixel and a credibility prop at
+//     once, and a clickable link is a phishing hop.
+//   - PKCE means a spoofed client cannot intercept a legitimate client's code.
 //
-// TWO POSSIBLE ANSWERS from getAuthorizationDetails, and both have to be
-// handled. If the user has already consented to this client and these scopes,
-// Supabase skips straight to a redirect and returns { redirect_url } instead of
-// authorization details. Rendering a consent form in that case would ask a
-// question that has already been answered, and there would be no authorization_id
-// to submit. Narrow on 'authorization_id' in data.
-//
-// A Server Component: it reads a session and calls Supabase, and there is
-// nothing interactive here beyond two form submits, which POST to
-// /api/oauth/decision.
-// ---------------------------------------------------------------------------
+// TWO POSSIBLE ANSWERS from getAuthorizationDetails, and both have to be handled.
+// If the user has already consented to this client and these scopes, Supabase
+// skips straight to a redirect and returns { redirect_url } instead of
+// authorization details — rendering a consent form then would ask a question
+// already answered, with no authorization_id to submit. Narrow on
+// 'authorization_id' in data.
 import { redirect } from "next/navigation";
 
 import { getSessionUser } from "@/lib/auth/dal";
@@ -67,18 +51,17 @@ const BUTTON =
 const SECONDARY =
   "cursor-pointer rounded border border-zinc-300 px-3 py-1.5 text-sm font-medium hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800";
 
-// The scopes Supabase can issue, verbatim from its own scopes_supported. Shown
-// in plain language because "phone" or "offline_access" tells a user nothing
-// about what an agent will actually do with it.
+// The scopes Supabase can issue, verbatim from its own scopes_supported. Shown in
+// plain language because "phone" or "offline_access" tells a user nothing about
+// what an agent will actually do with it.
 //
-// offline_access is the one worth spelling out honestly: it is a REFRESH token,
-// so the grant outlives the browser session that created it and the agent keeps
-// working tomorrow without asking again. That is the normal thing for an MCP
-// client to want and also the thing a user should understand they are agreeing
-// to, which is why it is described by its consequence rather than its name.
+// offline_access is the one worth spelling out honestly: it is a REFRESH token, so
+// the grant outlives the browser session that created it. That is the normal thing
+// for an MCP client to want and also the thing a user should understand they are
+// agreeing to, which is why it is described by its consequence rather than its name.
 //
-// An unrecognised scope falls through to its raw name below — better a bare
-// string the user can search for than silently hiding something that was granted.
+// An unrecognised scope falls through to its raw name below — better a bare string
+// the user can search for than silently hiding something that was granted.
 const SCOPE_LABELS: Record<string, string> = {
   openid: "Confirm who you are",
   email: "See your email address",

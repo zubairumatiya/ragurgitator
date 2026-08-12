@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // IN-PLACE CONFIG CHANGE (bulk actions → change base model / chunk size).
 //
 // Unlike the create dialog (which spawns a NEW config), this mutates the
@@ -18,7 +17,6 @@
 // the config row changes — instead every chunk of that document gets a
 // per-chunk override (model / size / size+model), the same mechanism the
 // autotuner and the per-chunk trial use.
-// ---------------------------------------------------------------------------
 import { sql } from "@/lib/db";
 import { resolveConfig, withConfig, type ResolvedConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";

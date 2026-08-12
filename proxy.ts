@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // PROXY — Next 16's renamed Middleware (node_modules/next/dist/docs/01-app/
 // 01-getting-started/16-proxy.md). Root-level, one per project.
 //
@@ -16,7 +15,6 @@
 // never be the only check. Real authorization is lib/auth/dal.ts, called next to
 // the data. If this file were deleted, the app should still be secure — only
 // less pleasant to use.
-// ---------------------------------------------------------------------------
 import { NextResponse, type NextRequest } from "next/server";
 
 import { proxySupabase } from "@/lib/auth/supabase";

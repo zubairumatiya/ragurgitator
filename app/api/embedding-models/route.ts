@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: GET /api/embedding-models
 //
 // Lists every embedding model as a base-model option for the config picker, with
@@ -11,7 +10,6 @@
 // saved keys (strict BYOK), and the same model list answers for every config
 // they own — so this runs inside withRequestUser rather than withRequestConfig.
 // See lib/rag/embeddingModels.listBaseModelOptions.
-// ---------------------------------------------------------------------------
 import { listBaseModelOptions } from "@/lib/rag/embeddingModels";
 import { availableProviders } from "@/lib/rag/providerAvailability";
 import { withRequestUser } from "@/lib/http/configScope";

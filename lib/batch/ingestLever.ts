@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // THE EMBEDDING LEG'S BATCH PREFERENCE, in one place.
 //
 // "Batch the embedding leg" is a per-config savings setting (Settings → Savings),
@@ -21,7 +20,6 @@
 //
 // Must run inside the target config's withConfig scope: the handler reads
 // activeConfig() for its settings and the job is filed against that config.
-// ---------------------------------------------------------------------------
 import { handlerFor } from "@/lib/batch/jobs/registry";
 import type { IngestEmbeddingScope } from "@/lib/batch/jobs/ingestEmbedding";
 import { submitBatch } from "@/lib/batch/orchestrator";

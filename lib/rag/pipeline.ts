@@ -1,16 +1,10 @@
-// ---------------------------------------------------------------------------
 // ORCHESTRATION: ties the individual stages into two top-level flows.
 //
-// Ingestion flow (run when documents are added):
-//   loader -> hash -> dedup (documents + document_embeddings)
-//          -> chunker -> embeddings -> vectorStore
+// Ingestion:  loader -> hash -> dedup -> chunker -> embeddings -> vectorStore
+// Query:      retriever -> generator -> answer (+ sources)
 //
-// Query flow (run per user question):
-//   retriever -> generator -> answer (+ sources)
-//
-// The API routes should call THIS module, not the individual stages, so the
-// HTTP layer stays dumb and the RAG logic stays testable in isolation.
-// ---------------------------------------------------------------------------
+// API routes should call THIS module, not the individual stages, so the HTTP
+// layer stays dumb and the RAG logic stays testable in isolation.
 import { createHash } from "node:crypto";
 
 import { submitIngestBatchIfEnabled } from "@/lib/batch/ingestLever";
@@ -61,11 +55,10 @@ export type IngestStep = "load" | "chunk" | "embed" | "store";
 
 // The half of an upload that has to happen before any vector exists: dedup by
 // content hash, store the raw text, join the config's corpus when it's synced.
-// Returns the document id.
 //
-// SPLIT FROM THE EMBED HALF so the batch lever can be offered a document id —
-// an ingest_embedding batch is scoped to ids, so nothing can be embedded until
-// every input in the upload has one. See ingest().
+// SPLIT FROM THE EMBED HALF so the batch lever can be offered a document id — an
+// ingest_embedding batch is scoped to ids, so nothing can be embedded until every
+// input in the upload has one.
 async function storeOne(doc: SourceDocument): Promise<string> {
   const cfg = activeConfig();
   const contentHash = sha256(doc.text);
@@ -100,16 +93,14 @@ async function embedOne(
 ): Promise<number> {
   const cfg = activeConfig();
 
-  // A run already exists — nothing to buy. Returns the RUN'S OWN chunk count,
-  // not zero, because the callers here have already filtered out the documents
-  // that were embedded before they started (see ingest()). What's left is a run
-  // that landed during this operation: the batch builder writes one outright
-  // when the embedding cache covers the whole document, and calling that "no new
-  // chunks" would deny work that just happened.
+  // A run already exists — nothing to buy. Returns the RUN'S OWN chunk count, not
+  // zero, because the callers here have already filtered out documents embedded
+  // before they started. What's left is a run that landed during this operation: the
+  // batch builder writes one outright when the embedding cache covers the whole
+  // document, and calling that "no new chunks" would deny work that just happened.
   //
-  // This used to bank the ingest_skip lever; it doesn't any more
-  // (migrations/0054) — the avoided embed worth counting is the cache's, and
-  // embedDocsCached banks it below as embed_cache.
+  // This used to bank the ingest_skip lever; it doesn't any more (0054) — the
+  // avoided embed worth counting is the cache's, banked below as embed_cache.
   const existingRun = (await embeddingRunChunkCounts([documentId])).get(documentId);
   if (existingRun !== undefined) {
     console.log(
@@ -125,15 +116,14 @@ async function embedOne(
 
   onStep("embed");
   const chunkTexts = chunks.map((c) => c.text);
-  // Through the per-user embedding cache, not straight at the provider. A chunk
-  // this user has already paid to embed under this model is free however it got
-  // there: another config ingested it, or this very document did before it was
-  // deleted — the cache outlives the document (lib/rag/embedCache). Content
-  // addressing makes that safe with no invalidation to get wrong, since the key
-  // is sha256(text) under a model id.
+  // Through the per-user embedding cache, not straight at the provider. A chunk this
+  // user has already paid to embed under this model is free however it got there:
+  // another config ingested it, or this very document did before it was deleted —
+  // the cache outlives the document. Content addressing makes that safe with no
+  // invalidation to get wrong, since the key is sha256(text) under a model id.
   //
-  // embedDocsCached meters itself — hits as embed_cache, misses as embed spend —
-  // so there is no meterEmbeds call here; a second one would double-count.
+  // embedDocsCached meters itself — hits as embed_cache, misses as embed spend — so
+  // a meterEmbeds call here would double-count.
   const vectors = await embedDocsCached(chunkTexts, cfg.embeddingModel);
 
   onStep("store");
@@ -153,10 +143,10 @@ async function embedOne(
 // One entry per input source: a chunk count on success, an error string on
 // failure. A single bad file no longer sinks the whole batch.
 //
-// `queued` is the third outcome and it is neither of the other two: the document
-// is stored and its embeddings are with the batch API, so there are no chunks
-// yet and nothing went wrong. Reporting it as `chunksAdded: 0` would read as
-// "nothing happened" for work that will land hours later.
+// `queued` is the third outcome and is neither of the other two: the document is
+// stored and its embeddings are with the batch API, so there are no chunks yet and
+// nothing went wrong. Reporting it as `chunksAdded: 0` would read as "nothing
+// happened" for work that lands hours later.
 export type IngestResult =
   | { fileName: string; chunksAdded: number }
   | { fileName: string; queued: true }
@@ -176,15 +166,14 @@ export type IngestEvent =
 
 type Emit = (event: IngestEvent) => void;
 
-// Sequential on purpose: ordered step events make for a clean progress UI, and
-// it keeps us from firing every file's embeddings at the provider at once.
+// Sequential on purpose: ordered step events make for a clean progress UI, and it
+// keeps us from firing every file's embeddings at the provider at once.
 //
 // THREE PHASES, and the middle one is why the first two are separate. Load and
 // store every input, THEN offer the whole document set to the embedding leg's
 // batch preference, THEN embed inline whatever the batch didn't take. An
 // ingest_embedding batch is scoped to document ids, so it cannot be offered
-// anything until every input has been stored — which is the only reason storing
-// and embedding are no longer one pass per file.
+// anything until every input has been stored.
 export async function ingest(
   inputs: LoadInput[],
   onEvent: Emit = () => {},
@@ -276,16 +265,15 @@ export async function ingest(
   return { results };
 }
 
-// Core of every "embed stored docs, no re-upload" flow: chunk → embed → store
-// each doc (raw text persisted at first ingest, migration 0010) into the ACTIVE
-// config; already-embedded docs are no-ops. Emits step/file-done events only —
-// the caller owns start/done so several passes can share one progress stream.
+// Core of every "embed stored docs, no re-upload" flow: chunk → embed → store each
+// doc into the ACTIVE config; already-embedded docs are no-ops. Emits
+// step/file-done events only — the caller owns start/done so several passes can
+// share one progress stream.
 //
 // `indexOffset` keeps indexes continuous across passes; `fileLabel` decorates
-// names (e.g. "doc.md → config-X" during a multi-config sync); `preEmbedded` is
-// the set of ids the config held BEFORE the caller started, and it is the only
-// thing that can distinguish "already had it" from "just got it" — see
-// vectorStore.embeddingRunChunkCounts.
+// names during a multi-config sync; `preEmbedded` is the set of ids the config
+// held BEFORE the caller started, and is the only thing that can distinguish
+// "already had it" from "just got it".
 type EmbedStoredOpts = {
   indexOffset?: number;
   fileLabel?: (name: string) => string;
@@ -353,13 +341,13 @@ async function embedStoredDocs(
 // The batch lever, then whatever it didn't take — the stored-doc counterpart of
 // ingest()'s phases 2 and 3, so every user-initiated embed honours the config's
 // batch preference identically. The snapshot has to be taken HERE, before the
-// lever runs: build() can write a run outright for a document the embedding
-// cache already covers, and after that there is no way to tell that from a run
-// that was there all along.
+// lever runs: build() can write a run outright for a document the embedding cache
+// already covers, and after that there is no way to tell that from a run that was
+// there all along.
 //
-// Auto-sync (syncDocsIntoConfigs) deliberately doesn't come through here. It is
-// a side effect of editing a corpus rather than someone asking to embed, and
-// deferring it by up to 12 hours per synced config isn't what "sync" means.
+// Auto-sync deliberately doesn't come through here. It is a side effect of editing
+// a corpus rather than someone asking to embed, and deferring it by up to 12 hours
+// per synced config isn't what "sync" means.
 async function embedOrQueue(
   docs: EmbeddableDoc[],
   onEvent: Emit,
@@ -527,17 +515,14 @@ export async function syncRemoveDocFromConfigs(
   return removed;
 }
 
-// Query flow entry: answer a user question. Two layers wrap the generation
-// cascade:
-//   1. Semantic cache (docs/semantic-caching-plan.md) — a past question close
-//      enough in embedding space serves its banked answer, skipping retrieval AND
-//      generation. Whether a close match is actually SERVED is the per-config
-//      "Serve cached answers" toggle (Settings → Savings); the cache is POPULATED
-//      regardless, so flipping serving on later has data to hit against.
-//      Transparent: the mechanism disabled or its table unmigrated → behaves as
-//      if absent.
-//   2. Generation cascade (answerWithCascade) — the actual answer, cheap-model
-//      first with axis-2 escalation when saver mode is on.
+// Query flow entry: answer a user question. Two layers wrap the generation cascade:
+//   1. Semantic cache — a past question close enough in embedding space serves its
+//      banked answer, skipping retrieval AND generation. Whether a close match is
+//      actually SERVED is the per-config "Serve cached answers" toggle; the cache
+//      is POPULATED regardless. Transparent: mechanism disabled or table unmigrated
+//      → behaves as if absent.
+//   2. Generation cascade — the actual answer, cheap-model first with axis-2
+//      escalation when saver mode is on.
 export async function ask(question: string): Promise<CachedResult> {
   const trimmed = question.trim();
 
@@ -552,15 +537,13 @@ export async function ask(question: string): Promise<CachedResult> {
   if (probe.hit) return probe.result;
 
   // Miss (or would-hit with serving off): reuse the vector the cache already
-  // embedded (banked in embedding_cache) so we don't pay to embed the query
-  // twice, run the cascade, and always bank the result — so the cache fills even
-  // while serving is off.
+  // embedded so we don't pay to embed the query twice, run the cascade, and always
+  // bank the result — so the cache fills even while serving is off.
   //
   // `queryVector` is null when the CACHE-KEY model differs from this config's
-  // retrieval model (docs/semantic-cache-key-model-plan.md, Phase 1): the key
-  // vector is then in a foreign space and useless to the retriever, so retrieve()
-  // embeds under the config's own model as it would with no cache at all. The
-  // key vector still goes to the store, which banks under the key model.
+  // retrieval model: the key vector is then in a foreign space and useless to the
+  // retriever, so retrieve() embeds under the config's own model as it would with no
+  // cache at all. The key vector still goes to the store, which banks under it.
   const sources = probe.queryVector
     ? await retrieveForQuery(trimmed, probe.queryVector)
     : await retrieve(trimmed);
@@ -644,7 +627,7 @@ async function answerWithCascade(
   return { answer, sources, model, efficacy, escalated };
 }
 
-// The cascade's saved dollars, honest and signed (docs §2 #2):
+// The cascade's saved dollars, honest and signed:
 //   accept   → we ran cheap instead of strong: saved = cost(strong@cheapTokens)
 //              − cost(cheap) − one gate embed.  POSITIVE.
 //   escalate → we ran cheap + gate + strong + gate but the baseline is strong
@@ -653,8 +636,8 @@ async function answerWithCascade(
 // The running total over real traffic is therefore the true net.
 //
 // No try/catch of its own: detached() swallows on both of its paths, which also
-// finally covers the costLlm/costEmbed throw on an unpriced model — an unhandled
-// rejection back when this was `void`-ed.
+// covers the costLlm/costEmbed throw on an unpriced model — an unhandled rejection
+// back when this was `void`-ed.
 async function recordCascadeSaving(a: {
   strongModel: string;
   cheapModel: string;

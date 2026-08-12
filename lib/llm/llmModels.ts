@@ -1,24 +1,18 @@
-// ---------------------------------------------------------------------------
 // LLM MODEL REGISTRY — the single source of truth for every ANSWER-GENERATION
-// model the app knows about (docs/user-accounts-plan.md §9.1). Deliberately the
-// same shape as lib/rag/embeddingModels.ts so there is ONE registry idiom in the
-// codebase: a pure data table, a `<thing>Spec(id)` lookup that throws on an
-// unknown id, and option builders that take a resolved availability set and
-// return the `selectable`/`reason` pair every picker already renders.
+// model the app knows about. Deliberately the same shape as
+// lib/rag/embeddingModels.ts so there is ONE registry idiom: a pure data table, a
+// `<thing>Spec(id)` lookup that throws on an unknown id, and option builders that
+// take a resolved availability set.
 //
 // Pure on purpose — no `server-only`, no IO. Availability under strict BYOK is a
-// per-user DB question (lib/rag/providerAvailability.ts); it is passed IN so that
-// this module stays importable from a client component and so a picker costs one
-// query per render rather than one per model.
+// per-user DB question; it is passed IN so this module stays importable from a
+// client component and a picker costs one query per render rather than one per model.
 //
 // PROVIDER IS DERIVED FROM THE MODEL ID, never stored twice. `configs.llm_model`
-// holds the provider's own API id, and those ids are already namespaced —
-// `claude-*` is Anthropic, `gpt-*` is OpenAI. A `provider` column (or a provider
-// field a table author could get wrong) would be a second source of truth that
-// nothing forces to agree with the id, and the disagreement would surface as a
-// call billed to the wrong user's key. See §9.0: this is also why the LLM setting
-// needs no new config column.
-// ---------------------------------------------------------------------------
+// holds the provider's own API id, and those ids are already namespaced. A
+// `provider` column would be a second source of truth that nothing forces to agree
+// with the id, and the disagreement would surface as a call billed to the wrong
+// user's key.
 export type LlmProviderId = "anthropic" | "openai";
 
 export type LlmModelSpec = {
@@ -29,17 +23,14 @@ export type LlmModelSpec = {
   note?: string; // picker sub-label ("cheap tier", "previous flagship")
 };
 
-// The id → provider rule, in one place. Prefix-based rather than a registry
-// lookup so it also answers for ids the registry does not list: providers echo
-// back resolved dated ids ("claude-haiku-4-5-20251001"), the cascade's cheap tier
-// and the semantic-cache judge models are configured as bare strings, and a user
-// could paste a newer id before anyone adds a row below. All of those still have
-// an unambiguous provider, and dispatching them correctly is more useful than
-// refusing them.
+// The id → provider rule, in one place. Prefix-based rather than a registry lookup
+// so it also answers for ids the registry does not list: providers echo back
+// resolved dated ids, the cascade's cheap tier and the judge models are configured
+// as bare strings, and a user could paste a newer id before anyone adds a row.
 //
-// Returns null rather than guessing. A wrong guess here charges one user's call
-// to the other provider's key — the one failure mode strict BYOK exists to
-// prevent — so an unrecognised prefix must be loud, not defaulted.
+// Returns null rather than guessing. A wrong guess charges one user's call to the
+// other provider's key — the one failure mode strict BYOK exists to prevent — so an
+// unrecognised prefix must be loud, not defaulted.
 export function llmProviderFor(id: string): LlmProviderId | null {
   if (id.startsWith("claude-")) return "anthropic";
   if (id.startsWith("gpt-")) return "openai";
@@ -58,19 +49,16 @@ export function llmProviderOf(id: string): LlmProviderId {
   return provider;
 }
 
-// The registry rows, WITHOUT `provider` — it is filled in below from the id, so
-// the table has no way to disagree with itself.
+// The registry rows, WITHOUT `provider` — it is filled in below from the id, so the
+// table has no way to disagree with itself.
 //
-// This list is CURATED, not a catalogue. Every id below is one we would defend
-// picking for a config; everything else the providers still serve is one line
-// away when there is a reason to offer it. Rates for each live in
-// lib/rag/pricing.ts (LLM_PRICES) — kept there, not here, because pricing is the
-// ledger's concern and a rate can change without the model changing.
+// This list is CURATED, not a catalogue. Rates live in lib/rag/pricing.ts, not
+// here, because pricing is the ledger's concern and a rate can change without the
+// model changing.
 //
-// Context windows are the provider's stated input limit. For the OpenAI rows
-// that is 272K, which is also the boundary above which OpenAI bills the ~2×
-// long-context rate (see the LLM_PRICES comment) — our prompts are chunked RAG
-// contexts of a few thousand tokens, so it is unreachable in practice.
+// Context windows are the provider's stated input limit. For the OpenAI rows that
+// is 272K, also the boundary above which OpenAI bills the ~2× long-context rate —
+// unreachable in practice for chunked RAG contexts.
 type LlmModelRow = Omit<LlmModelSpec, "provider">;
 
 const LLM_MODEL_ROWS: Record<string, LlmModelRow> = {
@@ -89,16 +77,13 @@ const LLM_MODEL_ROWS: Record<string, LlmModelRow> = {
   "claude-sonnet-4-6": { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", contextTokens: 1_000_000, note: "default" },
   "claude-haiku-4-5": { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", contextTokens: 200_000, note: "cheap tier" },
 
-  // --- OpenAI (ids + rates from developers.openai.com pricing, 2026-08-05) ----
-  // Excluded: gpt-5.5, gpt-5.2, gpt-5.1, gpt-5, the -pro variants (30/180 and
-  // up), and everything gpt-4* / o*. All still served — this is curation, not
-  // availability.
+  // OpenAI. Excluded: gpt-5.5, gpt-5.2, gpt-5.1, gpt-5, the -pro variants, and
+  // everything gpt-4* / o*. All still served — this is curation, not availability.
   //
   // EVERY OPENAI ID HERE MUST POST-DATE gpt-5.1. lib/llm/openaiChat.ts pins
-  // `reasoning_effort: "none"` on every translated request, so that a caller's
-  // max_tokens keeps meaning "visible output" after translation — and "none" is
-  // only supported from gpt-5.1 onward (everything earlier defaults to "medium"
-  // and rejects it). Registering an older id would need a different default
+  // `reasoning_effort: "none"` on every translated request, so a caller's max_tokens
+  // keeps meaning "visible output" after translation — and "none" is only supported
+  // from gpt-5.1 onward. Registering an older id would need a different default
   // there, not just a row here.
   "gpt-5.6-sol": { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", contextTokens: 272_000, note: "flagship" },
   "gpt-5.6-terra": { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", contextTokens: 272_000, note: "mid tier" },
@@ -159,20 +144,18 @@ export type LlmModelOption = {
   reason: string | null;
 };
 
-// Options for the config Settings LLM picker (§9.2), in registry order.
+// Options for the config Settings LLM picker, in registry order.
 //
-// An unkeyed provider's models are LISTED GREYED OUT with the reason, never
-// dropped — the same contract as listBaseModelOptions and the autotune/aggregate
-// checklists. Dropping them would make a picker that shows only Anthropic look
-// like an app that only supports Anthropic, when the truth is one missing key.
+// An unkeyed provider's models are LISTED GREYED OUT with the reason, never dropped
+// — the same contract as listBaseModelOptions. Dropping them would make a picker
+// that shows only Anthropic look like an app that only supports Anthropic, when the
+// truth is one missing key.
 //
-// `availability` is the structural ProviderAvailability type from the embedding
-// registry (deliberately structural, so one `await availableProviders()` answers
-// for both registries — see its comment). Re-declared here rather than imported
-// so this module has no dependency on the embedding side.
+// `availability` is the structural ProviderAvailability type, re-declared here
+// rather than imported so this module has no dependency on the embedding side.
 //
 // `provider` filters to one provider's models, for the picker's Provider select,
-// which is purely a filter and is not persisted (§9.2).
+// which is purely a filter and is not persisted.
 export function listLlmOptions(
   availability: { has(provider: string): boolean },
   provider?: LlmProviderId,

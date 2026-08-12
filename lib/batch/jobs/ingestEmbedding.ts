@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // BATCH JOB: ingest_embedding (Voyage) — the embedding leg (−33%).
 //
 // The many-request batch shape: one Voyage embedding request per chunk. build()
@@ -20,7 +19,6 @@
 // inserts only when EVERY chunk got a vector (a partial run would leave the doc
 // mis-retrievable). Voyage-only: batch embedding goes through the Voyage adapter,
 // so a config whose base model isn't Voyage returns null (falls back to inline).
-// ---------------------------------------------------------------------------
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";
 import { topUpSavedRuns } from "@/lib/rag/clusterStore";

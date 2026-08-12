@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: "New config" dialog (Client Component) — custom-settings creation for
 // real A/B testing. The user picks:
 //   - a document SOURCE: "New (start blank)", or "From existing corpora" which
@@ -15,7 +14,6 @@
 // /api/configs/[id]/populate (body { corpusIds }) to embed the de-duped docs
 // under the new config, showing progress. Then it routes to the new tab.
 // Styling mirrors FileUpload / EvalDashboard (zinc palette).
-// ---------------------------------------------------------------------------
 "use client";
 
 import { useEffect, useState } from "react";
@@ -75,7 +73,6 @@ export function ConfigCreateDialog({
   const [topK, setTopK] = useState(initial?.topK ?? DEFAULTS.topK);
   const [phase, setPhase] = useState<Phase>({ kind: "form" });
 
-  // Load the model availability list + corpora when the dialog opens.
   useEffect(() => {
     apiFetch("/api/embedding-models")
       .then((r) => r.json())

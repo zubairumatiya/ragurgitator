@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // THE `describe_config` TOOL PAYLOAD.
 //
 // The one tool the MCP server exposes: read back everything the UI knows about a
@@ -23,7 +22,6 @@
 // drift from the dashboard within a month and there would be no way to tell
 // which one was lying. The single exception is the override→document join at the
 // bottom, which has no existing caller.
-// ---------------------------------------------------------------------------
 import "server-only";
 
 import { z } from "zod";

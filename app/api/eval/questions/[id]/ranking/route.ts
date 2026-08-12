@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: /api/eval/questions/[id]/ranking
 //
 // The per-question graded-nDCG ranking builder (see lib/rag/ranking):
@@ -12,7 +11,6 @@
 //     Every mutation returns the refreshed context so the panel re-renders cleanly.
 //
 // `params` is a Promise in this Next.js version — await it.
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";

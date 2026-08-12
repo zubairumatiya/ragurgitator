@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // Email-confirmation / OAuth landing route.
 //
 // A user arriving here has clicked a link in their mail client, so every failure
@@ -23,7 +22,6 @@
 //
 // Both are handled so this route keeps working before and after the email
 // template is switched to {{ .TokenHash }} — see docs/user-accounts-plan.md.
-// ---------------------------------------------------------------------------
 import type { EmailOtpType } from "@supabase/supabase-js";
 import { NextResponse, type NextRequest } from "next/server";
 

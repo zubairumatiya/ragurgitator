@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: "this cluster preset needs re-fitting" flag.
 //
 // Ingesting a document tops its chunks into every saved preset by nearest
@@ -13,7 +12,6 @@
 //
 // Renders nothing below the threshold: under it, top-up is working as intended
 // and there's nothing to act on.
-// ---------------------------------------------------------------------------
 import { config } from "@/lib/config";
 import { Tooltip } from "@/app/components/Tooltip";
 

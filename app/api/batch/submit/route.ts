@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/batch/submit
 //
 // Launch a batch for one job kind. Body: { kind, scope } where scope is the
@@ -11,7 +10,6 @@
 //
 // Additive: this never touches the existing synchronous flows — it's a separate
 // entry the UI offers when the config's preference selects "batch" for the kind.
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";

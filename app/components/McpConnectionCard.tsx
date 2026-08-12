@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: connect an AI agent to this account over MCP.
 //
 // Three things, in the order a user needs them: the switch that turns the
@@ -18,12 +17,15 @@
 // convenience over text that is already on screen, never the only way to get it.
 // BackToConfigs.tsx is the precedent for a browser API behind graceful
 // degradation.
-// ---------------------------------------------------------------------------
 "use client";
 
 import { useActionState, useEffect, useState } from "react";
 
-import { revokeMcpGrant, setMcpEnabled, type McpFormState } from "@/app/account/actions";
+import {
+  revokeMcpGrant,
+  setMcpEnabled,
+  type McpFormState,
+} from "@/app/account/actions";
 
 const BUTTON =
   "cursor-pointer rounded bg-zinc-900 px-3 py-1.5 text-sm font-medium text-zinc-50 hover:bg-zinc-700 disabled:cursor-default disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300";
@@ -52,7 +54,10 @@ export function McpConnectionCard({
   // because an empty list and an unavailable list mean very different things.
   grantsError: string | null;
 }) {
-  const [toggleState, toggleAction, toggling] = useActionState(setMcpEnabled, {} as McpFormState);
+  const [toggleState, toggleAction, toggling] = useActionState(
+    setMcpEnabled,
+    {} as McpFormState,
+  );
 
   const snippet = JSON.stringify(
     { mcpServers: { rag: { type: "http", url: serverUrl } } },
@@ -64,10 +69,11 @@ export function McpConnectionCard({
     <section className="mt-12">
       <h2 className="text-sm font-medium">MCP access</h2>
       <p className="mt-1 max-w-prose text-xs text-zinc-500">
-        Let an AI agent — Claude Code, Claude Desktop, Cursor — read your configs directly:
-        settings, documents, overrides, costs and evaluation scores. Connecting signs you into
-        this app and asks for your approval, so no key is ever pasted anywhere. Agents can read
-        configuration only: never your documents, and nothing they can change.
+        Let an AI agent — Claude Code, Claude Desktop, Cursor — read your
+        configs directly: settings, documents, overrides, costs and evaluation
+        scores. Connecting signs you into this app and asks for your approval,
+        so no key is ever pasted anywhere. Agents can read configuration only:
+        never your documents, and nothing they can change.
       </p>
 
       <form action={toggleAction} className="mt-4 flex items-center gap-2">
@@ -92,7 +98,10 @@ export function McpConnectionCard({
         </p>
       ) : null}
       {toggleState.saved ? (
-        <p role="status" className="mt-2 text-xs text-zinc-600 dark:text-zinc-400">
+        <p
+          role="status"
+          className="mt-2 text-xs text-zinc-600 dark:text-zinc-400"
+        >
           Saved.
         </p>
       ) : null}
@@ -148,8 +157,9 @@ function Snippet({ snippet }: { snippet: string }) {
         <code>{snippet}</code>
       </pre>
       <p className="mt-2 text-xs text-zinc-500">
-        In Claude Code this goes in <code>.mcp.json</code>; then run <code>/mcp</code> to
-        authenticate. Your browser will open here to confirm.
+        In Claude Code this goes in <code>.mcp.json</code> file at the root of
+        your project; restart claude code then run <code>/mcp</code> to
+        authenticate.{" "}
       </p>
     </div>
   );
@@ -188,7 +198,10 @@ function ConnectedClients({
 }
 
 function GrantRow({ grant }: { grant: McpGrantDto }) {
-  const [state, action, pending] = useActionState(revokeMcpGrant, {} as McpFormState);
+  const [state, action, pending] = useActionState(
+    revokeMcpGrant,
+    {} as McpFormState,
+  );
 
   return (
     <div className="border-t border-zinc-200 py-3 dark:border-zinc-800">
@@ -219,5 +232,9 @@ function GrantRow({ grant }: { grant: McpGrantDto }) {
 function formatDate(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "recently";
-  return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  return date.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 }

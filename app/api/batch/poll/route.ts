@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/batch/poll
 //
 // The "Check now" button and the panel's while-open poll. Advances the SIGNED-IN
@@ -10,7 +9,6 @@
 // This is a session-bearing route despite feeling like a background job: it is
 // driven by the UI panel (app/components/BatchRequestsPanel.tsx), which is what
 // lets the poller scope to an owner rather than sweeping the whole table.
-// ---------------------------------------------------------------------------
 import { pollAndApply } from "@/lib/batch/orchestrator";
 import { withRequestUser } from "@/lib/http/configScope";
 

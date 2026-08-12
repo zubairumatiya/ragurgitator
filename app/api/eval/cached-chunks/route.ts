@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: GET /api/eval/cached-chunks?model=<id>
 //
 // Chunk ids under the active config whose text already has a cached 'document'
@@ -6,7 +5,6 @@
 // auto-adds these to the trial's test pool — they cost nothing to include
 // (delegate-space retrieval / earlier trials already embedded them), and a
 // wider pool keeps trials honest about the live competition.
-// ---------------------------------------------------------------------------
 import { withRequestConfig } from "@/lib/http/configScope";
 import { cachedChunkIdsForModel } from "@/lib/rag/evalStore";
 

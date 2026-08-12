@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // SECRET KEY — a plaintext provider credential that cannot be logged by accident.
 //
 // A decrypted API key is the one value in this codebase that is directly
@@ -22,7 +21,6 @@
 // "where can this key escape to?" is a search rather than an audit — see the
 // hardening phase in docs/user-accounts-plan.md, which asserts in CI that
 // .expose() appears only at the provider-client construction sites.
-// ---------------------------------------------------------------------------
 
 const REDACTED = "[redacted]";
 

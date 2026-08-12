@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: one provider's key — its state, and the form to set or replace it.
 //
 // The input is WRITE-ONLY by construction. It is never given a value or a
@@ -9,7 +8,6 @@
 // There is no "edit" affordance because there is no readable value to edit —
 // only REPLACE (save again) and DELETE. That mirrors what the database can
 // actually do, rather than implying a round trip that cannot exist.
-// ---------------------------------------------------------------------------
 "use client";
 
 import { useActionState, useEffect, useRef } from "react";

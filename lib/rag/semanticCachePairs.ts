@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // SEMANTIC CACHE — the GENERATED eval pair set (migration 0040, Phase 2 of
 // docs/semantic-cache-key-model-plan.md).
 //
@@ -17,7 +16,6 @@
 //
 // Best-effort against a missing table (42P01), like the rest of the cache: the
 // sweep falls back to a shadow-only pair set.
-// ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
 import type Anthropic from "@anthropic-ai/sdk";
 

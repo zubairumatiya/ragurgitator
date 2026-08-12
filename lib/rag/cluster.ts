@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // K-MEANS (pure compute, no DB) for the /clusters page.
 //
 // Spherical k-means over the corpus embeddings. Voyage vectors are unit-length,
@@ -12,7 +11,6 @@
 // UI fires several of these (different seeds) so the user can see the spread the
 // randomness produces and keep the one they like; the orchestration + DB live in
 // lib/rag/clusterStore.ts.
-// ---------------------------------------------------------------------------
 
 // One k-means result. `assignments[i]` is the cluster ordinal (0..k-1) for the
 // i-th input vector; `assignmentSim[i]` is that vector's cosine similarity to its

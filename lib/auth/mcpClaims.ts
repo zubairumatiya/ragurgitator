@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // MCP TOKEN CLAIMS — the decision about which verified JWTs become an identity.
 //
 // Split out of lib/auth/mcpToken.ts, which is "server-only" because it holds the
@@ -23,7 +22,6 @@
 // so there is no `mcp:read` to require, and its tokens are not audience-bound to
 // this server. Requiring a scope that is always present, or reading a `resource`
 // claim that is never set, would look like defence and provide none.
-// ---------------------------------------------------------------------------
 import { type AuthInfo, OAuthError, OAuthErrorCode } from "@modelcontextprotocol/server";
 
 // Identity lifted off the verified token and carried to the tool body through

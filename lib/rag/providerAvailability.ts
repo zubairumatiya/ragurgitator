@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // PROVIDER AVAILABILITY — "can this user embed/generate with provider X right
 // now?" (docs/user-accounts-plan.md §5).
 //
@@ -20,7 +19,6 @@
 // The reason strings differ accordingly, and that difference is the whole point
 // of keeping the two paths apart — telling a user to "add a local key in
 // Settings" would send them somewhere that cannot help them.
-// ---------------------------------------------------------------------------
 import "server-only";
 
 import { keyedProviders, type ProviderId } from "@/lib/auth/providerKeys";

@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/eval/autotune/apply
 //
 // Applies ONE autotune candidate the user picked from a `chunk-choice` event
@@ -6,7 +5,6 @@
 // { chunkId, family: 'size'|'model'|'size+model', size?, overlap?, model? }.
 // Persists the override, confirms it through real retrieval, and reverts if it
 // regressed — same promote→persist→confirm path the engine uses (§5.3).
-// ---------------------------------------------------------------------------
 import { applyAutotuneCandidate, type CandidateFamily } from "@/lib/rag/autotune";
 import { withRequestConfig } from "@/lib/http/configScope";
 

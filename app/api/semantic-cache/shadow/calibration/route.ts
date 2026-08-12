@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: GET /api/semantic-cache/shadow/calibration?space=…
 //
 // Runs the precision-at-threshold sweep over a space's judged shadow events and
@@ -13,7 +12,6 @@
 // apiFetch sends no configId and this resolves to the Default config — which is
 // exactly why the report carries `targetSource` back out, naming the config
 // whose dial was used instead of showing an unattributed percentage.
-// ---------------------------------------------------------------------------
 import { withRequestConfig } from "@/lib/http/configScope";
 import { scopedAcceptTarget } from "@/lib/rag/semanticCache";
 import { calibrationCurve } from "@/lib/rag/semanticCacheCalibration";

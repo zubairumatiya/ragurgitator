@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: irreversible account deletion, gated behind typing the word DELETE.
 //
 // A confirm() dialog would be less code, but it is one reflexive click from a
@@ -10,7 +9,6 @@
 // The server does NOT re-check the typed word. It is a UX guard against
 // misclicks, not a security control: the real authorization is requireUser() in
 // the action, and a user is always allowed to delete their own account.
-// ---------------------------------------------------------------------------
 "use client";
 
 import { useState } from "react";

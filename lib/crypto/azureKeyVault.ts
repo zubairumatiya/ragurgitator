@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // AZURE KEY VAULT adapter — the outer layer of the envelope (see envelope.ts).
 //
 // WHY KEYS AND NOT SECRETS: Key Vault offers both, and only one of them actually
@@ -32,7 +31,6 @@
 // AUDIT: Key Vault diagnostic logging is NOT on by default. Enable diagnostic
 // settings to Azure Monitor to get the unwrap trail that this design is partly
 // paying for (hardening phase).
-// ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
 
 import { DefaultAzureCredential } from "@azure/identity";
@@ -105,7 +103,6 @@ export const azureKeyWrapper: KeyWrapper = {
   },
 };
 
-// ---------------------------------------------------------------------------
 // DEK CACHE
 //
 // Every open() would otherwise cost a Key Vault round trip (tens of ms, billed).
@@ -121,7 +118,6 @@ export const azureKeyWrapper: KeyWrapper = {
 //
 // Serverless caveat: on Vercel each instance keeps its own Map and cold starts
 // miss, so expect more vault calls than a long-lived server would make.
-// ---------------------------------------------------------------------------
 const DEFAULT_TTL_MS = 60_000;
 
 export function cachedKeyWrapper(inner: KeyWrapper, ttlMs = DEFAULT_TTL_MS): KeyWrapper {

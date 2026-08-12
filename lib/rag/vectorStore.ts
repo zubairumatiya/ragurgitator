@@ -1,10 +1,8 @@
-// ---------------------------------------------------------------------------
 // STEP 4 of ingestion: STORE  (and the backend for retrieval)
 //
 // Persists documents + chunks in Postgres (pgvector) and answers nearest-
 // neighbor queries. Vectors live in one table per (embedding-model, dim) so
 // different models stay in their own geometric spaces; see migrations/.
-// ---------------------------------------------------------------------------
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";

@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/eval/rescore
 //
 // Re-runs retrieval scoring for EVERY labeled question under the active config
@@ -6,7 +5,6 @@
 // and freezes a run snapshot. Use after the corpus changes (e.g. a doc was added)
 // so Recall@k stays apples-to-apples. Backs the "Re-score all" button on /eval.
 // Streams progress as NDJSON (one EvalEvent per line) for a live bar + results.
-// ---------------------------------------------------------------------------
 import { streamError } from "@/lib/http/missingKeyServer";
 import { rescoreAllQuestions, type EvalEvent } from "@/lib/rag/eval";
 import { ndjsonStream } from "@/lib/http/ndjson";

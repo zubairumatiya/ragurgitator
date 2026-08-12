@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // EMBEDDING PROVIDER ADAPTERS (see docs/embedding-providers-plan.md, E2/E3).
 //
 // One adapter per provider. Each maps the abstract role ("document" | "query")
@@ -10,7 +9,6 @@
 // Adding a provider = one adapter here + a PROVIDERS entry + registry rows. The
 // non-Voyage adapters are inert until a key/weights exist (lazy clients), so
 // this file is safe to ship before any of them is switched on.
-// ---------------------------------------------------------------------------
 import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
 
 import { activeUserId } from "@/lib/auth/userScope";

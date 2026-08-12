@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // QUESTION CACHE — the pure half.
 //
 // Dependency-free on purpose, exactly like semanticCacheCore.ts: no DB, no
@@ -7,7 +6,6 @@
 // most worth testing directly — and a test cannot import
 // lib/rag/questionCache.ts without dragging lib/db (and its DATABASE_URL
 // requirement) in with it.
-// ---------------------------------------------------------------------------
 
 // Compare question texts the way a reader would: case- and whitespace-blind.
 // Nothing stronger (no punctuation stripping, no stemming) — two questions that

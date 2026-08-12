@@ -1,37 +1,25 @@
-// ---------------------------------------------------------------------------
-// AUTOTUNE ENGINE (Phase C of docs/eval-autotuning-plan.md).
+// AUTOTUNE ENGINE.
 //
-// For every question below its min-rate (D1), search per chunk for a re-shape
-// that lifts it: chunk SIZE first (Stage 1), then alternate MODELS — both the
-// full chunk and the best sub-size under each model (Stage 2), then remaining
-// size × model combos (Stage 3) — per the A2/A4 ladder. A winning candidate is
-// persisted as a per-chunk override (pieces, Phase B), CONFIRMED through real
-// rank-fused retrieval (reverted if the approximation over-promised — the
-// runner-up finalists then get their turn before the chunk is given up on),
-// snapshotted into the chunk's "Models tried" list (eval_model_trials — the
-// kept winner only, not every search rung; L10: deferred to after the run
-// reports done, since nothing in the run reads it back), and the run ends
-// with a dirty-set re-score (A3 — only questions the kept overrides could have
-// affected re-run retrieval; the rest are proven unchanged and re-stamped, see
-// eval.rescoreAffectedQuestions) + an eval_runs snapshot (feeds Appraise)
-// + an autotune_runs history row.
+// For every question below its min-rate, search per chunk for a re-shape that
+// lifts it: chunk SIZE first, then alternate MODELS, then remaining size × model
+// combos. A winning candidate is persisted as a per-chunk override, CONFIRMED
+// through real rank-fused retrieval (reverted if the approximation over-promised,
+// with runner-up finalists getting their turn before the chunk is given up on),
+// snapshotted into the chunk's "Models tried" list, and the run ends with a
+// dirty-set re-score plus an eval_runs snapshot and an autotune_runs history row.
 //
-// autotune.keepBest (0026): when NO candidate clears a chunk's bar (or every
-// finalist fails its confirm), the best strictly-improving candidate is kept
-// instead under a relaxed-but-real confirm — no new failures allowed and the
-// failing pairs' metric values must actually rise on real retrieval. Reported
-// as "improved", never as resolved.
+// keepBest (0026): when NO candidate clears a chunk's bar, the best
+// strictly-improving candidate is kept under a relaxed-but-real confirm — no new
+// failures, and the failing pairs' metric values must actually rise on real
+// retrieval. Reported as "improved", never as resolved.
 //
-// The inner search ranks every candidate through the REAL rank-fused dry-run
-// (fuseWithOverrides with the hypothetical override injected — the same
-// methodology as runModelTrial's fusedRank), so a candidate's rank IS the
-// merged position live retrieval would give it. The remaining approximation:
-// per-question nDCG can't be recomputed cheaply mid-search, so an nDCG-failing
-// question "clears" approximately when its ground-truth rank lands within
-// ndcg_k without regressing. The per-chunk confirm re-score (real retrieval,
-// real metrics) is the arbiter either way — it also catches override state
-// drifting between a chunk's search and its apply.
-// ---------------------------------------------------------------------------
+// The inner search ranks every candidate through the REAL rank-fused dry-run, so a
+// candidate's rank IS the merged position live retrieval would give it. The
+// remaining approximation: per-question nDCG can't be recomputed cheaply
+// mid-search, so an nDCG-failing question "clears" approximately when its
+// ground-truth rank lands within ndcg_k without regressing. The per-chunk confirm
+// re-score is the arbiter either way — it also catches override state drifting
+// between a chunk's search and its apply.
 import { NEVER_STOP, type ShouldStop } from "@/lib/http/cancelRegistry";
 import type { StreamErrorEvent } from "@/lib/http/missingKey";
 import { autotuneModelLadder } from "@/lib/config";
@@ -287,24 +275,19 @@ async function usableModelLadder(scope: string[] | null): Promise<string[]> {
 }
 
 // Candidate trial: the REAL rank-fused dry-run — inject the candidate as a
-// hypothetical override (replacing any stored override on this chunk), run
-// fuseWithOverrides per target question, and read the chunk's merged position.
-// Same methodology as runModelTrial's fusedRank, so a candidate's rank here is
-// the rank live retrieval (and the confirm re-score) would actually produce.
-// `candidateTexts` are the re-split pieces, or [whole chunk] for model-only;
-// `model` is the space they compete in (the base model for size-only). `pool`
-// is autotune's fusion pool (0027) — null follows live retrieval's. The
-// confirm re-score always runs at the live pool, so a smaller search pool
-// only trades embedding cost for coarser ranks (and possible confirm reverts).
-// L15: everything a chunk's search re-reads identically on every rung. The
-// search phase was 257.8s (55% of the run) and untouched — because the doc's
-// search levers (L1 fan-out, L3 pre-warm) both assumed the cost was EMBEDDING
-// round-trips, so nobody looked at the DB reads repeating underneath.
+// hypothetical override, run fuseWithOverrides per target question, and read the
+// chunk's merged position, so a candidate's rank here is what live retrieval (and
+// the confirm re-score) would produce. `pool` is autotune's fusion pool (0027);
+// null follows live retrieval's. The confirm always runs at the live pool, so a
+// smaller search pool only trades embedding cost for coarser ranks.
 //
-// Per rung, fusedTrialRanks was re-fetching `listOverrides()`, re-pulling every
-// stored override vector (its piece cache lived one call), and re-running an
-// identical base ANN per target. None of it varies across the ~6 rungs a chunk
-// tries: overrides are only ever persisted in CONFIRM, never mid-search.
+// Everything a chunk's search re-reads identically on every rung. Per rung,
+// fusedTrialRanks was re-fetching `listOverrides()`, re-pulling every stored
+// override vector, and re-running an identical base ANN per target — none of
+// which varies across the ~6 rungs a chunk tries, since overrides are only ever
+// persisted in CONFIRM, never mid-search. The search phase was 257.8s (55% of the
+// run) and had gone unexamined because the known levers assumed the cost was
+// EMBEDDING round-trips.
 //
 // Lifetime is exactly one chunk's search, so it's built in the chunk loop and
 // thrown away after — no fingerprint key needed, because nothing can invalidate
@@ -388,21 +371,16 @@ async function persistCandidate(
   return setChunkSizeModelOverride(chunkId, c.size!, c.overlap ?? 0, c.model!);
 }
 
-// Snapshot a KEPT candidate into the chunk's saved trials (eval_model_trials),
-// so it shows up under "Models tried" like a hand-saved experiment. Only the
-// winner is saved — every search rung would drown the list. The pool mirrors
-// the manual runner's auto pool (getModelTrialContext): the distractors the
-// chunk's questions already retrieved; runModelTrial re-adds the chunk itself.
-// Best-effort — a snapshot failure never fails (or reverts) the applied
-// override, which stands on its own confirm.
+// Snapshot a KEPT candidate into the chunk's saved trials, so it shows up under
+// "Models tried" like a hand-saved experiment. Only the winner is saved — every
+// search rung would drown the list. Best-effort: a snapshot failure never fails
+// (or reverts) the applied override, which stands on its own confirm.
 //
-// L10 (docs/autotune-speedups-plan.md): this is the single most expensive thing
-// in a run that the run does not need — 97.6s, 41% of confirm, measured
-// 2026-08-03, because each call is a FULL runModelTrial (re-chunk, embed under
-// the candidate model, fused-rank the pool) and 36 candidates are kept. Nothing
-// inside runAutotune reads eval_model_trials back; only the three UI-facing
-// routes do. So a run defers these to after it reports done (see
-// pendingSnapshots) — same rows, same UI, off the clock.
+// This is the single most expensive thing in a run that the run does not need —
+// 97.6s, 41% of confirm (2026-08-03), because each call is a FULL runModelTrial
+// and 36 candidates are kept. Nothing inside runAutotune reads eval_model_trials
+// back; only the UI-facing routes do. So a run defers these to after it reports
+// done — same rows, same UI, off the clock.
 async function saveKeptTrialSnapshot(
   chunkId: string,
   c: Pick<AutotuneCandidate, "family" | "size" | "overlap" | "model">,
@@ -443,19 +421,17 @@ function pairValue(q: QuestionDetail, metric: AutotuneMetric): number {
   return q.ndcg ?? 0;
 }
 
-// Promote → persist → CONFIRM (§5.3): apply the override, re-score the chunk's
-// own questions through real rank-fused retrieval, and keep it only if the chunk's
+// Promote → persist → CONFIRM: apply the override, re-score the chunk's own
+// questions through real rank-fused retrieval, and keep it only if the chunk's
 // failing (question, metric) set shrank with no new failures — otherwise revert
-// (restoring the chunk's pre-confirm override exactly, or baseline if it had
-// none) and re-score again so the stored results stay truthful. Exported
-// for the post-run choice endpoint (POST /api/eval/autotune/apply).
+// (restoring the pre-confirm override exactly, or baseline if it had none) and
+// re-score again so the stored results stay truthful.
 //
-// mode 'improve' (autotune.keepBest) relaxes the keep condition: the failing
-// set need not shrink as long as no new (question, metric) starts failing AND
-// the failing pairs' summed metric values strictly rose — still a real-
-// retrieval check, so the approximation can't over-promise its way in. The
-// values only move within the retrieval depth (a rank past it is a miss), so
-// "improvement" can't be noise from deep-rank shuffling.
+// mode 'improve' (keepBest) relaxes the keep condition: the failing set need not
+// shrink as long as no new pair starts failing AND the failing pairs' summed
+// metric values strictly rose — still a real-retrieval check, so the
+// approximation can't over-promise its way in. The values only move within the
+// retrieval depth, so "improvement" can't be noise from deep-rank shuffling.
 export async function applyAutotuneCandidate(
   chunkId: string,
   candidate: Pick<AutotuneCandidate, "family" | "size" | "overlap" | "model">,
@@ -1034,16 +1010,14 @@ export async function runAutotune(
     }
   }
 
-  // ---- RIPPLE RE-SCORE + SNAPSHOT (A3) -----------------------------------
-  // Dirty-set re-score: only questions the run's override changes could have
-  // touched go through real retrieval again; the rest are PROVEN unchanged
-  // from their stored results and re-stamped (rescoreAffectedQuestions — same
-  // end state as a full re-score, minus the redundant retrievals). It also
-  // freezes the eval_runs snapshot Appraise reads.
+  // RIPPLE RE-SCORE + SNAPSHOT. Dirty-set re-score: only questions the run's
+  // override changes could have touched go through real retrieval again; the rest
+  // are PROVEN unchanged and re-stamped. It also freezes the eval_runs snapshot
+  // Appraise reads.
   //
-  // Net-changed chunks = the KEPT ones. A reverted candidate restores the
-  // chunk's pre-confirm override exactly (applyAutotuneCandidate), so only
-  // chunks whose confirm kept a new override differ from the run-start state.
+  // Net-changed chunks = the KEPT ones. A reverted candidate restores the chunk's
+  // pre-confirm override exactly, so only chunks whose confirm kept a new override
+  // differ from the run-start state.
   const endOverrides = new Map(
     (await listOverrides()).map((o) => [o.sourceChunkId, o]),
   );

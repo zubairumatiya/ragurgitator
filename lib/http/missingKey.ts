@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // MISSING-KEY WIRE CONTRACT — the shape a route uses to say "this request was
 // fine, you just have no key for the provider it needs" (docs/user-accounts-plan.md §5).
 //
@@ -18,7 +17,6 @@
 // CLIENT-SAFE ON PURPOSE — no `server-only`, no import of lib/llm/client (which
 // is server-only). This module is the shared vocabulary; the server-side
 // detection lives in missingKeyServer.ts, which may import both.
-// ---------------------------------------------------------------------------
 
 // The machine-readable discriminator. A CODE rather than string-matching the
 // message: the message is prose that will be reworded, and a client keying off

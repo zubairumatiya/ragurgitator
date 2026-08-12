@@ -1,11 +1,9 @@
-// ---------------------------------------------------------------------------
 // UI: "New corpus" form (Client Component) on the corpora page. Creates an
 // empty corpus, or — with "start from existing corpora" checked — a merged one
 // seeded with the selection's documents, de-duplicated by content hash (the
 // CorpusPicker previews the union and warns on duplicates). POSTs
 // /api/corpora, then router.refresh()es the server-rendered list and fires
 // CORPORA_CHANGED so the sidebar re-pulls too.
-// ---------------------------------------------------------------------------
 "use client";
 
 import { useRouter } from "next/navigation";

@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // JOB REGISTRY — the seam between the generic batch machinery and each job's
 // specifics. A handler is two halves:
 //
@@ -12,7 +11,6 @@
 // Only kinds with a handler here can be submitted; the others are recognized
 // everywhere else (settings/preference/status) but POST /api/batch/submit
 // guards them with a 501 until their handler lands (see the plan doc's phasing).
-// ---------------------------------------------------------------------------
 import type { BatchProvider, BatchRequest, BatchResultRow, JobKind } from "@/lib/batch/types";
 import type { SubmitMeta } from "@/lib/batch/providers";
 import { questionGenerationHandler } from "@/lib/batch/jobs/questionGeneration";

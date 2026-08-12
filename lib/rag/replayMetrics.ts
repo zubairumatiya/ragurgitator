@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // OFFLINE REPLAY — the pure arithmetic, split out of replayStore so it can be
 // tested without a database (replayStore imports lib/db, which throws at import
 // time when DATABASE_URL is unset). Same core/store split as
@@ -7,7 +6,6 @@
 // Everything here is deterministic and side-effect free: given a query vector, a
 // gold vector and a pool, produce a rank; given ranks, produce the metrics the
 // Models tab displays.
-// ---------------------------------------------------------------------------
 import { cosine } from "./semanticCacheCore";
 
 // The pool ranked best-first by cosine to the query. Needed for nDCG, which
@@ -22,7 +20,6 @@ export function rankTexts(
     .map((c) => c.text);
 }
 
-// ---------------------------------------------------------------------------
 // LEAVE-ONE-OUT IDEAL RANKING — the correction that makes cross-model nDCG fair.
 //
 // The stored ideal (eval_rankings, kind='aggregate') is built by averaging the

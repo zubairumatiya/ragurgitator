@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // Proves the two halves of the deletion contract (open question #4, resolved
 // 2026-08-08):
 //
@@ -25,7 +24,6 @@
 // `npm run rls:check`.
 //
 //   Usage: node --env-file=.env.local --import tsx scripts/cascade-check.ts
-// ---------------------------------------------------------------------------
 import postgres from "postgres";
 
 const adminUrl = process.env.DATABASE_URL;

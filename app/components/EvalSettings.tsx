@@ -1,25 +1,18 @@
-// ---------------------------------------------------------------------------
 // UI: the config Settings dropdown (Client Component), mounted on the RIGHT of
-// the Nav (see Nav.tsx) so it's reachable from every config view, not just
-// /eval. Extracted from EvalDashboard.
+// the Nav so it's reachable from every config view, not just /eval.
 //
-// Sections: LLM (the config's answer-generation model, §9.2 — first because
-// every metric below is measured on answers it produced), eval METRICS
-// (per-metric enable + k + optional min-rate, A1), AUTOTUNING (A5; consumed by
-// the autotune engine), CORPUS (the auto-sync toggle — corpus ↔ config
-// membership sync, 0017), and the greyed "Long-term savings" Phase E stub.
+// Sections: LLM (the config's answer-generation model — first because every metric
+// below is measured on answers it produced), eval METRICS, AUTOTUNING, CORPUS (the
+// auto-sync toggle), and the greyed "Long-term savings" stub.
 //
-// Self-sufficient: opens by seeding from GET /api/eval/criteria (criteria +
-// config summary + the model option lists), saves via PATCH /api/eval/criteria
-// (+ PATCH /api/configs/[id] carrying whichever of auto-sync / llmModel
-// changed), then fires EVAL_CRITERIA_CHANGED
-// (the eval dashboard re-pulls its summary) and router.refresh() (the banner
-// re-renders). apiFetch scopes everything to the tab in the URL.
+// Self-sufficient: seeds from GET /api/eval/criteria, saves via PATCH
+// /api/eval/criteria (+ PATCH /api/configs/[id] carrying whichever of auto-sync /
+// llmModel changed), then fires EVAL_CRITERIA_CHANGED and router.refresh().
+// apiFetch scopes everything to the tab in the URL.
 //
-// The seed is CACHED per config and revalidated behind the open panel (see "the
-// seed cache" below), and warmed on hover — opening used to wait on two round
-// trips every time, for a payload that rarely changes between opens.
-// ---------------------------------------------------------------------------
+// The seed is CACHED per config and revalidated behind the open panel, and warmed
+// on hover — opening used to wait on two round trips every time, for a payload
+// that rarely changes.
 "use client";
 
 import Link from "next/link";
@@ -71,11 +64,9 @@ const BATCH_OPTION_LABELS: Partial<Record<JobKind, string>> = {
 // Recognized everywhere (preference, status panel) but not submittable —
 // lib/batch/jobs/registry.ts has no handler, so POST /api/batch/submit 501s.
 //
-// ndcg_ranking has nothing to batch today: "Bulk actions → Add nDCG rankings"
-// builds the CROSS-MODEL AGGREGATE ground truth (embeddings only, no LLM), and
-// the LLM rankings (llm_pool / llm_rerank) are per-question, launched one at a
-// time from the ranking panel — interactive, so batching is the wrong fit. A
-// batched LLM nDCG needs a bulk LLM-ranking flow to exist first.
+// ndcg_ranking has nothing to batch today: "Add nDCG rankings" builds the
+// CROSS-MODEL AGGREGATE ground truth (embeddings only, no LLM), and the LLM
+// rankings are per-question and interactive, so batching is the wrong fit.
 //
 // Shown disabled rather than hidden so the roster of jobs stays honest.
 const UNIMPLEMENTED_KINDS = new Set<JobKind>(["ndcg_ranking"]);
@@ -202,20 +193,16 @@ export function EvalSettings() {
   const [scopeDocs, setScopeDocs] = useState<AutotuneScopeDocument[]>([]);
   const [scopeSel, setScopeSel] = useState<Set<string> | null>(null);
   const [scopeExpanded, setScopeExpanded] = useState<Set<string>>(new Set());
-  // Autotune model scope (0030): the alternate models a run could try (keyed
-  // ones plus unkeyed ones shown greyed out), and which are allowed. null = all
-  // the keyed ones (also covers models keyed later). The checklist is long
-  // enough to bury the sections below it, so it lives behind a disclosure that
-  // starts collapsed and pops open when a bulk action changes it.
-  // --- LLM picker (§9.2) ---
-  // `llmModel` is the config's answer-generation model; `savedLlmModel` is what
-  // the server last confirmed, so save can PATCH only on a real change (the same
-  // pattern corpusSync uses below).
+  // Autotune model scope (0030): the alternate models a run could try (keyed ones
+  // plus unkeyed ones shown greyed out), and which are allowed. null = all the keyed
+  // ones. The checklist is long enough to bury the sections below it, so it lives
+  // behind a disclosure that starts collapsed.
+  // LLM picker: `llmModel` is the config's answer-generation model; `savedLlmModel`
+  // is what the server last confirmed, so save can PATCH only on a real change.
   //
   // `llmProvider` is UI-ONLY and never persisted — it filters the model select.
-  // Provider is derived from the model id server-side (llmProviderOf), so
-  // storing it would be a second source of truth for a fact the id already
-  // carries, and the two could disagree.
+  // Provider is derived from the model id server-side, so storing it would be a
+  // second source of truth for a fact the id already carries.
   const [llmOpts, setLlmOpts] = useState<LlmModelOption[]>([]);
   const [llmModel, setLlmModel] = useState<string>("");
   const [savedLlmModel, setSavedLlmModel] = useState<string>("");
@@ -276,17 +263,13 @@ export function EvalSettings() {
   const setJob = (kind: JobKind, v: BatchChoice) =>
     setSavings((s) => ({ ...s, jobs: { ...s.jobs, [kind]: v } }));
 
-  // --- the seed cache (open latency) -------------------------------------
+  // The seed cache (open latency). Opening used to be "two round trips, THEN the
+  // panel appears", every time. The re-seed itself is not optional — an override
+  // applied from the collision-floor panel on Appraise has to show up here — so the
+  // fix is stale-while-revalidate rather than a plain memo.
   //
-  // Opening used to be "two round trips, THEN the panel appears", every time.
-  // The re-seed itself is not optional — an override applied from the
-  // collision-floor panel on Appraise has to show up here — so the fix is
-  // stale-while-revalidate rather than a plain memo: a cached open paints
-  // immediately from the last payload and reconciles behind it.
-  //
-  // Keyed by configId because every field in a Seed is config-scoped (apiFetch
-  // scopes both requests to the tab in the URL), so switching tabs must not show
-  // the previous config's numbers.
+  // Keyed by configId because every field in a Seed is config-scoped, so switching
+  // tabs must not show the previous config's numbers.
   const seedCache = useRef(new Map<string, Seed>());
   // A reconcile must never overwrite something the user has started editing.
   // One capture-phase handler on the panel (below) sets this for every input in
@@ -1797,25 +1780,19 @@ const PROVIDER_LABEL: Record<string, string> = {
   local: "Local",
 };
 
-// The autotune "Models" checklist: the alternate models a run may try, grouped
-// by VECTOR SPACE — provider-agnostic, so any model shows up the moment its
-// provider key is set. The base model's own space heads the list under a
-// "no fusion" label (an override under those models ranks directly against the
-// base, so live retrieval opens no extra fusion lane). Every OTHER distinct
-// space is its own subsection and costs one fusion lane at retrieval (each
-// extra space = one more query embedding + rank-merge lane per query); models
-// that genuinely share a space — the voyage-4 family, or two Matryoshka output
-// dims of one OpenAI/Cohere model — cluster into a single subsection and share
-// that one lane. `selected === null` = all allowed (the default, and what a
-// fully-checked list saves back as); nothing checked = size-only tuning.
+// The autotune "Models" checklist: the alternate models a run may try, grouped by
+// VECTOR SPACE. The base model's own space heads the list under a "no fusion"
+// label (an override under those models ranks directly against the base). Every
+// OTHER distinct space is its own subsection and costs one fusion lane at
+// retrieval; models that genuinely share a space cluster into one subsection and
+// share that lane. `selected === null` = all allowed; nothing checked = size-only.
 //
 // Models whose provider the user has no key for are LISTED under their own space
 // heading, disabled, with the key that would enable them. Hiding them was the bug
-// this fixes: with only a Voyage key added the whole list collapsed to the base
-// model's own space, so the UI read as "fusion isn't a thing here" instead of
-// "the other spaces need a key". A disabled row is never checked, never
-// toggleable, and never counted — not in the fusion-lane footer, not in the
-// header's "N selected", and (see save()) never in the saved scope.
+// this fixes: with only a Voyage key the whole list collapsed to the base model's
+// space, so the UI read as "fusion isn't a thing here" instead of "the other spaces
+// need a key". A disabled row is never checked, toggleable, or counted — not in the
+// fusion-lane footer, the header's "N selected", or the saved scope.
 function ModelScopeChecklist({
   models,
   selected,

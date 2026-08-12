@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // QUERY TIME, STEP 2: GENERATE  (the "G" in RAG)
 //
 // Takes the retrieved chunks + the user's question, builds a grounded prompt,
@@ -15,7 +14,6 @@
 //     for **bold** by habit put the asterisks on screen. MessageList also
 //     tolerates the marks if a model ignores this — belt and braces, because the
 //     rule is a request and the renderer is a guarantee.
-// ---------------------------------------------------------------------------
 import { config } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { meteredMessage } from "@/lib/rag/meter";

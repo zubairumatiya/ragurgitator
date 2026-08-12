@@ -1,9 +1,7 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/clusters/[id]/save
 //
 // Keep a candidate run as a named preset (saved=true). Body: { name: string }.
 // `params` is a Promise in this Next.js version — await it.
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody, requiredTrimmedString } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";

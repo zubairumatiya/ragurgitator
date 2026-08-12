@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // Shared types for the RAG pipeline.
 //
 // Defining these first gives you a contract every module agrees on. Sketch of
@@ -12,7 +11,6 @@
 //
 // TODO: turn the comments above into real `export interface` / `export type`
 //       declarations as you decide what each stage needs.
-// ---------------------------------------------------------------------------
 export type SourceDocument = {
   id: string;
   text: string;

@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/chat
 //
 // Body: { question: string }
@@ -9,7 +8,6 @@
 // documentId, and a source card that shows a raw UUID tells the user nothing.
 // Resolved here rather than inside the pipeline so the cache-hit path (whose
 // stored sources also replay with ids only) gets the names for free.
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody, requiredTrimmedString } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";

@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // RESPONSE EFFICACY GATE  (FrugalGPT LLM-cascade scoring function)
 //
 // FrugalGPT (Chen, Zaharia & Zou, 2023) runs a chain of models cheapest → most
@@ -44,7 +43,6 @@
 // `efficacyThreshold` against a labelled set is the "threshold sweep" — the same
 // search-a-parameter-against-a-metric shape as lib/rag/autotune, but a sibling
 // tuner (a scalar cutoff vs. autotune's size×model ladder), not that engine.
-// ---------------------------------------------------------------------------
 import { config } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { cosine, embedQueryCached } from "@/lib/rag/embedCache";

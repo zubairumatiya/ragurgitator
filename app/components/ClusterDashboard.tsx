@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: k-means clustering dashboard (/clusters).
 //
 // Set k and run k-means over the active corpus. Each run produces 3 candidates
@@ -10,7 +9,6 @@
 // arbitrary and k differs).
 //
 // Server compute + persistence live in lib/rag/cluster.ts + clusterStore.ts.
-// ---------------------------------------------------------------------------
 "use client";
 
 import { useCallback, useEffect, useState } from "react";

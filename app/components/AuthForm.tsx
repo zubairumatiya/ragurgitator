@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: the shared sign-in / sign-up form (Client Component).
 //
 // One component for both modes — the fields, validation surface, and error
@@ -8,7 +7,6 @@
 // State comes from React 19's useActionState, so the submitting state and the
 // server's error string arrive without any fetch/loading plumbing here. Styling
 // mirrors the zinc palette used across the app.
-// ---------------------------------------------------------------------------
 "use client";
 
 import Link from "next/link";

@@ -1,10 +1,8 @@
-// ---------------------------------------------------------------------------
 // DB layer for autotune run history (migration 0016, Phase C of
 // docs/eval-autotuning-plan.md) plus the config-scoped question ignores the
 // engine must exclude from targeting (0014's config_question_ignores — written
 // by the Phase D "ignore in rates" UI, but respected here from day one).
 // Raw SQL via the shared `sql` client; scoped to the ACTIVE config.
-// ---------------------------------------------------------------------------
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 

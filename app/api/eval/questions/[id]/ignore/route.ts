@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/eval/questions/[id]/ignore
 //
 // Manual false-positive mode (eval-autotuning-plan §7): mark / unmark one
@@ -6,7 +5,6 @@
 // excluded from the Recall/nDCG aggregates, the min-rate pass/fail counts, and
 // autotune targeting, but still render (greyed) so the decision stays visible
 // and reversible. `params` is a Promise in this Next.js version — await it.
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";

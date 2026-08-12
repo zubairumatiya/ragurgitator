@@ -1,11 +1,9 @@
-// ---------------------------------------------------------------------------
 // UI: instant hover tooltip. The native `title` attribute waits on an
 // OS-controlled delay (~1s) before showing; this is a pure-CSS replacement
 // that fades in after ~150ms and hides immediately on mouse-out. Renders
 // inline (span) so it can wrap chips, labels, or whole cards inside flex rows;
 // `align` anchors the bubble when the trigger sits near a container edge —
 // "left"/"right" pin that edge of the bubble to the trigger so it grows inward.
-// ---------------------------------------------------------------------------
 import type { ReactNode } from "react";
 
 // `className` is for sizing the trigger inside a flex row — a truncating label

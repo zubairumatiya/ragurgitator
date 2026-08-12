@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/clusters/[id]/label
 //
 // The Claude-naming step: label each bucket of a run from its representative
@@ -9,7 +8,6 @@
 // Honors Settings → Savings: when this config picked "Batch API" for cluster
 // labeling, submit the run as a batch instead and return { batch } — no labels
 // land now; they're written by the handler's apply() when the batch completes.
-// ---------------------------------------------------------------------------
 import { withRequestConfig } from "@/lib/http/configScope";
 import { labelBuckets } from "@/lib/rag/clusterLabeler";
 import {

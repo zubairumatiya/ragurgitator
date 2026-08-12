@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // Window events wiring the Appraise → Semantic caching panels together. They're
 // siblings under a Server Component page with no shared parent state, so they
 // talk over the window rather than through props.
@@ -10,7 +9,6 @@
 //
 // The wiring doesn't care about panel order: recommendations are emitted from
 // fetch callbacks, so every listener has long since mounted.
-// ---------------------------------------------------------------------------
 
 // A threshold was written. Display panels re-pull.
 export const SC_CHANGED = "sc:thresholds-changed";

@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // ACTIVE CONFIG — request-scoped RAG configuration.
 //
 // The app used to read a single hard-coded `config` (lib/config.ts) everywhere.
@@ -15,7 +14,6 @@
 //
 // lib/config.ts remains the source of GLOBAL settings (upload limits, eval/
 // ranking knobs) and the DEFAULTS used to seed new configs.
-// ---------------------------------------------------------------------------
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import { activeUserId } from "@/lib/auth/userScope";

@@ -1,11 +1,9 @@
-// ---------------------------------------------------------------------------
 // STEP 1 of ingestion: LOAD
 //
 // Takes a raw source (pasted text or an uploaded .txt/.md/.pdf/.docx file) and
 // turns it into clean `SourceDocument` objects with text extracted and basic
 // metadata attached. Parsing concerns stay isolated here — no chunking,
 // embedding, or storage.
-// ---------------------------------------------------------------------------
 import mammoth from "mammoth";
 import { extractText, getDocumentProxy } from "unpdf";
 

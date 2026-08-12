@@ -1,47 +1,27 @@
-// ---------------------------------------------------------------------------
-// QUERY TIME, STEP 1: RETRIEVE
+// QUERY TIME, STEP 1: RETRIEVE — find the most relevant chunks for a question.
 //
-// Given the user's question, find the most relevant chunks in the active config.
+// Fast path (no per-chunk overrides): a single config-filtered ANN on the base model.
 //
-// Fast path (no per-chunk overrides): a single config-filtered ANN on the base
-// model — unchanged from before.
-//
-// When the config has per-chunk model OVERRIDES (Phase 5), retrieval fuses
-// multiple embedding spaces by a RANK-INTERLEAVE MERGE (D7): the base-model ANN
-// over the NON-overridden chunks, plus — for each FOREIGN-space override model —
-// that model's overridden chunks. Raw cosine isn't comparable across embedding
-// spaces, so we combine by RANK, not score. Each chunk carries exactly one rank
-// (from its canonical model's space) and the merged order is simply ascending
-// rank: base chunks at integer positions, overridden chunks at fractional
-// positions strictly between the base candidates they beat and the ones they
-// didn't — so the two kinds never tie and no arbitrary tie-break can favour
-// either.
+// With overrides, retrieval fuses multiple embedding spaces by a RANK-INTERLEAVE
+// MERGE. Raw cosine isn't comparable across embedding spaces, so we combine by
+// RANK, not score: each chunk carries exactly one rank (from its canonical
+// model's space) and the merged order is ascending rank — base chunks at integer
+// positions, overridden chunks at fractional positions strictly between the base
+// candidates they beat and the ones they didn't, so the two kinds never tie.
 //
 // SHARED SPACE ⇒ NO FUSION: an override whose model shares the base model's
-// vectorSpace (embeddingModels.sameVectorSpace) is cosine-comparable to the
-// base query, so it is NOT a separate space — its pieces rank by real cosine
-// directly against the base candidates (reusing the base query vector, no pool
-// re-embedding). Only genuinely FOREIGN spaces open a fusion lane. So keeping
-// autotune inside the base model's space (the Settings "Models" checklist)
-// means live retrieval pays for zero extra embeddings.
+// vectorSpace is cosine-comparable to the base query, so its pieces rank by real
+// cosine directly against the base candidates, reusing the base query vector.
+// Only genuinely FOREIGN spaces open a fusion lane.
 //
 // An overridden chunk's rank is NOT its rank among the few other overridden
-// chunks (a near-empty list would hand it rank ~1 for every query — a
-// structural boost unrelated to relevance). Instead it's ranked against this
-// query's REAL competition: the base ANN's candidates re-embedded under the
-// override model — the configurable fusion pool is embedded fresh (cached
-// persistently, see embedCache/0020), and deeper candidates already in the
-// cache join for free, so steady-state cost is one query embedding per
-// override model while accuracy grows with the cache. The candidates themselves
-// still score only from the base list; the delegate-space sims exist purely to
-// POSITION the overridden chunks honestly.
+// chunks — a near-empty list would hand it rank ~1 for every query, a structural
+// boost unrelated to relevance. It's ranked against this query's REAL
+// competition: the base ANN's candidates re-embedded under the override model.
 //
-// The fusion core (fuseWithOverrides) takes the override state as an argument
-// so the model-trial dry-run (lib/rag/eval.runModelTrial) can inject a
-// HYPOTHETICAL override and report the exact merged rank a chunk would occupy
-// if the trial were applied — the trial and live retrieval share this code and
-// cannot drift.
-// ---------------------------------------------------------------------------
+// fuseWithOverrides takes the override state as an argument so the model-trial
+// dry-run can inject a HYPOTHETICAL override and report the exact merged rank a
+// chunk would occupy — trial and live retrieval share this code and cannot drift.
 import { activeConfig } from "@/lib/rag/activeConfig";
 import {
   cachedDocVectors,
@@ -63,100 +43,85 @@ import type { RetrievedChunk } from "@/types/rag";
 
 // Base candidates pulled for fusion when overrides exist (vs the final top-k).
 // The auto pool is max(k * FUSION_BASE_FACTOR, 50); the config's
-// retrieval_fusion_pool (0027) overrides it, and autotune's trial dry-runs can
-// pass their own pool. Either way the pool never drops below k, or the merged
-// list couldn't fill the final top-k.
+// retrieval_fusion_pool (0027) overrides it. The pool never drops below k, or the
+// merged list couldn't fill the final top-k.
 //
-// The pool counts PAID embeddings only. The base ANN is actually pulled to a
-// deeper max(pool * FUSION_DEEP_FACTOR, FUSION_DEEP_FLOOR): candidates beyond
-// the pool join the competition FREE when their embedding under the override
-// model is already cached (a cosine against a stored vector — no API call), so
-// the effective pool grows toward the deep list as the cache warms. In base
-// space every candidate's sim is already known from the ANN, so the whole deep
-// list always competes there.
+// The pool counts PAID embeddings only. The base ANN is pulled deeper: candidates
+// beyond the pool join FREE when their embedding under the override model is
+// already cached, so the effective pool grows toward the deep list as the cache
+// warms. In base space every candidate's sim is already known from the ANN.
 const FUSION_BASE_FACTOR = 4;
 const FUSION_POOL_FLOOR = 50;
 const FUSION_DEEP_FACTOR = 4;
 const FUSION_DEEP_FLOOR = 200;
 
-// The effective fusion pool for a retrieval at depth k. `configured` is a
-// caller-supplied pool (autotune's setting); null/undefined falls back to the
-// active config's retrieval_fusion_pool, then to the auto formula.
+// The effective fusion pool at depth k. `configured` is a caller-supplied pool;
+// null/undefined falls back to the config's retrieval_fusion_pool, then the auto
+// formula.
 export function effectiveFusionPool(k: number, configured?: number | null): number {
   const pool =
     configured ?? activeConfig().fusionPool ?? Math.max(k * FUSION_BASE_FACTOR, FUSION_POOL_FLOOR);
   return Math.max(k, pool);
 }
 
-// One entry of the merged fusion list. `sim` is the chunk's real cosine to the
-// query in its CANONICAL space (base model for base chunks, the override model
-// for overridden chunks) — informational: honest per-chunk, but not comparable
-// across spaces and therefore not monotone with the merged order.
+// One entry of the merged fusion list. `sim` is the chunk's real cosine in its
+// CANONICAL space — informational: honest per-chunk, but not comparable across
+// spaces and therefore not monotone with the merged order.
 export type FusedCandidate = { id: string; rank: number; sim: number };
 
 // Similarity cutoffs captured during one retrieval and stored with the eval
-// result (eval_results.screen_cutoffs, 0028). They let the post-autotune
-// dirty screen (eval.rescoreAffectedQuestions) prove "this override change
-// cannot have altered this question's stored result" without re-retrieving:
-//  - deep: sim of the LAST candidate of the FULL deep base list — a chunk
-//    below it never competed in the base lane (as a candidate OR as a
-//    competitor for override-space ranking). null when the corpus didn't fill
-//    the deep list, or on the no-override fast path (no fusion, no pools).
+// result (0028). They let the post-autotune dirty screen prove "this override
+// change cannot have altered this question's stored result" without re-retrieving:
+//  - deep: sim of the LAST candidate of the FULL deep base list — a chunk below it
+//    never competed in the base lane. null when the corpus didn't fill the deep
+//    list, or on the no-override fast path.
 //  - models[m]: the depth-th strongest competitor sim in model m's space — an
 //    override piece scoring below it cannot crack the merged top-depth.
-//    Always includes the base model (covers future size-only overrides).
-// Only the base-ANN competitor sims count toward models[m] (never fellow
-// override pieces): overrides can change between runs, competitors can't
-// without changing the fingerprint, so the cutoff stays valid as a bound.
+// Only base-ANN competitor sims count toward models[m], never fellow override
+// pieces: overrides can change between runs, competitors can't without changing
+// the fingerprint, so the cutoff stays valid as a bound.
 export type ScreenCutoffs = {
   depth: number;
   deep: number | null;
   models: Record<string, number>;
 };
 
-// Override state loaded ONCE for a batch of retrievals under the same
-// fingerprint (eval scoring re-scores hundreds of questions back-to-back).
-// Without it every retrieveForQuery call re-reads the override rows and every
-// model's pieces from the DB — the dominant repeat cost of "Re-score all" on
-// a warm embedding cache.
+// Override state loaded ONCE for a batch of retrievals under the same fingerprint
+// (eval scoring re-scores hundreds of questions back-to-back). Without it every
+// retrieveForQuery re-reads the override rows and every model's pieces — the
+// dominant repeat cost of "Re-score all" on a warm embedding cache.
 export type ChunkMeta = { documentId: string; position: number; text: string };
 
 export type RetrievalContext = {
   overrides: ChunkOverride[];
   piecesFor: (model: string) => Promise<OverrideEmbedding[]>;
-  // L14: resolveChunks for the overridden chunks that reached the top-k. Same
-  // cross-call caching as piecesFor — see resolveCached below.
+  // Same cross-call caching as piecesFor — see resolveCached below.
   resolve: (ids: string[]) => Promise<Map<string, ChunkMeta>>;
 };
 
-// L12 (docs/autotune-speedups-plan.md): the per-context memo above only lives
-// as long as one buildRetrievalContext call, and autotune scores ONE question
-// per call — so `overrideEmbeddings` (every override row for the config, with
-// its vectors) was re-pulled per question. Measured at 68.4s in the 0042
-// `pieces` bucket.
+// The per-context memo above only lives as long as one buildRetrievalContext
+// call, and autotune scores ONE question per call — so every override row for the
+// config, with its vectors, was re-pulled per question (measured at 68.4s).
 //
 // This survives across calls, keyed by the override-state fingerprint. That key
 // is what makes it safe: the fingerprint IS the hash of the override rows, so a
-// kept or reverted override changes it and the old entry can never be served.
-// A run-scoped context WITHOUT this key would be a correctness bug — overrides
-// change constantly mid-confirm (persist, re-score, maybe revert, re-score).
+// kept or reverted override changes it and the old entry can never be served. A
+// run-scoped context WITHOUT this key would be a correctness bug — overrides
+// change constantly mid-confirm.
 //
-// One state at a time, so it self-evicts: a new fingerprint drops the whole
-// previous map rather than growing without bound.
+// One state at a time, so it self-evicts.
 let pieceCacheState: string | null = null;
 let pieceCacheByModel = new Map<string, Promise<OverrideEmbedding[]>>();
 
-// L14: the same idea for resolveChunks. A chunk's metadata (documentId,
-// position, text) is a property of the CHUNK ROW, which an override never
-// touches — so this could in principle be cached for longer. It is deliberately
-// keyed on the same fingerprint anyway: sharing one eviction rule with the piece
-// cache means there is exactly one staleness question to reason about instead of
-// two, and the reuse that matters (many re-scores under one override state) is
-// captured either way.
+// The same idea for resolveChunks. A chunk's metadata is a property of the CHUNK
+// ROW, which an override never touches, so this could in principle be cached for
+// longer. It's keyed on the same fingerprint anyway: one eviction rule means one
+// staleness question to reason about instead of two, and the reuse that matters
+// (many re-scores under one override state) is captured either way.
 let metaCacheById = new Map<string, ChunkMeta>();
 
 // One state variable for both caches — they are evicted together, so a second
-// one would only be a way for them to disagree.
+// would only be a way for them to disagree.
 function resetCachesFor(state: string): void {
   if (pieceCacheState === state) return;
   pieceCacheState = state;
@@ -166,8 +131,8 @@ function resetCachesFor(state: string): void {
 
 // `state` is the caller's already-fetched fingerprint, passed as a PROMISE so
 // callers can keep fetching it in parallel with this function instead of
-// serializing behind it (that parallelism is L11, worth ~58s — don't undo it).
-// Omitted → no cross-call caching, just the per-context memo as before.
+// serializing behind it (worth ~58s — don't undo it). Omitted → no cross-call
+// caching, just the per-context memo.
 export async function buildRetrievalContext(
   state?: Promise<string>,
 ): Promise<RetrievalContext> {
@@ -199,9 +164,8 @@ export async function buildRetrievalContext(
       if (fingerprint === null) return resolveChunks(ids);
       resetCachesFor(fingerprint);
 
-      // Only the ids we haven't already resolved go to the database; the rest
-      // come straight from the cache. A partial miss still costs one query, not
-      // one per id.
+      // Only unresolved ids go to the database. A partial miss still costs one query,
+      // not one per id.
       const out = new Map<string, ChunkMeta>();
       const missing: string[] = [];
       for (const id of ids) {
@@ -223,39 +187,36 @@ export async function buildRetrievalContext(
 export async function retrieve(question: string): Promise<RetrievedChunk[]> {
   const trimmed = question.trim();
   if (!trimmed) throw new Error("Cannot retrieve for an empty question.");
-  // Live chat's base query embed — deliberately UNCACHED (a repeat question is
-  // the semantic cache's job, upstream of here), so this is always a miss and
-  // only ever reports spend. Metered so the chat surface's embed cost isn't
-  // invisible next to its generation cost.
+  // Live chat's base query embed — deliberately UNCACHED (a repeat question is the
+  // semantic cache's job, upstream of here), so this is always a miss and only ever
+  // reports spend. Metered so the chat surface's embed cost isn't invisible.
   const vector = await embedQuery(trimmed);
   meterEmbeds(activeConfig().embeddingModel, [], [trimmed]);
   return retrieveForQuery(trimmed, vector);
 }
 
 // Rank-interleave fusion against an explicit override state. Returns the FULL
-// merged list (every base candidate + every overridden chunk, ascending rank)
-// plus resolved metadata for the base candidates; callers slice/resolve as
-// needed. Live retrieval passes the stored overrides; the trial dry-run passes
-// a hypothetical set.
+// merged list plus resolved metadata for the base candidates; callers slice as
+// needed. Live retrieval passes the stored overrides, the trial dry-run a
+// hypothetical set.
 //
-// ⚠ If you change the SEMANTICS of this merge (rank formula, candidate set,
-// what `sim`/score means), bump FUSION_VERSION in overrideStore.ts — that's
-// what flags results scored under the old algorithm as stale.
+// ⚠ If you change the SEMANTICS of this merge (rank formula, candidate set, what
+// `sim`/score means), bump FUSION_VERSION in overrideStore.ts — that's what flags
+// results scored under the old algorithm as stale.
 export async function fuseWithOverrides(
   text: string,
   baseVector: number[],
   k: number,
   overrides: ChunkOverride[],
   piecesFor: (model: string) => Promise<OverrideEmbedding[]>,
-  // Fusion pool override (0027) — autotune's trial dry-runs pass their own;
-  // omitted = the config's retrieval_fusion_pool, then the auto formula.
+  // Fusion pool override (0027); omitted = the config's retrieval_fusion_pool, then
+  // the auto formula.
   pool?: number | null,
-  // L15: a caller-owned cache for the base ANN. Autotune's search re-ranks the
-  // SAME question against many candidate rungs, and the base ANN depends only
-  // on (query vector, excluded ids, depth) — none of which vary across rungs —
-  // so without this it re-runs an identical query per rung. Caller-owned rather
-  // than module-level because the caller knows the lifetime: one chunk's search,
-  // during which no override is persisted. Live retrieval passes nothing.
+  // A caller-owned cache for the base ANN. Autotune's search re-ranks the SAME
+  // question against many candidate rungs, and the base ANN depends only on (query
+  // vector, excluded ids, depth) — none of which vary across rungs. Caller-owned
+  // because the caller knows the lifetime: one chunk's search, during which no
+  // override is persisted. Live retrieval passes nothing.
   annCache?: Map<string, RetrievedChunk[]>,
 ): Promise<{
   merged: FusedCandidate[];
@@ -270,14 +231,14 @@ export async function fuseWithOverrides(
   const meta = new Map<string, { documentId: string; position: number; text: string }>();
   const cutoffModels: Record<string, number> = {};
 
-  // Base space: ANN over the non-overridden chunks. Pulled past the paid pool
-  // so already-cached deeper candidates can compete for free (header comment).
+  // Base space: ANN over the non-overridden chunks. Pulled past the paid pool so
+  // already-cached deeper candidates can compete for free (see header).
   const paidN = effectiveFusionPool(k, pool);
   const deepN = Math.max(paidN * FUSION_DEEP_FACTOR, FUSION_DEEP_FLOOR);
   // Keyed on everything the ANN result depends on: the query, the excluded set
-  // (sorted so ordering can't produce a false miss), and the depth. `text`
-  // stands in for baseVector — they're 1:1 under a fixed base model, and the
-  // vector itself would be a 1024-float key.
+  // (sorted so ordering can't produce a false miss), and the depth. `text` stands in
+  // for baseVector — they're 1:1 under a fixed base model, and the vector itself
+  // would be a 1024-float key.
   const annKey = annCache
     ? `${text} ${deepN} ${[...overriddenIds].sort().join(",")}`
     : null;

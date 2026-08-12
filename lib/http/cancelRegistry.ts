@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // CANCELLING AN IN-FLIGHT NDJSON RUN.
 //
 // An NDJSON producer is deliberately detached from the request that started it
@@ -29,7 +28,6 @@
 // globalThis-backed for the same reason the pools are (lib/db.ts): HMR
 // re-evaluates modules in dev, and a fresh Map would orphan every run
 // registered against the old one, mid-stream.
-// ---------------------------------------------------------------------------
 
 type ActiveRun = { userId: string; cancelled: boolean };
 

@@ -1,11 +1,9 @@
-// ---------------------------------------------------------------------------
 // API route: GET /api/eval/questions/[id]/window?from=&to=
 //
 // Backs the "resize one custom chunk" editor: returns the labeled chunk plus its
 // neighbors in [from, to], stitched into contiguous text with per-token char
 // offsets and each chunk's token span (see lib/rag/eval.buildChunkWindow). Read-
 // only; nothing is persisted. `params` is a Promise in this Next.js version.
-// ---------------------------------------------------------------------------
 import { withRequestConfig } from "@/lib/http/configScope";
 import { buildChunkWindow } from "@/lib/rag/eval";
 

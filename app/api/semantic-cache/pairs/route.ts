@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: GET/POST /api/semantic-cache/pairs
 //
 // The GENERATED half of the cache-key eval pair set (migration 0040, Phase 2 of
@@ -17,7 +16,6 @@
 // Config-scoped: the gap query is scoped to the active config's eval bank, even
 // though the pair table itself is global (a pair is a property of two question
 // texts, and pooling every label into one set is the point).
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 
 import { parseBody } from "@/lib/http/body";

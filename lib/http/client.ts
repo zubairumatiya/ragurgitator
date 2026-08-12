@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // CONFIG-SCOPED fetch wrapper for client components.
 //
 // Pages live under /c/<configId>/… (see app/c/[configId]). Every /api/… call a
@@ -10,7 +9,6 @@
 //
 // NOTE: this is the BROWSER fetch wrapper. It is unrelated to lib/llm/client.ts
 // (the server-side Anthropic client). Only import this from "use client" code.
-// ---------------------------------------------------------------------------
 
 // The active tab's configId, parsed from /c/<id>/… ; null when off a config
 // route (e.g. the Appraise page) or during SSR where there's no location.

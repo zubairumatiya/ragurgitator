@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // PROVIDER ADAPTERS — the only place that talks to a batch API over the wire.
 //
 // Three providers behind one interface (submit / poll / results / cancel):
@@ -25,7 +24,6 @@
 // exported helpers (mapAnthropicStatus / mapOpenAiStatus / mapVoyageStatus /
 // parseOpenAiResults / parseVoyageResults) so those — the parts most likely to be
 // wrong — are unit-tested with canned payloads. See lib/batch/providerStatus.test.ts.
-// ---------------------------------------------------------------------------
 import type Anthropic from "@anthropic-ai/sdk";
 import { toFile } from "openai";
 import { activeUserId } from "@/lib/auth/userScope";
@@ -66,9 +64,7 @@ export interface ProviderAdapter {
   cancel(providerBatchId: string): Promise<void>;
 }
 
-// ===========================================================================
 // Anthropic
-// ===========================================================================
 
 // Every method resolves the ACTIVE user's key. The batch poller is a
 // session-bearing route (app/api/batch/poll/route.ts runs inside
@@ -130,7 +126,6 @@ const anthropicAdapter: ProviderAdapter = {
   },
 };
 
-// ===========================================================================
 // OpenAI (SDK — client.files.* + client.batches.*)
 // ===========================================================================
 //
@@ -205,9 +200,7 @@ const openaiAdapter: ProviderAdapter = {
   },
 };
 
-// ===========================================================================
 // Voyage (REST — https://api.voyageai.com/v1, Files API + JSONL)
-// ===========================================================================
 
 const VOYAGE_BASE = "https://api.voyageai.com/v1";
 
@@ -299,8 +292,6 @@ const voyageAdapter: ProviderAdapter = {
     await voyageJson(`/batches/${id}/cancel`, { method: "POST" });
   },
 };
-
-// ===========================================================================
 
 const ADAPTERS: Record<BatchProvider, ProviderAdapter> = {
   anthropic: anthropicAdapter,

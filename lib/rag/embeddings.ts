@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // STEP 3 of ingestion (and also used at query time): EMBED
 //
 // Turns text into a vector (number[]) via the embedding model. The SAME model
@@ -10,7 +9,6 @@
 // (lib/rag/embeddingProviders.ts), and batches by that provider's cap. Adapters
 // return normalized vectors (Voyage/OpenAI/Cohere already do; the local adapter
 // passes normalize:true), so downstream cosine reduces to a dot product.
-// ---------------------------------------------------------------------------
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { modelSpec } from "@/lib/rag/embeddingModels";
 import { PROVIDERS, type EmbedRole } from "@/lib/rag/embeddingProviders";

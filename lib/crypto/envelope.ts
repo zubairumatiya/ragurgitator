@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // ENVELOPE ENCRYPTION — pure core (no Azure, no DB, no I/O), so it's unit-
 // testable against a fake wrapper without provisioning a vault. Mirrors the
 // semanticCore.ts / semanticCache.ts split: the decisions that make the scheme
@@ -17,7 +16,6 @@
 // module optimises for correctness rather than for scrubbing RAM.
 //
 // See docs/user-accounts-plan.md §4.
-// ---------------------------------------------------------------------------
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
 import { SecretKey } from "./secretKey";
@@ -58,7 +56,6 @@ export interface KeyWrapper {
   unwrap(wrapped: Buffer, kekId: string): Promise<Buffer>;
 }
 
-// ---------------------------------------------------------------------------
 // TENANT BINDING
 //
 // AWS KMS has EncryptionContext — key/value pairs that must match on decrypt and
@@ -75,7 +72,6 @@ export interface KeyWrapper {
 // or a provider slug, so no pair of (userId, provider) values can be made to
 // produce the same AAD as a different pair — the same injection reasoning as
 // fingerprintFrom() in semanticCacheCore.ts.
-// ---------------------------------------------------------------------------
 export function aadFor(userId: string, provider: string): Buffer {
   if (!userId || !provider) {
     throw new Error("aadFor requires a non-empty userId and provider.");

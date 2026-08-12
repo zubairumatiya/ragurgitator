@@ -1,11 +1,9 @@
-// ---------------------------------------------------------------------------
 // API route: /api/eval/chunks/[chunkId]/trials
 //
 // Lightweight read of a chunk's saved model trials, so the dashboard can show the
 // "Models tried" list attached to the chunk without loading the full trial
 // context (pool/corpus/models) the runner needs. `params` is a Promise in this
 // Next.js version — await it.
-// ---------------------------------------------------------------------------
 import { withRequestConfig } from "@/lib/http/configScope";
 import { listModelTrials } from "@/lib/rag/evalStore";
 

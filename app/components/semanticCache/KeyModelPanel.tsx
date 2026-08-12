@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // Appraise → Semantic caching: the CACHE-KEY MODEL leaderboard (Phase 3 of
 // docs/semantic-cache-key-model-plan.md).
 //
@@ -17,7 +16,6 @@
 //   2. Run sweep      — embedding-only, cached, so re-runs are nearly free.
 //   3. Apply          — writes the per-config override (or all configs). Refuses
 //      an uncalibrated target space unless explicitly confirmed.
-// ---------------------------------------------------------------------------
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";

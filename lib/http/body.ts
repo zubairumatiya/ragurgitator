@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // Shared JSON request-body validation for the API routes. Each route declares
 // its payload contract once as a Zod schema; parseBody reads the body and
 // validates it in one step, handing back either typed data or a ready-to-return
@@ -7,7 +6,6 @@
 //
 // readJsonBody/invalidBody are exported separately for routes that need to
 // branch on the raw payload before choosing a schema (see the configs routes).
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 
 type Parsed<T> =

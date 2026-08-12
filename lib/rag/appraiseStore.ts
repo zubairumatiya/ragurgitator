@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // DB layer for the Appraise tab — CROSS-CONFIG comparison (multi-config-plan §8,
 // Phase 4). Unlike the other stores this is deliberately NOT scoped to one active
 // config: it reads every config's latest frozen eval-run snapshot so they can be
@@ -7,7 +6,6 @@
 // Uses the eval_runs snapshots (config_id added in 0011) rather than recomputing,
 // so Appraise is cheap and reflects exactly what each config last measured. A
 // config that has never been scored has no run row → null metrics.
-// ---------------------------------------------------------------------------
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 

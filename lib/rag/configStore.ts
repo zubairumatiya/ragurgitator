@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // DB layer for configs — one saved experiment = one top-level tab (see
 // migrations/0011 and docs/multi-config-plan.md §4). Raw SQL via the shared
 // `sql` client, no business logic; mirrors corpusStore.ts / evalStore.ts.
@@ -19,7 +18,6 @@
 // insert stamps it. A scoped-out id therefore behaves exactly like a deleted
 // one: reads return null, mutations match 0 rows and return false/null, and the
 // routes turn both into the same 404.
-// ---------------------------------------------------------------------------
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { config } from "@/lib/config";

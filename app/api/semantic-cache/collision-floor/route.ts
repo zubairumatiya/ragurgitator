@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: GET/POST /api/semantic-cache/collision-floor
 //
 // Config-scoped via withRequestConfig (the client passes ?configId=…) — the
@@ -19,7 +18,6 @@
 // the expensive thing here, and a persistence problem must never turn a
 // successful calibration into a 500 (collisionFloorStore swallows its own
 // errors, so the await below can't throw).
-// ---------------------------------------------------------------------------
 import { withRequestConfig } from "@/lib/http/configScope";
 import { readCollisionFloorState, saveCollisionFloor } from "@/lib/rag/collisionFloorStore";
 import { computeCollisionFloor } from "@/lib/rag/semanticCacheCalibration";

@@ -1,9 +1,7 @@
-// ---------------------------------------------------------------------------
 // API route: GET /api/eval
 //
 // Returns the current eval summary (Recall@k, per-document breakdown, the
 // per-question detail table, and the run snapshots) for the /eval page.
-// ---------------------------------------------------------------------------
 import { withRequestConfig } from "@/lib/http/configScope";
 import { getSummary } from "@/lib/rag/evalStore";
 

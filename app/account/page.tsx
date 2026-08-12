@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // The account page: identity, provider keys, and account deletion.
 //
 // A Server Component, so the key list is read through the DAL rather than an API
@@ -15,7 +14,6 @@
 //
 // Reached by clicking the email in the sidebar footer. proxy.ts already protects
 // it: only /login, /signup and /auth are public.
-// ---------------------------------------------------------------------------
 import { withPageUser } from "@/lib/auth/dal";
 import {
   listProviderKeys,

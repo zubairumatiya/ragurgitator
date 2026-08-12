@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // BATCH JOB: question_generation (Anthropic or OpenAI — whichever serves the
 // config's llmModel; both discount batch work 50%).
 //
@@ -21,7 +20,6 @@
 // question → Add cached" — so a batch submitted here buys exactly what was
 // asked for. Clear the cache first if you want the free half; the button is
 // idempotent and takes it without spending anything.
-// ---------------------------------------------------------------------------
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import type { Difficulty } from "@/lib/rag/eval";

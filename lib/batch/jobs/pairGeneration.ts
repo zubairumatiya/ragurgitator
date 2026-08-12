@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // BATCH JOB: cache_pair_generation — routed by keyModelSweep.generateModel's own
 // provider, which is an Anthropic id today.
 //
@@ -16,7 +15,6 @@
 // apply is IDEMPOTENT: inserts go through insertPairs, whose canonical
 // (hash_a, hash_b) unique key + on-conflict-do-nothing makes a re-poll or retry
 // a no-op rather than a duplicate.
-// ---------------------------------------------------------------------------
 import { config } from "@/lib/config";
 import {
   insertPairs,

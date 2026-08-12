@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: GET /api/eval/chunks/[chunkId]
 //
 // One chunk's text, for the dashboard's "chunk #N" toggle. Deliberately not part
@@ -9,7 +8,6 @@
 //
 // A missing chunk and a chunk under a different config both answer 404 — see
 // getChunkText. `params` is a Promise in this Next.js version — await it.
-// ---------------------------------------------------------------------------
 import { withRequestConfig } from "@/lib/http/configScope";
 import { getChunkText } from "@/lib/rag/evalStore";
 

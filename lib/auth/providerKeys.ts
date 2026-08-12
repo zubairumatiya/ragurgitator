@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // PROVIDER KEY DAL — the only module that reads or writes user_provider_keys.
 //
 // The rule the whole file is arranged around: NOTHING here returns a plaintext
@@ -15,7 +14,6 @@
 //
 // A "give me the key as a string" function does not exist on purpose. Phase 4's
 // provider clients call openProviderKey() and .expose() inline at construction.
-// ---------------------------------------------------------------------------
 import "server-only";
 
 import { keyWrapper } from "@/lib/crypto/azureKeyVault";

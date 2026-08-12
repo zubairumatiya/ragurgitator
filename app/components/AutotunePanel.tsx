@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: the "Auto-resolve below min-rate" button + its modal (Phase C of
 // docs/eval-autotuning-plan.md §4.4).
 //
@@ -9,7 +8,6 @@
 // mode 'choose') come back as chunk-choice events — rendered as pickers whose
 // Apply buttons hit POST /api/eval/autotune/apply. Closing after a run reloads
 // the dashboard.
-// ---------------------------------------------------------------------------
 "use client";
 
 import { useState } from "react";
@@ -251,7 +249,6 @@ export function AutotunePanel({
     }
   }
 
-  // Apply one picked candidate for a pending-choice chunk.
   async function applyChoice(chunkId: string, c: AutotuneCandidate) {
     setChoices((cs) =>
       cs.map((ch) =>

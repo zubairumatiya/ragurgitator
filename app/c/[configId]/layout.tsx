@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // Layout for every config-scoped page (/c/[configId]/…). Renders the §6 shell:
 //   1. ConfigTabs    — the cross-config tab bar (open tabs + new + Appraise).
 //   2. active banner — "<name> · <model> · <size>/<overlap> · corpus: <name>".
@@ -13,7 +12,6 @@
 // notFound() is used for an unknown configId so a stale/bad tab URL 404s rather
 // than rendering a bannerless shell. See node_modules/next/dist/docs for the
 // file-convention details.
-// ---------------------------------------------------------------------------
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { RememberConfigRoute } from "@/app/components/BackToConfigs";

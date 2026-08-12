@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // CACHE-KEY MODEL SWEEP (docs/semantic-cache-key-model-plan.md, Phase 2).
 //
 // Scores every candidate embedding model on the same pooled pair set and emits
@@ -21,7 +20,6 @@
 // COST IS EMBEDDING-ONLY — no LLM calls, no re-ingestion, no chunks table
 // touched. Every text goes through embedQueryCached, so it's content-addressed,
 // metered, and nearly free on re-runs.
-// ---------------------------------------------------------------------------
 import { config } from "@/lib/config";
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";

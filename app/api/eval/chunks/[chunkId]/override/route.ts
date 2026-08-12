@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST/DELETE /api/eval/chunks/[chunkId]/override
 //
 // Persist or clear a per-chunk override for the ACTIVE config (Phase 5 / Phase B):
@@ -13,7 +12,6 @@
 // On success the CHANGED chunk's questions are re-scored inline (rescored: n in
 // the response) so its rates reflect the new retrieval immediately; every other
 // result goes retrieval-stale (badge + change log) until the next full run.
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";

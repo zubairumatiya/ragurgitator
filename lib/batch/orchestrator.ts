@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // ORCHESTRATOR — threads store ↔ providers ↔ job handlers ↔ notify.
 //
 //   submitBatch  — create the row, submit to the provider, stamp the id (or fail).
@@ -10,7 +9,6 @@
 // the handlers read activeConfig()-scoped tables, and it runs LATE — long after
 // the original request. Handlers are idempotent, so the modest double-apply
 // window from two overlapping polls in a single-user app is harmless.
-// ---------------------------------------------------------------------------
 import { withConfig, resolveConfig } from "@/lib/rag/activeConfig";
 import {
   createBatchJob,

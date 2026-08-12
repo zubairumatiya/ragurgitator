@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // DB layer for per-config EVAL CRITERIA (migration 0014, Phase A of
 // docs/eval-autotuning-plan.md). Raw SQL via the shared `sql` client.
 //
@@ -9,7 +8,6 @@
 //
 // The autotune.* fields are saved here now (the Settings dropdown edits them) but
 // aren't consumed until the Phase C engine lands.
-// ---------------------------------------------------------------------------
 import { activeUserId } from "@/lib/auth/userScope";
 import { fragment, sql } from "@/lib/db";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";

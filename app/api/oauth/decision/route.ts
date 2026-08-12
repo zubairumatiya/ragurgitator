@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // THE CONSENT DECISION — where Approve and Deny actually happen.
 //
 // The form on /oauth/consent posts here. This route tells Supabase what the user
@@ -19,7 +18,6 @@
 // A DENIAL IS A NORMAL OUTCOME, not an error: it still produces a redirect_url,
 // because the waiting OAuth client needs to be told no rather than left hanging
 // on a request that never resolves.
-// ---------------------------------------------------------------------------
 import { redirect } from "next/navigation";
 
 import { requireUserForApi, unauthorizedJson } from "@/lib/auth/dal";

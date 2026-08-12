@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: GET/POST /api/configs
 //
 // GET returns the tabs the ConfigTabs bar renders: `open` (current tabs, ordered)
@@ -9,7 +8,6 @@
 // These act ON the configs table itself rather than within one config's scope, so
 // they don't use withRequestConfig (configStore takes explicit ids). Body for
 // POST is optional: { name?: string }.
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 import { invalidBody, readJsonBody } from "@/lib/http/body";
 import {

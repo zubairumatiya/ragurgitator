@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // RFC 9728 PROTECTED RESOURCE METADATA — "who authorizes access to /api/mcp?"
 //
 // Reached at /.well-known/oauth-protected-resource/api/mcp via a rewrite in
@@ -17,7 +16,6 @@
 // validates the issuer URL (HTTPS outside localhost, no fragment, no query), so
 // a misconfigured Supabase project fails here with a clear message rather than
 // three hops later inside somebody's agent.
-// ---------------------------------------------------------------------------
 import { buildOAuthProtectedResourceMetadata } from "@modelcontextprotocol/server";
 
 import { authorizationServerMetadata, mcpServerUrl } from "@/lib/mcp/metadata";

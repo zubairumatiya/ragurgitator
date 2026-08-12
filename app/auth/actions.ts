@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // Auth Server Actions — sign in, sign up, sign out.
 //
 // Server Actions (not Route Handlers) because these are form submissions that
@@ -9,7 +8,6 @@
 // Shaped for React 19's useActionState — (prevState, formData) => state — so the
 // form can render field errors and a pending state without any client-side
 // validation logic duplicating what's below.
-// ---------------------------------------------------------------------------
 "use server";
 
 import { redirect } from "next/navigation";

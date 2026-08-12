@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: GET /api/semantic-cache/shadow
 //
 // Returns the shadow-log spaces (for the space picker) and, when ?space=… is
@@ -7,7 +6,6 @@
 // vector-space across configs, matching the thresholds table) — and still pooled
 // across USERS, which Phase 5 partitions alongside the thresholds table. Phase 2
 // gates the endpoint on a session.
-// ---------------------------------------------------------------------------
 import { withRequestUser } from "@/lib/http/configScope";
 import { listShadowEvents, listShadowSpaces } from "@/lib/rag/semanticCacheCalibration";
 

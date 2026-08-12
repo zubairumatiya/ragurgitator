@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: GET/PATCH /api/batch
 //
 // GET  — the status panel's seed + the Settings Savings subsection's seed:
@@ -12,7 +11,6 @@
 //
 // Config-scoped (withRequestConfig) for the per-config bits; the job list is
 // global but harmlessly read inside the same scope.
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";

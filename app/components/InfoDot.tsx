@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: a "?" affordance that parks explanatory prose in a hover tooltip instead
 // of a paragraph under every heading. Use it where the copy is worth having but
 // isn't worth the vertical space on a dense page — the text still has to earn
@@ -6,7 +5,6 @@
 //
 // Thin wrapper over Tooltip: same instant-hover behaviour, same `align` for
 // headings that sit near a container edge.
-// ---------------------------------------------------------------------------
 import { Tooltip } from "@/app/components/Tooltip";
 
 export function InfoDot({

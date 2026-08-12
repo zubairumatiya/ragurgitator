@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // THE MCP SERVER INSTANCE — tool registration and the per-request factory.
 //
 // createMcpHandler calls this factory once per HTTP request rather than holding
@@ -11,7 +10,6 @@
 // some ambient place at call time. The identity arrives on the verified token
 // (lib/auth/mcpToken.ts), is handed to the factory as ctx.authInfo, and is bound
 // here — one hop, no globals.
-// ---------------------------------------------------------------------------
 import "server-only";
 
 import { McpServer } from "@modelcontextprotocol/server";

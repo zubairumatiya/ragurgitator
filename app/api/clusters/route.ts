@@ -1,9 +1,7 @@
-// ---------------------------------------------------------------------------
 // API route: GET /api/clusters
 //
 // Lists the active model's cluster runs — saved presets first, then the current
 // unsaved candidates — as summaries for the dashboard and the compare picker.
-// ---------------------------------------------------------------------------
 import { withRequestConfig } from "@/lib/http/configScope";
 import { listRuns } from "@/lib/rag/clusterStore";
 

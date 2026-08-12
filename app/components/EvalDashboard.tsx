@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: retrieval eval dashboard (/eval).
 //
 // Shows Recall@k, MRR@k, and nDCG for the active config, a per-document
@@ -10,7 +9,6 @@
 // close to the top" (1/rank, 0 past mrr_k) — two configs can tie on recall
 // while one consistently ranks the chunk higher. The per-question rank already
 // shows on the hit badge, so MRR only appears as the headline aggregate.
-// ---------------------------------------------------------------------------
 "use client";
 
 import {
@@ -3333,7 +3331,6 @@ function RunProgress({
   );
 }
 
-// ---------------------------------------------------------------------------
 // Per-chunk "try a different configuration" experiment. Re-ranks this chunk's
 // questions against a small candidate pool — the chunk (always in) + its
 // questions' top-k + any corpus chunks you add — under a VARIATION: an alternate
@@ -3341,7 +3338,6 @@ function RunProgress({
 // (combination). Ephemeral by default; "Save result" persists a snapshot
 // rendered under the chunk's variations lists. Each question's pool rank is
 // shown against its stored full-corpus result.
-// ---------------------------------------------------------------------------
 type TrialState =
   | { status: "loading" }
   | { status: "error"; message: string }

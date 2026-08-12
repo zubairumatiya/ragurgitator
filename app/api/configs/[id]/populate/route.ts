@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/configs/[id]/populate
 //
 // Spawn step for a config created from existing corpora: embed their stored
@@ -12,7 +11,6 @@
 // enters that config's scope explicitly rather than via withRequestConfig.
 // `params` is a Promise in this Next.js version. NDJSON producer enters the scope
 // itself, so the deferred stream callback still sees the right config.
-// ---------------------------------------------------------------------------
 import { streamError } from "@/lib/http/missingKeyServer";
 import { ndjsonStream } from "@/lib/http/ndjson";
 import { resolveConfig, withConfig } from "@/lib/rag/activeConfig";

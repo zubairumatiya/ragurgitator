@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: lists documents currently in the (pgvector) store, with per-document
 // delete.
 //
@@ -13,7 +12,6 @@
 // bank serves every config. That's what the list being per-config implies, and
 // the confirm text spells it out because a "Delete" next to a file name reads as
 // "delete the file" — which is why this button says Remove.
-// ---------------------------------------------------------------------------
 "use client";
 
 import { useEffect, useState } from "react";

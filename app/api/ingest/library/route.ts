@@ -1,11 +1,9 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/ingest/library
 //
 // Ingest previously-uploaded documents into the ACTIVE config by id — the
 // "User library" mode on the workbench (no re-upload; raw text was stored at
 // first ingest, migration 0010). Body: { documentIds: [...] }. Streams the same
 // NDJSON IngestEvents as /api/ingest so the upload panel reuses its progress UI.
-// ---------------------------------------------------------------------------
 import { streamError } from "@/lib/http/missingKeyServer";
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";

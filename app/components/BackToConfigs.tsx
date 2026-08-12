@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // "← Back to configs" — the escape hatch on the standalone pages (Appraise,
 // Corpora), which sit outside /c/[configId] and so have no tab bar of their own.
 //
@@ -13,7 +12,6 @@
 // whose server snapshot is "/" — the server never touches storage, and the href
 // upgrades on hydration. Worst case the user clicks in the ~1 frame before
 // hydration and gets the old behaviour.
-// ---------------------------------------------------------------------------
 "use client";
 
 import Link from "next/link";

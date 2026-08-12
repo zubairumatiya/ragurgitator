@@ -1,16 +1,8 @@
-// ---------------------------------------------------------------------------
 // SEMANTIC CACHE — pure core (no DB, no I/O), so it's unit-testable without a
-// database connection (mirrors how evalMetrics.ts is split out of eval.ts —
-// the test imports THIS file, not the DB-touching orchestration).
-//
-// The cache serves a PAST answer for a NEW question when the two are close
-// enough in embedding space — see docs/semantic-caching-plan.md. This file owns
-// the three decisions that make a hit correct:
+// database connection. This file owns the three decisions that make a hit correct:
 //   - spaceOf()             which threshold applies (per embedding vector-space)
 //   - bestMatch() / isHit() is the nearest cached query close enough to serve?
 //   - fingerprintFrom()     is a cached entry still valid for today's config?
-// Everything here is deterministic and dependency-light on purpose.
-// ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
 
 // RELATIVE import on purpose: EMBEDDING_MODELS is a VALUE import, and the test
@@ -83,24 +75,21 @@ export function spaceOf(model: string): string {
   return EMBEDDING_MODELS[model]?.vectorSpace ?? model;
 }
 
-// ---------------------------------------------------------------------------
-// ENTITY / NUMBER GUARD — see docs/semantic-cache-key-model-plan.md, Phase 0.
+// ENTITY / NUMBER GUARD.
 //
 // Embeddings fail hardest on the tokens that make two identically-phrased
 // questions FACTUALLY different: "what was 2023 revenue" vs "what was 2024
 // revenue" sits near 0.98 cosine under essentially every model, so no threshold
-// that still serves paraphrases can separate them. It's a lexical failure, so
-// it gets a lexical fix rather than a better model.
+// that still serves paraphrases can separate them. A lexical failure gets a
+// lexical fix rather than a better model.
 //
-// The guard is CONSERVATIVE BY CONSTRUCTION: it can only ever turn a would-be
-// hit into a miss, never the reverse. Its worst case is lost savings — which is
-// exactly why a blocked match is still shadow-logged (guard_blocked, migration
-// 0038), so the recall it costs is measurable instead of arguable.
+// CONSERVATIVE BY CONSTRUCTION: it can only ever turn a would-be hit into a miss,
+// never the reverse. Its worst case is lost savings — which is why a blocked match
+// is still shadow-logged (guard_blocked, 0038), so the recall it costs is
+// measurable instead of arguable.
 //
-// Deliberately NO NER model: a dependency and per-lookup latency for a guard
-// whose whole job is catching a failure mode that regex token sets already
-// catch.
-// ---------------------------------------------------------------------------
+// Deliberately NO NER model: a dependency and per-lookup latency for a guard whose
+// whole job is catching a failure mode regex token sets already catch.
 
 // Numerals, with the decorations that change their meaning: an optional
 // currency sign, thousands separators, a decimal part, and a trailing % or
@@ -171,36 +160,27 @@ export function entityGuardPasses(a: string, b: string): boolean {
 
 // Deterministic fingerprint of everything that determines a cached answer. Two
 // entries with the same fingerprint were produced over the same document set by
-// the same answering model, so serving one for the other is safe. Any change
-// flips the fingerprint and the stale entries stop matching.
+// the same answering model, so serving one for the other is safe.
 //
-// WHAT the caller puts in is deliberately not decided here — see
-// currentFingerprint in semanticCache.ts, which keys on the documents and the
-// answering model only and explains why the retrieval knobs are excluded.
+// Null-safe: a null part is encoded distinctly from the string "null" or "" so an
+// absent value and a present one can't collide.
+// WHAT actually goes in the validity key, kept here (pure, DB-free) so it can be
+// asserted without a database:
 //
-// Null-safe: a null part is encoded distinctly from the string "null" or "" so
-// an absent value and a present one can't collide.
-// WHAT actually goes in the cache's validity key — the one decision this whole
-// re-scoping turns on, kept here (pure, DB-free) so it can be asserted without a
-// database. semanticCache.currentFingerprint supplies the two inputs and does
-// nothing else. See docs/semantic-cache-user-scope-plan.md §2.
-//
-//   documents       md5 of the DOCUMENT IDS this config has ingested. Different
-//                   documents ⇒ possibly a different answer. Ids only — no chunk
-//                   count — so the signature is comparable across configs and
-//                   re-chunking doesn't invalidate through the back door.
+//   documents       md5 of the DOCUMENT IDS this config has ingested. Ids only —
+//                   no chunk count — so the signature is comparable across configs
+//                   and re-chunking doesn't invalidate through the back door.
 //   cascadeEnabled  saver mode. With it ON the answer comes from
 //                   cheapModelFor(llmModel) and only escalates on an efficacy
 //                   failure, so two configs with an IDENTICAL llm_model answer
 //                   from different models. Without this in the key, user scoping
 //                   would let a saver-mode config's cheap answer be served to a
-//                   strong-model config — the exact failure keying on the
-//                   answering model exists to prevent.
+//                   strong-model config.
 //
 // NOT in here, on purpose: chunkSize, chunkOverlap, topK, fusionPool, the
-// retrieval embedding model, the override state. Route, not truth. And not
-// llmModel or the cache-key model — both are COLUMNS on semantic_cache, matched
-// in SQL rather than hashed.
+// retrieval embedding model, the override state — route, not truth. And not
+// llmModel or the cache-key model, both of which are COLUMNS on semantic_cache,
+// matched in SQL rather than hashed.
 export function answerFingerprint(input: {
   cascadeEnabled: boolean;
   documents: string;
@@ -222,11 +202,9 @@ export function fingerprintFrom(parts: (string | number | null)[]): string {
   return createHash("sha256").update(canonical).digest("hex");
 }
 
-// ---------------------------------------------------------------------------
 // PHASE 2 CALIBRATION — pure math (no DB), see docs/semantic-caching-plan.md.
 // The orchestration that feeds these (eval-bank fetch, shadow-log fetch, and
 // the threshold upsert) lives in semanticCacheCalibration.ts.
-// ---------------------------------------------------------------------------
 
 const median = (xs: number[]): number | null => {
   if (xs.length === 0) return null;
@@ -358,18 +336,17 @@ export type CalibrationResult = {
 };
 
 // Precision-at-threshold sweep over judged shadow events. Sort by sim desc; for
-// each prefix (the top-n by similarity) the accept rate is P(accept | sim ≥
-// this sim). `recommended` is the LOWEST sim whose prefix still clears `target`
-// with at least `minSamples` events — i.e. the most inclusive threshold whose
-// served set keeps the false-hit rate under (1 − target). Non-monotonic dips
-// are handled naturally: the guarantee is on the aggregate over the served set,
-// so a dip that later recovers is allowed.
+// each prefix the accept rate is P(accept | sim ≥ this sim). `recommended` is the
+// LOWEST sim whose prefix still clears `target` with at least `minSamples` events
+// — the most inclusive threshold whose served set keeps the false-hit rate under
+// (1 − target). Non-monotonic dips are fine: the guarantee is on the aggregate
+// over the served set.
 //
-// TWO STEPS, deliberately split: this builds the curve, and selectFromCurve
-// (calibrationCurve.ts) makes the choice. The panel re-derives τ at a target the
-// server never saw, from the curve alone, and calls that same function — so a
-// number explored on screen is arithmetically the number that would be applied.
-// Anything added to the choice belongs THERE, not here, or the two paths drift.
+// TWO STEPS, deliberately split: this builds the curve, selectFromCurve makes the
+// choice. The panel re-derives τ at a target the server never saw, from the curve
+// alone, using that same function — so a number explored on screen is
+// arithmetically the number that would be applied. Anything added to the choice
+// belongs THERE, not here, or the two paths drift.
 export function calibrateFromJudged(
   events: { sim: number; verdict: "accept" | "reject" }[],
   target: number,
@@ -409,18 +386,16 @@ export function calibrateFromJudged(
   };
 }
 
-// AUC — P(a random SAME pair outranks a random DIFFERENT pair). 0.5 is a coin
-// flip, 1.0 is perfect separation. Computed as the Mann-Whitney U statistic with
-// AVERAGE ranks for ties, which is exactly equivalent and needs no thresholding.
-//
-// Purely RANK-based, so it's immune to cosine-scale differences across models by
-// construction — the reason it's here at all, since raw similarity magnitudes
-// can never be compared between embedding spaces.
+// AUC — P(a random SAME pair outranks a random DIFFERENT pair). Computed as the
+// Mann-Whitney U statistic with AVERAGE ranks for ties. Purely RANK-based, so it's
+// immune to cosine-scale differences across models by construction — the reason
+// it's here at all, since raw similarity magnitudes can never be compared between
+// embedding spaces.
 //
 // SECONDARY to recall@τ, deliberately. AUC grades the WHOLE ranking, and a cache
-// only ever serves from the very top of it: a model can win on AUC by ordering
-// the middle of the distribution well and still be worse where it counts. Use it
-// as a sanity check and a tiebreak, not as the objective.
+// only ever serves from the very top of it: a model can win on AUC by ordering the
+// middle well and still be worse where it counts. A sanity check and a tiebreak,
+// not the objective.
 //
 // null when either class is missing — with no same pairs or no different pairs
 // there is no ordering question to ask, and any number would be an artifact.

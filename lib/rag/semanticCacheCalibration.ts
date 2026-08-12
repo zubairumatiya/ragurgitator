@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // SEMANTIC CACHE — Phase 2 calibration orchestration (DB-facing). The pure
 // math (collision floor, precision-at-threshold sweep) lives in
 // semanticCacheCore.ts; this file is the plumbing: read the eval bank / shadow
@@ -13,7 +12,6 @@
 //      the sweep.
 //
 // Best-effort against missing tables (42P01), like the rest of the cache.
-// ---------------------------------------------------------------------------
 import { config } from "@/lib/config";
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
@@ -46,7 +44,6 @@ async function safe<T>(fn: () => Promise<T[]>, fallback: T[]): Promise<T[]> {
 }
 
 // --- A. Collision floor (config-scoped) ------------------------------------
-
 
 // Ownership fragment (0049) for the CONFIG-ROOTED tables of this subsystem —
 // semantic_cache_shadow and semantic_cache_collision_floor. "My rows" is exactly

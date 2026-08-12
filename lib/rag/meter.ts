@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // METERING + PROVIDER DISPATCH — the one wrapper every generation call goes
 // through, so gross LLM spend lands in spend_totals (docs/savings-accounting-plan.md
 // §3, L2) and so "which provider serves this model" is decided in exactly one
@@ -33,7 +32,6 @@
 // The Anthropic ⇄ Chat-Completions translation itself lives in lib/llm/openaiChat.ts,
 // not here: the batch adapter needs the same pair (see its header), and it has no
 // business importing the spend ledger to get them.
-// ---------------------------------------------------------------------------
 import type Anthropic from "@anthropic-ai/sdk";
 
 import { anthropicFor, openaiFor } from "@/lib/llm/client";

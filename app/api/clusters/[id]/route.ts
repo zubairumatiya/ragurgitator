@@ -1,10 +1,8 @@
-// ---------------------------------------------------------------------------
 // API route: GET/DELETE /api/clusters/[id]
 //
 // GET returns one run's full detail (per-bucket cohesion/size + a nearest-to-
 // centroid representative chunk). DELETE removes a run/preset (its clusters and
 // assignments cascade). `params` is a Promise in this Next.js version — await it.
-// ---------------------------------------------------------------------------
 import { withRequestConfig } from "@/lib/http/configScope";
 import { deleteRun, getRun } from "@/lib/rag/clusterStore";
 

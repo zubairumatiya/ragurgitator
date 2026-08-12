@@ -1,11 +1,9 @@
-// ---------------------------------------------------------------------------
 // CLUSTER STORE + ENGINE for the /clusters page.
 //
 // Reads the active-config corpus vectors, runs k-means (lib/rag/cluster.ts), and
 // persists the buckets. A "run" produces several candidates (random restarts)
 // the user can compare and keep; unsaved candidates are pruned when the next run
 // starts. Mirrors the run/snapshot conventions in lib/rag/evalStore.ts.
-// ---------------------------------------------------------------------------
 import type { StreamErrorEvent } from "@/lib/http/missingKey";
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";

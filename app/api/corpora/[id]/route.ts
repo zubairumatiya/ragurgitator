@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: GET/DELETE /api/corpora/[id]
 //
 // GET returns everything the corpus detail page (and the create-config dialog's
@@ -10,7 +9,6 @@
 // clears their corpus_id, so auto-sync simply breaks; their embedded documents
 // are untouched. Global (not config-scoped). `params` is a Promise in this
 // Next.js version.
-// ---------------------------------------------------------------------------
 import { withRequestUser } from "@/lib/http/configScope";
 import {
   deleteCorpus,

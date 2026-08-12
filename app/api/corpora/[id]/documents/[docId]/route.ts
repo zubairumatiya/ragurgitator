@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: DELETE /api/corpora/[id]/documents/[docId]
 //
 // Remove a document from a corpus. Membership only — the document stays global
@@ -6,7 +5,6 @@
 // embedding of the doc (chunks, eval labels, overrides) is removed too; that's
 // what sync means. Unsynced/detached configs are untouched. `params` is a
 // Promise in this Next.js version.
-// ---------------------------------------------------------------------------
 import { withRequestUser } from "@/lib/http/configScope";
 import { getCorpus, removeDocumentFromCorpus } from "@/lib/rag/corpusStore";
 import { syncRemoveDocFromConfigs } from "@/lib/rag/pipeline";

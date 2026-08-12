@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // BATCH JOB: cluster_labeling (Anthropic or OpenAI — whichever serves the
 // config's llmModel).
 //
@@ -9,7 +8,6 @@
 //
 // apply is naturally idempotent: saveClusterLabels just UPDATEs clusters.label,
 // so re-applying the same labels is a no-op.
-// ---------------------------------------------------------------------------
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { labelRequestParams, parseBucketLabels, type BucketSamples } from "@/lib/rag/clusterLabeler";
 import { representativeChunksForRun, saveClusterLabels } from "@/lib/rag/clusterStore";

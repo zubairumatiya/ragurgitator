@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // ACTIVE USER — request-scoped identity.
 //
 // The deliberate twin of lib/rag/activeConfig.ts, and it exists for the same
@@ -39,7 +38,6 @@
 // itself rather than inheriting it — the async context AsyncResource.bind
 // restores carries a transaction that has already committed. See the ordering
 // note in that file; it is not a detail you can rearrange safely.
-// ---------------------------------------------------------------------------
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import { withUserTransaction } from "@/lib/db";

@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: upload / paste / pick-from-library documents to ingest (Client Component).
 //
 // File and Paste-text modes submit to /api/ingest as multipart/form-data; the
@@ -7,7 +6,6 @@
 // IngestEvents into one progress UI, with a per-source result line. Uses React
 // 19's <form action={...}> pattern, which hands us a FormData directly and
 // avoids deprecated synthetic-event types.
-// ---------------------------------------------------------------------------
 "use client";
 
 import { useEffect, useState } from "react";

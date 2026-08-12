@@ -1,46 +1,34 @@
-// ---------------------------------------------------------------------------
 // QUESTION CACHE — generated eval questions, banked per user and keyed on the
 // hash of the passage they were written for, so a question is authored once per
-// account rather than once per config (migrations/0055_question_cache.sql).
+// account rather than once per config (0055).
 //
-// Question generation can be idempotent WITHIN a config: with "Top up" ticked
-// the gap query (chunksNeedingQuestionsByDifficulty) keeps only chunks below
-// their target, so re-running the same staged counts costs nothing. It is scoped
-// to the active config, though, so a second config over the same corpus sees
-// every slot as missing and re-buys the whole set. This module is what makes
-// that free.
+// Generation is already idempotent WITHIN a config (the "Top up" gap query keeps
+// only chunks below target), but it's config-scoped, so a second config over the
+// same corpus sees every slot as missing and re-buys the whole set. This module is
+// what makes that free.
 //
-// BANKING IS AUTOMATIC, SERVING IS NOT. Every generation (inline, single-chunk,
-// and batch apply) banks what it paid for, but nothing reads the cache on its
-// own: serving happens only when you press "Bulk actions → Add question → Add
-// cached", which hands every chunk in scope whatever the bank holds for its exact
-// text — any difficulty, no target, no count, minus anything the chunk already
-// shows. Reuse hands you wording authored under another config, so it stays a
-// deliberate act rather than a background default.
+// BANKING IS AUTOMATIC, SERVING IS NOT. Every generation banks what it paid for,
+// but nothing reads the cache on its own: serving happens only via "Bulk actions →
+// Add question → Add cached". Reuse hands you wording authored under another
+// config, so it stays a deliberate act rather than a background default.
 //
-// A HIT IS EXACT. Only the chunk text, the difficulty, the count and the model
-// reach the generator — no temperature, no seed, no user-editable prompt — so a
-// row keyed on sha256(chunk text) at the same difficulty and model IS a question
-// for that passage. This cache never serves a question authored from different
-// text; approximate reuse (remapping onto a differently-chunked passage) is
-// reconfigure.ts's best-effort salvage and is deliberately not done here.
+// A HIT IS EXACT. Only the chunk text, difficulty, count and model reach the
+// generator — no temperature, no seed, no user-editable prompt — so a row keyed on
+// sha256(chunk text) at the same difficulty and model IS a question for that
+// passage. Approximate reuse (remapping onto a differently-chunked passage) is
+// reconfigure.ts's salvage and is deliberately not done here.
 //
-// Shape follows embedCache.ts, which is the sibling this table was modelled on:
-//   - reads are scoped `where user_id = activeUserId()` and RETHROW anything
-//     that isn't a missing table, because silently reporting a miss is a silent
-//     bill;
-//   - writes are best-effort — wrapped in isolated() so a failure cannot poison
-//     the caller's transaction, `on conflict do nothing` because a concurrent
-//     run may have banked the same deterministic row, and warn-and-carry-on
-//     because a lost cache row costs one future generation and nothing else;
-//   - no L1 map. These rows are small and the lookup is one batched query per
-//     run, so a process-global cache would buy nothing and would have to be
-//     user-keyed to be safe.
+// Shape follows embedCache.ts:
+//   - reads are scoped `where user_id = activeUserId()` and RETHROW anything that
+//     isn't a missing table, because silently reporting a miss is a silent bill;
+//   - writes are best-effort — isolated() so a failure can't poison the caller's
+//     transaction, `on conflict do nothing` for concurrent identical rows, and
+//     warn-and-carry-on because a lost row costs one future generation;
+//   - no L1 map. These rows are small and the lookup is one batched query per run.
 //
 // prompt_version is threaded in from the caller rather than imported: the prompt
 // constants live in eval.ts, which imports this module, and a value import back
-// would be a runtime cycle. The type-only imports below are erased and safe.
-// ---------------------------------------------------------------------------
+// would be a runtime cycle.
 import { createHash } from "node:crypto";
 
 import { activeUserId } from "@/lib/auth/userScope";
@@ -130,23 +118,18 @@ async function readBanked(
   }
 }
 
-// Give every chunk in scope whatever the bank holds for its exact text.
+// Give every chunk in scope whatever the bank holds for its exact text — the
+// engine behind "Add cached". Nothing is generated and nothing is batched.
 //
-// The engine behind "Add cached". Nothing is generated and nothing is batched: a
-// chunk whose text was never generated for simply gets nothing, and pressing
-// "Add" is what buys it.
+// DEDUPE IS BY QUESTION TEXT, against every question the chunk already shows under
+// this config — generated, previously reused, or hand written. So pressing the
+// button twice adds nothing the second time.
 //
-// DEDUPE IS BY QUESTION TEXT (selectNewQuestions), against every question the
-// chunk already shows under this config -- generated, previously reused, or hand
-// written. So pressing the button twice adds nothing the second time, and a
-// question a config already displays is never handed back to it.
-//
-// Reused questions are inserted exactly as generated ones are (same
-// insertQuestionWithLabel, same 'generated' source, the cached generator_model,
-// the banked difficulty) and are handed to `onLanded` so the caller can stream
-// them into the dashboard live, indistinguishable from bought ones -- which they
-// are. `onTotal` fires once the additions are known, because until the bank has
-// been read there is no honest number to size a progress bar with.
+// Reused questions are inserted exactly as generated ones are and handed to
+// `onLanded` so the caller can stream them into the dashboard live,
+// indistinguishable from bought ones. `onTotal` fires once the additions are
+// known, because until the bank has been read there is no honest number to size a
+// progress bar with.
 export async function fillChunksFromCache(
   chunks: ChunkWithQuestions[],
   model: string,
@@ -214,22 +197,20 @@ export async function fillChunksFromCache(
 }
 
 // Unbank one question: drop every row for this exact wording on this exact
-// passage, so deleting it from the golden set also stops "Add cached" handing
-// it back.
+// passage, so deleting it from the golden set also stops "Add cached" handing it
+// back.
 //
-// DELIBERATELY NOT FILTERED BY MODEL OR DIFFICULTY. The same wording banked
-// under another model would still return via "Add cached", and the user's
-// intent when they tick the box is "stop showing me this question", not "stop
-// showing me the gpt-4o-mini variant of it".
+// DELIBERATELY NOT FILTERED BY MODEL OR DIFFICULTY. The same wording banked under
+// another model would still return via "Add cached", and the intent when ticking
+// the box is "stop showing me this question".
 //
-// Equality is `normalizeQuestion` — the same tested function that decides reuse
-// in selectNewQuestions — applied in JS rather than as SQL `lower(btrim(...))`,
-// which would be a second definition of equality free to drift from the first.
+// Equality is `normalizeQuestion` — the same tested function that decides reuse in
+// selectNewQuestions — applied in JS rather than as SQL `lower(btrim(...))`, which
+// would be a second definition of equality free to drift from the first.
 //
-// Best-effort like the rest of this module: the question is already deleted, and
-// a failed uncache must not 500 a successful delete. The caller still gets the
-// count (or null on failure) so the UI can say what actually happened —
-// silently failing to uncache is exactly the surprise this exists to prevent.
+// Best-effort: the question is already deleted, and a failed uncache must not 500 a
+// successful delete. The caller still gets the count (or null on failure) so the UI
+// can say what actually happened.
 export async function uncacheQuestion(
   chunkText: string,
   question: string,
@@ -305,14 +286,13 @@ export async function bankedSlotCounts(
 
 // Bank freshly generated questions for a passage.
 //
-// `startSlot` is where this chunk's questions begin — the count it already held
-// at this difficulty — so slots stay dense and a later config asking for more
-// picks up where this one stopped.
+// `startSlot` is where this chunk's questions begin — the count it already held at
+// this difficulty — so slots stay dense and a later config asking for more picks
+// up where this one stopped.
 //
-// Usage is the generating call's real input/output tokens divided by the number
-// of questions it produced: the inline path asks for N in one call, so
-// per-question cost is that call's cost split N ways. Zero when the provider
-// returned no usage, which banks the question and no dollars.
+// Usage is the generating call's real input/output tokens divided by the number of
+// questions it produced. Zero when the provider returned no usage, which banks the
+// question and no dollars.
 export async function bankQuestions(args: {
   textHash: string;
   difficulty: string;

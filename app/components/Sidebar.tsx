@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: the left-hand, togglable sidebar (Client Component), rendered by the root
 // layout so it frames every page (config tabs, Appraise, the corpora page). It
 // holds the signed-in account row, then collapsible sections — "My corpora"
@@ -13,7 +12,6 @@
 // exposed to React via useSyncExternalStore (SSR snapshot = open; localStorage
 // isn't readable during SSR, and this avoids a setState-in-effect restore).
 // Styling mirrors ConfigTabs/Nav (zinc palette).
-// ---------------------------------------------------------------------------
 "use client";
 
 import Link from "next/link";

@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: PATCH/DELETE /api/eval/questions/[id]
 //
 // Manual curation of the golden set. PATCH edits a question's text (marks it
@@ -7,7 +6,6 @@
 // doesn't return via "Add cached". A query param rather than a body: DELETE
 // bodies are awkward and parseBody here is built for POST/PATCH.
 // `params` is a Promise in this Next.js version — await it.
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody, requiredTrimmedString } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";

@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/eval/bulk-ndcg
 //
 // "Bulk actions → Add nDCG rankings" on /eval: for every labeled question in
@@ -7,7 +6,6 @@
 // vector query over the corpus), promote it to ground truth, and score the
 // still-unscored. Streams progress as NDJSON (one EvalEvent per line) for the
 // dashboard's progress bar. Body: { documentIds?, rebuild? }.
-// ---------------------------------------------------------------------------
 import { streamError } from "@/lib/http/missingKeyServer";
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";

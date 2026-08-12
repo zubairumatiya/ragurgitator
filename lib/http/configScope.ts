@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // Bridge between the HTTP layer and the request scopes. Every route handler runs
 // its work inside one of the two wrappers here, which do three things in order:
 // authenticate, enter the user scope, and (for the config-scoped variant)
@@ -22,7 +21,6 @@
 // and hand Next's `after` the flush that drains it once the response is out.
 // after() is called BEFORE withUser, so the async context it binds carries no
 // transaction handle — that ordering is load-bearing, not incidental.
-// ---------------------------------------------------------------------------
 import { after } from "next/server";
 
 import { requireUserForApi, unauthorizedJson } from "@/lib/auth/dal";

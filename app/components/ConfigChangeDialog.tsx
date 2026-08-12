@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: "Change this config" dialog (Client Component) — the bulk-actions flow
 // that mutates the CURRENT config in place (unlike ConfigCreateDialog, which
 // spawns a new one; use + / Duplicate on the tab bar for that).
@@ -11,7 +10,6 @@
 //
 // Streams the route's IngestEvents into a progress line. Styling mirrors
 // ConfigCreateDialog (zinc palette).
-// ---------------------------------------------------------------------------
 "use client";
 
 import { useEffect, useState } from "react";

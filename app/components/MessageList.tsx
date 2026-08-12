@@ -1,9 +1,7 @@
-// ---------------------------------------------------------------------------
 // UI: renders the list of chat messages.
 //
 // Pure presentation — props in, JSX out. Assistant messages can carry their
 // retrieved sources so you can see which chunks the model leaned on.
-// ---------------------------------------------------------------------------
 "use client";
 
 import { Fragment, useState } from "react";

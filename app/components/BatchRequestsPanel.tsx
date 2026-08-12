@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // BATCH REQUESTS PANEL (Client Component) — the account-wide status view for
 // batch API jobs, mounted in the Nav next to Settings so it's reachable from
 // every config view. Jobs are global (a provider batch isn't config-scoped), so
@@ -16,7 +15,6 @@
 //     is seeing them, so the green "something finished" dot clears — then poll
 //     every 10s while it stays open, and re-list. "Check now" forces one.
 //   • Cancel (in_progress only) and dismiss ("ack") a finished job's badge.
-// ---------------------------------------------------------------------------
 "use client";
 
 import { useCallback, useEffect, useState } from "react";

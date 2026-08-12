@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // MCP BEARER TOKEN VERIFICATION — the resource server's half of the OAuth flow.
 //
 // Supabase is the AUTHORIZATION server: it runs the OAuth 2.1 endpoints, handles
@@ -48,7 +47,6 @@
 // failure mode is a transient network error reading as a 401, which an agent
 // retries. If MCP traffic ever became chatty enough for this to hurt, the move
 // is a short-TTL liveness cache keyed on the token, NOT dropping the check.
-// ---------------------------------------------------------------------------
 import "server-only";
 
 import { type AuthInfo, OAuthError, type OAuthTokenVerifier } from "@modelcontextprotocol/server";

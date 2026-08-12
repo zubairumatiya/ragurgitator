@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // DB layer for corpora (reusable named document sets) — see migrations/0010,
 // 0017 and docs/multi-config-plan.md. Raw SQL via the shared `sql` client, no
 // business logic. Mirrors vectorStore.ts / evalStore.ts.
@@ -16,7 +15,6 @@
 // separately. That matters: without the document-side predicate, adding a
 // document id you don't own to a corpus you do own would smuggle it into your
 // corpus.
-// ---------------------------------------------------------------------------
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { isUuid } from "@/lib/rag/activeConfig";

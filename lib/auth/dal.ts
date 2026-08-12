@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // DATA ACCESS LAYER — the authorization boundary.
 //
 // Per the Next 16 auth guide (node_modules/next/dist/docs/01-app/02-guides/
@@ -16,7 +15,6 @@
 // three leaf components each call requireUser() performs ONE getUser() round
 // trip. That's what makes "check at every call site" affordable enough to
 // actually do — the guide's recommended pattern.
-// ---------------------------------------------------------------------------
 import "server-only";
 
 import { cache } from "react";

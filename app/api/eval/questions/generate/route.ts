@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/eval/questions/generate
 //
 // Author one synthetic eval question for a specific chunk (under the active
@@ -6,7 +5,6 @@
 // 'easy' | 'medium' | 'hard' }. The new question lands unscored until the next
 // "Score pending" / "Re-score all". Backs the synthetic side of the
 // "Add a question" form on each chunk group in /eval.
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";

@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // Appraise → Semantic caching: THE place a threshold gets written. Every other
 // panel on the page only computes and displays; a number goes live here or
 // nowhere, so there's one control to reason about instead of an apply button per
@@ -22,7 +21,6 @@
 //
 // Targets are encoded as "space:<name>" / "config:<uuid>" so one <select> can
 // span both layers — "space vs config" and "which one" is a single decision.
-// ---------------------------------------------------------------------------
 "use client";
 
 import { useCallback, useEffect, useState } from "react";

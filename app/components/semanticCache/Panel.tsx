@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // The section frame every panel on Appraise → Semantic caching wears.
 //
 // It exists because the four panels used to each invent their own chrome — one
@@ -23,7 +22,6 @@
 //
 // No state and no hooks, so it renders in a Server Component (the page frame) and
 // inside the self-fetching Client Components alike.
-// ---------------------------------------------------------------------------
 import type { ReactNode } from "react";
 
 import { InfoDot } from "@/app/components/InfoDot";

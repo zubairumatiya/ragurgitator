@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // Reconstruct source text from stored chunks (eval boundary editor only).
 //
 // The original document text isn't persisted — only chunk text is. But adjacent
@@ -6,7 +5,6 @@
 // (suffix of one chunk == prefix of the next), so we can stitch a contiguous run
 // of chunks back into the surrounding text. Used by the "resize one custom
 // chunk" experiment to show a chunk in the context of its frozen neighbors.
-// ---------------------------------------------------------------------------
 
 export type ChunkSpan = {
   position: number;

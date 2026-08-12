@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: GET/POST /api/semantic-cache/key-model
 //
 // The CACHE-KEY model — the embedding model incoming questions are keyed under
@@ -27,7 +26,6 @@
 // Config-scoped (withRequestConfig) — but note `apply` with scope "all" writes
 // every config, which is how a "global default" is expressed at runtime: the
 // true global lives in lib/config.ts and is a code constant.
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 
 import { parseBody } from "@/lib/http/body";

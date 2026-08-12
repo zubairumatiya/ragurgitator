@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // ANTHROPIC ⇄ OPENAI CHAT COMPLETIONS TRANSLATION — pure, no client, no IO.
 //
 // Extracted from lib/rag/meter.ts because there are now TWO transports that need
@@ -27,7 +26,6 @@
 // silently. A prompt that quietly lost its schema constraint or its tools would
 // come back as unparseable prose from a model that looks like it just did a bad
 // job, which is a much worse afternoon than a thrown error naming the field.
-// ---------------------------------------------------------------------------
 import type Anthropic from "@anthropic-ai/sdk";
 import type OpenAI from "openai";
 

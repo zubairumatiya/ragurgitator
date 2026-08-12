@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/ingest
 //
 // Accepts either:
@@ -10,7 +9,6 @@
 // line) so the client can render a live progress bar; validation errors are
 // returned as plain JSON before the stream starts. All RAG logic stays in
 // lib/rag — this route just translates HTTP <-> input.
-// ---------------------------------------------------------------------------
 import { streamError } from "@/lib/http/missingKeyServer";
 import { config } from "@/lib/config";
 import { ingest, type IngestEvent } from "@/lib/rag/pipeline";

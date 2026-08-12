@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: the cross-config tab bar (Client Component) that sits above every config
 // page — the top row in the §6 shell:
 //
@@ -11,7 +10,6 @@
 // any mutation we router.refresh() to re-pull them, and route as needed.
 //
 // Styling mirrors Nav.tsx / EvalDashboard.tsx (zinc palette, rounded, subtle).
-// ---------------------------------------------------------------------------
 "use client";
 
 import Link from "next/link";

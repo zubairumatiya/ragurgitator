@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/eval/cancel
 //
 // Asks an in-flight NDJSON run to stop. Body: { runId } — the id the run
@@ -15,7 +14,6 @@
 // belongs to another user (deliberately indistinguishable, so this cannot probe
 // for other people's run ids). The UI treats it as success — either way, that
 // run is not going to spend anything more on this instance.
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 
 import { activeUserId } from "@/lib/auth/userScope";

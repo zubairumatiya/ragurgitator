@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/corpora/[id]/documents — add documents to a corpus.
 //
 // Accepts either:
@@ -10,7 +9,6 @@
 // auto-synced to this corpus, streamed as NDJSON IngestEvents (that's the part
 // that costs embedding calls; zero synced configs = instant). Corpus-level, so
 // no withRequestConfig. `params` is a Promise in this Next.js version.
-// ---------------------------------------------------------------------------
 import { streamError } from "@/lib/http/missingKeyServer";
 import { config } from "@/lib/config";
 import { ndjsonStream } from "@/lib/http/ndjson";

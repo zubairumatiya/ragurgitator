@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: DELETE /api/documents/[id]
 //
 // Removes the ACTIVE CONFIG's embedding of a document — its chunks, the eval
@@ -10,7 +9,6 @@
 // in the user's library, re-embeddable with no re-upload.
 //
 // `params` is a Promise in this Next.js version — await it.
-// ---------------------------------------------------------------------------
 import { withRequestConfig } from "@/lib/http/configScope";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { deleteEmbeddingRunFor } from "@/lib/rag/vectorStore";

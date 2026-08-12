@@ -1,24 +1,16 @@
-// ---------------------------------------------------------------------------
 // SEMANTIC CACHE — orchestration (DB-facing). Serves a PAST answer for a NEW
-// question when the two are close enough in embedding space, letting ask()
-// skip retrieval (and, once it's enabled, generation) entirely. See
-// docs/semantic-caching-plan.md. The correctness decisions live in the
-// dependency-free core (semanticCacheCore.ts); this file is the plumbing:
-// embed the query, find the nearest still-valid cached entry, and decide via the
-// per-space threshold whether it's a hit.
+// question when the two are close enough in embedding space, letting ask() skip
+// retrieval and generation entirely. The correctness decisions live in the
+// dependency-free core (semanticCacheCore.ts); this file is the plumbing.
 //
-// SCOPE: per USER, not per config, since migration 0058
-// (docs/semantic-cache-user-scope-plan.md). An entry is reachable from every
+// SCOPE: per USER, not per config, since 0058. An entry is reachable from every
 // config of yours holding the same documents and answering with the same model,
 // however differently they retrieve — the AB-testing workflow this repo is built
 // around is several configs over one corpus, and the old per-config grain made
-// each of them buy the same answer over again. config_id survives on the row as
-// provenance only.
+// each of them buy the same answer over again. config_id survives as provenance.
 //
-// Best-effort, exactly like embedCache: if migration 0031 isn't applied
-// (undefined_table, 42P01) lookups always miss and stores are no-ops, so the
-// feature is safe to ship ahead of the migration.
-// ---------------------------------------------------------------------------
+// Best-effort, like embedCache: if 0031 isn't applied (42P01) lookups always miss
+// and stores are no-ops, so the feature is safe to ship ahead of the migration.
 import { createHash } from "node:crypto";
 
 import { activeUserId } from "@/lib/auth/userScope";
@@ -62,11 +54,10 @@ export type CacheKey = { model: string; vector: number[] };
 // A miss also hands back the RETRIEVAL query vector when the lookup happens to
 // already have it — i.e. when the cache-key model and the config's embedding
 // model coincide, which is the default. Decoupled, they're vectors in different
-// spaces and the key vector is useless to the retriever, so `queryVector` is
-// null and the caller embeds for retrieval itself.
+// spaces and the key vector is useless to the retriever, so `queryVector` is null
+// and the caller embeds for retrieval itself.
 //
-// A hit carries neither: it skips retrieval AND generation, so there is nothing
-// left to reuse a vector for.
+// A hit carries neither: it skips retrieval AND generation.
 export type CacheProbe =
   | { hit: true; result: CachedResult; sim: number; matchedQuery: string }
   | { hit: false; key: CacheKey; queryVector: number[] | null };
@@ -80,30 +71,24 @@ const sha256 = (text: string): string =>
 const truncate = (s: string, n = 80): string =>
   s.length <= n ? s : `${s.slice(0, n - 1)}…`;
 
-// A signature of WHICH DOCUMENTS this config can answer from: the set of
-// document ids with chunks ingested under it. Adding or removing a document
-// changes the id set and so invalidates every banked answer.
+// A signature of WHICH DOCUMENTS this config can answer from: the set of document
+// ids with chunks ingested under it. Adding or removing a document invalidates
+// every banked answer.
 //
-// Document ids ONLY — deliberately not the chunk count it used to carry (see
-// docs/semantic-cache-user-scope-plan.md §2). Two reasons:
-//   - chunk count moves on every re-chunk, which put chunkSize/chunkOverlap
-//     back into the validity key through the back door after they were
-//     removed from it for being route, not truth;
-//   - the ids are the half that is comparable ACROSS configs. Two configs over
-//     the same corpus hold identical document ids even though their per-model
-//     chunks_<model>_<dim> tables and chunk counts differ, which is what lets
-//     them share one cache bucket.
+// Document ids ONLY — deliberately not the chunk count it used to carry:
+//   - chunk count moves on every re-chunk, which put chunkSize/chunkOverlap back
+//     into the validity key through the back door;
+//   - the ids are the half that is comparable ACROSS configs. Two configs over the
+//     same corpus hold identical document ids even though their per-model chunk
+//     tables and counts differ, which is what lets them share one bucket.
 //
 // Keying on ids is sound because document CONTENT is immutable: insertDocument
-// (lib/rag/vectorStore.ts:84) always mints a fresh uuid — no on-conflict, no
-// update path — and nothing in the app rewrites a `documents` row, so a
-// re-upload is a new id. Content cannot change under an id already in the
-// signature.
+// always mints a fresh uuid — no on-conflict, no update path — so a re-upload is
+// a new id.
 //
 // Read from the CHUNKS table rather than corpus_documents on purpose: chunks are
-// what retrieval can actually reach, so a document in the corpus but not yet
-// ingested here can't appear in an answer and must not join the key. Missing
-// chunk table (fresh config, pre-migration) → a stable "no-corpus" marker.
+// what retrieval can reach, so a document in the corpus but not yet ingested here
+// can't appear in an answer and must not join the key.
 async function documentSignature(cfg: ResolvedConfig): Promise<string> {
   try {
     const [row] = await sql<{ docs: string }[]>`
@@ -119,35 +104,31 @@ async function documentSignature(cfg: ResolvedConfig): Promise<string> {
   }
 }
 
-// The validity key an entry is stored under and looked up by: what would make
-// the banked answer WRONG, and nothing else. See semanticCacheCore for the hash
-// itself and docs/semantic-cache-user-scope-plan.md §2 for the decision.
+// The validity key an entry is stored under and looked up by: what would make the
+// banked answer WRONG, and nothing else.
 //
 // Deliberately absent: chunkSize, chunkOverlap, topK, fusionPool, the retrieval
 // embedding model and the override state. Those describe HOW the answer was
 // found, not WHETHER it is still true — nudging topK used to throw away every
-// banked answer for the config and re-buy it at full price. The cost of that
-// trade is that the cache can mask a retrieval change while you tune; the answer
-// is the existing "Serve cached answers" toggle (Settings → Savings), which
-// forces recomputation and shadow-logs the would-hits.
+// banked answer and re-buy it at full price. The cost is that the cache can mask
+// a retrieval change while you tune; the answer is the "Serve cached answers"
+// toggle, which forces recomputation and shadow-logs the would-hits.
 //
-// NOTE: the CACHE-KEY model is deliberately absent too, for a different reason.
-// The key model changes only how questions are INDEXED for lookup, not what
-// answer was produced, and it already has a column of its own
-// (semantic_cache.embedding_model) — folding it in would needlessly invalidate
-// every cached ANSWER on a key-model switch.
+// The CACHE-KEY model is absent for a different reason: it changes only how
+// questions are INDEXED for lookup, not what answer was produced, and it has a
+// column of its own — folding it in would needlessly invalidate every cached
+// ANSWER on a key-model switch.
 //
-// NOTE: llmModel is absent because it is a COLUMN as of 0058, not because it
-// doesn't matter — it sits in the lookup's where-clause instead, so /cache can
-// name the answering model per row. cascadeEnabled stays in the hash: it is a
-// modifier on that model rather than an identity anyone wants to filter on.
+// llmModel is absent because it is a COLUMN as of 0058, sitting in the lookup's
+// where-clause instead so /cache can name the answering model per row.
+// cascadeEnabled stays in the hash: it modifies that model rather than being an
+// identity anyone wants to filter on.
 //
-// NOTE: SYSTEM_PROMPT (lib/rag/generator.ts:33) is not in this hash either. It
-// is a static const with no interpolation and the app has no prompt editing, so
-// the only thing that can change it is a code edit — at which point bump `sc-vN`
-// in answerFingerprint, in the same commit. That manual bump is the whole
-// invalidation mechanism for the prompt (plan §10 item 3); there is deliberately
-// no derived prompt_version.
+// SYSTEM_PROMPT is not in this hash either. It is a static const and the app has
+// no prompt editing, so only a code edit can change it — at which point bump
+// `sc-vN` in answerFingerprint in the same commit. That manual bump is the whole
+// invalidation mechanism for the prompt; there is deliberately no derived
+// prompt_version.
 async function currentFingerprint(cfg: ResolvedConfig): Promise<string> {
   return answerFingerprint({
     cascadeEnabled: cfg.cascadeEnabled,
@@ -157,20 +138,17 @@ async function currentFingerprint(cfg: ResolvedConfig): Promise<string> {
 
 // --- the cache-key model ---------------------------------------------------
 
-// The embedding model incoming questions are keyed under for the proximity
-// match. Two layers, mirroring resolveThreshold:
+// The embedding model incoming questions are keyed under for the proximity match:
 //
 //   configs.batch_savings.semanticCache.keyModel   (per-config override)
 //     ?? config.semanticCache.keyModel             (global default)
 //
-// This is NOT the config's retrieval model: the cache-key vector never touches
-// a chunks_* table, so it needs neither `ingestable` nor a matching dimension —
-// every registered model is a candidate. See docs/semantic-cache-key-model-plan.md.
+// NOT the config's retrieval model: the key vector never touches a chunks_* table,
+// so it needs neither `ingestable` nor a matching dimension.
 //
-// An override naming a model that isn't in the registry falls back to the
-// global default rather than throwing: the alternative is a provider error on
-// the answer hot path over a stale/hand-edited jsonb value, and the default is
-// always a working model.
+// An override naming an unregistered model falls back to the global default
+// rather than throwing — the alternative is a provider error on the answer hot
+// path over a stale jsonb value.
 export function resolveKeyModel(override: string | null): string {
   if (override !== null && EMBEDDING_MODELS[override]) return override;
   if (override !== null) {
@@ -184,18 +162,15 @@ export function resolveKeyModel(override: string | null): string {
 
 // --- the calibration precision target --------------------------------------
 
-// The precision the calibration sweeps hold themselves to. Two layers, same
-// shape as resolveKeyModel:
+// The precision the calibration sweeps hold themselves to:
 //
 //   configs.batch_savings.semanticCache.acceptTarget  (per-config override)
 //     ?? config.semanticCache.acceptTarget            (global default, 0.99)
 //
-// This is a PROBABILITY, not a cosine: it's the rule that derives τ from judged
-// evidence, where `threshold` is a hand-set τ. Both sweeps take it as a
-// PARAMETER rather than reading it here (see the note on semanticCacheLookup) —
-// the pages that host them are not config-scoped, so a target read deep in the
-// stack would silently be the Default config's. Resolving at the route and
-// passing it down keeps "whose setting is this?" answerable.
+// A PROBABILITY, not a cosine: the rule that derives τ from judged evidence, where
+// `threshold` is a hand-set τ. Both sweeps take it as a PARAMETER rather than
+// reading it here — the pages hosting them are not config-scoped, so a target read
+// deep in the stack would silently be the Default config's.
 export function resolveAcceptTarget(override: number | null): number {
   return override ?? config.semanticCache.acceptTarget;
 }
@@ -237,15 +212,14 @@ export type EffectiveThreshold = {
   source: ThresholdSource;
 };
 
-// The cosine threshold governing hits, INHERITED for this model's vector-space:
-// a calibrated value if one exists (semantic_cache_thresholds), else the
-// conservative default. Missing table → default. This is what a config with no
-// override of its own runs at, and what the Settings input shows as its
+// The cosine threshold governing hits, INHERITED for this model's vector space: a
+// calibrated value if one exists, else the conservative default. This is what a
+// config with no override runs at, and what the Settings input shows as its
 // placeholder.
 //
 // Per (user, space) since 0050, and that predicate is load-bearing rather than
-// hygienic: without it the last account to calibrate sets the floor at which
-// EVERY account's cache serves a stored answer instead of computing a fresh one.
+// hygienic: without it the last account to calibrate sets the floor at which EVERY
+// account's cache serves a stored answer instead of computing a fresh one.
 export async function inheritedThreshold(model: string): Promise<EffectiveThreshold> {
   const space = spaceOf(model);
   try {
@@ -274,29 +248,23 @@ async function resolveThreshold(
 }
 
 // Find a cached answer for `question`. Embeds the query under the resolved
-// CACHE-KEY model (cached in 0020) and, among entries valid for the current
-// fingerprint and stored under that same key model, finds the nearest one.
+// CACHE-KEY model and, among entries valid for the current fingerprint and stored
+// under that same key model, finds the nearest one.
 //
-// The candidate set is THIS USER's, across all of their configs (migration
-// 0058) — not this config's. Two configs over the same documents, answering with
-// the same model, share one bucket however far apart their retrieval settings
-// are; that reuse is the whole point of the re-scoping. What still separates
-// buckets is the answering model (`llm_model`, an explicit column here), the
+// The candidate set is THIS USER's, across all of their configs (0058). What still
+// separates buckets is the answering model (`llm_model`, an explicit column), the
 // key model's vector space, and the fingerprint's document set + saver mode.
 //
-// A match that clears the threshold is only RETURNED AS A HIT when `serve` is true
-// (the Settings → Savings toggle); with serving off it's logged as a "would-hit"
-// shadow and reported as a miss, so the caller recomputes a fresh answer.
+// A match clearing the threshold is only RETURNED AS A HIT when `serve` is true;
+// with serving off it's logged as a "would-hit" shadow and reported as a miss.
 //
 // A miss hands back the key vector (so the store doesn't re-embed) and, WHEN THE
 // KEY MODEL AND THE CONFIG'S EMBEDDING MODEL COINCIDE, that same vector as the
-// retrieval query vector — which is the default case, so the common path still
-// embeds exactly once. Decoupled, the key vector is in a foreign space and the
-// caller embeds for retrieval itself.
+// retrieval query vector — the default case, so the common path embeds once.
 //
-// All three settings come from the CALLER (pipeline reads configs.batch_savings)
-// rather than being read here, so this stays a pure function of its inputs and
-// one lookup can't disagree with another about which config it's serving.
+// All three settings come from the CALLER rather than being read here, so this
+// stays a pure function of its inputs and one lookup can't disagree with another
+// about which config it's serving.
 export async function semanticCacheLookup(
   question: string,
   {
@@ -353,15 +321,13 @@ export async function semanticCacheLookup(
       match !== null &&
       !entityGuardPasses(question, match.value.text);
 
-    // Shadow-log the nearest match for threshold calibration (Phase 2 — see
-    // docs/semantic-caching-plan.md). Recorded whenever it clears the low
-    // shadowLogFloor, INDEPENDENT of the serving threshold and the serve toggle,
-    // so calibration has judged examples BELOW today's threshold. Fire-and-
-    // forget: a failure here must never affect the answer.
+    // Shadow-log the nearest match for threshold calibration. Recorded whenever it
+    // clears the low shadowLogFloor, INDEPENDENT of the serving threshold and the
+    // serve toggle, so calibration has judged examples BELOW today's threshold.
+    // Fire-and-forget: a failure here must never affect the answer.
     //
     // Guard-blocked matches are logged too, flagged: the guard trades recall for
-    // safety, and the only way to know what that trade cost is to judge the
-    // rows it rejected.
+    // safety, and the only way to know what that cost is to judge what it rejected.
     if (match && match.sim >= config.semanticCache.shadowLogFloor) {
       await detached(() =>
         recordShadow(
@@ -397,15 +363,15 @@ export async function semanticCacheLookup(
             `served cached answer, skipped retrieval. new="${truncate(question)}" ` +
             `matched="${truncate(match.value.text)}"`,
         );
-        // Deferred telemetry; a failure here must not fail the answer, and the
-        // caller must not wait for it. These two are the reason lib/detached.ts
-        // exists: a served hit returns straight out of ask() and /api/chat does
-        // no further database work, so a bare `void` here issued its SQL after
-        // the request's transaction had already committed — i.e. the semantic
-        // cache under-reported on EVERY served hit, precisely when it worked.
-        // userId is read HERE, not inside the closure: flushDetached does run
-        // its tasks inside withUser so activeUserId() would resolve either way,
-        // but a value captured at queue time can't be wrong later.
+        // Deferred telemetry; a failure must not fail the answer, and the caller must not
+        // wait for it. These two are the reason lib/detached.ts exists: a served hit
+        // returns straight out of ask() and /api/chat does no further database work, so a
+        // bare `void` here issued its SQL after the request's transaction had already
+        // committed — the semantic cache under-reported on EVERY served hit, precisely
+        // when it worked.
+        //
+        // userId is read HERE, not inside the closure: a value captured at queue time
+        // can't be wrong later.
         const userId = activeUserId();
         await detached(() =>
           bumpHit(userId, keyModel, cfg.llmModel, fingerprint, match.value.text),
@@ -435,11 +401,10 @@ export async function semanticCacheLookup(
 }
 
 // Bank a freshly-computed answer under the CACHE-KEY model the lookup resolved
-// (`key`, handed back on the miss — so the question is never re-embedded).
+// (`key`, handed back on the miss, so the question is never re-embedded).
 // Exact-duplicate questions are suppressed by the unique (user, key model, llm
-// model, fingerprint, query_hash) constraint. `config_id` is still written, as
+// model, fingerprint, query_hash) constraint. `config_id` is written as
 // provenance — "which config first banked this" — and is no longer ownership.
-// Best-effort throughout.
 export async function semanticCacheStore(
   question: string,
   key: CacheKey,
@@ -471,28 +436,22 @@ export async function semanticCacheStore(
 }
 
 // Keep one user's cache bounded, occasionally. THE GC THIS REPLACED was
-// `delete … where config_id = <cfg> and fingerprint <> <current>`, which was
-// safe only because a config had exactly ONE live fingerprint at a time. Ported
-// naively to `where user_id = …` it becomes a data-loss bug: a user now holds
-// several live fingerprints at once — one per (document set × saver mode) — so
-// storing an answer under one config would delete the ENTIRE cache of another,
-// on every single store. A single user toggling saver mode on one config is
-// enough to trigger it. See docs/semantic-cache-user-scope-plan.md §4.
+// `delete … where config_id = <cfg> and fingerprint <> <current>`, safe only
+// because a config had exactly ONE live fingerprint at a time. Ported naively to
+// `where user_id = …` it becomes a data-loss bug: a user holds several live
+// fingerprints at once — one per (document set × saver mode) — so storing an
+// answer under one config would delete the ENTIRE cache of another, on every
+// store.
 //
 // Computing "every fingerprint currently live across this user's configs" per
 // store would mean a document-signature query per config on the answer hot path.
 // Not worth it for a table whose stale rows are merely UNREACHABLE, never wrong:
-// they can age out by volume instead, which also gives the table the per-user
-// bound the /cache listing wants.
-//
-// Sampled rather than run every time — the cap is a ceiling, not a quota, so
-// sitting a few rows over it between prunes costs nothing.
+// they age out by volume instead. Sampled rather than run every time — the cap is
+// a ceiling, not a quota.
 //
 // The sub-select ranks the rows to KEEP (most-served, then newest) and offsets
-// past the cap, so what's deleted is the tail: cold and old first. Rows that
-// have proven themselves are the last to go, and a stale fingerprint's rows —
-// which can never be hit again — sort to the bottom on their own as the live
-// ones accumulate hits.
+// past the cap, so what's deleted is the tail: cold and old first. A stale
+// fingerprint's rows sort to the bottom on their own as live ones accumulate hits.
 async function pruneByVolume(): Promise<void> {
   if (Math.random() * config.semanticCache.pruneEvery >= 1) return;
   await isolated(
@@ -508,14 +467,14 @@ async function pruneByVolume(): Promise<void> {
   );
 }
 
-// A served hit skipped the GENERATION for this question (docs §2 #3). The query
-// embed is NOT counted here — the lookup embeds it regardless, so it isn't
-// avoided; only the answer model call is. Tokens are estimated from the banked
-// result (context chunks in, answer out) under the model that produced it.
+// A served hit skipped the GENERATION for this question. The query embed is NOT
+// counted — the lookup embeds it regardless, so it isn't avoided. Tokens are
+// estimated from the banked result under the model that produced it.
+//
 // Called fire-and-forget on the serve hot path, so the WHOLE body is guarded:
-// `result` is a jsonb row read back from the DB and its shape is trusted, not
-// checked — a malformed row would throw inside the .map() before any inner
-// try/catch could see it, and an unhandled rejection takes the process down.
+// `result` is a jsonb row whose shape is trusted, not checked — a malformed row
+// would throw inside the .map() before any inner try/catch could see it, and an
+// unhandled rejection takes the process down.
 async function recordSemanticSaving(result: CachedResult, question: string): Promise<void> {
   try {
     const contextText = result.sources.map((s) => s.chunk.chunk.text);
@@ -530,13 +489,13 @@ async function recordSemanticSaving(result: CachedResult, question: string): Pro
 }
 
 // Bank a shadow event for calibration (best-effort). Deduped by the unique
-// (config, fingerprint, query_hash) constraint, so a repeated question under
-// the same validity key records once and doesn't swamp the judged set.
+// (config, fingerprint, query_hash) constraint, so a repeated question under the
+// same validity key records once and doesn't swamp the judged set.
 //
-// `keyModel` — not cfg.embeddingModel — is what's stamped on the row: `sim` was
-// computed in the KEY model's space, and both the sweep and semantic_cache_
-// thresholds are keyed by that space. Stamping the retrieval model would file
-// the label against a space its number doesn't belong to.
+// `keyModel` — not cfg.embeddingModel — is what's stamped: `sim` was computed in
+// the KEY model's space, and both the sweep and semantic_cache_thresholds are
+// keyed by that space. Stamping the retrieval model would file the label against
+// a space its number doesn't belong to.
 async function recordShadow(
   cfg: ResolvedConfig,
   keyModel: string,
@@ -628,27 +587,22 @@ async function bumpHit(
   }
 }
 
-// ---------------------------------------------------------------------------
-// SWITCHING THE CACHE-KEY MODEL (docs/semantic-cache-key-model-plan.md, Phase 1)
+// SWITCHING THE CACHE-KEY MODEL
 //
-// The schema already supports coexistence — semantic_cache keys on
-// (user_id, embedding_model, llm_model, fingerprint, query_hash) with an
-// explicit `dimension` and a plain real[] vector — so two key models with
-// different dims
-// sit side by side and a switch is non-destructive: old rows simply stop
-// matching. What ISN'T free is the safety posture, which is what the two
-// helpers below exist for.
-// ---------------------------------------------------------------------------
+// The schema already supports coexistence — semantic_cache keys on (user_id,
+// embedding_model, llm_model, fingerprint, query_hash) with an explicit
+// `dimension` and a plain real[] vector — so two key models with different dims
+// sit side by side and a switch is non-destructive: old rows simply stop matching.
+// What ISN'T free is the safety posture, which is what the two helpers below are for.
 
 // THE LANDMINE. Thresholds are keyed by spaceOf(model), so switching key models
 // moves a config into a new space — and an uncalibrated space falls back to
-// defaultThreshold (0.95). That is a silent change to the cosine floor answers
-// are served at, in either direction, made as a side effect of picking a model.
+// defaultThreshold (0.95). That is a silent change to the cosine floor answers are
+// served at, in either direction, made as a side effect of picking a model.
 //
-// So: returns the blocking detail when `model`'s space has NO calibrated row,
-// and null when it's safe. Callers must refuse the switch on a non-null result
-// (or make the user override it explicitly) — never flip silently. The Settings
-// key-model picker and PATCH /api/batch both go through this.
+// So: returns the blocking detail when `model`'s space has NO calibrated row, and
+// null when it's safe. Callers must refuse the switch on a non-null result (or
+// make the user override it explicitly) — never flip silently.
 export async function uncalibratedKeyModelSpace(
   model: string,
 ): Promise<{ space: string; fallbackThreshold: number } | null> {
@@ -696,29 +650,24 @@ export type KeyModelBackfill = {
   failed: number; // questions whose re-embed threw (provider/key errors)
 };
 
-// EAGER BACKFILL: re-embed this user's already-cached questions under
-// `keyModel` and insert them as new rows, so a switch doesn't have to wait for
-// users to re-ask before the cache has anything to hit against. Offered as an
-// explicit action, never an automatic side effect of the switch — it spends
-// provider tokens, and how much is a decision the user should get to make.
+// EAGER BACKFILL: re-embed this user's already-cached questions under `keyModel`
+// and insert them as new rows, so a switch doesn't have to wait for users to
+// re-ask before the cache has anything to hit against. An explicit action, never
+// an automatic side effect — it spends provider tokens.
 //
-// Since 0058 this spans the user's WHOLE ACCOUNT, not the config it runs under,
-// which is what makes a key-model switch one operation instead of a per-config
-// chore. `llm_model` is therefore carried through from each source row rather
-// than read from `cfg`: the config this happens to run under is not the config
-// that banked each row.
+// Since 0058 this spans the user's WHOLE ACCOUNT, which is what makes a key-model
+// switch one operation instead of a per-config chore. `llm_model` is therefore
+// carried through from each source row rather than read from `cfg`.
 //
 // Only rows under the RUNNING CONFIG'S fingerprint are backfilled, so the run
-// never spends provider tokens re-keying answers that are already invalid. Note
-// what that now covers and what it doesn't: the fingerprint is the document set
-// plus saver mode, so this reaches every config of the user's that shares those
-// two, however differently they retrieve — but a user holding a SECOND corpus
-// re-keys it by running the backfill again from a config over that corpus.
-// Embeds go through embedQueryCached, so a question
-// already seen under this model costs zero and a re-run of an interrupted
-// backfill is nearly free. Sequential on purpose — this is a background action
-// with no latency budget, and one request at a time is the kind provider rate
-// limits like.
+// never re-keys answers that are already invalid. The fingerprint is the document
+// set plus saver mode, so this reaches every config sharing those two — but a user
+// holding a SECOND corpus re-keys it by running the backfill from a config over
+// that corpus.
+//
+// Embeds go through embedQueryCached, so a re-run of an interrupted backfill is
+// nearly free. Sequential on purpose — a background action with no latency budget,
+// and one request at a time is the kind provider rate limits like.
 export async function backfillKeyModel(
   keyModel: string,
   limit = 500,
@@ -824,19 +773,14 @@ export type CacheEntrySummary = {
 const LIST_LIMIT = 500;
 
 // Every cached answer this user owns, most-served first. Filtered on
-// semantic_cache.user_id directly since 0058 — the table carries its own owner
-// now, so the join to configs is purely for the provenance LABEL and is a LEFT
-// join: config_id is nullable, and a row whose banking config was deleted is
-// still a live, servable answer.
+// semantic_cache.user_id directly since 0058; the join to configs is purely for
+// the provenance LABEL and is a LEFT join — config_id is nullable, and a row whose
+// banking config was deleted is still a live, servable answer.
 //
-// Deliberately reads `result->>'answer'` rather than the whole `result` blob:
-// the jsonb also holds `sources`, a full RetrievedChunk[] per row, which this
-// page never renders. Selecting it would pull megabytes of chunk text out of
-// the DB to display a truncated preview column.
-//
-// Same best-effort contract as the rest of this file: a missing table (0031 not
-// applied) lists nothing rather than throwing, so the page renders its empty
-// state instead of a 500.
+// Deliberately reads `result->>'answer'` rather than the whole `result` blob: the
+// jsonb also holds `sources`, a full RetrievedChunk[] per row, which this page
+// never renders. Selecting it would pull megabytes of chunk text out of the DB to
+// display a truncated preview.
 export async function listCacheEntries(): Promise<CacheEntrySummary[]> {
   try {
     const rows = await sql<

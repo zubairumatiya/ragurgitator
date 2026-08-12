@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/eval/process
 //
 // Scores every question that has no fresh result — new, edited, or stale after
@@ -10,7 +9,6 @@
 //
 // The path keeps its old name deliberately — one caller, no churn, no stale
 // bookmarks.
-// ---------------------------------------------------------------------------
 import { streamError } from "@/lib/http/missingKeyServer";
 import { scorePendingQuestions, type EvalEvent } from "@/lib/rag/eval";
 import { ndjsonStream } from "@/lib/http/ndjson";

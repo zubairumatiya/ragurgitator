@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // LIVE Azure Key Vault check — the half of Phase 0 that envelope.test.ts cannot
 // cover. Those tests run against an in-memory fake wrapper so `npm test` needs
 // no credentials, no network and no vault; this script is the counterpart that
@@ -13,7 +12,6 @@
 //
 // Prints no secret material: the probe value is a synthetic string, and even
 // that is only ever compared, never logged.
-// ---------------------------------------------------------------------------
 import { KeyClient } from "@azure/keyvault-keys";
 import { DefaultAzureCredential } from "@azure/identity";
 

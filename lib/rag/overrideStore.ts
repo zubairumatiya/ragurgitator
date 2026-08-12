@@ -1,10 +1,8 @@
-// ---------------------------------------------------------------------------
 // DB layer for per-chunk embedding-model overrides (migration 0013, Phase 5).
 // Raw SQL via the shared `sql` client; scoped to the ACTIVE config like the
 // other stores. An override is an alternate vector for a chunk that still lives
 // in the config's base chunks_<model>_<dim> table — see retriever.ts for how the
 // base ANN and the override sets are rank-fused at query time.
-// ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
@@ -283,7 +281,6 @@ export async function clearChunkOverride(sourceChunkId: string): Promise<boolean
   }
   return rows.length > 0;
 }
-
 
 // When the active config's retrieval last changed shape (an override set or
 // cleared), or null when it never has. Tolerates the column not existing yet

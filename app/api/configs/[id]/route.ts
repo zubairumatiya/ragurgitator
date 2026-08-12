@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: PATCH/POST/DELETE /api/configs/[id]
 //
 //   PATCH  — mutate one tab: { name } rename, { isOpen } close/reopen,
@@ -12,7 +11,6 @@
 // configStore takes explicit ids, so these don't need withRequestConfig. The last
 // open tab can't be closed and the last config can't be deleted — the UI always
 // needs somewhere to land. `params` is a Promise in this Next.js version.
-// ---------------------------------------------------------------------------
 import { readJsonBody } from "@/lib/http/body";
 import { withRequestUser } from "@/lib/http/configScope";
 import { LLM_MODELS } from "@/lib/llm/llmModels";

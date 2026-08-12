@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // Proves that 0051's policies are actually load-bearing, by trying to read data
 // as `rag_app` under three identities: the real owner, a stranger, and nobody.
 //
@@ -12,7 +11,6 @@
 // Run it after any migration that adds a table or changes an ownership column.
 //
 //   Usage: node --env-file=.env.local --import tsx scripts/rls-check.ts
-// ---------------------------------------------------------------------------
 import postgres from "postgres";
 
 const appUrl = process.env.RAG_APP_DATABASE_URL;

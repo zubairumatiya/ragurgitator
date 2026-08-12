@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: chat container (Client Component).
 //
 // Owns conversation state, posts to /api/chat, renders <MessageList /> + an
@@ -9,7 +8,6 @@
 // at all?" is a DB fact, and asking for it from here would mean a round trip and
 // a window where Ask looks live and isn't. Both null-provider and true mean "let
 // the request through" — see the page for why an unknown model isn't gated.
-// ---------------------------------------------------------------------------
 "use client";
 
 import Link from "next/link";

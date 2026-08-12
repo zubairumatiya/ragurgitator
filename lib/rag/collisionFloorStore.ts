@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // DB layer for the SAVED COLLISION-FLOOR REPORT (migration 0037).
 //
 // The collision floor is an all-pairs sweep over a config's labeled eval
@@ -22,7 +21,6 @@
 // Deliberately separate from semanticCacheCalibration.ts, which owns the
 // computation: persistence is a different concern and the calibration module is
 // imported by paths that must not care whether 0037 exists.
-// ---------------------------------------------------------------------------
 import { isolated, sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import type { CollisionFloorReport } from "@/lib/rag/semanticCacheCalibration";

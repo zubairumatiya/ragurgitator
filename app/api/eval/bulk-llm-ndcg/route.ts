@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/eval/bulk-llm-ndcg
 //
 // "Bulk actions → Add LLM nDCG rankings" on /eval: for every labeled question in
@@ -11,7 +10,6 @@
 // Nothing is promoted to ground truth: the rankings land as comparison
 // candidates, exactly as a per-question "Re-rank top-k" would. Streams progress
 // as NDJSON (one EvalEvent per line). Body: { documentIds? }.
-// ---------------------------------------------------------------------------
 import { streamError } from "@/lib/http/missingKeyServer";
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";

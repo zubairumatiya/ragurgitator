@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // DB layer for COST ACCOUNTING (migration 0034; docs/savings-accounting-plan.md).
 //
 // Two concerns, both raw SQL via the shared `sql` client:
@@ -14,7 +13,6 @@
 // (42P01, pre-migration) makes writes no-op and the read return an empty report,
 // so the feature is safe to ship ahead of the migration and never breaks a hot
 // path. Recording errors are swallowed (telemetry must not fail an answer).
-// ---------------------------------------------------------------------------
 import { activeUserId } from "@/lib/auth/userScope";
 import { isolated, sql } from "@/lib/db";
 import { activeConfigOrNull } from "@/lib/rag/activeConfig";

@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // DB layer for per-question graded nDCG rankings (migrations/0009). Raw SQL via
 // the shared `sql` client, no business logic — orchestration lives in ranking.ts.
 //
@@ -6,7 +5,6 @@
 // activeConfig()), like evalStore.ts / clusterStore.ts. A ranking is tied to the
 // question's active-config embedding run (document_embedding_id), so changing the
 // config makes a question's rankings stop matching and it reads ungraded again.
-// ---------------------------------------------------------------------------
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { retrievalStateFingerprint } from "@/lib/rag/overrideStore";

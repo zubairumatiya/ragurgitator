@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/semantic-cache/shadow/judge
 //
 // Two modes (discriminated on `mode`):
@@ -8,7 +7,6 @@
 //   human — a single Accept/Reject verdict on one event (overrides any LLM one).
 //
 // Global (shadow events are pooled per vector-space).
-// ---------------------------------------------------------------------------
 import { z } from "zod";
 
 import { config } from "@/lib/config";

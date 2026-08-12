@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // UI: a corpus's document manager (Client Component) on /corpora/[id].
 //
 //   - member docs table with per-doc Remove (membership only; auto-synced
@@ -10,7 +9,6 @@
 // corpus has auto-synced configs the docs are embedded into each one (real
 // cost, so real progress); with none the stream finishes instantly. After any
 // mutation: router.refresh() + CORPORA_CHANGED for the sidebar.
-// ---------------------------------------------------------------------------
 "use client";
 
 import { useRef, useState } from "react";

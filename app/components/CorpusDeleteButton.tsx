@@ -1,10 +1,8 @@
-// ---------------------------------------------------------------------------
 // UI: delete-a-corpus button (Client Component), used on the corpora list and
 // detail pages. Deleting a corpus never deletes configs: any attached config
 // keeps its embedded documents — its corpus pointer clears and auto-sync
 // breaks (0017). The confirm spells that out. On success: sidebar refresh via
 // CORPORA_CHANGED, router.refresh(), and optional redirect (detail page).
-// ---------------------------------------------------------------------------
 "use client";
 
 import { useRouter } from "next/navigation";

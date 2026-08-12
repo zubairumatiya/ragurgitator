@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // BATCH SAVINGS — bank the discount an applied batch realized vs. the
 // synchronous API (docs/savings-accounting-plan.md §2 #4). Called from each
 // handler's apply(), which runs inside the job's config scope — so recordSaving
@@ -13,7 +12,6 @@
 // config each one captures is the JOB's, since the orchestrator enters a
 // different config scope per job (lib/batch/orchestrator.ts). A request-level
 // config snapshot would file every job's saving against one config.
-// ---------------------------------------------------------------------------
 import { detached } from "@/lib/detached";
 import { BATCH_DISCOUNT, costEmbed, costLlm, estimateTokensAll } from "@/lib/rag/pricing";
 import { llmProviderOf } from "@/lib/llm/llmModels";

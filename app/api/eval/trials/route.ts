@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: GET /api/eval/trials
 //
 // Every saved model trial under the active config, grouped by source chunk id —
@@ -6,7 +5,6 @@
 // "Models tried" section per chunk group, so the per-chunk route meant one
 // request per group (80 on the current corpus, most of them empty). The
 // per-chunk route stays for the trial runner, which reads a single chunk.
-// ---------------------------------------------------------------------------
 import { withRequestConfig } from "@/lib/http/configScope";
 import { listModelTrialsByChunk } from "@/lib/rag/evalStore";
 

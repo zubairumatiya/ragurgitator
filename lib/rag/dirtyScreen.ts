@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // THE DIRTY SCREEN — the pure decision core of eval.rescoreAffectedQuestions.
 //
 // After an autotune run, only the chunks whose override state net-changed can
@@ -29,7 +28,6 @@
 // at the bottom of the competitor pool can shift another overridden chunk's
 // fractional rank by ±1 — screen 3 marks all such questions dirty rather
 // than reasoning about the swapped competitor, so the screen stays sound.
-// ---------------------------------------------------------------------------
 import type { ScreenCutoffs } from "@/lib/rag/retriever";
 
 // One net-changed chunk, with the two sims the screens compare for ONE

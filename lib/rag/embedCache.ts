@@ -1,44 +1,32 @@
-// ---------------------------------------------------------------------------
-// Two-layer embedding cache + cosine, shared by everything in the app that pays
-// to embed text: INGEST (lib/rag/pipeline, lib/rag/reconfigure, and the batch
-// leg in lib/batch/jobs/ingestEmbedding), the per-chunk "try a different model"
-// trial (lib/rag/eval.runModelTrial), the graded-nDCG ranking builder
-// (lib/rag/ranking.ts), and delegate-space retrieval (lib/rag/retriever).
+// Two-layer embedding cache + cosine, shared by everything in the app that pays to
+// embed text: ingest, the per-chunk "try a different model" trial, the graded-nDCG
+// ranking builder, and delegate-space retrieval.
 //
-// INGEST GOES THROUGH HERE, and that is the point of the table rather than an
-// afterthought. A chunk's vector used to live only in chunks_<model>_<dim>,
-// which hangs off the document — so deleting a document destroyed the only copy
-// and re-uploading it bought the same bytes again. embedding_cache has no
-// foreign key to `documents`; its lifetime is the USER's. Banking ingest here
-// means a deleted-then-re-uploaded document is free, and so is the same document
-// ingested into a second config even when no run survives anywhere.
+// INGEST GOES THROUGH HERE, and that is the point of the table. A chunk's vector
+// used to live only in chunks_<model>_<dim>, which hangs off the document — so
+// deleting a document destroyed the only copy and re-uploading it bought the same
+// bytes again. embedding_cache has no foreign key to `documents`; its lifetime is
+// the USER's. So a deleted-then-re-uploaded document is free, and so is the same
+// document ingested into a second config.
 //
-// L1 is the original in-process Map (dies with the server). L2 is the
-// embedding_cache table (migration 0020): content-addressed by
-// (model, input_kind, sha256(text)) — no raw text stored — so any string ever
-// embedded under a model costs one provider API call across restarts, trials,
-// and queries. Misses embed via the provider and write back to both layers.
-// L2 is best-effort: if migration 0020 hasn't been applied (undefined_table,
-// 42P01) the cache degrades to the old memory-only behavior.
+// L1 is an in-process Map (dies with the server). L2 is the embedding_cache table
+// (0020), content-addressed by (model, input_kind, sha256(text)) — no raw text
+// stored — so any string ever embedded under a model costs one provider call
+// across restarts, trials and queries. L2 is best-effort: without 0020 the cache
+// degrades to memory-only.
 //
-// TWO COSTS THAT COME WITH INGEST BEING HERE, both accepted knowingly. A chunk's
-// vector now lives twice — in chunks_<model>_<dim> for retrieval and here for
-// reuse, ~4KB each — and that cannot be collapsed by sharing rows, because the
-// two tables have different lifetimes on purpose, which is the whole point. And
-// L1 below is a process-global Map that is never evicted, so a 10,000-chunk
-// corpus is ~80MB resident until restart. Fine at current scale; if the server's
-// memory ever becomes the constraint, the dials are an LRU bound or an ingest
-// path that writes L2 and skips L1 (ingest never re-reads what it just embedded).
+// TWO COSTS, both accepted knowingly. A chunk's vector now lives twice — in
+// chunks_<model>_<dim> for retrieval and here for reuse, ~4KB each — which cannot
+// be collapsed by sharing rows, because the two tables have different lifetimes on
+// purpose. And L1 is never evicted, so a 10,000-chunk corpus is ~80MB resident
+// until restart; the dials if that ever binds are an LRU bound or an ingest path
+// that writes L2 and skips L1.
 //
-// BOTH LAYERS ARE PER-USER as of 0050. The table was global and content-
-// addressed, which under strict BYOK is a cost transfer (one account's key pays
-// to bank a vector another reads for free) and leaves a row nobody owns, so
-// "delete my account" can't reach it. L1 carries activeUserId() in its key for
-// the same reason — a process-global Map would hand back exactly the vectors the
-// table change just partitioned, and reopen the same existence oracle, for as
-// long as the server stays up. The two layers must agree or neither means
-// anything.
-// ---------------------------------------------------------------------------
+// BOTH LAYERS ARE PER-USER as of 0050. The table was global and content-addressed,
+// which under strict BYOK is a cost transfer (one account's key pays to bank a
+// vector another reads for free) and leaves a row nobody owns, so "delete my
+// account" can't reach it. L1 carries activeUserId() in its key for the same
+// reason — the two layers must agree or neither means anything.
 import { createHash } from "node:crypto";
 
 import { activeUserId } from "@/lib/auth/userScope";
@@ -55,21 +43,19 @@ const uniq = (xs: string[]): string[] => [...new Set(xs)];
 const embedCost = (model: string, texts: string[]): number =>
   texts.reduce((sum, t) => sum + costEmbed(model, estimateTokens(t)), 0);
 
-// A cache HIT is an avoided embed — bank it as an embed_cache saving. A MISS
-// paid the provider — bank it as embed spend. Both are one upsert for the whole
-// batch (recordSaving/Spend add aggregates), and both go through detached().
+// A cache HIT is an avoided embed — bank it as an embed_cache saving. A MISS paid
+// the provider — bank it as embed spend. Both are one upsert for the whole batch,
+// and both go through detached().
 //
-// Async, and every caller must await it. It used to be synchronous-by-void,
-// which is exactly the bug lib/detached.ts exists to prevent — the awaits are
-// free inside a request (the work is queued for after the response) and the type
-// checker is what keeps the nine call sites honest, since a `void`-grep can't.
+// Async, and every caller must await it. It used to be synchronous-by-void, which
+// is exactly the bug lib/detached.ts exists to prevent — the awaits are free inside
+// a request (the work is queued for after the response) and the type checker is
+// what keeps the nine call sites honest, since a `void`-grep can't.
 //
 // Exported because two paid embed paths cache OUTSIDE this module and would
-// otherwise go unpriced against the no-cache counterfactual: the eval
-// query-vector cache (eval_question_embeddings, keyed by question id — see
-// eval.scoreQuestions) and live chat retrieval (retriever.retrieve, which has
-// no cache at all, so it only ever reports spend). They own their storage; this
-// owns what an embed costs.
+// otherwise go unpriced: the eval query-vector cache and live chat retrieval
+// (which has no cache at all, so it only ever reports spend). They own their
+// storage; this owns what an embed costs.
 export async function meterEmbeds(
   model: string,
   hits: string[],
@@ -156,24 +142,20 @@ async function readPersisted(
 // so a few hundred is already a multi-megabyte statement.
 const WRITE_BATCH = 200;
 
-// L2 write-back for freshly embedded texts. `on conflict do nothing`: a
-// concurrent request may have raced us to the same (deterministic) vector.
-// Since 0050 that conflict is only ever with THIS user's own row — two accounts
-// embedding the same text now bank a row each, which is the dedup we gave up.
+// L2 write-back for freshly embedded texts. `on conflict do nothing`: a concurrent
+// request may have raced us to the same deterministic vector. Since 0050 that
+// conflict is only ever with THIS user's own row.
 //
 // BATCHED, because ingest writes here now. A savepoint plus an insert per text —
-// two round trips each — was survivable while the callers were trials and
-// rankings writing handfuls. A document's whole chunk set, and a corpus sync's
-// every document, is not: a 5,000-chunk sync would be ~10,000 round trips
-// against a connection held for the length of the request (lib/db.ts).
+// two round trips each — was survivable while the callers wrote handfuls; a
+// 5,000-chunk sync would be ~10,000 round trips against a connection held for the
+// length of the request.
 //
 // BEST-EFFORT, for the same reason. This used to rethrow anything that wasn't a
-// missing table, and with ingest depending on it that would fail the INGEST —
-// vectors bought, run lost — over a write whose only cost when it's missing is
-// one future embed. So it warns and carries on, like every other
-// telemetry-adjacent write in the store layer. NOT symmetric with the read:
-// readPersisted must still throw, because silently treating every text as a miss
-// is a silent bill.
+// missing table, which with ingest depending on it would fail the INGEST — vectors
+// bought, run lost — over a write whose only cost when missing is one future embed.
+// NOT symmetric with the read: readPersisted must still throw, because silently
+// treating every text as a miss is a silent bill.
 async function writePersisted(
   model: string,
   kind: InputKind,
@@ -245,17 +227,14 @@ export async function embedDocsCached(
 }
 
 // Bank vectors this process did NOT embed itself — the async batch ingest, whose
-// vectors arrive from a provider's batch API hours after they were asked for
-// (lib/batch/jobs/ingestEmbedding.apply). Without this, batch-ingested documents
-// would never populate the cache and deleting one would still cost money to
-// re-upload, which would make two ways of doing the same thing behave
-// differently for no reason a user could see.
+// vectors arrive hours after they were asked for. Without this, batch-ingested
+// documents would never populate the cache and deleting one would still cost money
+// to re-upload, making two ways of doing the same thing behave differently.
 //
-// L2 only, deliberately. L1 exists to spare a re-read within a process, and
-// nothing re-reads these: apply() writes the run and is done. Filling it would
-// only grow a Map that is never evicted (see the header).
+// L2 only, deliberately. L1 exists to spare a re-read within a process, and nothing
+// re-reads these: apply() writes the run and is done.
 //
-// Meters nothing: the batch leg prices its own embeds (lib/batch/savings.ts).
+// Meters nothing: the batch leg prices its own embeds.
 export async function bankDocVectors(
   entries: { text: string; vector: number[] }[],
   model: string,

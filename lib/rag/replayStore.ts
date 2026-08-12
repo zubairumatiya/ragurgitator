@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // OFFLINE REPLAY (migration 0043) — real full-corpus retrieval metrics for every
 // candidate embedding model, for $0.
 //
@@ -22,7 +21,6 @@
 //   - Chunking is held at the config's own. A model that would prefer different
 //     chunk sizes is being judged on someone else's chunking.
 //   - A model is scored only at 100% corpus coverage (see scoreModel).
-// ---------------------------------------------------------------------------
 import { createHash } from "node:crypto";
 
 import { activeUserId } from "@/lib/auth/userScope";

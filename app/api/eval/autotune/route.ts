@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // API route: POST /api/eval/autotune
 //
 // Runs the Phase C autotune engine: for every question below its min-rate,
@@ -6,7 +5,6 @@
 // (confirmed via real retrieval), then one full-corpus re-score + snapshot.
 // Streams progress as NDJSON (one AutotuneEvent per line) so the dashboard can
 // show live per-chunk progress and collect pending choices.
-// ---------------------------------------------------------------------------
 import { streamError } from "@/lib/http/missingKeyServer";
 import { runAutotune, type AutotuneEvent } from "@/lib/rag/autotune";
 import { ndjsonStream } from "@/lib/http/ndjson";

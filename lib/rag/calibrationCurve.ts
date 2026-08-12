@@ -1,4 +1,3 @@
-// ---------------------------------------------------------------------------
 // SEMANTIC CACHE — choosing τ from a calibration curve. Phase 4 of
 // docs/semantic-cache-key-model-plan.md.
 //
@@ -18,7 +17,6 @@
 // A curve is all the information the choice needs: every candidate cut point,
 // with the precision and recall its prefix achieves. The raw events add nothing
 // to the decision, which is why this split is possible at all.
-// ---------------------------------------------------------------------------
 
 // One cut point. `acceptRateAtOrAbove` is the PRECISION of the set that would be
 // served at this sim (accepts ÷ n), `coverageAtOrAbove` its RECALL (accepts ÷
