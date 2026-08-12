@@ -21,8 +21,10 @@ import { useActionState, useEffect, useState } from "react";
 
 import {
   revokeMcpGrant,
+  revokeMcpWrite,
   setMcpEnabled,
   type McpFormState,
+  type McpWriteFormState,
 } from "@/app/account/actions";
 
 const BUTTON =
@@ -38,15 +40,29 @@ export type McpGrantDto = {
   grantedAt: string;
 };
 
+// A write grant as the card shows it (0060). `live` is computed on the server so
+// the two never disagree about the clock, and a LAPSED grant is still listed —
+// "it expired at 15:02" is the answer to "why did my agent's write fail", which
+// an empty list would not give.
+export type McpWriteGrantDto = {
+  clientId: string;
+  clientName: string;
+  capabilities: string[];
+  expiresAt: string;
+  live: boolean;
+};
+
 export function McpConnectionCard({
   enabled,
   serverUrl,
   grants,
   grantsError,
+  writeGrants,
 }: {
   enabled: boolean;
   serverUrl: string;
   grants: McpGrantDto[];
+  writeGrants: McpWriteGrantDto[];
   // Non-null when the grant list could not be read — almost always "the OAuth
   // server isn't enabled on this project yet". Shown rather than swallowed,
   // because an empty list and an unavailable list mean very different things.
@@ -108,6 +124,7 @@ export function McpConnectionCard({
         <>
           <Snippet snippet={snippet} />
           <ConnectedClients grants={grants} grantsError={grantsError} />
+          <WriteGrants grants={writeGrants} />
         </>
       ) : (
         <p className="mt-4 text-xs text-zinc-500">
@@ -195,6 +212,61 @@ function ConnectedClients({
   );
 }
 
+// WRITE ACCESS, listed separately from the connection above it, because the two
+// are different kinds of permission with different lifetimes: connecting lasts
+// until you disconnect it, writing lapses within the hour. Folding them into one
+// row would imply the second is as durable as the first.
+//
+// Revoking here bites immediately — the write tools read the grant row on every
+// call — which is the opposite of Disconnect above, whose already-issued access
+// token stays signature-valid until it expires.
+function WriteGrants({ grants }: { grants: McpWriteGrantDto[] }) {
+  if (grants.length === 0) return null;
+
+  return (
+    <div className="mt-8">
+      <h3 className="text-xs font-medium uppercase tracking-wide text-zinc-500">Write access</h3>
+      <div className="mt-2">
+        {grants.map((grant) => (
+          <WriteGrantRow key={grant.clientId} grant={grant} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WriteGrantRow({ grant }: { grant: McpWriteGrantDto }) {
+  const [state, action, pending] = useActionState(revokeMcpWrite, {} as McpWriteFormState);
+
+  return (
+    <div className="border-t border-zinc-200 py-3 dark:border-zinc-800">
+      <div className="flex items-baseline justify-between gap-4">
+        <div>
+          <p className="text-sm">{grant.clientName}</p>
+          <p className="mt-0.5 text-xs text-zinc-500">
+            {grant.live
+              ? `Can write until ${formatTime(grant.expiresAt)} · ${grant.capabilities.join(", ")}`
+              : `Lapsed at ${formatTime(grant.expiresAt)}`}
+          </p>
+        </div>
+        {grant.live ? (
+          <form action={action}>
+            <input type="hidden" name="clientId" value={grant.clientId} />
+            <button type="submit" disabled={pending} className={LINK_BUTTON}>
+              {pending ? "Revoking…" : "Revoke"}
+            </button>
+          </form>
+        ) : null}
+      </div>
+      {state.error ? (
+        <p role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">
+          {state.error}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 function GrantRow({ grant }: { grant: McpGrantDto }) {
   const [state, action, pending] = useActionState(
     revokeMcpGrant,
@@ -225,6 +297,14 @@ function GrantRow({ grant }: { grant: McpGrantDto }) {
       ) : null}
     </div>
   );
+}
+
+// Time only for write grants: every one of them expires within the hour, so a
+// date would be noise.
+function formatTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "soon";
+  return date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
 function formatDate(iso: string): string {

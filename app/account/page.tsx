@@ -19,6 +19,8 @@ import {
 import { serverSupabase } from "@/lib/auth/supabase";
 import { sql } from "@/lib/db";
 import { mcpServerUrl } from "@/lib/mcp/metadata";
+import { listGrants as listWriteGrants } from "@/lib/mcp/writeGrant";
+import { type WriteGrant, grantIsLive } from "@/lib/mcp/writeGrantPolicy";
 import { BackToConfigs } from "@/app/components/BackToConfigs";
 import { DeleteAccountForm } from "@/app/components/DeleteAccountForm";
 import { McpConnectionCard, type McpGrantDto } from "@/app/components/McpConnectionCard";
@@ -27,10 +29,11 @@ import { ProviderKeyRow } from "@/app/components/ProviderKeyRow";
 export const metadata = { title: "Account" };
 
 export default async function AccountPage() {
-  const { user, keys, mcpEnabled } = await withPageUser(async (user) => ({
+  const { user, keys, mcpEnabled, writeGrants } = await withPageUser(async (user) => ({
     user,
     keys: await listProviderKeys(user.id),
     mcpEnabled: await readMcpEnabled(user.id),
+    writeGrants: await listWriteGrants(user.id),
   }));
 
   const byProvider = new Map<string, ProviderKeyDto>(keys.map((k) => [k.provider, k]));
@@ -78,6 +81,17 @@ export default async function AccountPage() {
         serverUrl={mcpServerUrl().href}
         grants={grants}
         grantsError={grantsError}
+        // Names come from the OAuth grant list, so a write grant whose client has
+        // since been disconnected shows its raw id rather than borrowing a name
+        // from nowhere — that pairing is exactly the state worth noticing.
+        writeGrants={writeGrants.map((grant) => ({
+          clientId: grant.clientId,
+          clientName:
+            grants.find((row) => row.clientId === grant.clientId)?.clientName ?? grant.clientId,
+          capabilities: grant.capabilities,
+          expiresAt: grant.expiresAt.toISOString(),
+          live: isLiveNow(grant),
+        }))}
       />
 
       <section className="mt-12 rounded border border-red-200 p-4 dark:border-red-900/50">
@@ -92,6 +106,10 @@ export default async function AccountPage() {
     </div>
   );
 }
+
+// Outside the component for react-hooks/purity: Date.now() during render is a
+// value that changes between renders, which is precisely what the rule guards.
+const isLiveNow = (grant: WriteGrant) => grantIsLive(grant, Date.now());
 
 // Missing row → false, matching mcpEnabled() in lib/http/mcpScope.ts. The page
 // and the endpoint must agree on what an absent profile means, or the card shows

@@ -25,6 +25,8 @@ import { requireUser, withPageUser } from "@/lib/auth/dal";
 import { serverSupabase } from "@/lib/auth/supabase";
 import { deleteProviderKey, isProviderId, saveProviderKey } from "@/lib/auth/providerKeys";
 import { invalidateProviderClients } from "@/lib/llm/client";
+import { grantWrite, revokeWrite } from "@/lib/mcp/writeGrant";
+import { grantExpiry, isWriteCapability } from "@/lib/mcp/writeGrantPolicy";
 import { privilegedSql, sql } from "@/lib/db";
 
 export type KeyFormState = {
@@ -139,6 +141,115 @@ export async function revokeMcpGrant(
   // the account-wide switch above exists alongside this one.
   revalidatePath("/account");
   return { saved: true };
+}
+
+// MCP WRITE GRANTS — the human "yes" that lets an agent write (0060).
+//
+// Deliberately NOT wired into app/api/oauth/decision/route.ts. That route drives
+// Supabase's own authorization object and Supabase owns its lifecycle; bolting a
+// second decision onto it would couple our grant to a flow we do not control and
+// make it un-revocable without disconnecting the client outright. A separate
+// surface keeps the OAuth flow untouched and the write grant independently
+// revocable.
+//
+// THE CLIENT ID ARRIVES FROM THE URL, and the URL is whatever an agent told the
+// user to open. Two things make that safe:
+//
+//   1. The client must ALREADY hold a Supabase OAuth grant on this account
+//      (assertConnectedClient). So the worst a forged link can do is name a
+//      client the user has personally connected — it cannot mint write access
+//      for a stranger, and it cannot name a client the account has never seen.
+//   2. The requested expiry only ever SHORTENS. grantExpiry takes the minimum of
+//      one hour and the token exp in the link, so inflating `exp` buys nothing.
+//
+// The capabilities are read from the CHECKBOXES, not from the link's query
+// string: the link proposes, the person on the page decides.
+export type McpWriteFormState = {
+  error?: string;
+  granted?: boolean;
+  revoked?: boolean;
+};
+
+export async function approveMcpWrite(
+  _prev: McpWriteFormState,
+  formData: FormData,
+): Promise<McpWriteFormState> {
+  const clientId = formData.get("clientId")?.toString() ?? "";
+  if (!clientId) return { error: "Missing client." };
+
+  const capabilities = formData
+    .getAll("capability")
+    .map((value) => value.toString())
+    .filter(isWriteCapability);
+  if (capabilities.length === 0) {
+    return { error: "Select at least one thing to allow." };
+  }
+
+  // `exp` is the token's own expiry in seconds, passed through from the agent's
+  // describe_authorization output. Unparseable → undefined, which grantExpiry
+  // reads as "no extra room" and falls back to the one-hour ceiling.
+  const expRaw = Number(formData.get("exp")?.toString());
+  const exp = Number.isFinite(expRaw) && expRaw > 0 ? expRaw : undefined;
+
+  const expiresAt = grantExpiry(Date.now(), exp);
+  if (expiresAt.getTime() <= Date.now()) {
+    return {
+      error:
+        "That connection's access token has already expired. Reconnect the agent and try again.",
+    };
+  }
+
+  // Authenticate before the Supabase round trip; the id for the write itself
+  // comes from withPageUser's own re-derivation below, never from the form.
+  await requireUser();
+
+  const connected = await isConnectedClient(clientId);
+  if (!connected) {
+    return {
+      error:
+        "That client is not connected to your account. Connect it from the account page first, " +
+        "then ask it for a fresh approval link.",
+    };
+  }
+
+  await withPageUser((scoped) => grantWrite(scoped.id, clientId, capabilities, expiresAt));
+
+  revalidatePath("/account");
+  revalidatePath("/account/mcp-write");
+  return { granted: true };
+}
+
+export async function revokeMcpWrite(
+  _prev: McpWriteFormState,
+  formData: FormData,
+): Promise<McpWriteFormState> {
+  const clientId = formData.get("clientId")?.toString() ?? "";
+  if (!clientId) return { error: "Missing client." };
+
+  await withPageUser((user) => revokeWrite(user.id, clientId));
+
+  // Unlike revokeMcpGrant above, this one bites IMMEDIATELY and completely: the
+  // write tools read this row on every call, so a revoked grant stops the next
+  // write even though the client's bearer token is still signature-valid.
+  revalidatePath("/account");
+  revalidatePath("/account/mcp-write");
+  return { revoked: true };
+}
+
+// Is this client_id one the user has actually connected? Supabase scopes
+// listGrants to the caller's session, so this can only ever see the user's own
+// clients. An unreadable list returns FALSE rather than assuming yes — refusing
+// to write a grant we could not corroborate is the safe direction, and the error
+// the user sees names the fix.
+async function isConnectedClient(clientId: string): Promise<boolean> {
+  try {
+    const supabase = await serverSupabase();
+    const { data, error } = await supabase.auth.oauth.listGrants();
+    if (error || !data) return false;
+    return data.some((grant) => grant.client.id === clientId);
+  } catch {
+    return false;
+  }
 }
 
 // ACCOUNT DELETION
