@@ -1,33 +1,31 @@
-// BATCH SAVINGS — bank the discount an applied batch realized vs. the
-// synchronous API (docs/savings-accounting-plan.md §2 #4). Called from each
-// handler's apply(), which runs inside the job's config scope — so recordSaving
-// picks up the right config with no explicit id.
+// BATCH SAVINGS — bank the discount an applied batch realized vs. the synchronous
+// API. Called from each handler's apply(), which runs inside the job's config scope
+// — so recordSaving picks up the right config with no explicit id.
 //
 // Each leg's saving is priced where its token counts actually live:
 //   • LLM    — the result bodies carry real per-request `usage`, so sum it.
-//   • Voyage — result rows carry only embedding vectors (no usage), so price
-//              the −33% from the embedded texts (char/4), like embed_cache.
-// Both defer through detached(); savingsStore swallows a missing table / any
-// error. /api/batch/poll is an ordinary request, so these ARE queued — and the
-// config each one captures is the JOB's, since the orchestrator enters a
-// different config scope per job (lib/batch/orchestrator.ts). A request-level
-// config snapshot would file every job's saving against one config.
+//   • Voyage — result rows carry only vectors (no usage), so price the −33% from
+//              the embedded texts (char/4), like embed_cache.
+//
+// Both defer through detached(). /api/batch/poll is an ordinary request, so these
+// ARE queued — and the config each one captures is the JOB's, since the
+// orchestrator enters a different config scope per job. A request-level config
+// snapshot would file every job's saving against one config.
 import { detached } from "@/lib/detached";
 import { BATCH_DISCOUNT, costEmbed, costLlm, estimateTokensAll } from "@/lib/rag/pricing";
 import { llmProviderOf } from "@/lib/llm/llmModels";
 import { recordSaving } from "@/lib/rag/savingsStore";
 import type { BatchResultRow } from "@/lib/batch/types";
 
-// LLM leg (question generation, cluster labeling, cache pairs) — either provider.
-// Sums the real usage across every succeeded result: the batch paid for all of
-// them, so all of them saved vs. standard price.
+// LLM leg — either provider. Sums the real usage across every succeeded result:
+// the batch paid for all of them, so all of them saved vs. standard price.
 //
-// MODEL AND RATE BOTH COME FROM THE RESULT BODY, not the caller. The OpenAI
-// adapter translates its ChatCompletions back into the same Anthropic Message
-// shape (lib/llm/openaiChat.ts), so `usage` and `model` are read identically on
-// both legs, and the discount is looked up from the model's own provider rather
-// than assumed. Today both are 0.5, which is exactly why hardcoding one would go
-// unnoticed until a provider changed its batch price.
+// MODEL AND RATE BOTH COME FROM THE RESULT BODY, not the caller. The OpenAI adapter
+// translates its ChatCompletions back into the same Anthropic Message shape, so
+// `usage` and `model` are read identically on both legs, and the discount is looked
+// up from the model's own provider rather than assumed. Today both are 0.5, which
+// is exactly why hardcoding one would go unnoticed until a provider changed its
+// batch price.
 export async function bankLlmBatchSaving(results: BatchResultRow[]): Promise<void> {
   let inTok = 0;
   let outTok = 0;

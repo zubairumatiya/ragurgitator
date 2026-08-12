@@ -1,12 +1,11 @@
-// Proves that 0051's policies are actually load-bearing, by trying to read data
-// as `rag_app` under three identities: the real owner, a stranger, and nobody.
+// Proves that 0051's policies are actually load-bearing, by trying to read data as
+// `rag_app` under three identities: the real owner, a stranger, and nobody.
 //
-// Worth having as a script rather than a one-off, because the failure mode this
-// guards against is silent in both directions. A policy that is too tight makes
-// a feature return empty rather than error, and a policy that is missing makes a
-// table readable by everyone while every page still looks correct — neither
-// shows up in a typecheck, a unit test, or a page that only ever renders one
-// account's data.
+// A script rather than a one-off, because the failure mode it guards is silent in
+// both directions. A policy that is too tight makes a feature return empty rather
+// than error, and a policy that is missing makes a table readable by everyone while
+// every page still looks correct — neither shows up in a typecheck, a unit test, or
+// a page that only ever renders one account's data.
 //
 // Run it after any migration that adds a table or changes an ownership column.
 //

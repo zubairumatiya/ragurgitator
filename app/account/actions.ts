@@ -1,22 +1,21 @@
 // Account Server Actions — save / delete a provider key, delete the account.
 //
-// Server Actions rather than Route Handlers for the same reason as the auth
-// forms: the API key is posted as FormData and never held in React state, so it
-// exists on the client only as the contents of a write-only <input> that is
-// discarded on submit.
+// Server Actions rather than Route Handlers for the same reason as the auth forms:
+// the API key is posted as FormData and never held in React state, so it exists on
+// the client only as the contents of a write-only <input> discarded on submit.
 //
-// EVERY action re-derives the user from the session. The user id is never
-// accepted from the form — a hidden field is caller-controlled input, and
-// trusting one here would let anyone write keys into anyone's row.
+// EVERY action re-derives the user from the session. The user id is never accepted
+// from the form — a hidden field is caller-controlled input, and trusting one here
+// would let anyone write keys into anyone's row.
 //
 // The two key actions use withPageUser rather than a bare requireUser(): as of
 // 0051 authenticating is no longer enough, because `sql` also needs the
-// transaction that carries the identity the RLS policies read, and withPageUser
-// is what opens it. deleteAccount is the exception and stays on requireUser() —
-// it touches only privilegedSql, which deliberately runs outside any scope.
+// transaction carrying the identity the RLS policies read. deleteAccount is the
+// exception and stays on requireUser() — it touches only privilegedSql, which
+// deliberately runs outside any scope.
 //
-// Form validation happens BEFORE entering the scope in both, so a malformed
-// submission never opens a transaction it has no use for.
+// Form validation happens BEFORE entering the scope, so a malformed submission
+// never opens a transaction it has no use for.
 "use server";
 
 import { redirect } from "next/navigation";
@@ -82,16 +81,14 @@ export async function deleteKey(_prev: KeyFormState, formData: FormData): Promis
 // MCP ACCESS — the kill switch, and per-client revocation.
 //
 // Two different kinds of "off", and both exist because they fail differently.
-// setMcpEnabled is the account-wide switch (migrations/0059_mcp_access.sql):
-// it takes effect on the very next request, needs no knowledge of which clients
-// exist, and is the thing to reach for when you don't know what leaked.
-// revokeMcpGrant is surgical — it deletes ONE client's sessions and invalidates
-// its refresh tokens at Supabase — and is what you want when the answer is
-// "that one laptop", not "everything".
+// setMcpEnabled is the account-wide switch (0059): it takes effect on the very
+// next request, needs no knowledge of which clients exist, and is what to reach
+// for when you don't know what leaked. revokeMcpGrant is surgical — it deletes ONE
+// client's sessions and invalidates its refresh tokens at Supabase.
 //
-// Neither takes an id from the form for the user, same rule as above.
-// revokeMcpGrant does take a clientId, which is safe because Supabase scopes the
-// revocation to the caller's own grants: a forged client id revokes nothing.
+// Neither takes an id from the form for the user. revokeMcpGrant does take a
+// clientId, which is safe because Supabase scopes the revocation to the caller's
+// own grants: a forged client id revokes nothing.
 export type McpFormState = {
   error?: string;
   saved?: boolean;
@@ -146,14 +143,12 @@ export async function revokeMcpGrant(
 
 // ACCOUNT DELETION
 //
-// Deletes the auth.users row directly over our own pooled connection. This is
-// one of only three callers of privilegedSql: `auth.users` is owned by
-// supabase_auth_admin with DELETE granted to `postgres`, and 0051 deliberately
-// did NOT re-grant that to `rag_app` — the restricted role has no business
-// reaching into the auth schema at all. Going through `postgres` also means no
-// Supabase service-role key is needed, and NOT introducing one matters: it is a
-// permanent god-mode credential in the env, exactly the kind of long-lived
-// secret the rest of this design works to avoid.
+// Deletes the auth.users row directly over our own pooled connection — one of only
+// three callers of privilegedSql. `auth.users` is owned by supabase_auth_admin
+// with DELETE granted to `postgres`, and 0051 deliberately did NOT re-grant that
+// to `rag_app`. Going through `postgres` also means no Supabase service-role key
+// is needed, and NOT introducing one matters: it is a permanent god-mode
+// credential in the env.
 //
 // One statement is enough because the cascade chain is already declared:
 //
@@ -164,9 +159,9 @@ export async function revokeMcpGrant(
 // shared across all users, and the per-row DEKs it wrapped are gone, which makes
 // the ciphertext permanently unopenable regardless.
 //
-// Sign-out happens FIRST. Reversing the order leaves a cookie whose user no
-// longer exists, and every subsequent request pays a failed getUser() round trip
-// before landing on /login.
+// Sign-out happens FIRST. Reversing the order leaves a cookie whose user no longer
+// exists, and every subsequent request pays a failed getUser() round trip before
+// landing on /login.
 export async function deleteAccount(): Promise<void> {
   const user = await requireUser();
 

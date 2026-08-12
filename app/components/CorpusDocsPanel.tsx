@@ -1,14 +1,14 @@
 // UI: a corpus's document manager (Client Component) on /corpora/[id].
 //
-//   - member docs table with per-doc Remove (membership only; auto-synced
-//     configs also lose that doc's chunks — the confirm says so)
+//   - member docs table with per-doc Remove (membership only; auto-synced configs
+//     also lose that doc's chunks — the confirm says so)
 //   - add EXISTING global documents (checkbox picker)
 //   - upload NEW files into the corpus
 //
-// Adds POST /api/corpora/[id]/documents and stream IngestEvents: when the
-// corpus has auto-synced configs the docs are embedded into each one (real
-// cost, so real progress); with none the stream finishes instantly. After any
-// mutation: router.refresh() + CORPORA_CHANGED for the sidebar.
+// Adds POST /api/corpora/[id]/documents and streams IngestEvents: when the corpus
+// has auto-synced configs the docs are embedded into each one (real cost, so real
+// progress); with none the stream finishes instantly. After any mutation:
+// router.refresh() + CORPORA_CHANGED for the sidebar.
 "use client";
 
 import { useRef, useState } from "react";

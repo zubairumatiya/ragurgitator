@@ -1,21 +1,18 @@
-// SEMANTIC CACHE — the GENERATED eval pair set (migration 0040, Phase 2 of
-// docs/semantic-cache-key-model-plan.md).
+// SEMANTIC CACHE — the GENERATED eval pair set (0040).
 //
-// A pair is two question texts plus one ANSWER-LEVEL label: would a single
-// answer serve both? That framing is load-bearing. A shadow verdict asks
-// "would this stored ANSWER serve this new question" (JUDGE_SYSTEM in
-// semanticCacheCalibration.ts); a naive generated pair asks "are these two
-// questions the same". Pooling those two as-is would mix two different targets,
-// so the generation prompt below is written against the ANSWER-level one.
+// A pair is two question texts plus one ANSWER-LEVEL label: would a single answer
+// serve both? That framing is load-bearing. A shadow verdict asks "would this stored
+// ANSWER serve this new question"; a naive generated pair asks "are these two
+// questions the same". Pooling those two as-is would mix two different targets, so
+// the generation prompt below is written against the ANSWER-level one.
 //
-// Two halves, split the same way question generation is (lib/rag/eval.ts):
-//   - pairRequestParams / parsePairs — the prompt + parse, shared verbatim by
-//     the inline path (generatePairs, here) and the batch path
-//     (lib/batch/jobs/pairGeneration.ts), so the two can never drift.
+// Two halves, split the same way question generation is:
+//   - pairRequestParams / parsePairs — the prompt + parse, shared verbatim by the
+//     inline path and the batch path, so the two can never drift.
 //   - the store — gap query, insert, read-back for the sweep.
 //
-// Best-effort against a missing table (42P01), like the rest of the cache: the
-// sweep falls back to a shadow-only pair set.
+// Best-effort against a missing table (42P01): the sweep falls back to a
+// shadow-only pair set.
 import { createHash } from "node:crypto";
 import type Anthropic from "@anthropic-ai/sdk";
 

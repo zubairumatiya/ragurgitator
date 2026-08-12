@@ -1,25 +1,23 @@
-// CACHE-KEY MODEL SWEEP (docs/semantic-cache-key-model-plan.md, Phase 2).
+// CACHE-KEY MODEL SWEEP.
 //
-// Scores every candidate embedding model on the same pooled pair set and emits
-// one leaderboard row each. Deliberately NOT autotune: ~9 models × a couple of
-// preprocessing variants is small enough to enumerate, so this is a table you
-// sort, not a search you run.
+// Scores every candidate embedding model on the same pooled pair set and emits one
+// leaderboard row each. Deliberately NOT autotune: ~9 models × a couple of
+// preprocessing variants is small enough to enumerate, so this is a table you sort,
+// not a search you run.
 //
 // THE OBJECTIVE IS RECALL AT A FIXED PRECISION. Each model gets its OWN τ — the
-// lowest threshold whose served set still clears the caller's precision target
-// (per-config, resolved by the route via scopedAcceptTarget) — and is then scored
-// on how many of the available same-answer pairs that τ serves. The target rides
-// back out on the result as `targetSource`, because this page is not
+// lowest threshold whose served set still clears the caller's precision target —
+// and is then scored on how many of the available same-answer pairs that τ serves.
+// The target rides back out as `targetSource`, because this page is not
 // config-scoped and an unattributed "99%" would hide whose dial set it.
-// Holding precision equal is what makes the models
-// comparable at all: cosine scales differ between embedding spaces, so raw
-// similarity magnitudes never can be. AUC rides along as a scale-free sanity
-// check and tiebreak, never as the objective (it grades the whole ranking; a
-// cache only serves from the very top of it).
 //
-// COST IS EMBEDDING-ONLY — no LLM calls, no re-ingestion, no chunks table
-// touched. Every text goes through embedQueryCached, so it's content-addressed,
-// metered, and nearly free on re-runs.
+// Holding precision equal is what makes the models comparable at all: cosine scales
+// differ between embedding spaces, so raw similarity magnitudes never can be. AUC
+// rides along as a scale-free sanity check and tiebreak, never as the objective.
+//
+// COST IS EMBEDDING-ONLY — no LLM calls, no re-ingestion, no chunks table touched.
+// Every text goes through embedQueryCached, so it's content-addressed, metered, and
+// nearly free on re-runs.
 import { config } from "@/lib/config";
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
@@ -84,14 +82,13 @@ export type SweepResult = {
 
 // Shadow verdicts are FREE — every judged row is reusable under any candidate
 // model, since a verdict is a property of the (new_query, matched_query,
-// served_answer) triple, not of the embedding model that surfaced it. Re-embed
-// the two stored texts, recompute cosine, re-run the sweep: zero judging spend.
+// served_answer) triple, not of the embedding model that surfaced it.
 //
 // KNOWN BIAS, and the reason shadow-only was rejected: a row only exists if it
 // cleared shadowLogFloor UNDER THE MODEL IN USE AT CAPTURE TIME. A pair the
 // capturing model scored 0.5 but a candidate scores 0.97 was never logged, so a
 // candidate's false-positive rate is systematically UNDER-estimated here. The
-// generated set (with hard negatives) is what covers that hole.
+// generated set (with hard negatives) covers that hole.
 //
 // Guard-blocked rows are INCLUDED: the guard is a separate lever, and excluding
 // what it rejected would hide exactly the pairs it exists to catch.

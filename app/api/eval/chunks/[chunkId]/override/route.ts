@@ -1,17 +1,17 @@
 // API route: POST/DELETE /api/eval/chunks/[chunkId]/override
 //
-// Persist or clear a per-chunk override for the ACTIVE config (Phase 5 / Phase B):
-//   POST { model }            — model override: re-embed the whole chunk under
-//                               `model` and rank it in that model's space.
-//   POST { size, overlap? }   — size override: re-split the chunk and rank it by
-//                               its best piece (hit = any piece in top-k).
+// Persist or clear a per-chunk override for the ACTIVE config:
+//   POST { model }            — re-embed the whole chunk under `model` and rank it
+//                               in that model's space.
+//   POST { size, overlap? }   — re-split the chunk and rank it by its best piece
+//                               (hit = any piece in top-k).
 //   DELETE                    — clear whatever override the chunk has.
-// Both are rank-fused with the base ANN (see lib/rag/retriever). Scoped to the
-// active config. `params` is a Promise in this Next.js version.
+// Both are rank-fused with the base ANN. `params` is a Promise in this Next.js
+// version.
 //
-// On success the CHANGED chunk's questions are re-scored inline (rescored: n in
-// the response) so its rates reflect the new retrieval immediately; every other
-// result goes retrieval-stale (badge + change log) until the next full run.
+// On success the CHANGED chunk's questions are re-scored inline so its rates reflect
+// the new retrieval immediately; every other result goes retrieval-stale (badge +
+// change log) until the next full run.
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";

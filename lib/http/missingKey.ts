@@ -1,22 +1,20 @@
-// MISSING-KEY WIRE CONTRACT — the shape a route uses to say "this request was
-// fine, you just have no key for the provider it needs" (docs/user-accounts-plan.md §5).
+// MISSING-KEY WIRE CONTRACT — the shape a route uses to say "this request was fine,
+// you just have no key for the provider it needs".
 //
-// Under strict BYOK there are no server keys, so EVERY user hits this on their
-// first run: it is the app's most common failure, not an edge case, and the one
-// where the difference between "add your OpenAI key" (a link) and "OpenAI
-// rejected the request" (a support problem) matters most. MissingProviderKeyError
-// carries the provider precisely so that distinction survives to the client;
-// before this module nothing consumed it and it arrived as a 500 with the
-// sentence buried in a generic message.
+// Under strict BYOK there are no server keys, so EVERY user hits this on their first
+// run: it is the app's most common failure, not an edge case, and the one where the
+// difference between "add your OpenAI key" (a link) and "OpenAI rejected the
+// request" (a support problem) matters most. MissingProviderKeyError carries the
+// provider precisely so that distinction survives to the client; before this module
+// nothing consumed it and it arrived as a 500.
 //
-// TWO TRANSPORTS, ONE PAYLOAD. Plain routes return JSON from the scope wrappers
-// in configScope.ts; the NDJSON routes own their error handling by contract (see
-// ndjson.ts) and emit a typed event instead. Both build their body here so the
-// client has one thing to recognise.
+// TWO TRANSPORTS, ONE PAYLOAD. Plain routes return JSON from the scope wrappers;
+// the NDJSON routes own their error handling by contract and emit a typed event
+// instead. Both build their body here so the client has one thing to recognise.
 //
-// CLIENT-SAFE ON PURPOSE — no `server-only`, no import of lib/llm/client (which
-// is server-only). This module is the shared vocabulary; the server-side
-// detection lives in missingKeyServer.ts, which may import both.
+// CLIENT-SAFE ON PURPOSE — no `server-only`, no import of lib/llm/client. This
+// module is the shared vocabulary; the server-side detection lives in
+// missingKeyServer.ts, which may import both.
 
 // The machine-readable discriminator. A CODE rather than string-matching the
 // message: the message is prose that will be reworded, and a client keying off

@@ -1,18 +1,16 @@
 // SAVE-TIME KEY VERIFICATION.
 //
-// One cheap live call per provider, made with the CANDIDATE key before it is
-// sealed. A key that doesn't work is rejected at the settings form rather than
-// being stored and then failing during an ingest run, where the error surfaces
-// three screens away from the thing that caused it.
+// One cheap live call per provider, made with the CANDIDATE key before it is sealed.
+// A key that doesn't work is rejected at the settings form rather than being stored
+// and then failing during an ingest run, where the error surfaces three screens away
+// from the thing that caused it.
 //
-// Every client here is constructed ad hoc from the candidate key and thrown
-// away. Nothing touches the shared clients in lib/llm/client.ts — those still
-// read process.env until Phase 4 makes them per-user, and reusing them would
+// Every client here is constructed ad hoc from the candidate key and thrown away.
+// Nothing touches the shared clients in lib/llm/client.ts — reusing them would
 // verify the SERVER's key while the user watches their own typo get accepted.
 //
-// The calls are chosen to be the cheapest thing that still proves the key is
-// accepted: a model list where the provider offers one, a single-token embed
-// where it doesn't. None of them bill meaningfully.
+// The calls are the cheapest thing that still proves the key is accepted: a model
+// list where the provider offers one, a single-token embed where it doesn't.
 import "server-only";
 
 import Anthropic from "@anthropic-ai/sdk";

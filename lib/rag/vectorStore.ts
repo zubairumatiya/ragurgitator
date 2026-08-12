@@ -94,15 +94,14 @@ export async function insertDocument(
 
 // NOTE — deleteDocument USED TO LIVE HERE, and DELETE /api/documents/[id] called
 // it. One statement deleted the `documents` row and let the FK cascade take the
-// embeddings, chunks, eval questions/labels/results with it — ACROSS EVERY
-// CONFIG, which is not what a delete on one config's document list should mean.
-// That route now calls deleteEmbeddingRunFor (above), so a delete is scoped to
-// the config you performed it in and every other config keeps its copy.
+// embeddings, chunks, eval questions/labels/results with it — ACROSS EVERY CONFIG,
+// which is not what a delete on one config's document list should mean. That route
+// now calls deleteEmbeddingRunFor, so a delete is scoped to the config you
+// performed it in.
 //
-// Nothing in the app purges a `documents` row any more. The row and its stored
-// text survive as a library entry (listLibraryDocuments), re-embeddable without
-// a re-upload; they are reachable only by "delete my account", which cascades
-// them through user_profiles.
+// Nothing in the app purges a `documents` row any more. The row and its stored text
+// survive as a library entry, re-embeddable without a re-upload; they are reachable
+// only by "delete my account".
 
 // Remove ONE config's embedding of a document (corpus auto-sync removal): the
 // document itself — and every other config's embedding of it — stays. Deleting
@@ -132,16 +131,16 @@ export async function deleteEmbeddingRunFor(
   });
 }
 
-// Which of `documentIds` the ACTIVE config already has a run for, and how big
-// each one is. Absent from the map = not embedded here.
+// Which of `documentIds` the ACTIVE config already has a run for, and how big each
+// one is. Absent from the map = not embedded here.
 //
-// The chunk count comes off document_embeddings rather than counting chunk rows,
-// so this is a point-read per document however large the run is. Callers use it
-// to tell "this document was already here" from "this document's run landed
-// during the operation I'm reporting on" — which matters because the batch
-// builder can write a complete run out of the embedding cache before the inline
-// path ever looks (lib/batch/jobs/ingestEmbedding.build), and reporting that as
-// "no new chunks" describes work that did happen as work that didn't.
+// The chunk count comes off document_embeddings rather than counting chunk rows, so
+// this is a point-read per document however large the run is. Callers use it to
+// tell "this document was already here" from "this document's run landed during the
+// operation I'm reporting on" — which matters because the batch builder can write a
+// complete run out of the embedding cache before the inline path ever looks, and
+// reporting that as "no new chunks" describes work that did happen as work that
+// didn't.
 export async function embeddingRunChunkCounts(
   documentIds: string[],
 ): Promise<Map<string, number>> {
@@ -238,16 +237,16 @@ export async function insertEmbeddingRunWithChunks(args: {
   });
 }
 
-// NOTE — reuseEmbeddingRun USED TO LIVE HERE. It copied a sibling config's run
-// with one INSERT … SELECT when that config had embedded the same document under
-// identical settings, restoring the free second ingest that 0011's config-scoped
-// run key gave up. Routing ingest through embedding_cache (lib/rag/embedCache)
-// covers every case it covered and the one it could not — no sibling run
-// survives, because the document was deleted — and books the saving under
-// embed_cache rather than a second structural lever describing the same idea.
+// NOTE — reuseEmbeddingRun USED TO LIVE HERE. It copied a sibling config's run with
+// one INSERT … SELECT when that config had embedded the same document under
+// identical settings. Routing ingest through embedding_cache covers every case it
+// covered and the one it could not — no sibling run survives, because the document
+// was deleted — and books the saving under embed_cache rather than a second
+// structural lever describing the same idea.
+//
 // What we gave up, stated honestly: the copy never took the vectors out of the
-// database, where the cache route pulls them over the wire and rehashes the
-// texts. Slower, still free.
+// database, where the cache route pulls them over the wire and rehashes the texts.
+// Slower, still free.
 
 export async function query(
   vector: number[],

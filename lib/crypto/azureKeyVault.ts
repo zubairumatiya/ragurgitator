@@ -1,36 +1,31 @@
 // AZURE KEY VAULT adapter — the outer layer of the envelope (see envelope.ts).
 //
-// WHY KEYS AND NOT SECRETS: Key Vault offers both, and only one of them actually
-// implements this design. "Secrets" would store the KEK as a blob we read back —
-// the key material leaves the vault, so a compromised app server takes the KEK
-// with it and the whole two-layer scheme collapses into one layer. "Keys"
-// exposes wrapKey/unwrapKey as OPERATIONS: the KEK never leaves, and an attacker
-// with app-server access gains only the ability to CALL unwrap while their
-// access lasts — revocable, rate-limitable, and logged.
+// WHY KEYS AND NOT SECRETS: Key Vault offers both, and only one implements this
+// design. "Secrets" would store the KEK as a blob we read back — the key material
+// leaves the vault, so a compromised app server takes the KEK with it and the
+// two-layer scheme collapses into one. "Keys" exposes wrapKey/unwrapKey as
+// OPERATIONS: the KEK never leaves, and an attacker with app-server access gains
+// only the ability to CALL unwrap while their access lasts — revocable,
+// rate-limitable, and logged.
 //
 // COST: a software-protected RSA key on the standard tier carries no monthly
-// per-key charge; operations bill per 10k. With the DEK cache below, a small
-// deployment makes very few calls. See docs/user-accounts-plan.md §4.
+// per-key charge; operations bill per 10k.
 //
-// AUTH: one machine identity serves every user — this is entirely separate from
-// how users authenticate to the app (Supabase Auth). DefaultAzureCredential walks
-// a chain and resolves it differently per environment, which is why no code here
-// branches on deployment:
+// AUTH: one machine identity serves every user — entirely separate from how users
+// authenticate to the app. DefaultAzureCredential walks a chain and resolves it
+// differently per environment, which is why no code here branches on deployment:
 //
 //   local   the developer's `az login` session (needs Key Vault Crypto Officer)
-//   Vercel  OIDC federation — Vercel mints a short-lived token per invocation and
-//           Azure exchanges it for an access token, via AZURE_TENANT_ID +
-//           AZURE_CLIENT_ID and NO client secret. https://vercel.com/docs/oidc/azure
+//   Vercel  OIDC federation — a short-lived token per invocation exchanged for an
+//           access token, via AZURE_TENANT_ID + AZURE_CLIENT_ID, NO client secret
 //
 // Managed identity is deliberately not in that list: it only exists on Azure
-// compute (App Service/Functions/Container Apps/VMs/AKS), not on Vercel. The
-// federated path is the better outcome anyway — there is no long-lived secret
-// anywhere to leak or rotate, so the DB and the vault stay two genuinely
+// compute, not on Vercel. The federated path is the better outcome anyway — no
+// long-lived secret to leak or rotate, so the DB and the vault stay two genuinely
 // independent compromises.
 //
 // AUDIT: Key Vault diagnostic logging is NOT on by default. Enable diagnostic
-// settings to Azure Monitor to get the unwrap trail that this design is partly
-// paying for (hardening phase).
+// settings to Azure Monitor to get the unwrap trail this design is partly paying for.
 import { createHash } from "node:crypto";
 
 import { DefaultAzureCredential } from "@azure/identity";
@@ -107,14 +102,14 @@ export const azureKeyWrapper: KeyWrapper = {
 //
 // Every open() would otherwise cost a Key Vault round trip (tens of ms, billed).
 // This caches the UNWRAPPED DEK — never the API key, which is microseconds to
-// re-derive from a cached DEK and is the directly-spendable credential of the
-// two. Caching the expensive-and-inert value while re-deriving the cheap-and-
-// dangerous one is the whole trade.
+// re-derive from a cached DEK and is the directly-spendable credential of the two.
+// Caching the expensive-and-inert value while re-deriving the cheap-and-dangerous
+// one is the whole trade.
 //
-// Keyed by a hash of the WRAPPED blob, which needs no knowledge of user or
-// provider and is exactly correct: identical wrapped bytes always unwrap to
-// identical plaintext. It also means a row that gets re-sealed (new DEK) misses
-// the cache automatically rather than serving a stale key.
+// Keyed by a hash of the WRAPPED blob, which needs no knowledge of user or provider
+// and is exactly correct: identical wrapped bytes always unwrap to identical
+// plaintext. It also means a re-sealed row (new DEK) misses the cache automatically
+// rather than serving a stale key.
 //
 // Serverless caveat: on Vercel each instance keeps its own Map and cold starts
 // miss, so expect more vault calls than a long-lived server would make.

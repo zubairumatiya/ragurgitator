@@ -1,14 +1,14 @@
 // SECRET KEY — a plaintext provider credential that cannot be logged by accident.
 //
-// A decrypted API key is the one value in this codebase that is directly
-// spendable by anyone who obtains it: paste it into curl and it bills the user's
-// provider account, from anywhere, until they notice and rotate. Memory hygiene
-// in a GC'd runtime is not really available to us (V8 strings are immutable and
-// the collector may have copied them), so the defence that actually pays is
-// making the value UNSERIALIZABLE BY DEFAULT rather than trying to erase it.
+// A decrypted API key is the one value in this codebase that is directly spendable
+// by anyone who obtains it: paste it into curl and it bills the user's provider
+// account, from anywhere, until they notice and rotate. Memory hygiene in a GC'd
+// runtime is not really available to us (V8 strings are immutable and the collector
+// may have copied them), so the defence that actually pays is making the value
+// UNSERIALIZABLE BY DEFAULT rather than trying to erase it.
 //
-// Every accidental-disclosure path we can realistically expect goes through one
-// of four hooks — string coercion, JSON, util.inspect, or console.log (which is
+// Every accidental-disclosure path we can realistically expect goes through one of
+// four hooks — string coercion, JSON, util.inspect, or console.log (which is
 // util.inspect). All four are overridden below, so:
 //
 //   console.log(key)              -> [redacted]
@@ -18,9 +18,8 @@
 //                                    error reporter serializes it later
 //
 // Only an explicit .expose() yields the real string. That call is greppable, so
-// "where can this key escape to?" is a search rather than an audit — see the
-// hardening phase in docs/user-accounts-plan.md, which asserts in CI that
-// .expose() appears only at the provider-client construction sites.
+// "where can this key escape to?" is a search rather than an audit — scripts/guards.ts
+// asserts that .expose() appears only at the provider-client construction sites.
 
 const REDACTED = "[redacted]";
 

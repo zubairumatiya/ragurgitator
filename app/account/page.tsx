@@ -1,19 +1,14 @@
 // The account page: identity, provider keys, and account deletion.
 //
 // A Server Component, so the key list is read through the DAL rather than an API
-// route — the withPageUser() boundary is the authorization check and it sits
-// right next to the query. listProviderKeys() returns DTOs with no ciphertext
-// column in the SELECT at all, so what crosses into the client tree structurally
-// cannot contain a credential.
+// route — the withPageUser() boundary is the authorization check and it sits right
+// next to the query. listProviderKeys() returns DTOs with no ciphertext column in
+// the SELECT at all, so what crosses into the client tree structurally cannot
+// contain a credential.
 //
-// withPageUser, NOT a bare requireUser(). Both authenticate, but only
-// withPageUser opens the transaction that carries the identity RLS reads (0051),
-// and `sql` throws outside one. This page read as `requireUser()` +
-// `listProviderKeys()` right up until 5b landed, which is why it was the last
-// place still doing it.
-//
-// Reached by clicking the email in the sidebar footer. proxy.ts already protects
-// it: only /login, /signup and /auth are public.
+// withPageUser, NOT a bare requireUser(). Both authenticate, but only withPageUser
+// opens the transaction that carries the identity RLS reads (0051), and `sql` throws
+// outside one.
 import { withPageUser } from "@/lib/auth/dal";
 import {
   listProviderKeys,

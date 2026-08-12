@@ -1,23 +1,20 @@
-// DB layer for configs — one saved experiment = one top-level tab (see
-// migrations/0011 and docs/multi-config-plan.md §4). Raw SQL via the shared
-// `sql` client, no business logic; mirrors corpusStore.ts / evalStore.ts.
+// DB layer for configs — one saved experiment = one top-level tab. Raw SQL, no
+// business logic; mirrors corpusStore.ts / evalStore.ts.
 //
 // A config points at one corpus and bundles the processing settings; all derived
-// data (embedding runs, chunks, eval/cluster runs) is owned via config_id, so two
-// configs over the same corpus with different settings are a clean A/B. This
-// module powers the tab bar: list/create/rename/close/reopen/reorder/delete, plus
-// the copy-on-write "duplicate" (D8/§4.4) that clones a config's vectors with NO
-// embedding API calls because identical settings produce byte-identical vectors.
+// data is owned via config_id, so two configs over the same corpus with different
+// settings are a clean A/B. This module powers the tab bar, plus the copy-on-write
+// "duplicate" that clones a config's vectors with NO embedding API calls because
+// identical settings produce byte-identical vectors.
 //
 // Unlike the other stores, these functions take explicit ids (the config being
 // acted on is named by the caller / URL) rather than reading activeConfig().
 //
-// OWNERSHIP (0049): because the id comes from the caller, every statement here
-// is a potential IDOR — an id from a URL must never be trusted on its own. So
-// every read, update and delete carries `user_id = ${activeUserId()}`, and every
-// insert stamps it. A scoped-out id therefore behaves exactly like a deleted
-// one: reads return null, mutations match 0 rows and return false/null, and the
-// routes turn both into the same 404.
+// OWNERSHIP (0049): because the id comes from the caller, every statement here is a
+// potential IDOR. So every read, update and delete carries
+// `user_id = ${activeUserId()}`, and every insert stamps it. A scoped-out id
+// therefore behaves exactly like a deleted one: reads return null, mutations match
+// 0 rows, and the routes turn both into the same 404.
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { config } from "@/lib/config";
@@ -299,21 +296,18 @@ export async function setCascadeEnabled(
   return rows.length > 0 ? enabled : null;
 }
 
-// The ANSWER-GENERATION model for this config (docs/user-accounts-plan.md §9.2).
-// Written by the Settings dropdown's LLM picker; read on the hot path via
-// activeConfig().llmModel, which generateAnswer() already defaults to.
+// The ANSWER-GENERATION model for this config. Written by the Settings dropdown's
+// LLM picker; read on the hot path via activeConfig().llmModel.
 //
-// Per-CONFIG rather than per-user (§9.0): configs are the A/B unit Appraise's
-// replay scoring keys off, so a user-level LLM toggle would silently override
-// every config's own choice and make each stored comparison mean something the
-// row no longer records. There is no provider column to keep in step either —
-// provider is derived from the id (llmProviderOf), so this one write is the
-// whole change.
+// Per-CONFIG rather than per-user: configs are the A/B unit Appraise's replay
+// scoring keys off, so a user-level LLM toggle would silently override every
+// config's own choice and make each stored comparison mean something the row no
+// longer records. There is no provider column to keep in step either — provider is
+// derived from the id — so this one write is the whole change.
 //
 // Deliberately NOT validated here: llmSpec() is the validator and it runs at the
-// route, so an unknown id is refused at the control that set it rather than
-// deep inside a later generation call. This layer stays a row update, like its
-// neighbours. Returns false when no row matched (missing, or another user's).
+// route, so an unknown id is refused at the control that set it rather than deep
+// inside a later generation call. Returns false when no row matched.
 export async function setLlmModel(id: string, model: string): Promise<boolean> {
   if (!isUuid(id)) return false;
   const rows = await sql`

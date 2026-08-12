@@ -5,48 +5,41 @@
 // which reduces to one job — decide whether the bearer token on this request is
 // real, and whose it is.
 //
-// This file is the SIGNATURE half of that job; lib/auth/mcpClaims.ts is the
-// DECISION half, and the security argument lives over there with the code it
-// describes. The split exists because this module holds a Supabase client and is
-// "server-only", which makes it unloadable by the test runner — and the decision
-// logic is the part that most needs tests.
+// This file is the SIGNATURE half; lib/auth/mcpClaims.ts is the DECISION half, and
+// the security argument lives over there with the code it describes. The split
+// exists because this module holds a Supabase client and is "server-only", which
+// makes it unloadable by the test runner — and the decision logic most needs tests.
 //
 // TWO CHECKS, in this order, and the order is the whole design:
 //
-//   1. getClaims(token) — LOCAL signature verification against the cached JWKS.
-//      No network. Rejects garbage, forgeries and expired tokens for free, which
-//      is why it goes first: a junk token should not cost a round trip.
-//      (Local only while the project signs with an ASYMMETRIC key, RS256/ES256.
-//      Under symmetric HS256 this silently becomes a round trip of its own,
-//      which is one reason the dashboard checklist insists on ES256.)
-//
+//   1. getClaims(token) — LOCAL signature verification against the cached JWKS. No
+//      network. Rejects garbage, forgeries and expired tokens for free, so a junk
+//      token should not cost a round trip. (Local only while the project signs
+//      with an ASYMMETRIC key; under HS256 this silently becomes a round trip of
+//      its own, which is why the dashboard checklist insists on ES256.)
 //   2. getUser(token) — SESSION LIVENESS, one round trip to the auth server.
 //
-// WHY STEP 2 EXISTS, since it costs a round trip on every MCP request and an
-// earlier version of this file did without it. A signature says the token was
-// issued and has not expired. It says NOTHING about whether the grant behind it
-// still exists. Measured on 2026-08-12 against a live token: after
+// WHY STEP 2 EXISTS, since it costs a round trip on every MCP request. A signature
+// says the token was issued and has not expired. It says NOTHING about whether the
+// grant behind it still exists. Measured 2026-08-12 against a live token: after
 // auth.oauth.revokeGrant(), getClaims still ACCEPTED the token while getUser
-// REJECTED it ("Auth session missing!"). So with local verification alone, the
-// Disconnect button on /account was advisory for up to the access-token TTL —
-// one hour on this project — and a leaked token stayed live for that whole
-// window no matter what the user did. Revocation you have to wait an hour for is
-// not revocation.
+// REJECTED it. So with local verification alone, the Disconnect button on /account
+// was advisory for up to the access-token TTL — one hour — and a leaked token
+// stayed live that whole window. Revocation you have to wait an hour for is not
+// revocation.
 //
-// THE MEASURED COST, so nobody has to guess whether it was worth it (same
-// machine, 2026-08-12, dev server against a remote Supabase project):
+// THE MEASURED COST (same machine, 2026-08-12, dev server against remote Supabase):
 //
-//   getClaims  (local signature)   ~1 ms
-//   getUser    (session liveness)  ~143 ms   <- this check
-//   mcp_enabled (kill switch query) ~64 ms
+//   getClaims  (local signature)    ~1 ms
+//   getUser    (session liveness)   ~143 ms   <- this check
+//   mcp_enabled (kill switch query)  ~64 ms
 //   whole tools/list request        ~495 ms
 //
-// So it is roughly a third of the request, on requests that happen when a human
-// asks an agent a question — not a hot loop. The round trip also only happens
-// for tokens that already passed local verification, so junk costs nothing. The
-// failure mode is a transient network error reading as a 401, which an agent
-// retries. If MCP traffic ever became chatty enough for this to hurt, the move
-// is a short-TTL liveness cache keyed on the token, NOT dropping the check.
+// Roughly a third of the request, on requests that happen when a human asks an
+// agent a question — not a hot loop. The round trip also only happens for tokens
+// that already passed local verification. If MCP traffic ever became chatty enough
+// for this to hurt, the move is a short-TTL liveness cache keyed on the token, NOT
+// dropping the check.
 import "server-only";
 
 import { type AuthInfo, OAuthError, type OAuthTokenVerifier } from "@modelcontextprotocol/server";

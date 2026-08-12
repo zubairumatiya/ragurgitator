@@ -1,13 +1,12 @@
-// BATCH JOB: cluster_labeling (Anthropic or OpenAI — whichever serves the
-// config's llmModel).
+// BATCH JOB: cluster_labeling (Anthropic or OpenAI — whichever serves the config's
+// llmModel).
 //
-// The single-request batch shape — labelBuckets already packs every bucket into
-// one prompt, so this batch has exactly one request (custom_id = runId). Shares
-// prompt + parse with the inline labeler via labelRequestParams /
-// parseBucketLabels (lib/rag/clusterLabeler.ts).
+// The single-request batch shape — labelBuckets already packs every bucket into one
+// prompt, so this batch has exactly one request (custom_id = runId). Shares prompt +
+// parse with the inline labeler.
 //
-// apply is naturally idempotent: saveClusterLabels just UPDATEs clusters.label,
-// so re-applying the same labels is a no-op.
+// apply is naturally idempotent: saveClusterLabels just UPDATEs clusters.label, so
+// re-applying the same labels is a no-op.
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { labelRequestParams, parseBucketLabels, type BucketSamples } from "@/lib/rag/clusterLabeler";
 import { representativeChunksForRun, saveClusterLabels } from "@/lib/rag/clusterStore";

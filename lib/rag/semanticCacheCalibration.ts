@@ -1,15 +1,13 @@
-// SEMANTIC CACHE — Phase 2 calibration orchestration (DB-facing). The pure
-// math (collision floor, precision-at-threshold sweep) lives in
-// semanticCacheCore.ts; this file is the plumbing: read the eval bank / shadow
-// log, run the LLM judge, and upsert per-space thresholds. See
-// docs/semantic-caching-plan.md.
+// SEMANTIC CACHE — Phase 2 calibration orchestration (DB-facing). The pure math
+// lives in semanticCacheCore.ts; this file is the plumbing: read the eval bank /
+// shadow log, run the LLM judge, and upsert per-space thresholds.
 //
 // Two calibration paths, both writing semantic_cache_thresholds:
-//   A. Collision floor — from the ACTIVE config's eval bank (config-scoped;
-//      call inside withRequestConfig). No LLM calls, available immediately.
+//   A. Collision floor — from the ACTIVE config's eval bank (config-scoped; call
+//      inside withRequestConfig). No LLM calls, available immediately.
 //   B. Shadow judge — from real would-hit traffic pooled per vector-space
-//      (global). An on-demand LLM pass and/or human Accept/Reject labels feed
-//      the sweep.
+//      (global). An on-demand LLM pass and/or human Accept/Reject labels feed the
+//      sweep.
 //
 // Best-effort against missing tables (42P01), like the rest of the cache.
 import { config } from "@/lib/config";
@@ -46,16 +44,14 @@ async function safe<T>(fn: () => Promise<T[]>, fallback: T[]): Promise<T[]> {
 // --- A. Collision floor (config-scoped) ------------------------------------
 
 // Ownership fragment (0049) for the CONFIG-ROOTED tables of this subsystem —
-// semantic_cache_shadow and semantic_cache_collision_floor. "My rows" is exactly
-// "rows under a config I own". These reads return real user content — new_query
-// / matched_query / served_answer are a user's questions and the answers served
-// to them — so an unscoped read here is a content leak, not merely a stats leak.
+// semantic_cache_shadow and semantic_cache_collision_floor. These reads return
+// real user content (new_query / matched_query / served_answer), so an unscoped
+// read here is a content leak, not merely a stats leak.
 //
-// semantic_cache itself is NO LONGER one of these: 0058 moved its tenancy from
-// config_id to a user_id of its own, so it filters on activeUserId() directly,
-// as semantic_cache_thresholds has since 0050. Using this fragment on it would
-// still work but would silently drop every row whose banking config was deleted
-// — rows that are live and servable.
+// semantic_cache itself is NO LONGER one of these: 0058 moved its tenancy to a
+// user_id of its own, so it filters on activeUserId() directly. Using this
+// fragment on it would still work but would silently drop every row whose banking
+// config was deleted — rows that are live and servable.
 const ownedConfigs = () =>
   sql`config_id in (select id from configs where user_id = ${activeUserId()})`;
 
@@ -65,24 +61,19 @@ export type CollisionFloorReport = CollisionFloorResult & {
   questionsTotal: number; // labeled questions before dropping any without a cached vector
 };
 
-// Lever #10 — EVAL-EMBEDDING REUSE. The collision floor is an all-pairs sweep
-// over every labeled question's query vector, so the naive version of this
-// calibration re-embeds the whole eval bank on every run. We read the vectors
-// the eval bank already banked (eval_question_embeddings) and embed nothing.
-// Structural + estimate, priced like the other estimate levers: char/4 tokens
-// through costEmbed for the config's embedding model (unknown model → $0 with
-// pricing.ts's one-time warn — an under-count, never a fabricated price).
+// Lever #10 — EVAL-EMBEDDING REUSE. The collision floor is an all-pairs sweep over
+// every labeled question's query vector, so the naive version re-embeds the whole
+// eval bank on every run. We read the vectors the eval bank already banked and
+// embed nothing. Structural + estimate, priced like the other estimate levers.
 //
 // Credited per vector ACTUALLY served from the cache, not per requested id: a
 // question with no banked vector is dropped by collisionFloor, so it avoided
-// nothing. Disjoint from embed_cache, which banks hits on the PAID eval path
-// (eval.scoreQuestions meters its own hits/misses); this read has no paid leg
-// at all — a miss here doesn't embed, it just shrinks the sample.
+// nothing. Disjoint from embed_cache, which banks hits on the PAID eval path; this
+// read has no paid leg at all — a miss here doesn't embed, it shrinks the sample.
 //
-// Best-effort and deferred through detached(), like meterEmbeds: telemetry must
-// never be the reason a calibration fails to return its report, and it must not
-// outlive the request's transaction either (lib/detached.ts). The await costs
-// nothing — inside a request the write is queued for after the response.
+// Best-effort and deferred through detached(): telemetry must never be the reason
+// a calibration fails to return its report, and it must not outlive the request's
+// transaction either.
 async function recordEvalEmbedReuse(
   model: string,
   questionText: Map<string, string>,
@@ -102,20 +93,18 @@ async function recordEvalEmbedReuse(
   }
 }
 
-// Compute the collision floor for the active config's CACHE-KEY vector-space
-// from its labeled eval questions and their already-cached query embeddings.
-// Does NOT write — the caller applies the recommendation explicitly.
+// Compute the collision floor for the active config's CACHE-KEY vector-space from
+// its labeled eval questions and their already-cached query embeddings. Does NOT
+// write — the caller applies the recommendation explicitly.
 //
-// The key model, not the config's retrieval model (docs/semantic-cache-key-
-// model-plan.md, Phase 1): the floor is a recommendation for
-// semantic_cache_thresholds, which is keyed by the space the CACHE matches in.
+// The key model, not the config's retrieval model: the floor is a recommendation
+// for semantic_cache_thresholds, which is keyed by the space the CACHE matches in.
 // Computing it in the retrieval space would file a number against a space the
 // cache never consults.
 //
-// getCachedQueryEmbeddings never embeds — it reads what the eval bank already
-// banked. So a key model the eval bank has never run under yields no vectors and
-// an honest empty sample (`questionsTotal` vs the dropped count says so), rather
-// than a surprise embedding bill from opening a panel.
+// getCachedQueryEmbeddings never embeds. So a key model the eval bank has never
+// run under yields no vectors and an honest empty sample, rather than a surprise
+// embedding bill from opening a panel.
 export async function computeCollisionFloor(): Promise<CollisionFloorReport> {
   const savings = await getBatchSavings(activeConfig().id);
   const keyModel = resolveKeyModel(savings.semanticCache.keyModel);

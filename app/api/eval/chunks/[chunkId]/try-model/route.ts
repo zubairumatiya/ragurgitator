@@ -1,17 +1,16 @@
 // API route: /api/eval/chunks/[chunkId]/try-model
 //
-// The per-chunk "try a different model" experiment (see lib/rag/eval):
+// The per-chunk "try a different model" experiment:
 //   - GET    : context for the trial UI — the chunk, its questions + stored
 //              baseline, the auto candidate pool, the rest of the corpus to pick
 //              from, the models on offer, and any saved trials.
-//   - POST   : run a trial { model?, size?, overlap?, sections?, poolChunkIds,
-//              save? } — re-rank the chunk's questions within the re-embedded
+//   - POST   : run a trial — re-rank the chunk's questions within the re-embedded
 //              pool under the variation (model, chunk shape, or both). With
-//              save:true the snapshot is persisted (eval_model_trials).
+//              save:true the snapshot is persisted.
 //   - DELETE : remove a saved trial (?trialId=...).
 //
-// Ranking is ephemeral and in-memory; the live index is never touched. `params`
-// is a Promise in this Next.js version — await it.
+// Ranking is ephemeral and in-memory; the live index is never touched. `params` is a
+// Promise in this Next.js version — await it.
 import { z } from "zod";
 import { EMBEDDING_MODELS } from "@/lib/rag/embeddingModels";
 import { parseBody } from "@/lib/http/body";

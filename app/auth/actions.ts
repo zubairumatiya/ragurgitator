@@ -1,13 +1,12 @@
 // Auth Server Actions — sign in, sign up, sign out.
 //
-// Server Actions (not Route Handlers) because these are form submissions that
-// need to set cookies and then redirect, and because it keeps credentials off
-// the client entirely: the password is posted as FormData to the server and is
-// never held in React state.
+// Server Actions (not Route Handlers) because these are form submissions that need
+// to set cookies and then redirect, and because it keeps credentials off the client
+// entirely: the password is posted as FormData and never held in React state.
 //
 // Shaped for React 19's useActionState — (prevState, formData) => state — so the
-// form can render field errors and a pending state without any client-side
-// validation logic duplicating what's below.
+// form can render field errors and a pending state without client-side validation
+// duplicating what's below.
 "use server";
 
 import { redirect } from "next/navigation";
@@ -123,17 +122,16 @@ export async function signUp(_prev: AuthState, formData: FormData): Promise<Auth
     return { error: error.message, email };
   }
 
-  // With email confirmation ON (Supabase's default), signUp returns a user but
-  // no session, so there is nothing to sign in to yet — the next step happens in
-  // the user's inbox. Redirecting to a dedicated page rather than re-rendering
-  // the form with a notice means the destination is a real URL: it survives a
-  // refresh, it can't be mistaken for "the form didn't submit", and the form
+  // With email confirmation ON, signUp returns a user but no session, so there is
+  // nothing to sign in to yet. Redirecting to a dedicated page rather than
+  // re-rendering the form with a notice means the destination is a real URL: it
+  // survives a refresh, it can't be mistaken for "the form didn't submit", and the
   // fields are gone so there is no half-filled signup inviting a second attempt.
   //
-  // The address is passed along only so the page can name it. Supabase returns
-  // this same shape for an address that is ALREADY registered, which is what
-  // keeps signup from being an account-enumeration oracle — so the page must
-  // stay worded as "if that address is new, a link is on its way."
+  // The address is passed along only so the page can name it. Supabase returns this
+  // same shape for an address that is ALREADY registered, which is what keeps signup
+  // from being an account-enumeration oracle — so the page must stay worded as "if
+  // that address is new, a link is on its way."
   if (!data.session) {
     redirect(`/signup/check-email?email=${encodeURIComponent(parsed.data.email)}`);
   }

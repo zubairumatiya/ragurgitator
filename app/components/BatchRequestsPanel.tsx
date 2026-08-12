@@ -1,20 +1,17 @@
-// BATCH REQUESTS PANEL (Client Component) — the account-wide status view for
-// batch API jobs, mounted in the Nav next to Settings so it's reachable from
-// every config view. Jobs are global (a provider batch isn't config-scoped), so
-// each row is tagged with the config that launched it.
+// BATCH REQUESTS PANEL (Client Component) — the account-wide status view for batch
+// API jobs, mounted in the Nav so it's reachable from every config view. Jobs are
+// global (a provider batch isn't config-scoped), so each row is tagged with the
+// config that launched it.
 //
-// Behavior:
 //   • On mount: GET the list (seeds the badge). If anything is still running, do
-//     ONE poll so batches that finished while the app was closed get picked up
-//     and applied straight away — bounded to when there's actually pending work.
-//   • Always: poll every 60s in the background (this is in the Nav, so that
-//     means on every page), advancing provider status, applying completions and
-//     sending the completion email. Nothing else in the app does this — there is
-//     no cron — so a closed panel used to mean a finished batch stayed unapplied.
-//   • On open: ack every finished job (POST /api/batch/ack) — opening the panel
-//     is seeing them, so the green "something finished" dot clears — then poll
-//     every 10s while it stays open, and re-list. "Check now" forces one.
-//   • Cancel (in_progress only) and dismiss ("ack") a finished job's badge.
+//     ONE poll so batches that finished while the app was closed get applied
+//     straight away.
+//   • Always: poll every 60s in the background, advancing provider status, applying
+//     completions and sending the completion email. Nothing else in the app does
+//     this — there is no cron — so a closed panel used to mean a finished batch
+//     stayed unapplied.
+//   • On open: ack every finished job, then poll every 10s while it stays open.
+//   • Cancel (in_progress only) and dismiss a finished job's badge.
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
@@ -110,18 +107,15 @@ export function BatchRequestsPanel() {
   }, []);
 
   // Poll on an interval FOR AS LONG AS THIS IS MOUNTED — which, since the panel
-  // lives in the Nav, is every page. Fast while open so the list feels live;
-  // every minute in the background so a batch that completes while you are
-  // elsewhere in the app still gets advanced, applied and emailed, instead of
-  // sitting untouched until somebody happens to open the panel. There is no
-  // server-side scheduler, so this loop is the only thing that ever calls
-  // apply().
+  // lives in the Nav, is every page. Fast while open so the list feels live; every
+  // minute in the background so a batch completing while you are elsewhere still gets
+  // advanced, applied and emailed. There is no server-side scheduler, so this loop is
+  // the only thing that ever calls apply().
   //
   // Deliberately NOT gated on a poll already being in flight. /api/batch/poll is
-  // idempotent per job (each handler's apply re-checks what it is about to
-  // write), so an overlap costs a duplicate request and nothing else — whereas
-  // skipping the tick means one slow or hung poll silently stops the loop, which
-  // is the failure that leaves a finished batch unapplied indefinitely.
+  // idempotent per job, so an overlap costs a duplicate request and nothing else —
+  // whereas skipping the tick means one slow or hung poll silently stops the loop,
+  // which is the failure that leaves a finished batch unapplied indefinitely.
   useEffect(() => {
     // Opening the panel acks the finished jobs, then polls immediately.
     // Deferred out of the effect body (a 0ms timer) so it doesn't set state

@@ -1,42 +1,34 @@
 // Appraise → Semantic caching. A peer page of Costs and the cross-config metrics
-// table (see app/appraise/configs/page.tsx), under the shared AppraiseNav. Surfaces Phase 2
-// of the semantic cache (docs/semantic-caching-plan.md): the eval-bank collision
-// floor, the per-space thresholds, and the shadow-judge calibration.
+// table, under the shared AppraiseNav. Surfaces Phase 2 of the semantic cache: the
+// eval-bank collision floor, the per-space thresholds, and the shadow-judge
+// calibration.
 //
 // Panel order follows the order you'd actually work in, cheapest evidence first,
-// and each panel is NUMBERED with its place in it (app/components/semanticCache/
-// Panel.tsx) — the sequence was previously legible only in this comment:
+// and each panel is NUMBERED with its place in it:
 //   1. Collision floor — pure arithmetic over the eval bank, no LLM spend, usable
-//      the moment a config has labeled questions. Where a threshold starts, and
-//      the apply control sits in its footer so the recommendation and the box
-//      that makes it live are one reading order apart.
+//      the moment a config has labeled questions. The apply control sits in its
+//      footer so the recommendation and the box that makes it live are one reading
+//      order apart.
 //   2. Thresholds by vector-space — what's live now, read-only.
-//   3. Shadow judge — needs real would-hit traffic and costs judge tokens, so
-//      it's the refinement you reach for after (1), not the starting point.
-//   4. Cache key model — the only panel that isn't about a threshold's VALUE:
-//      it changes WHICH SPACE a config reads its threshold from. Last, because
-//      it only makes sense once you've seen the spaces and what they serve at.
+//   3. Shadow judge — needs real would-hit traffic and costs judge tokens, so it's
+//      the refinement you reach for after (1).
+//   4. Cache key model — the only panel that isn't about a threshold's VALUE: it
+//      changes WHICH SPACE a config reads its threshold from.
 //
-// All four wear the same card (the shared Panel), so they read as four steps of
-// one workflow. They used to each carry their own chrome — a rule underneath, no
-// box at all, a bordered card, a rule supplied by this page — which made peers
-// look like unrelated widgets and left the page's two write controls looking
-// nothing alike.
+// All four wear the same card, so they read as four steps of one workflow.
 //
 // The page frame is a Server Component. It reads the config list and the first
-// config's SAVED collision floor (migration 0037) here, on the server, and hands
-// them to CollisionFloorPanel as props: that panel used to fetch the list and
-// then — a second round trip deep — the floor, so opening this tab painted an
-// empty panel and popped the numbers in a moment later. Everything else on the
-// page is still self-fetching Client Components (they read the
-// /api/semantic-cache/* routes and talk to each other
-// over window events — see semanticCache/events.ts: calibration panels
-// `emitRecommendation`, the apply panel listens and prefills, and a write
-// broadcasts SC_CHANGED so the table and apply panel re-pull). Nothing needs
-// threading through, and the wiring is order-independent — recommendations are
-// emitted from fetch callbacks, long after every listener has mounted.
-// ApplyThresholdPanel is the only one that WRITES a threshold; the rest display
-// data and feed it recommendations.
+// config's SAVED collision floor here, on the server, and hands them to
+// CollisionFloorPanel as props: that panel used to fetch the list and then — a
+// second round trip deep — the floor, so opening this tab painted an empty panel
+// and popped the numbers in a moment later.
+//
+// Everything else is still self-fetching Client Components, talking to each other
+// over window events (see semanticCache/events.ts): calibration panels
+// `emitRecommendation`, the apply panel listens and prefills, and a write broadcasts
+// SC_CHANGED so the table and apply panel re-pull. The wiring is order-independent
+// — recommendations are emitted from fetch callbacks, long after every listener has
+// mounted. ApplyThresholdPanel is the only one that WRITES a threshold.
 import { AppraiseNav } from "@/app/components/AppraiseNav";
 import { BackToConfigs } from "@/app/components/BackToConfigs";
 import { InfoDot } from "@/app/components/InfoDot";

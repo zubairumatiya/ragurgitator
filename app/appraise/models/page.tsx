@@ -1,18 +1,13 @@
-// Appraise → Models (docs/appraise-model-comparison-plan.md). Two questions the
-// app couldn't answer before: what does each embedding model cost per token, and
-// how has each one performed here.
+// Appraise → Models. Two questions the app couldn't answer before: what does each
+// embedding model cost per token, and how has each one performed here.
 //
-// Both model kinds are priced here now. The original note said LLMs didn't
-// belong — "a table of prices with every metric dashed" — and that was right
-// while nothing could CHOOSE one: pricing with no decision attached to it is
-// just trivia, and the Costs tab already reported what had been spent.
-//
-// §9.2's picker changed the premise. A config's answer model is now a setting
-// with eleven options across two providers, so the question "what will this
-// cost me" has a decision behind it, and it should be answerable on the page
-// that answers the same question for embeddings. The quality half is still
-// embeddings-only — the replay ranks the corpus, which is not something an
-// answer model does — so the LLM section is a rate card and nothing more.
+// Both model kinds are priced here now. The original note said LLMs didn't belong —
+// "a table of prices with every metric dashed" — and that was right while nothing
+// could CHOOSE one. The config LLM picker changed the premise: a config's answer
+// model is now a setting with eleven options across two providers, so "what will
+// this cost me" has a decision behind it. The quality half is still
+// embeddings-only — the replay ranks the corpus, which is not something an answer
+// model does — so the LLM section is a rate card and nothing more.
 //
 // Standalone (outside /c/[configId]) like its sibling Appraise tabs, so no
 // per-config banner. Dynamic — it reads the DB per request.

@@ -1,26 +1,19 @@
-// DB layer for the SAVED COLLISION-FLOOR REPORT (migration 0037).
+// DB layer for the SAVED COLLISION-FLOOR REPORT (0037).
 //
-// The collision floor is an all-pairs sweep over a config's labeled eval
-// questions (semanticCacheCalibration.computeCollisionFloor). It used to live
-// only in the panel's React state, so leaving Appraise → Semantic caching and
-// coming back meant re-running it to see a number that hadn't changed. This
-// module persists the latest report per config and reads it back.
+// The collision floor is an all-pairs sweep over a config's labeled eval questions.
+// It used to live only in the panel's React state, so leaving Appraise → Semantic
+// caching and coming back meant re-running it to see a number that hadn't changed.
 //
 // Cache semantics, NOT a source of truth: nothing is ever served from a saved
-// report. It's a display + "offer this recommendation to the apply panel"
-// convenience, and the real number is always recomputable by pressing Recompute.
-// That's what licenses the best-effort contract below.
-//
-// Best-effort exactly like savingsStore / semanticCache: a missing table (42P01,
-// i.e. 0037 not applied) makes the read return null and the write no-op, so the
-// app behaves IDENTICALLY with or without the migration. A save failure must
-// never cost the caller the report it just computed, so writes swallow other
-// errors too (warn only) — the caller has the value in hand and returns it
-// regardless.
+// report. It's a display convenience, and the real number is always recomputable.
+// That's what licenses the best-effort contract: a missing table makes the read
+// return null and the write no-op, so the app behaves IDENTICALLY with or without
+// the migration, and a save failure never costs the caller the report it just
+// computed.
 //
 // Deliberately separate from semanticCacheCalibration.ts, which owns the
-// computation: persistence is a different concern and the calibration module is
-// imported by paths that must not care whether 0037 exists.
+// computation: persistence is a different concern and that module is imported by
+// paths that must not care whether 0037 exists.
 import { isolated, sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import type { CollisionFloorReport } from "@/lib/rag/semanticCacheCalibration";
@@ -154,18 +147,17 @@ export async function saveCollisionFloor(report: CollisionFloorReport): Promise<
   }
 }
 
-// How many labeled questions the active config has RIGHT NOW — the staleness
-// key for a saved report's questions_total.
+// How many labeled questions the active config has RIGHT NOW — the staleness key
+// for a saved report's questions_total.
 //
-// This is `count(distinct q.id)` over exactly the join evalStore
-// .allLabeledQuestions uses, because that's what computeCollisionFloor counts
-// into questionsTotal (it dedupes the one-row-per-label result down to unique
-// question ids). Anything looser would flag stale on a config that hasn't
-// changed. Counted in SQL rather than by re-reading the bank: the panel asks for
-// this on every mount and it must not pull question text over the wire.
+// This is `count(distinct q.id)` over exactly the join allLabeledQuestions uses,
+// because that's what computeCollisionFloor counts into questionsTotal. Anything
+// looser would flag stale on a config that hasn't changed. Counted in SQL rather
+// than by re-reading the bank: the panel asks for this on every mount and it must
+// not pull question text over the wire.
 //
-// Returns null if the count can't be taken, which the caller reads as "can't
-// judge staleness" and shows no hint — never a false alarm.
+// Returns null if the count can't be taken, which the caller reads as "can't judge
+// staleness" and shows no hint — never a false alarm.
 export async function countLabeledQuestions(): Promise<number | null> {
   try {
     const rows = await isolated(

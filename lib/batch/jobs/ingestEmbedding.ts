@@ -1,24 +1,21 @@
 // BATCH JOB: ingest_embedding (Voyage) — the embedding leg (−33%).
 //
-// The many-request batch shape: one Voyage embedding request per chunk. build()
-// resolves the documents to embed (an explicit set, a corpus selection, or the
-// config's own corpus), chunks each one, and emits a request per chunk keyed
-// `<docId>:<position>`. apply() RE-CHUNKS each document (deterministic — same
-// chunker, same config scope → same positions/texts, so no chunk text needs to
-// survive in the job's jsonb `input`), maps each position back to its returned
-// vector, and writes a complete embedding run.
+// One Voyage embedding request per chunk. build() resolves the documents to embed,
+// chunks each one, and emits a request per chunk keyed `<docId>:<position>`.
+// apply() RE-CHUNKS each document (deterministic — same chunker, same config scope →
+// same positions/texts, so no chunk text needs to survive in the job's jsonb
+// `input`), maps each position back to its returned vector, and writes a complete
+// embedding run.
 //
-// BOTH HALVES GO THROUGH THE EMBEDDING CACHE, and it has to be both or the two
-// ways of ingesting a document would disagree. build() withholds chunks the user
-// already owns (a batched request for bytes we have is still buying them);
-// apply() resolves those from the cache and banks what the batch DID buy, so a
-// batch-ingested document is as free to delete and re-upload as an inline one.
+// BOTH HALVES GO THROUGH THE EMBEDDING CACHE, and it has to be both or the two ways
+// of ingesting a document would disagree. build() withholds chunks the user already
+// owns; apply() resolves those from the cache and banks what the batch DID buy, so
+// a batch-ingested document is as free to delete and re-upload as an inline one.
 //
-// apply is IDEMPOTENT and all-or-nothing per document: it skips a doc that's
-// already embedded (hasEmbeddingRun — a re-poll or a competing inline embed) and
-// inserts only when EVERY chunk got a vector (a partial run would leave the doc
-// mis-retrievable). Voyage-only: batch embedding goes through the Voyage adapter,
-// so a config whose base model isn't Voyage returns null (falls back to inline).
+// apply is IDEMPOTENT and all-or-nothing per document: it skips a doc that's already
+// embedded and inserts only when EVERY chunk got a vector (a partial run would leave
+// the doc mis-retrievable). Voyage-only, so a config whose base model isn't Voyage
+// returns null and falls back to inline.
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";
 import { topUpSavedRuns } from "@/lib/rag/clusterStore";
@@ -34,17 +31,17 @@ import type { SourceDocument } from "@/types/rag";
 export type IngestEmbeddingScope = { corpusIds?: string[]; documentIds?: string[] };
 
 // The chunk TEXTS don't need to survive to apply — they're re-derived
-// deterministically. But "deterministically" only holds against the settings
-// build() used, and this batch is async (hours), so the config can be edited
-// while it's in flight. Hence the SNAPSHOT: apply() re-chunks with these, not
-// with whatever activeConfig() says by then. Without it, a changed chunk
-// size/overlap silently skips every doc (positions stop matching → complete =
-// false → applied: 0, no error), and a changed embedding model is worse — the
-// old-space vectors get written under the new model's name.
+// deterministically. But "deterministically" only holds against the settings build()
+// used, and this batch is async (hours), so the config can be edited while it's in
+// flight. Hence the SNAPSHOT: apply() re-chunks with these, not with whatever
+// activeConfig() says by then. Without it, a changed chunk size/overlap silently
+// skips every doc (positions stop matching → complete = false → applied: 0, no
+// error), and a changed embedding model is worse — the old-space vectors get written
+// under the new model's name.
 //
-// chunkSize/chunkOverlap/dimension are OPTIONAL for backward compatibility:
-// jobs enqueued before this field existed have no snapshot and fall back to the
-// live config, i.e. exactly the old behavior.
+// chunkSize/chunkOverlap/dimension are OPTIONAL for backward compatibility: jobs
+// enqueued before this field existed have no snapshot and fall back to the live
+// config.
 type IngestEmbeddingInput = {
   embeddingModel: string;
   documentIds: string[];

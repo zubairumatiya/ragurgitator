@@ -1,14 +1,13 @@
 // Window events wiring the Appraise → Semantic caching panels together. They're
-// siblings under a Server Component page with no shared parent state, so they
-// talk over the window rather than through props.
+// siblings under a Server Component page with no shared parent state, so they talk
+// over the window rather than through props.
 //
-// Only ONE panel writes thresholds (ApplyThresholdPanel, on the Collision floor
-// heading row). The calibration panels — collision floor itself and the shadow
-// judge lower down — compute recommendations and broadcast them; nothing they
-// do is live until the apply panel is used.
+// Only ONE panel writes thresholds (ApplyThresholdPanel). The calibration panels
+// compute recommendations and broadcast them; nothing they do is live until the
+// apply panel is used.
 //
-// The wiring doesn't care about panel order: recommendations are emitted from
-// fetch callbacks, so every listener has long since mounted.
+// The wiring doesn't care about panel order: recommendations are emitted from fetch
+// callbacks, so every listener has long since mounted.
 
 // A threshold was written. Display panels re-pull.
 export const SC_CHANGED = "sc:thresholds-changed";
@@ -30,16 +29,15 @@ export type ThresholdRecommendation = {
 
 // Recommendations are rounded to 4 decimals before they leave their panel.
 //
-// Nothing downstream can honour more. semantic_cache_thresholds.threshold is
-// `real` (float4, ~7 significant digits), and the cached query vectors sim is
-// computed from are `real[]` too — so 0.943 already lands at 0.94300002 in the
-// table, and sim itself carries error near 1e-6. Four decimals sits an order of
-// magnitude above that noise floor and well below collisionMargin (0.01), the
-// granularity calibration actually reasons at.
+// Nothing downstream can honour more. semantic_cache_thresholds.threshold is `real`
+// (~7 significant digits), and the cached query vectors sim is computed from are
+// `real[]` too — so 0.943 already lands at 0.94300002 in the table, and sim itself
+// carries error near 1e-6. Four decimals sits an order of magnitude above that noise
+// floor and well below collisionMargin (0.01).
 //
 // It also keeps float arithmetic out of the input box: a collision floor of
-// 0.933 + 0.01 is 0.9430000000000001 in float64, and showing THAT as the
-// suggested threshold would be alarming for no reason.
+// 0.933 + 0.01 is 0.9430000000000001 in float64, and showing THAT as the suggested
+// threshold would be alarming for no reason.
 export function emitRecommendation(rec: ThresholdRecommendation): void {
   const value = Math.round(rec.value * 1e4) / 1e4;
   window.dispatchEvent(new CustomEvent(SC_RECOMMEND, { detail: { ...rec, value } }));

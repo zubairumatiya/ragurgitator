@@ -6,17 +6,17 @@ const nextConfig: NextConfig = {
   // bypasses bundling so Node resolves the working CJS entry instead.
   serverExternalPackages: ["voyageai"],
 
-  // OAuth discovery for the MCP server (app/api/mcp). RFC 9728 fixes these paths
-  // under /.well-known, and a client fetches them before it holds any credential
-  // — they are not ours to choose or to move.
+  // OAuth discovery for the MCP server. RFC 9728 fixes these paths under
+  // /.well-known, and a client fetches them before it holds any credential — they are
+  // not ours to choose or to move.
   //
-  // REWRITES RATHER THAN REAL DIRECTORIES because a dot-prefixed folder under
-  // app/ is not reliably routed. The handlers therefore live at ordinary paths
-  // (app/api/mcp-discovery/*) and these map the spec's paths onto them.
+  // REWRITES RATHER THAN REAL DIRECTORIES because a dot-prefixed folder under app/ is
+  // not reliably routed. The handlers live at ordinary paths (app/api/mcp-discovery/*)
+  // and these map the spec's paths onto them.
   //
-  // Note the proxy runs BEFORE rewrites in Next's execution order, so
-  // /.well-known also has to be in PUBLIC_PREFIXES in proxy.ts or an
-  // unauthenticated agent gets redirected to /login before it ever gets here.
+  // Note the proxy runs BEFORE rewrites in Next's execution order, so /.well-known
+  // also has to be in PUBLIC_PREFIXES in proxy.ts or an unauthenticated agent gets
+  // redirected to /login before it ever gets here.
   async rewrites() {
     return [
       {

@@ -1,31 +1,27 @@
-// PER-USER PROVIDER CLIENTS — strict BYOK (docs/user-accounts-plan.md §5).
+// PER-USER PROVIDER CLIENTS — strict BYOK.
 //
-// There are no server API keys any more. Every provider client is constructed
-// from the calling user's own credential, decrypted out of the vault on demand.
-// The module-level singletons this file used to export (built from
-// process.env.VOYAGE_API_KEY et al) are gone deliberately: a single shared
-// client is a single shared bill, and under multi-tenancy that is both a
+// There are no server API keys any more. Every provider client is constructed from
+// the calling user's own credential, decrypted out of the vault on demand. The
+// module-level singletons this file used to export are gone deliberately: a single
+// shared client is a single shared bill, and under multi-tenancy that is both a
 // cost-transfer bug and a data-egress one.
 //
-// The shape is `<provider>For(userId)` — async, because resolving a key means a
-// DB read plus an Azure Key Vault unwrap. Callers that have no user in hand
-// cannot get a client, which is the point: "which key pays for this call" is now
-// answerable at every call site.
+// The shape is `<provider>For(userId)` — async, because resolving a key means a DB
+// read plus an Azure Key Vault unwrap. Callers that have no user in hand cannot get
+// a client, which is the point: "which key pays for this call" is now answerable at
+// every call site.
 //
-// MISSING KEY IS NOT AN ERROR CONDITION TO PAPER OVER. `MissingProviderKeyError`
-// is thrown rather than returning a keyless client that fails later inside the
-// SDK with a provider-worded 401. The distinction matters for the UI: "you have
-// not added an OpenAI key" is a settings link, whereas "OpenAI rejected the
-// request" is a support problem, and the two must not look alike.
+// MISSING KEY IS NOT AN ERROR CONDITION TO PAPER OVER. `MissingProviderKeyError` is
+// thrown rather than returning a keyless client that fails later inside the SDK
+// with a provider-worded 401. "You have not added an OpenAI key" is a settings
+// link, whereas "OpenAI rejected the request" is a support problem.
 //
-// CACHING. Constructed clients are cached per (userId, provider) for the same
-// 60s as the DEK cache in azureKeyVault.ts, and for the same reason: a single
-// ingest run makes hundreds of embedding calls, and re-unwrapping the DEK for
-// each one would bill a Key Vault operation per batch. The TTLs match on purpose
-// — a shorter client TTL would just miss into a live DEK cache and gain nothing,
-// and a longer one would keep serving a key the user has already rotated away
-// from. 60s is the window in which a revoked key still works; that is the
-// deliberate trade, and it is bounded.
+// CACHING. Constructed clients are cached per (userId, provider) for the same 60s
+// as the DEK cache, and for the same reason: a single ingest run makes hundreds of
+// embedding calls. The TTLs match on purpose — a shorter client TTL would just miss
+// into a live DEK cache, and a longer one would keep serving a key the user has
+// already rotated away from. 60s is the bounded window in which a revoked key still
+// works.
 import "server-only";
 
 import Anthropic from "@anthropic-ai/sdk";

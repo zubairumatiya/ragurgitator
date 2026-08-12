@@ -1,31 +1,25 @@
 // API route: GET/POST /api/semantic-cache/key-model
 //
-// The CACHE-KEY model — the embedding model incoming questions are keyed under
-// for the proximity match, decoupled from the config's retrieval model. See
-// docs/semantic-cache-key-model-plan.md, Phases 1 and 3.
+// The CACHE-KEY model — the embedding model incoming questions are keyed under for
+// the proximity match, decoupled from the config's retrieval model.
 //
-// GET  — the model in force for the scoped config, where it came from (own
-//        override vs the global default), what its space serves at, and the
-//        full candidate list. Every REGISTERED model is a candidate: the
-//        cache-key vector never touches a chunks_* table, so `ingestable` is
-//        irrelevant here.
+// GET  — the model in force for the scoped config, where it came from, what its
+//        space serves at, and the full candidate list. Every REGISTERED model is a
+//        candidate: the key vector never touches a chunks_* table.
 // POST — three actions:
-//        • sweep    — score every candidate on the pooled pair set and return
-//                     the leaderboard. Embedding-only (no LLM calls), and every
-//                     text goes through embedQueryCached, so a re-run is nearly
-//                     free. NOT folded into GET: the first run pays for real
-//                     embeddings and a page load must never do that silently.
+//        • sweep    — score every candidate on the pooled pair set. Embedding-only
+//                     and cached, so a re-run is nearly free. NOT folded into GET:
+//                     the first run pays for real embeddings and a page load must
+//                     never do that silently.
 //        • apply    — write the per-config override, for one config or all.
-//        • backfill — re-embed this config's cached questions under the key
-//                     model so a switch has something to hit against.
+//        • backfill — re-embed this config's cached questions under the key model.
 //
-// The UNCALIBRATED-SPACE REFUSAL lives on `apply` here exactly as it does on
-// PATCH /api/batch: switching key models moves a config into a new vector-space,
-// and an uncalibrated one silently falls back to defaultThreshold.
+// The UNCALIBRATED-SPACE REFUSAL lives on `apply` here exactly as on PATCH
+// /api/batch: switching key models moves a config into a new vector-space, and an
+// uncalibrated one silently falls back to defaultThreshold.
 //
-// Config-scoped (withRequestConfig) — but note `apply` with scope "all" writes
-// every config, which is how a "global default" is expressed at runtime: the
-// true global lives in lib/config.ts and is a code constant.
+// Config-scoped — but `apply` with scope "all" writes every config, which is how a
+// "global default" is expressed at runtime: the true global is a code constant.
 import { z } from "zod";
 
 import { parseBody } from "@/lib/http/body";

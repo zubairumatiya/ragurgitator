@@ -68,19 +68,19 @@ export function MessageList({ messages }: { messages: DisplayMessage[] }) {
   );
 }
 
-// The two bits of Markdown a model reaches for by habit — **bold** and "- " /
-// "* " bullets — rendered rather than printed. The system prompt asks for plain
-// prose (lib/rag/generator.ts); this is what happens when a model ignores it.
+// The two bits of Markdown a model reaches for by habit — **bold** and "- " / "* "
+// bullets — rendered rather than printed. The system prompt asks for plain prose;
+// this is what happens when a model ignores it.
 //
-// Deliberately NOT a Markdown library: the input is untrusted model output, and
-// a full renderer is a much bigger surface (raw HTML passthrough, links,
-// images) for two marks. Everything here builds React nodes from string slices,
-// so nothing is ever interpreted as markup, and anything unrecognised — a `#`
-// heading, a backtick — falls through as the literal text it already was.
+// Deliberately NOT a Markdown library: the input is untrusted model output, and a
+// full renderer is a much bigger surface (raw HTML passthrough, links, images) for
+// two marks. Everything here builds React nodes from string slices, so nothing is
+// ever interpreted as markup, and anything unrecognised falls through as the literal
+// text it already was.
+//
 // Everything stays INLINE and the "\n" characters are kept: the bubble is
-// whitespace-pre-wrap, so the newlines are already the line breaks. A block-level
-// row per line (a flex bullet, say) would lay out beside them and double-space
-// the whole answer — the marker becomes a "• " glyph instead.
+// whitespace-pre-wrap, so the newlines are already the line breaks. A block-level row
+// per line would lay out beside them and double-space the whole answer.
 function Formatted({ text }: { text: string }) {
   const lines = text.split("\n");
   return (

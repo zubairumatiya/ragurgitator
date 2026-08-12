@@ -1,13 +1,11 @@
-// Appraise → Costs. The savings "spreadsheet" (docs/savings-accounting-plan.md),
-// promoted out of the metrics page into its own tab so the money view isn't a
-// footer under a table of nDCGs.
+// Appraise → Costs. The savings "spreadsheet", promoted out of the metrics page
+// into its own tab so the money view isn't a footer under a table of nDCGs.
 //
-// Scope comes from ?configId= — a Server Component render either way: the picker
-// is a tiny Client Component that rewrites the URL, and getCostsReport does the
-// filtering in SQL. `searchParams` is a Promise in this Next.js version (see
-// node_modules/next/dist/docs/01-app/03-api-reference/03-file-conventions/page.md),
-// so it must be awaited; reading it also forces dynamic rendering, which
-// force-dynamic already guarantees for the DB reads.
+// Scope comes from ?configId= — a Server Component render either way: the picker is
+// a tiny Client Component that rewrites the URL, and getCostsReport does the
+// filtering in SQL. `searchParams` is a Promise in this Next.js version, so it must
+// be awaited; reading it also forces dynamic rendering, which force-dynamic already
+// guarantees for the DB reads.
 import { AppraiseNav } from "@/app/components/AppraiseNav";
 import { BackToConfigs } from "@/app/components/BackToConfigs";
 import CostsSection from "@/app/components/CostsSection";

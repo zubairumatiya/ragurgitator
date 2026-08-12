@@ -1,11 +1,10 @@
 // API route: POST /api/batch/submit
 //
 // Launch a batch for one job kind. Body: { kind, scope } where scope is the
-// job-specific launch payload (question_generation: { difficulties, documentIds? };
-// cluster_labeling: { runId }). Config-scoped, so build() sees the right tab.
+// job-specific launch payload. Config-scoped, so build() sees the right tab.
 //
-//   • kind with no handler yet → 501 (recognized, "coming soon" — plan phasing).
-//   • build() returns nothing  → 200 { job: null } (no pending work — not an error).
+//   • kind with no handler yet → 501 (recognized, "coming soon").
+//   • build() returns nothing  → 200 { job: null } (no pending work, not an error).
 //   • otherwise                → 200 { job } (submitted; poll to see it land).
 //
 // Additive: this never touches the existing synchronous flows — it's a separate

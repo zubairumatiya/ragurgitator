@@ -1,13 +1,12 @@
 // API route: POST /api/clusters/[id]/label
 //
-// The Claude-naming step: label each bucket of a run from its representative
-// chunks (lib/rag/clusterLabeler), persist the labels, and return the updated
-// run detail so the UI can render them. Surfaced on saved presets only.
-// `params` is a Promise in this Next.js version — await it.
+// The Claude-naming step: label each bucket of a run from its representative chunks,
+// persist the labels, and return the updated run detail. Surfaced on saved presets
+// only. `params` is a Promise in this Next.js version — await it.
 //
 // Honors Settings → Savings: when this config picked "Batch API" for cluster
-// labeling, submit the run as a batch instead and return { batch } — no labels
-// land now; they're written by the handler's apply() when the batch completes.
+// labeling, submit the run as a batch instead and return { batch } — no labels land
+// now; they're written by the handler's apply() when the batch completes.
 import { withRequestConfig } from "@/lib/http/configScope";
 import { labelBuckets } from "@/lib/rag/clusterLabeler";
 import {

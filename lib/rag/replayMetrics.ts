@@ -22,24 +22,22 @@ export function rankTexts(
 
 // LEAVE-ONE-OUT IDEAL RANKING — the correction that makes cross-model nDCG fair.
 //
-// The stored ideal (eval_rankings, kind='aggregate') is built by averaging the
-// ranks that SEVERAL embedding models gave each chunk — which models is a
-// per-config setting (Settings → Metrics → nDCG → "Models in aggregate",
-// migration 0045), and each stored ranking records its own voters in
-// details.models. Read that, never a current config value: an old ranking was
-// built by whatever voted at the time.
+// The stored ideal is built by averaging the ranks that SEVERAL embedding models
+// gave each chunk — which models is a per-config setting (0045), and each stored
+// ranking records its own voters in details.models. Read that, never a current
+// config value: an old ranking was built by whatever voted at the time.
 //
-// Scoring a VOTER against that ideal is circular: it helped define the target
-// it's being graded on, which inflates its nDCG relative to a model that
-// contributed nothing.
+// Scoring a VOTER against that ideal is circular: it helped define the target it's
+// being graded on, which inflates its nDCG relative to a model that contributed
+// nothing.
 //
-// The fix is free, because eval_rankings.details.perModelRanks stores each
-// contributor's rank per chunk: rebuild the average WITHOUT the model under
-// test. A non-contributor keeps the full ideal — it was never advantaged.
+// The fix is free, because details.perModelRanks stores each contributor's rank per
+// chunk: rebuild the average WITHOUT the model under test. A non-contributor keeps
+// the full ideal — it was never advantaged.
 //
 // Returns chunk ids best-first, or null when excluding the model would leave
-// nothing to average (in which case the caller should skip nDCG rather than
-// grade against a single model's opinion).
+// nothing to average, in which case the caller should skip nDCG rather than grade
+// against a single model's opinion.
 export function leaveOneOutIdeal(
   perModelRanks: Record<string, Record<string, number>>,
   exclude: string,

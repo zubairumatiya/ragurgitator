@@ -1,18 +1,17 @@
-// Pure ranking-metric math, shared by the server (summary aggregates, run
-// snapshots) and the client (per-question chips on /eval).
+// Pure ranking-metric math, shared by the server (summary aggregates, run snapshots)
+// and the client (per-question chips on /eval).
 //
-// reciprocalRank stays single-relevant (MRR): the ground-truth chunk's 1-based
-// rank in the retrieved list, 0 on a miss. The optional depth cap makes it
-// MRR@k — a rank beyond k scores 0 instead of a small 1/rank, so the aggregate
-// only rewards landings within the window you actually serve.
+// reciprocalRank stays single-relevant (MRR): the ground-truth chunk's 1-based rank
+// in the retrieved list, 0 on a miss. The optional depth cap makes it MRR@k — a rank
+// beyond k scores 0 instead of a small 1/rank, so the aggregate only rewards
+// landings within the window you actually serve.
 //
-// nDCG is GRADED. It needs an *ideal* ranking of several chunks, built per
-// question on /eval (lib/rag/ranking.ts). A chunk's relevance gain is derived
-// from its position in that ideal order — the top chunk scores highest,
-// decreasing by one per position, and any chunk not in the ideal set scores 0.
-// nDCG@k = DCG@k / IDCG@k over the retrieved order. With no ideal ranking there
-// is nothing to grade against (IDCG = 0), so it returns null (ungraded) rather
-// than a misleading 0 or 1 — which is what lets the UI show it as not-yet-graded.
+// nDCG is GRADED. It needs an *ideal* ranking of several chunks, built per question
+// on /eval. A chunk's relevance gain is derived from its position in that ideal
+// order — the top chunk scores highest, decreasing by one per position, and any
+// chunk not in the ideal set scores 0. With no ideal ranking there is nothing to
+// grade against (IDCG = 0), so it returns null (ungraded) rather than a misleading 0
+// or 1 — which is what lets the UI show it as not-yet-graded.
 
 export function reciprocalRank(rank: number | null, k?: number): number {
   return rank && (k === undefined || rank <= k) ? 1 / rank : 0;

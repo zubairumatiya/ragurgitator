@@ -1,19 +1,17 @@
 // PROVIDER KEY DAL — the only module that reads or writes user_provider_keys.
 //
-// The rule the whole file is arranged around: NOTHING here returns a plaintext
-// key to a caller that could serialize it. Reads come in two flavours and they
-// are deliberately not interchangeable:
+// The rule the whole file is arranged around: NOTHING here returns a plaintext key
+// to a caller that could serialize it. Reads come in two flavours, deliberately not
+// interchangeable:
 //
-//   listProviderKeys()  → ProviderKeyDto[]  safe for the client. The SELECT
-//                         does not mention ciphertext/wrapped_dek/nonce/
-//                         auth_tag, so there is no accidental path from a DB
-//                         row into a React prop.
+//   listProviderKeys()  → ProviderKeyDto[]  safe for the client. The SELECT does not
+//                         mention ciphertext/wrapped_dek/nonce/auth_tag, so there is
+//                         no accidental path from a DB row into a React prop.
 //   openProviderKey()   → SecretKey         server-only, redacts on every
-//                         serialization hook, and requires an explicit
-//                         .expose() to yield the real string.
+//                         serialization hook, and requires an explicit .expose().
 //
-// A "give me the key as a string" function does not exist on purpose. Phase 4's
-// provider clients call openProviderKey() and .expose() inline at construction.
+// A "give me the key as a string" function does not exist on purpose. The provider
+// clients call openProviderKey() and .expose() inline at construction.
 import "server-only";
 
 import { keyWrapper } from "@/lib/crypto/azureKeyVault";

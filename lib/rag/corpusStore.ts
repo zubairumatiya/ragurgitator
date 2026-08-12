@@ -1,20 +1,18 @@
-// DB layer for corpora (reusable named document sets) — see migrations/0010,
-// 0017 and docs/multi-config-plan.md. Raw SQL via the shared `sql` client, no
-// business logic. Mirrors vectorStore.ts / evalStore.ts.
+// DB layer for corpora (reusable named document sets). Raw SQL, no business logic.
+// Mirrors vectorStore.ts / evalStore.ts.
 //
-// Since 0017 corpora are DECOUPLED from configs: a corpus is a quick way to
-// select a document set; a config's actual documents are its own embedding
-// runs. A config may point at a corpus (configs.corpus_id, nullable) and opt
-// into auto-sync (configs.corpus_sync) so membership changes flow both ways.
-// Deleting a corpus never touches configs — the FK sets their pointer null.
+// Since 0017 corpora are DECOUPLED from configs: a corpus is a quick way to select a
+// document set; a config's actual documents are its own embedding runs. A config may
+// point at a corpus (configs.corpus_id, nullable) and opt into auto-sync so
+// membership changes flow both ways. Deleting a corpus never touches configs — the
+// FK sets their pointer null.
 //
 // OWNERSHIP (0049): corpora and documents are both user-owned roots, so every
-// statement here filters on `user_id = ${activeUserId()}`. The membership table
+// statement filters on `user_id = ${activeUserId()}`. The membership table
 // `corpus_documents` carries no user_id of its own — it reaches an owner through
-// BOTH sides, so joins against it constrain the corpus and the document
-// separately. That matters: without the document-side predicate, adding a
-// document id you don't own to a corpus you do own would smuggle it into your
-// corpus.
+// BOTH sides, so joins against it constrain the corpus and the document separately.
+// Without the document-side predicate, adding a document id you don't own to a
+// corpus you do own would smuggle it into your corpus.
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { isUuid } from "@/lib/rag/activeConfig";

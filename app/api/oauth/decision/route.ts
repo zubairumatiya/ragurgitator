@@ -1,23 +1,22 @@
 // THE CONSENT DECISION — where Approve and Deny actually happen.
 //
 // The form on /oauth/consent posts here. This route tells Supabase what the user
-// chose and forwards the browser to whatever redirect URL comes back, which
-// carries either an authorization code or an `access_denied` error for the
-// client that started the flow.
+// chose and forwards the browser to whatever redirect URL comes back, which carries
+// either an authorization code or an `access_denied` error for the client that
+// started the flow.
 //
 // requireUserForApi() FIRST, before reading anything from the body. The
-// authorization id is a bearer-ish value that arrives over a form post, so the
-// session is the only thing proving the person clicking Approve is the person
-// the grant will be written for. Supabase scopes the call to the caller's own
-// session too, but "the other side also checks" is not a reason to skip it here.
+// authorization id arrives over a form post, so the session is the only thing
+// proving the person clicking Approve is the person the grant will be written for.
+// Supabase scopes the call to the caller's own session too, but "the other side
+// also checks" is not a reason to skip it here.
 //
-// skipBrowserRedirect: true is REQUIRED in a route handler. The default assumes
-// a browser context it can navigate; on the server there is nothing to navigate,
-// so we ask for the URL and issue the redirect ourselves.
+// skipBrowserRedirect: true is REQUIRED in a route handler. The default assumes a
+// browser context it can navigate; on the server there is nothing to navigate, so
+// we ask for the URL and issue the redirect ourselves.
 //
 // A DENIAL IS A NORMAL OUTCOME, not an error: it still produces a redirect_url,
-// because the waiting OAuth client needs to be told no rather than left hanging
-// on a request that never resolves.
+// because the waiting OAuth client needs to be told no rather than left hanging.
 import { redirect } from "next/navigation";
 
 import { requireUserForApi, unauthorizedJson } from "@/lib/auth/dal";

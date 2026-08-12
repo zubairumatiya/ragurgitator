@@ -1,17 +1,15 @@
-// Layout for every config-scoped page (/c/[configId]/…). Renders the §6 shell:
+// Layout for every config-scoped page (/c/[configId]/…). Renders the shell:
 //   1. ConfigTabs    — the cross-config tab bar (open tabs + new + Appraise).
 //   2. active banner — "<name> · <model> · <size>/<overlap> · corpus: <name>".
 //   3. Nav           — the nested Workbench / Eval / Clusters sub-nav.
 //   4. {children}    — the page, scoped to this config.
 //
-// This is a Server Component so it can read the tab lists + active config straight
-// from configStore. It re-renders when the [configId] segment changes (switching
-// tabs) so the banner stays in sync; ConfigTabs router.refresh()es it after
-// mutations. `params` is a Promise in this Next.js version — await it.
+// A Server Component so it can read the tab lists + active config straight from
+// configStore. It re-renders when the [configId] segment changes so the banner stays
+// in sync. `params` is a Promise in this Next.js version — await it.
 //
-// notFound() is used for an unknown configId so a stale/bad tab URL 404s rather
-// than rendering a bannerless shell. See node_modules/next/dist/docs for the
-// file-convention details.
+// notFound() is used for an unknown configId so a stale/bad tab URL 404s rather than
+// rendering a bannerless shell.
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { RememberConfigRoute } from "@/app/components/BackToConfigs";

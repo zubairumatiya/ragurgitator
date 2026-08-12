@@ -1,16 +1,15 @@
 // NOTIFY — "we'll email you when it's done", the real half.
 //
 // In-app notification is DERIVED, not stored: the status panel treats any
-// terminal-but-unacknowledged job as a toast/badge (batch_jobs.acknowledged),
-// so there's no separate notifications table. This module owns only the EMAIL
-// side, via Resend, and is strictly best-effort:
+// terminal-but-unacknowledged job as a toast/badge (batch_jobs.acknowledged), so
+// there's no notifications table. This module owns only the EMAIL side, via Resend,
+// and is strictly best-effort:
 //   • no RESEND_API_KEY or no recipient → returns false, never throws;
-//   • a send failure is logged and swallowed — a batch must never fail because
-//     the email didn't go out.
+//   • a send failure is logged and swallowed — a batch must never fail because the
+//     email didn't go out.
 //
-// Recipient is BATCH_NOTIFY_EMAIL (a single address until real user accounts
-// land — see the plan doc). Sender is BATCH_NOTIFY_FROM, defaulting to Resend's
-// shared onboarding sender so it works before a domain is verified.
+// Sender is BATCH_NOTIFY_FROM, defaulting to Resend's shared onboarding sender so it
+// works before a domain is verified.
 import { Resend } from "resend";
 import { JOB_LABELS, type BatchJob } from "@/lib/batch/types";
 

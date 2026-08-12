@@ -1,26 +1,23 @@
 // Appraise → Semantic caching: THE place a threshold gets written. Every other
-// panel on the page only computes and displays; a number goes live here or
-// nowhere, so there's one control to reason about instead of an apply button per
-// calibration method. Rendered into the Collision floor section's FOOTER (its
-// `action` slot) — one shared action, directly under the first recommendation
-// you'd apply rather than given a section of its own. The shadow judge, further
-// down the page, recommends into it too.
+// panel only computes and displays; a number goes live here or nowhere, so there's
+// one control to reason about instead of an apply button per calibration method.
+// Rendered into the Collision floor section's FOOTER, directly under the first
+// recommendation you'd apply. The shadow judge recommends into it too.
 //
 // A footer strip and not the heading row it used to sit on: there it had to stay
-// heading-height, which meant a nested bordered box wrapped around the controls
-// and every status line ("currently serves at…", the suggestion, a validation
-// complaint) stacked into a narrow right-aligned column above the numbers they
+// heading-height, which meant a nested bordered box around the controls and every
+// status line stacked into a narrow right-aligned column above the numbers they
 // were about. Full width instead, controls left and status right, matching the
 // key-model panel's footer so both write controls look and sit the same.
 //
 // The target dropdown picks which LAYER the value lands in:
-//   • a vector-space → semantic_cache_thresholds, inherited by every config on
-//     that embedding model that hasn't overridden it;
-//   • a config       → configs.batch_savings.semanticCache.threshold, an
-//     override that wins over its space (see semanticCache.resolveThreshold).
+//   • a vector-space → semantic_cache_thresholds, inherited by every config on that
+//     embedding model that hasn't overridden it;
+//   • a config       → configs.batch_savings.semanticCache.threshold, an override
+//     that wins over its space.
 //
-// Targets are encoded as "space:<name>" / "config:<uuid>" so one <select> can
-// span both layers — "space vs config" and "which one" is a single decision.
+// Targets are encoded as "space:<name>" / "config:<uuid>" so one <select> can span
+// both layers — "space vs config" and "which one" is a single decision.
 "use client";
 
 import { useCallback, useEffect, useState } from "react";

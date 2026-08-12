@@ -1,27 +1,22 @@
-// Proves the two halves of the deletion contract (open question #4, resolved
-// 2026-08-08):
+// Proves the two halves of the deletion contract:
 //
-//   1. Deleting a PROVIDER KEY destroys nothing else. Cached embeddings,
-//      ingested chunks and semantic_cache rows are derived data the user already
-//      paid for, and they survive.
-//   2. Deleting an ACCOUNT destroys everything. `delete from auth.users` is the
-//      only statement account deletion runs (app/account/actions.ts), so every
-//      row a user owns has to be reachable from it by ON DELETE CASCADE or it is
-//      silently retained after "delete my data".
+//   1. Deleting a PROVIDER KEY destroys nothing else. Cached embeddings, ingested
+//      chunks and semantic_cache rows are derived data the user already paid for.
+//   2. Deleting an ACCOUNT destroys everything. `delete from auth.users` is the only
+//      statement account deletion runs, so every row a user owns has to be reachable
+//      from it by ON DELETE CASCADE or it is silently retained after "delete my data".
 //
-// Both are properties of the SCHEMA, not of any code path, which is why this is
-// a script against the live database rather than a unit test. Neither can be
-// checked by running the deletion — the first would have to destroy a real key
-// to prove nothing followed it, and the second cannot be observed at all once
-// the rows are gone.
+// Both are properties of the SCHEMA, not of any code path, which is why this is a
+// script against the live database rather than a unit test. Neither can be checked
+// by running the deletion — the first would have to destroy a real key to prove
+// nothing followed it, and the second cannot be observed once the rows are gone.
 //
-// The account-deletion half is a reachability walk, not a table list, so a
-// future migration that adds an owned table is caught here even though this file
-// never learns its name. That is the whole point: the failure mode is a table
-// that keeps a deleted user's rows forever while every page still looks correct.
+// The account-deletion half is a reachability walk, not a table list, so a future
+// migration that adds an owned table is caught here even though this file never
+// learns its name. The failure mode it guards is a table that keeps a deleted
+// user's rows forever while every page still looks correct.
 //
-// Run it after any migration that adds a table or an ownership column, next to
-// `npm run rls:check`.
+// Run it after any migration that adds a table or an ownership column.
 //
 //   Usage: node --env-file=.env.local --import tsx scripts/cascade-check.ts
 import postgres from "postgres";

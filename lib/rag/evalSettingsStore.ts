@@ -1,13 +1,8 @@
-// DB layer for per-config EVAL CRITERIA (migration 0014, Phase A of
-// docs/eval-autotuning-plan.md). Raw SQL via the shared `sql` client.
+// DB layer for per-config EVAL CRITERIA (0014). Raw SQL via the shared `sql` client.
 //
-// Criteria live on the `configs` row (D3) but are loaded SEPARATELY from
-// ResolvedConfig (lib/rag/activeConfig.ts) — retrieval is hot and doesn't need
-// them, while only the eval flows (generate/score/summary) and the Settings UI
-// do. `k` is stored nullable: null means "fall back to the config's top_k" (A1).
-//
-// The autotune.* fields are saved here now (the Settings dropdown edits them) but
-// aren't consumed until the Phase C engine lands.
+// Criteria live on the `configs` row but are loaded SEPARATELY from ResolvedConfig —
+// retrieval is hot and doesn't need them, while only the eval flows and the Settings
+// UI do. `k` is stored nullable: null means "fall back to the config's top_k".
 import { activeUserId } from "@/lib/auth/userScope";
 import { fragment, sql } from "@/lib/db";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";

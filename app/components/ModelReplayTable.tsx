@@ -1,18 +1,18 @@
-// Appraise → Models, section B: full-corpus retrieval quality per embedding
-// model, from the offline replay (lib/rag/replayStore, migration 0043).
+// Appraise → Models, section B: full-corpus retrieval quality per embedding model,
+// from the offline replay (0043).
 //
 // This REPLACED a table built on eval_model_trials. That one re-ranked inside a
 // candidate pool containing the right chunk by construction, so all seven models
-// scored 1.000 and it could not rank anything. The replay ranks the whole corpus
-// for every model, on the same questions, by the same exact-cosine scan — and
+// scored 1.000 and it could not rank anything. The replay ranks the whole corpus for
+// every model, on the same questions, by the same exact-cosine scan — and
 // immediately produced a real spread (MRR .800–.881).
 //
-// Server Component. Only the scatter below it is a Client Component, for its
-// y-axis metric selector — the table itself needs no client state.
+// Server Component. Only the scatter below it is a Client Component, for its y-axis
+// metric selector.
 //
 // R@1 and MRR lead on purpose. R@5/R@10 are near the ceiling on this corpus
-// (0.92–1.00), which is exactly why the config's stored eval run reads 1.000 —
-// its k sits above where these models actually differ.
+// (0.92–1.00), which is exactly why the config's stored eval run reads 1.000 — its k
+// sits above where these models actually differ.
 import { InfoDot } from "@/app/components/InfoDot";
 import { ModelCostQualityChart } from "@/app/components/ModelCostQualityChart";
 import type { ConfigComparison } from "@/lib/rag/appraiseStore";

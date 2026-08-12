@@ -1,17 +1,13 @@
 // UI: "this cluster preset needs re-fitting" flag.
 //
-// Ingesting a document tops its chunks into every saved preset by nearest
-// EXISTING centroid (clusterStore.topUpSavedRuns), so a preset keeps covering
-// the corpus without a re-run. But the centroids stay where the original fit put
-// them: each top-up drops members around a center that was never recomputed,
-// leaving it a little further from the true middle of its bucket. This badge is
-// where that debt comes due: past config.clusterDriftThreshold the preset no
+// Ingesting a document tops its chunks into every saved preset by nearest EXISTING
+// centroid, so a preset keeps covering the corpus without a re-run. But the
+// centroids stay where the original fit put them: each top-up drops members around a
+// center that was never recomputed. Past config.clusterDriftThreshold the preset no
 // longer describes the corpus well enough to read as an observation — its
-// cohesion/silhouette numbers describe the old fit, not what's in the buckets
-// now — and only re-running clustering restores a real fit.
+// cohesion/silhouette numbers describe the old fit, not what's in the buckets now.
 //
-// Renders nothing below the threshold: under it, top-up is working as intended
-// and there's nothing to act on.
+// Renders nothing below the threshold: under it, top-up is working as intended.
 import { config } from "@/lib/config";
 import { Tooltip } from "@/app/components/Tooltip";
 

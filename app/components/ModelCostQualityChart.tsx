@@ -1,32 +1,30 @@
 // Appraise → Models: the cost/quality scatter.
 //
-// This is the one view a table can't give you — "is voyage-4-large worth 6×
-// voyage-4-lite?" is a position on a plane, not two numbers in adjacent columns.
-// It was deferred while every model sat at recall 1.000 (a flat line reads as a
-// broken chart, not as "no data"); the full-corpus replay gave the y-axis real
-// spread, so it earns its place now.
+// The one view a table can't give you — "is voyage-4-large worth 6× voyage-4-lite?"
+// is a position on a plane, not two numbers in adjacent columns. It was deferred
+// while every model sat at recall 1.000 (a flat line reads as a broken chart, not
+// as "no data"); the full-corpus replay gave the y-axis real spread.
 //
-// COLOR: one series, not seven. Identity comes from direct labels on every
-// point, so hue is free to carry one thing — whether a model is the config's
-// current base. Seven categorical hues would also be flatly wrong here: a
-// scatter compares ALL pairs, and no eight-hue ordering clears the colorblind
-// separation floors on all pairs at once (dataviz skill, references/palette.md).
+// COLOR: one series, not seven. Identity comes from direct labels on every point,
+// so hue is free to carry one thing — whether a model is the config's current base.
+// Seven categorical hues would also be flatly wrong here: a scatter compares ALL
+// pairs, and no eight-hue ordering clears the colorblind separation floors on all
+// pairs at once.
 //
-// Palette validated with the skill's validator in BOTH modes against the real
-// surfaces (light #fcfcfb, dark #1a1a19), --pairs all:
+// Palette validated in BOTH modes against the real surfaces (light #fcfcfb, dark
+// #1a1a19), --pairs all:
 //   neutral #71717a — lightness band, contrast >= 3:1, both modes
 //   accent  #2a78d6 light / #3987e5 dark — CVD dE 14.6 light / 16.3 dark
 // The chroma-floor FAIL on the neutral is intentional and out of scope: it reads
 // gray BECAUSE it isn't encoding identity. Don't "fix" it by adding hues.
 //
-// Client Component, for one reason: the y-axis metric is switchable. Everything
-// it needs already arrives as props (the replay is computed server-side), so this
-// costs no extra fetch — same pattern as CostsSection's view selector.
+// Client Component for one reason: the y-axis metric is switchable. Everything it
+// needs already arrives as props, so this costs no extra fetch.
 //
-// The hover layer is a native SVG <title> per mark, so it still needs no JS of
-// its own. NOTE: <title> children must be a SINGLE string — React can't convert
-// an array of text/value nodes into title text, and mixing them silently breaks
-// hydration. Always build it with a template literal.
+// The hover layer is a native SVG <title> per mark, so it needs no JS of its own.
+// NOTE: <title> children must be a SINGLE string — React can't convert an array of
+// text/value nodes into title text, and mixing them silently breaks hydration.
+// Always build it with a template literal.
 "use client";
 
 import { useState } from "react";

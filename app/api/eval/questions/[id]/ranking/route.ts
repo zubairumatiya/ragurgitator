@@ -1,13 +1,13 @@
 // API route: /api/eval/questions/[id]/ranking
 //
-// The per-question graded-nDCG ranking builder (see lib/rag/ranking):
-//   - GET  : panel context — the question and the rankings built so far (with
-//            which one is ground truth).
+// The per-question graded-nDCG ranking builder:
+//   - GET  : panel context — the question and the rankings built so far (with which
+//            one is ground truth).
 //   - POST : one mutation, by `action`:
-//       { action: "aggregate" }              — build the cross-model aggregate
-//       { action: "llm_pool" } / { action: "llm_rerank" } — LLM comparison ranking
-//       { action: "manual", chunkIds }       — save a hand-edited order
-//       { action: "truth", rankingId }        — promote one ranking to ground truth
+//       { action: "aggregate" }                            — cross-model aggregate
+//       { action: "llm_pool" } / { action: "llm_rerank" }  — LLM comparison ranking
+//       { action: "manual", chunkIds }                     — save a hand-edited order
+//       { action: "truth", rankingId }                     — promote to ground truth
 //     Every mutation returns the refreshed context so the panel re-renders cleanly.
 //
 // `params` is a Promise in this Next.js version — await it.

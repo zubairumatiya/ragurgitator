@@ -1,16 +1,15 @@
-// Scope selector for the Appraise pages that read one config at a time: all
-// configs (the account-wide rollup) or one config. The choice lives in the URL
-// (?configId=…) rather than in React state so the page stays a Server Component
-// — the report re-runs on the server with the WHERE clause, and the scoped view
-// is linkable/refreshable.
+// Scope selector for the Appraise pages that read one config at a time: all configs
+// (the account-wide rollup) or one config. The choice lives in the URL (?configId=…)
+// rather than in React state so the page stays a Server Component — the report
+// re-runs on the server with the WHERE clause, and the scoped view is
+// linkable/refreshable.
 //
-// replace() rather than push(): flipping the scope is a filter, not a place, so
-// it shouldn't stack up history entries between you and the back button.
+// replace() rather than push(): flipping the scope is a filter, not a place, so it
+// shouldn't stack up history entries between you and the back button.
 //
-// `basePath` and `allowAll` exist because Trial times reuses this: autotune
-// timings are per-config (a duration only means something next to runs over the
-// same workload), so that page pins to one config and has no all-configs
-// reading to offer.
+// `basePath` and `allowAll` exist because Trial times reuses this: autotune timings
+// are per-config (a duration only means something next to runs over the same
+// workload), so that page pins to one config and has no all-configs reading to offer.
 "use client";
 
 import { useRouter } from "next/navigation";

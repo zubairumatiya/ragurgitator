@@ -1,19 +1,18 @@
-// QUERY TIME, STEP 2: GENERATE  (the "G" in RAG)
+// QUERY TIME, STEP 2: GENERATE (the "G" in RAG)
 //
-// Takes the retrieved chunks + the user's question, builds a grounded prompt,
-// calls the LLM, and returns the answer.
+// Takes the retrieved chunks + the user's question, builds a grounded prompt, calls
+// the LLM, and returns the answer.
 //
 // Prompting decisions:
 //   - system prompt sets the role and the "answer only from context" rule
-//   - context chunks are wrapped in XML-ish tags so the model can tell where
-//     each one starts/ends (Claude is trained to follow this convention)
-//   - each chunk is labeled with its source so the model can cite if asked,
-//     and so a future re-ranker can use the same labels
+//   - context chunks are wrapped in XML-ish tags so the model can tell where each
+//     one starts/ends (Claude is trained to follow this convention)
+//   - each chunk is labeled with its source so the model can cite if asked
 //   - the answer is asked for as PLAIN PROSE. Nothing renders Markdown (the chat
-//     bubble prints the string under whitespace-pre-wrap), so a model reaching
-//     for **bold** by habit put the asterisks on screen. MessageList also
-//     tolerates the marks if a model ignores this — belt and braces, because the
-//     rule is a request and the renderer is a guarantee.
+//     bubble prints the string under whitespace-pre-wrap), so a model reaching for
+//     **bold** by habit put the asterisks on screen. MessageList also tolerates the
+//     marks if a model ignores this — the rule is a request, the renderer is a
+//     guarantee.
 import { config } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { meteredMessage } from "@/lib/rag/meter";

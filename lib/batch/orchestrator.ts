@@ -1,14 +1,14 @@
 // ORCHESTRATOR — threads store ↔ providers ↔ job handlers ↔ notify.
 //
 //   submitBatch  — create the row, submit to the provider, stamp the id (or fail).
-//   pollAndApply — the "Check now" / poll-while-open entry: advance every active
-//                  job one step (refresh status; apply on completion; notify).
+//   pollAndApply — the "Check now" / poll-while-open entry: advance every active job
+//                  one step (refresh status; apply on completion; notify).
 //   cancelJob    — provider cancel + local status.
 //
-// Apply runs inside the job's config scope (resolveConfig + withConfig) since
-// the handlers read activeConfig()-scoped tables, and it runs LATE — long after
-// the original request. Handlers are idempotent, so the modest double-apply
-// window from two overlapping polls in a single-user app is harmless.
+// Apply runs inside the job's config scope since the handlers read
+// activeConfig()-scoped tables, and it runs LATE — long after the original request.
+// Handlers are idempotent, so the modest double-apply window from two overlapping
+// polls is harmless.
 import { withConfig, resolveConfig } from "@/lib/rag/activeConfig";
 import {
   createBatchJob,

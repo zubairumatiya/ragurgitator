@@ -1,14 +1,11 @@
 // API route: POST /api/ingest
 //
-// Accepts either:
-//   - multipart/form-data with one or more `file` fields
-//     (.txt/.md/.pdf/.docx uploads), or
-//   - multipart/form-data with `text` (a pasted-text string)
+// Accepts multipart/form-data with either one or more `file` fields
+// (.txt/.md/.pdf/.docx) or a `text` field (pasted text).
 //
-// On success it streams ingestion progress back as NDJSON (one IngestEvent per
-// line) so the client can render a live progress bar; validation errors are
-// returned as plain JSON before the stream starts. All RAG logic stays in
-// lib/rag — this route just translates HTTP <-> input.
+// On success it streams ingestion progress back as NDJSON so the client can render a
+// live progress bar; validation errors are returned as plain JSON before the stream
+// starts. All RAG logic stays in lib/rag — this route just translates HTTP <-> input.
 import { streamError } from "@/lib/http/missingKeyServer";
 import { config } from "@/lib/config";
 import { ingest, type IngestEvent } from "@/lib/rag/pipeline";

@@ -1,15 +1,12 @@
-// DB layer for BATCH API savings (migration 0029, Phase E1).
-//
-// Two concerns, both raw SQL via the shared `sql` client:
+// DB layer for BATCH API savings (0029). Two concerns, both raw SQL:
 //
 //   1. The PER-CONFIG preference on configs.batch_savings (get / patch-merge),
 //      read-merge-write like evalSettingsStore so the UPDATE stays static.
-//   2. The ACCOUNT-WIDE batch_jobs ledger (create / poll-list / patch / ack).
-//      Jobs are global (a provider batch isn't config-scoped) but each carries
-//      config_id + a denormalized config_label so the panel can attribute it.
+//   2. The ACCOUNT-WIDE batch_jobs ledger. Jobs are global (a provider batch isn't
+//      config-scoped) but each carries config_id + a denormalized config_label so
+//      the panel can attribute it.
 //
-// No provider I/O here — that's lib/batch/providers.ts. This module only reads
-// and writes rows; the orchestrator threads the two together.
+// No provider I/O here — that's lib/batch/providers.ts.
 import { activeUserId } from "@/lib/auth/userScope";
 import { fragment, sql } from "@/lib/db";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";
@@ -219,27 +216,24 @@ const STALE_SUBMIT_MINUTES = 15;
 
 // Fail rows stranded in `submitting`, and return how many.
 //
-// THE STATE HAS NO OTHER EXIT. submitBatch writes the row, submits, then patches
-// it to in_progress; a submit that THROWS is caught and marked failed. But a
-// process that dies mid-submit (deploy, crash, platform timeout) marks nothing,
-// and `submitting` is excluded from both listActiveJobs and isPollable — so the
-// row is never looked at again, never terminal, and sits in the panel forever
-// with no action that does anything. This is the sweep the comment on
-// listActiveJobs has always promised.
+// THE STATE HAS NO OTHER EXIT. submitBatch writes the row, submits, then patches it
+// to in_progress; a submit that THROWS is caught and marked failed. But a process
+// that dies mid-submit (deploy, crash, platform timeout) marks nothing, and
+// `submitting` is excluded from both listActiveJobs and isPollable — so the row is
+// never looked at again, never terminal, and sits in the panel forever.
 //
 // `provider_batch_id is null` is the safety rail, not decoration: a row that
-// somehow holds a provider id is a REAL batch we are being charged for, and
-// failing it locally would orphan it. Those are left alone deliberately.
+// somehow holds a provider id is a REAL batch we are being charged for, and failing
+// it locally would orphan it.
 //
-// The honest gap, stated in the error text because we cannot resolve it here:
-// if the crash landed between the provider's create() returning and our patch,
-// the batch IS running on the provider under an id we never stored. Nothing
-// local can recover that id, so the user is told to check the provider console
-// rather than being quietly told the work never happened.
+// The honest gap, stated in the error text because we cannot resolve it here: if
+// the crash landed between the provider's create() returning and our patch, the
+// batch IS running under an id we never stored. Nothing local can recover it, so
+// the user is told to check the provider console rather than being quietly told the
+// work never happened.
 //
-// Sweeping a submit that was merely very slow is self-healing rather than
-// destructive: when it does return, submitBatch's patch writes the real
-// provider_batch_id and status in_progress straight over the failed row.
+// Sweeping a merely-slow submit is self-healing: when it returns, submitBatch's
+// patch writes the real provider_batch_id and in_progress over the failed row.
 export async function failStaleSubmittingJobs(): Promise<number> {
   const rows = await sql<{ id: string }[]>`
     update batch_jobs

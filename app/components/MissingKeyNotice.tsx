@@ -1,15 +1,14 @@
 // UI: the error surface for "you have no key for the provider this needs".
 //
-// Under strict BYOK this is the first thing a new account sees when it tries to
-// do anything, so it gets a LINK rather than a sentence: the whole reason
-// MissingProviderKeyError carries its provider (lib/llm/client.ts) is that "add
-// your OpenAI key" should be one click, not a search through Settings.
+// Under strict BYOK this is the first thing a new account sees when it tries to do
+// anything, so it gets a LINK rather than a sentence: the whole reason
+// MissingProviderKeyError carries its provider is that "add your OpenAI key" should
+// be one click, not a search through Settings.
 //
 // Use <ApiErrorNotice> wherever a component holds the parsed response body and
-// renders errors as JSX — it degrades to the plain message for every other kind
-// of failure, so it is a drop-in for `<p>{message}</p>`. Surfaces whose error
-// state is a bare string (chat bubbles) use errorTextFrom() instead and say the
-// same thing without the link.
+// renders errors as JSX — it degrades to the plain message for every other kind of
+// failure, so it is a drop-in for `<p>{message}</p>`. Surfaces whose error state is a
+// bare string (chat bubbles) use errorTextFrom() instead.
 "use client";
 
 import Link from "next/link";

@@ -1,15 +1,14 @@
 // Appraise → Semantic caching: shadow-judge calibration. Per vector-space, judge
 // recorded would-hit events — a bulk LLM pass, a boundary re-judge, and a human
 // Accept/Reject queue — then sweep the labels into a threshold. Judging is
-// on-demand (the Run buttons), never inline.
+// on-demand, never inline.
 //
-// Last panel on the page: it needs real would-hit traffic to have accrued and
-// costs judge tokens to run, so it refines a threshold the collision floor (top
-// of the page) already put in the right neighbourhood.
+// Last panel on the page: it needs real would-hit traffic to have accrued and costs
+// judge tokens to run, so it refines a threshold the collision floor already put in
+// the right neighbourhood.
 //
-// Judging writes VERDICTS, never a threshold: the swept recommendation is
-// broadcast to ApplyThresholdPanel — on the Collision floor heading row at the
-// top of the page — which owns every threshold write.
+// Judging writes VERDICTS, never a threshold: the swept recommendation is broadcast
+// to ApplyThresholdPanel, which owns every threshold write.
 "use client";
 
 import { useCallback, useEffect, useState } from "react";

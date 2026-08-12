@@ -1,15 +1,13 @@
-// UI: "Change this config" dialog (Client Component) — the bulk-actions flow
-// that mutates the CURRENT config in place (unlike ConfigCreateDialog, which
-// spawns a new one; use + / Duplicate on the tab bar for that).
+// UI: "Change this config" dialog (Client Component) — the bulk-actions flow that
+// mutates the CURRENT config in place (unlike ConfigCreateDialog, which spawns a new
+// one).
 //
-// Config-wide scope: PATCHes settings via POST /api/configs/[id]/reconfigure,
-// which re-embeds the config's documents and remaps eval labels; scores go
-// stale until the next re-score. Document scope (a document picked in Bulk
-// actions): the same route applies the change to that document's chunks as
-// per-chunk overrides — the config row is untouched.
+// Config-wide scope: PATCHes settings via POST /api/configs/[id]/reconfigure, which
+// re-embeds the config's documents and remaps eval labels; scores go stale until the
+// next re-score. Document scope: the same route applies the change to that
+// document's chunks as per-chunk overrides — the config row is untouched.
 //
-// Streams the route's IngestEvents into a progress line. Styling mirrors
-// ConfigCreateDialog (zinc palette).
+// Streams the route's IngestEvents into a progress line.
 "use client";
 
 import { useEffect, useState } from "react";

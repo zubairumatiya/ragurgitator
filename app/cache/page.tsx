@@ -1,19 +1,15 @@
-// My cache — a read-only window onto the semantic answer cache (linked from the
-// sidebar). Lists every question/answer pair banked across ALL of this user's
-// configs, most-served first, so "what has my cache learned, and what is it
-// actually saving me" is answerable without a psql prompt.
+// My cache — a read-only window onto the semantic answer cache. Lists every
+// question/answer pair banked across ALL of this user's configs, most-served first.
 //
-// Standalone (outside /c/[configId]) like Corpora and Appraise: the listing
-// spans configs, so a per-config banner/sub-nav would be actively misleading.
-// Dynamic — it reads the DB per request.
+// Standalone (outside /c/[configId]) like Corpora and Appraise: the listing spans
+// configs, so a per-config banner would be actively misleading. Dynamic — it reads
+// the DB per request.
 //
-// Read-only on purpose. The cache maintains itself: entries are written by
-// semanticCacheStore on a miss, invalidated when the documents or the answering
-// model change, and pruned by volume once the account holds more than the cap
-// (lib/rag/semanticCache.ts). There is no delete control here because there is
-// no state a user can usefully hand-edit — a wrong answer is fixed by changing
-// the documents, the model or the threshold. Calibration lives on Appraise →
-// Semantic caching.
+// Read-only on purpose. The cache maintains itself: entries are written on a miss,
+// invalidated when the documents or the answering model change, and pruned by volume
+// past the cap. There is no delete control because there is no state a user can
+// usefully hand-edit — a wrong answer is fixed by changing the documents, the model
+// or the threshold. Calibration lives on Appraise → Semantic caching.
 import { BackToConfigs } from "@/app/components/BackToConfigs";
 import { CacheTable } from "@/app/components/CacheTable";
 import { InfoDot } from "@/app/components/InfoDot";

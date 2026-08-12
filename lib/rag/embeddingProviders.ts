@@ -1,14 +1,14 @@
-// EMBEDDING PROVIDER ADAPTERS (see docs/embedding-providers-plan.md, E2/E3).
+// EMBEDDING PROVIDER ADAPTERS.
 //
-// One adapter per provider. Each maps the abstract role ("document" | "query")
-// to that provider's convention, applies the provider's batch cap, and
-// normalizes the response to number[][] in input order. The dispatcher in
-// embeddings.ts is the only caller; the rest of lib/ keeps using
-// embedTexts/embedQuery and never learns a provider's quirks.
+// One adapter per provider. Each maps the abstract role ("document" | "query") to
+// that provider's convention, applies the provider's batch cap, and normalizes the
+// response to number[][] in input order. The dispatcher in embeddings.ts is the
+// only caller; the rest of lib/ keeps using embedTexts/embedQuery and never learns
+// a provider's quirks.
 //
 // Adding a provider = one adapter here + a PROVIDERS entry + registry rows. The
-// non-Voyage adapters are inert until a key/weights exist (lazy clients), so
-// this file is safe to ship before any of them is switched on.
+// non-Voyage adapters are inert until a key/weights exist (lazy clients), so this
+// file is safe to ship before any of them is switched on.
 import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
 
 import { activeUserId } from "@/lib/auth/userScope";
@@ -84,12 +84,11 @@ const openaiProvider: EmbeddingProvider = {
 // available for embed-v4 and newer models" — the v3 family has one fixed width.
 //
 // Deliberately an allow-list of what we've checked, not a "v4 or later" version
-// comparison: the docs describe non-support rather than promising a 4xx, so a
-// v3 model handed the parameter may simply IGNORE it and return its native
-// width under a registry row claiming something narrower — a dimension mismatch
-// nothing downstream would catch until it reached a vector table. Gating here
-// means the app never depends on Cohere to reject it. Widen this only after
-// checking a new model's docs.
+// comparison: the docs describe non-support rather than promising a 4xx, so a v3
+// model handed the parameter may simply IGNORE it and return its native width under
+// a registry row claiming something narrower — a dimension mismatch nothing
+// downstream would catch until it reached a vector table. Gating here means the app
+// never depends on Cohere to reject it.
 function acceptsOutputDimension(apiModel: string): boolean {
   return apiModel.startsWith("embed-v4");
 }

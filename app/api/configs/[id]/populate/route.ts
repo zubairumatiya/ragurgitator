@@ -1,16 +1,15 @@
 // API route: POST /api/configs/[id]/populate
 //
 // Spawn step for a config created from existing corpora: embed their stored
-// documents under THIS config's settings (no re-upload). Optional JSON body
-// `{ corpusIds: [...] }` names the source selection (de-duped union — the
-// multi-corpus create); with no body it falls back to the config's own corpus.
-// Streams the same IngestEvents as /api/ingest so the creation dialog can show
-// a progress bar.
+// documents under THIS config's settings (no re-upload). Optional body
+// `{ corpusIds: [...] }` names the source selection (de-duped union); with no body
+// it falls back to the config's own corpus. Streams the same IngestEvents as
+// /api/ingest so the creation dialog can show a progress bar.
 //
-// Scoped to the config named in the path (not the active tab), so it resolves +
-// enters that config's scope explicitly rather than via withRequestConfig.
-// `params` is a Promise in this Next.js version. NDJSON producer enters the scope
-// itself, so the deferred stream callback still sees the right config.
+// Scoped to the config named in the path (not the active tab), so it resolves and
+// enters that config's scope explicitly rather than via withRequestConfig. `params`
+// is a Promise in this Next.js version. The NDJSON producer enters the scope itself,
+// so the deferred stream callback still sees the right config.
 import { streamError } from "@/lib/http/missingKeyServer";
 import { ndjsonStream } from "@/lib/http/ndjson";
 import { resolveConfig, withConfig } from "@/lib/rag/activeConfig";

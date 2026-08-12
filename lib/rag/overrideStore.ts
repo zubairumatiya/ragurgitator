@@ -26,21 +26,21 @@ export type OverridePiece = {
 // One entry of the retrieval change log (0021) — what the stale badge lists.
 export type RetrievalChange = { description: string; at: Date };
 
-// Version of the rank-fusion ALGORITHM (retriever.fuseWithOverrides), folded
-// into the fingerprint below. Bump it whenever fusion semantics change (how
-// ranks are computed/merged, what `score` means) so results scored under the
-// old algorithm flag stale and get re-scored — the override ROWS can't capture
-// that kind of change. v2 = fractional fusion ranks + real canonical-space
-// sims (July 2026); the pre-v2 fingerprint had no version prefix, so adding
-// one also invalidates everything scored before versioning existed. v3 = the
-// competitor set became paid-pool + free already-cached candidates from a
-// deeper base list, and base-space overrides compete against the full deep
-// list (July 2026). Note v3 ranks also drift (toward more accurate) as the
-// cache warms — that part is uncapturable here by design.
-// v4 = a model override that SHARES the base model's vectorSpace now folds into
-// the base lane (ranked by real cosine against the base query, no separate
-// fusion lane or re-embedding under its own model) instead of opening a lane
-// (July 2026) — same-space overrides rank differently, so older results re-score.
+// Version of the rank-fusion ALGORITHM (retriever.fuseWithOverrides), folded into
+// the fingerprint below. Bump it whenever fusion semantics change (how ranks are
+// computed/merged, what `score` means) so results scored under the old algorithm
+// flag stale and get re-scored — the override ROWS can't capture that kind of
+// change.
+//   v2  fractional fusion ranks + real canonical-space sims. The pre-v2 fingerprint
+//       had no version prefix, so adding one also invalidated everything scored
+//       before versioning existed.
+//   v3  the competitor set became paid-pool + free already-cached candidates from a
+//       deeper base list, and base-space overrides compete against the full deep
+//       list. Note v3 ranks also drift (toward more accurate) as the cache warms —
+//       uncapturable here by design.
+//   v4  a model override SHARING the base model's vectorSpace now folds into the
+//       base lane instead of opening a fusion lane, so same-space overrides rank
+//       differently and older results re-score.
 export const FUSION_VERSION = 4;
 
 // Fingerprint of the active config's current override state (0022): sha-256

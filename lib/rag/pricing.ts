@@ -1,13 +1,8 @@
-// PRICING + LEVER REGISTRY — the single source of truth the model registry never
-// had (autotuneModelLadder's comment: "no cost field exists in the registry to
-// derive it from"). Everything that costs an API call reads its price here, and
-// the savings ledger classifies every lever through LEVERS below.
+// PRICING + LEVER REGISTRY. Everything that costs an API call reads its price
+// here, and the savings ledger classifies every lever through LEVERS below.
 //
-// See docs/savings-accounting-plan.md. Prices are USD per 1M tokens, seeded from
-// the research doc's cited figures (Sonnet 4.6 $3/$15, Haiku 4.5 $1/$5, voyage
-// lite/4/large $0.02/$0.06/$0.12). An UNKNOWN model costs 0 (with a one-time
-// warn) — we never fabricate a price, so a missing entry under-counts rather
-// than lies. Add models here as they enter the app.
+// Prices are USD per 1M tokens. An UNKNOWN model costs 0 (with a one-time warn) —
+// we never fabricate a price, so a missing entry under-counts rather than lies.
 
 // The offline/interactive surfaces that spend money, for the gross-spend tally.
 export type Surface =
@@ -112,48 +107,39 @@ const LLM_PRICES: Record<string, LlmPrice> = {
 
 // Embedding rates. ONE table, TWO consumers with different needs:
 //
-//   - costEmbed (accounting) always wants a NUMBER. An absent price silently
-//     costs $0 (warnUnknown → 0), which under-counts the ledger forever.
-//   - the Appraise → Models rate card (display) must never quote a figure we
-//     can't stand behind.
+//   - costEmbed (accounting) always wants a NUMBER. An absent price silently costs
+//     $0, which under-counts the ledger forever.
+//   - the Appraise → Models rate card (display) must never quote a figure we can't
+//     stand behind.
 //
-// Hence `verified`: a false entry still COSTS at usdPerM, but the rate card
-// renders "—" for it. Don't collapse these back into a bare number.
+// Hence `verified`: a false entry still COSTS at usdPerM, but the rate card renders
+// "—" for it. Don't collapse these back into a bare number.
 //
-// `freeTierM` is the provider's free allowance in MILLIONS of tokens, per
-// account. It's policy, not an API-readable value, so it goes stale silently —
+// `freeTierM` is the provider's free allowance in MILLIONS of tokens, per account.
+// It's policy, not an API-readable value, so it goes stale silently —
 // RATES_VERIFIED_ON dates it, and the rate card footnotes that date.
 //
-// Verified 2026-08-02 against provider docs: every Voyage figure and Cohere's
-// were already correct. The one exception is text-embedding-3-large, where
-// OpenAI's own two pages disagree — the model card says $0.13/1M, the pricing
-// page says $0.065/1M, with open community reports about the discrepancy. A
-// conflict between primary sources is a stronger reason to withhold a number
-// than a missing one, so it's unverified until OpenAI resolves it. We keep
-// costing at 0.13 (the model card) so accounting stays conservative.
+// The exception is text-embedding-3-large, where OpenAI's own two pages disagree
+// (model card $0.13/1M, pricing page $0.065/1M). A conflict between primary
+// sources is a stronger reason to withhold a number than a missing one, so it's
+// unverified; we keep costing at 0.13 so accounting stays conservative.
 export type EmbedRate = {
   usdPerM: number; // what costEmbed uses — always a number
   verified: boolean; // false ⇒ rate card shows "—"
   freeTierM: number | null; // provider free allowance, millions of tokens
 };
 
-// Re-checked 2026-08-05 while registering the §9.3 models. The Cohere v3 family
-// is the notable addition, and it is unverified for a reason worth recording:
-// cohere.com/pricing NO LONGER PUBLISHES a per-token Embed v3 rate at all. The
-// page now carries only Embed 4 ($0.12/1M text, $0.47/1M image) plus Model Vault
-// capacity pricing (Embed 4 Small $4.00/hr or $2,500/mo; Medium $5.00/hr or
-// $3,250/mo), and the "legacy models" FAQ lists Command-family rates only.
+// The Cohere v3 family is unverified for a reason worth recording:
+// cohere.com/pricing NO LONGER PUBLISHES a per-token Embed v3 rate at all.
 //
-// The $0.10/1M below is not invented, though: Cohere itself published it, and it
-// is still verifiable in the 2026-02-16 Wayback snapshot of that page ("Embed 3
-// … $0.10 / 1M tokens"), which is the last one carrying an Embed 3 card. Cohere
-// never split the rate across the four v3 SKUs — all of them sat under one card.
-// So this is a WITHDRAWN first-party figure, not a third-party guess, which is
-// why it's trustworthy enough to cost at and not trustworthy enough to display.
+// The $0.10/1M below is not invented — Cohere published it, and it is still
+// verifiable in the 2026-02-16 Wayback snapshot of that page, the last one
+// carrying an Embed 3 card. Cohere never split the rate across the four v3 SKUs.
+// So this is a WITHDRAWN first-party figure, not a third-party guess: trustworthy
+// enough to cost at, not trustworthy enough to display.
 //
-// The v3 models are all still served: docs.cohere.com/docs/models lists them
-// with no deprecation flag, and the deprecations page retires only the v2.0
-// embed models (April 2026). Withdrawn price, live model.
+// The v3 models are all still served, with no deprecation flag. Withdrawn price,
+// live model.
 
 // The as-of date for every figure below, rendered by the rate card's footnote.
 export const RATES_VERIFIED_ON = "2026-08-05";

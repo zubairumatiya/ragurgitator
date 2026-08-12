@@ -1,17 +1,17 @@
 // LIVE Azure Key Vault check — the half of Phase 0 that envelope.test.ts cannot
-// cover. Those tests run against an in-memory fake wrapper so `npm test` needs
-// no credentials, no network and no vault; this script is the counterpart that
-// proves the REAL adapter works: RBAC is granted, the key resolves, wrap/unwrap
-// round-trips, and the DEK cache actually elides a second vault call.
+// cover. Those tests run against an in-memory fake wrapper so `npm test` needs no
+// credentials, no network and no vault; this script proves the REAL adapter works:
+// RBAC is granted, the key resolves, wrap/unwrap round-trips, and the DEK cache
+// actually elides a second vault call.
 //
-// Deliberately NOT a *.test.ts file — it would break `npm test` for anyone
-// without Azure configured. Run it by hand after provisioning or after changing
-// vault config / roles:
+// Deliberately NOT a *.test.ts file — it would break `npm test` for anyone without
+// Azure configured. Run it by hand after provisioning or after changing vault config
+// / roles:
 //
 //   npm run vault:check
 //
-// Prints no secret material: the probe value is a synthetic string, and even
-// that is only ever compared, never logged.
+// Prints no secret material: the probe value is synthetic, and even that is only
+// ever compared, never logged.
 import { KeyClient } from "@azure/keyvault-keys";
 import { DefaultAzureCredential } from "@azure/identity";
 

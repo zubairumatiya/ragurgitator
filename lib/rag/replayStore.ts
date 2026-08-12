@@ -1,26 +1,25 @@
-// OFFLINE REPLAY (migration 0043) — real full-corpus retrieval metrics for every
-// candidate embedding model, for $0.
+// OFFLINE REPLAY (0043) — real full-corpus retrieval metrics for every candidate
+// embedding model, for $0.
 //
-// THE IDEA: every vector we need is already banked. embedding_cache (0020) is
+// THE IDEA: every vector we need is already banked. embedding_cache is
 // content-addressed by (model, input_kind, sha256(text)), and autotune, the
 // per-chunk trials and the key-model sweep have between them embedded the whole
-// corpus AND the eval questions under every Voyage model. So we can rank the
-// full corpus for each model, score it against the stored gold labels, and never
-// call a provider.
+// corpus AND the eval questions under every Voyage model. So we can rank the full
+// corpus for each model, score it against the stored gold labels, and never call a
+// provider.
 //
 // WHY IT BEATS eval_model_trials: a trial re-ranks inside a candidate pool that
 // contains the correct chunk by construction, so every model scores ~1.000 and
-// nothing is comparable. Here every model ranks the SAME full corpus, on the
-// SAME questions, by the SAME exact-cosine scan. Only the model changes.
+// nothing is comparable. Here every model ranks the SAME full corpus, on the SAME
+// questions, by the SAME exact-cosine scan. Only the model changes.
 //
 // HONEST LIMITS, which the UI must carry:
-//   - Exact scan, not HNSW. Live retrieval uses an ANN index; this brute-forces
-//     cosine over every chunk. So these are best-case numbers and won't exactly
-//     reproduce a stored eval_runs row — but the method is identical across
-//     models, which is what makes the COMPARISON fair.
+//   - Exact scan, not HNSW. So these are best-case numbers and won't exactly
+//     reproduce a stored eval_runs row — but the method is identical across models,
+//     which is what makes the COMPARISON fair.
 //   - Chunking is held at the config's own. A model that would prefer different
 //     chunk sizes is being judged on someone else's chunking.
-//   - A model is scored only at 100% corpus coverage (see scoreModel).
+//   - A model is scored only at 100% corpus coverage.
 import { createHash } from "node:crypto";
 
 import { activeUserId } from "@/lib/auth/userScope";
@@ -177,15 +176,13 @@ function idealFor(
 //
 // The document-vector COUNT is the coverage proxy: it changes whenever any model
 // gains a cached chunk vector, which is the only way an under-covered model can
-// become scorable. It over-invalidates (an unrelated ingest bumps it too) — see
-// 0043's header for why that trade is deliberate.
+// become scorable. It over-invalidates (an unrelated ingest bumps it too), a trade
+// 0043 accepted deliberately.
 //
 // Scoped to the user's own rows since 0050. Unqualified, this count was the one
 // place that broke embedding_cache's implicit "every lookup brings its own
 // text_hash" invariant, and it was a functional bug on top of a tenancy one:
 // ANOTHER ACCOUNT'S INGEST bumped the count and threw away this user's replay.
-// Deliberate over-invalidation within one tenant is the trade 0043 accepted;
-// across tenants it was never anything but noise.
 async function fingerprint(configId: string, corpus: Corpus): Promise<string> {
   const [{ count }] = await sql<{ count: string }[]>`
     select count(*) as count from embedding_cache

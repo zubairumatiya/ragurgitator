@@ -17,12 +17,12 @@ export const normalizeQuestion = (q: string): string =>
 // Which banked questions a chunk should actually receive.
 //
 // `banked` — everything the cache holds for this chunk's exact text, at any
-// difficulty. `existing` — every question text already labeled to this chunk
-// under the active config, whatever its source.
+// difficulty. `existing` — every question text already labeled to this chunk under
+// the active config, whatever its source.
 //
-// Drops anything the chunk already shows, and anything repeated WITHIN `banked`
-// (the same question can sit in two slots if two configs generated it
-// independently). Order is preserved, so the caller lands them in bank order.
+// Drops anything the chunk already shows, and anything repeated WITHIN `banked` (the
+// same question can sit in two slots if two configs generated it independently).
+// Order is preserved, so the caller lands them in bank order.
 //
 // Text is the identity here, not the slot: a chunk's existing questions may be
 // hand-written, generated before the cache existed, or reused already, so a

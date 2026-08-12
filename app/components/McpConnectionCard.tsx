@@ -1,22 +1,20 @@
 // UI: connect an AI agent to this account over MCP.
 //
-// Three things, in the order a user needs them: the switch that turns the
-// endpoint on, the snippet they paste into their agent, and the list of what is
-// currently connected so they can cut any of it off.
+// Three things, in the order a user needs them: the switch that turns the endpoint
+// on, the snippet they paste into their agent, and the list of what is currently
+// connected so they can cut any of it off.
 //
-// THE SNIPPET CONTAINS NO TOKEN, and that is the feature rather than an
-// omission. The agent discovers the authorization server from the endpoint
-// itself, a browser opens to our consent page, and the credential is minted
-// after a human clicks Approve — so there is never a secret sitting in a config
-// file to leak, and nothing here is sensitive to display. If you find yourself
-// adding a "copy your API key" field to this card, the design has regressed.
+// THE SNIPPET CONTAINS NO TOKEN, and that is the feature rather than an omission.
+// The agent discovers the authorization server from the endpoint itself, a browser
+// opens to our consent page, and the credential is minted after a human clicks
+// Approve — so there is never a secret sitting in a config file to leak. If you
+// find yourself adding a "copy your API key" field to this card, the design has
+// regressed.
 //
 // FIRST CLIPBOARD USE IN THE CODEBASE. navigator.clipboard is unavailable on
 // insecure origins and can be permission-denied, so the write is wrapped and a
 // failure leaves the snippet visible and selectable — the copy button is a
-// convenience over text that is already on screen, never the only way to get it.
-// BackToConfigs.tsx is the precedent for a browser API behind graceful
-// degradation.
+// convenience over text already on screen, never the only way to get it.
 "use client";
 
 import { useActionState, useEffect, useState } from "react";

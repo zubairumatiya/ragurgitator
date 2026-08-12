@@ -2,29 +2,26 @@
 // authorization-server metadata.
 //
 // Shared between the MCP route (which advertises the metadata URL in its 401
-// challenge) and the two discovery routes (which serve the documents). They have
-// to agree exactly: a client reads the URL out of the challenge and fetches it,
-// so a mismatch is a flow that dead-ends with a correct-looking 401.
+// challenge) and the two discovery routes (which serve the documents). They have to
+// agree exactly: a client reads the URL out of the challenge and fetches it, so a
+// mismatch is a flow that dead-ends with a correct-looking 401.
 //
-// RESOURCE IDENTIFIER. Under RFC 9728 the resource server is identified by its
-// URL, and the well-known path is derived by inserting
-// `/.well-known/oauth-protected-resource` ahead of the path — so /api/mcp is
-// published at /.well-known/oauth-protected-resource/api/mcp. That derivation is
-// the SDK's; we don't hand-write either string, because writing them twice is
-// how they drift apart.
+// RESOURCE IDENTIFIER. Under RFC 9728 the resource server is identified by its URL,
+// and the well-known path is derived by inserting
+// `/.well-known/oauth-protected-resource` ahead of the path. That derivation is the
+// SDK's; we don't hand-write either string, because writing them twice is how they
+// drift apart.
 //
 // WHY WE FETCH SUPABASE'S METADATA RATHER THAN HARDCODING ITS ENDPOINTS. The
-// protected-resource document only needs the ISSUER, but the SDK's builder takes
-// a whole RFC 8414 metadata object, and inventing plausible-looking
-// authorization_endpoint / token_endpoint values to satisfy the type would be
-// writing down guesses about somebody else's server. Supabase publishes the real
-// document; we read it and cache it. That also makes the authorization-server
-// pass-through route free, since it is the same document.
+// protected-resource document only needs the ISSUER, but the SDK's builder takes a
+// whole RFC 8414 metadata object, and inventing plausible-looking endpoint values
+// to satisfy the type would be writing down guesses about somebody else's server.
+// Supabase publishes the real document; we read it and cache it. That also makes
+// the authorization-server pass-through route free, since it is the same document.
 //
-// The cache is a module-scope promise, so concurrent cold requests share one
-// fetch and a FAILED fetch is discarded rather than memoised — a transient
-// network blip during boot must not poison discovery for the life of the
-// process.
+// The cache is a module-scope promise, so concurrent cold requests share one fetch
+// and a FAILED fetch is discarded rather than memoised — a transient network blip
+// during boot must not poison discovery for the life of the process.
 import { type OAuthMetadata, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/server";
 
 // Falls back to the dev port rather than throwing, matching app/auth/actions.ts.

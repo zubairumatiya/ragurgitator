@@ -1,13 +1,11 @@
-// UI: corpus multi-select with duplicate detection (Client Component), shared
-// by the create-config dialog and the corpora page's create-from form.
+// UI: corpus multi-select with duplicate detection (Client Component), shared by the
+// create-config dialog and the corpora page's create-from form.
 //
-// Renders a selectable row per corpus (tint + checkmark, no checkboxes); as
-// corpora are selected it lazily fetches each
-// one's documents (GET /api/corpora/[id]) and reports the selection's de-duped
-// union: the same document in several corpora counts once, and distinct
-// document rows with the SAME content hash (the same file uploaded twice) are
-// collapsed — surfaced as the yellow "duplicate docs detected" warning, with
-// the underlined phrase carrying a hover tooltip that lists the dupes.
+// Renders a selectable row per corpus; as corpora are selected it lazily fetches
+// each one's documents and reports the selection's de-duped union: the same document
+// in several corpora counts once, and distinct document rows with the SAME content
+// hash (the same file uploaded twice) are collapsed — surfaced as the "duplicate
+// docs detected" warning, whose underlined phrase carries a tooltip listing them.
 "use client";
 
 import { useEffect, useMemo, useState } from "react";

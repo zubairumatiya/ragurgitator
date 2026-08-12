@@ -1,15 +1,11 @@
-// UI: the cross-config tab bar (Client Component) that sits above every config
-// page — the top row in the §6 shell:
+// UI: the cross-config tab bar (Client Component) that sits above every config page:
 //
 //   [ Resume-v1 × ] [ Resume-v2 × ] [ + ] [ ⌄ saved ]        [ 📊 Appraise ]
 //
-// Open configs are tabs (active highlighted); each has a small ⋯ menu for
-// Duplicate / Rename / Close. "+" creates a new empty config and routes to it.
-// "⌄ saved" reopens a closed config. "📊 Appraise" is a pinned, cross-config view
-// (a stub for now). The initial lists come from the server layout as props; after
-// any mutation we router.refresh() to re-pull them, and route as needed.
-//
-// Styling mirrors Nav.tsx / EvalDashboard.tsx (zinc palette, rounded, subtle).
+// Open configs are tabs (active highlighted); each has a small ⋯ menu for Duplicate /
+// Rename / Close. "+" creates a new empty config and routes to it. "⌄ saved" reopens
+// a closed config. The initial lists come from the server layout as props; after any
+// mutation we router.refresh() to re-pull them.
 "use client";
 
 import Link from "next/link";

@@ -1,33 +1,29 @@
 // THE DIRTY SCREEN — the pure decision core of eval.rescoreAffectedQuestions.
 //
 // After an autotune run, only the chunks whose override state net-changed can
-// affect any stored eval result; every other chunk's vectors are untouched.
-// Given one question's stored result (scored under the RUN-START override
-// state) and, per changed chunk, two precomputed similarities, this decides
-// whether the stored result is PROVEN identical under the run-end state
-// ('clean' → re-stamp its fingerprint) or must re-run retrieval ('dirty').
+// affect any stored eval result. Given one question's stored result (scored under
+// the RUN-START override state) and, per changed chunk, two precomputed
+// similarities, this decides whether the stored result is PROVEN identical under
+// the run-end state ('clean' → re-stamp its fingerprint) or must re-run retrieval.
 //
 // A changed chunk can ripple into a stored result in exactly three ways:
-//   1. It was IN the stored retrieved list — its move (or its pieces'
-//      removal) shifts the stored ranks directly.
-//   2. Its NEW pieces enter the merged top-depth — possible only if their
-//      best sim reaches the depth-th competitor sim in the SAME model space
-//      (cutoffs.models[m], stored with the result — 0028).
-//   3. Its base-lane membership changes inside the stored deep list (first
-//      override = leaves the base ANN; cleared = re-enters), perturbing the
-//      competitor pools every override space ranks against. Bounded by
-//      cutoffs.deep, the sim of the deep list's last candidate.
+//   1. It was IN the stored retrieved list — its move (or its pieces' removal)
+//      shifts the stored ranks directly.
+//   2. Its NEW pieces enter the merged top-depth — possible only if their best sim
+//      reaches the depth-th competitor sim in the SAME model space (0028).
+//   3. Its base-lane membership changes inside the stored deep list (first override
+//      = leaves the base ANN; cleared = re-enters), perturbing the competitor pools
+//      every override space ranks against. Bounded by cutoffs.deep.
 //
 // Conservative by construction: any missing input (no cutoffs, unknown sim,
-// different scoring depth, a result from any state other than run-start)
-// means 'dirty' — the screen never guesses. Comparisons use ≥ so ties count
-// as dirty too.
+// different scoring depth, a result from any state other than run-start) means
+// 'dirty' — the screen never guesses. Comparisons use ≥ so ties count as dirty too.
 //
-// Known approximation (accepted, documented): when a chunk's base-lane
-// membership changes WITHIN the deep list but below the top-depth, the swap
-// at the bottom of the competitor pool can shift another overridden chunk's
-// fractional rank by ±1 — screen 3 marks all such questions dirty rather
-// than reasoning about the swapped competitor, so the screen stays sound.
+// Known approximation (accepted): when a chunk's base-lane membership changes
+// WITHIN the deep list but below the top-depth, the swap at the bottom of the
+// competitor pool can shift another overridden chunk's fractional rank by ±1 —
+// screen 3 marks all such questions dirty rather than reasoning about the swapped
+// competitor, so the screen stays sound.
 import type { ScreenCutoffs } from "@/lib/rag/retriever";
 
 // One net-changed chunk, with the two sims the screens compare for ONE

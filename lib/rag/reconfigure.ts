@@ -1,22 +1,20 @@
 // IN-PLACE CONFIG CHANGE (bulk actions → change base model / chunk size).
 //
-// Unlike the create dialog (which spawns a NEW config), this mutates the
-// CURRENT config: update its settings row, re-chunk + re-embed its documents
-// under the new settings, and REMAP the eval labels — each question's
-// ground-truth chunk is re-pointed at the new chunk that best overlaps its old
-// chunk's text, so the eval set survives the change (scores go stale until the
-// next re-score).
+// Unlike the create dialog (which spawns a NEW config), this mutates the CURRENT
+// config: update its settings row, re-chunk + re-embed its documents under the new
+// settings, and REMAP the eval labels — each question's ground-truth chunk is
+// re-pointed at the new chunk that best overlaps its old chunk's text, so the eval
+// set survives the change (scores go stale until the next re-score).
 //
-// The remap works on character spans: a chunk's text is a contiguous slice of
-// the stored document content, so old and new chunks can both be located with
-// a sequential indexOf sweep and matched by maximal overlap. Documents without
-// stored raw text (pre-0010 uploads) can't be re-embedded — they're left under
-// the previous settings and reported.
+// The remap works on character spans: a chunk's text is a contiguous slice of the
+// stored document content, so old and new chunks can both be located with a
+// sequential indexOf sweep and matched by maximal overlap. Documents without stored
+// raw text (pre-0010 uploads) can't be re-embedded — they're left under the previous
+// settings and reported.
 //
-// Also supports the DOCUMENT-scoped variant: with `documentId` set, nothing on
-// the config row changes — instead every chunk of that document gets a
-// per-chunk override (model / size / size+model), the same mechanism the
-// autotuner and the per-chunk trial use.
+// Also supports the DOCUMENT-scoped variant: with `documentId` set, nothing on the
+// config row changes — instead every chunk of that document gets a per-chunk
+// override, the same mechanism the autotuner and the per-chunk trial use.
 import { sql } from "@/lib/db";
 import { resolveConfig, withConfig, type ResolvedConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";

@@ -1,16 +1,14 @@
 // API route: GET/POST /api/semantic-cache/thresholds
 //
 // GET  — per vector-space calibrated threshold (or the default) plus cache and
-//        shadow-log stats, across every config. Backs the Thresholds panel on
-//        Appraise → Semantic caching.
-// POST — apply/set a space's threshold `{space, threshold, sampleSize?, notes?}`
-//        (the "Apply recommended" / "Apply calibrated" buttons).
+//        shadow-log stats, across every config.
+// POST — apply/set a space's threshold `{space, threshold, sampleSize?, notes?}`.
 //
-// Not config-scoped: a threshold is keyed by vector-space, shared by every
-// config of YOURS that uses that embedding model. Since 0050 the table is
-// primary-keyed (user_id, space), so it stops there — one account's calibration
-// no longer governs another's cache, which mattered because a threshold set too
-// low makes the cache serve WRONG ANSWERS.
+// Not config-scoped: a threshold is keyed by vector-space, shared by every config of
+// YOURS that uses that embedding model. Since 0050 the table is primary-keyed
+// (user_id, space), so it stops there — one account's calibration no longer governs
+// another's cache, which mattered because a threshold set too low makes the cache
+// serve WRONG ANSWERS.
 import { z } from "zod";
 
 import { withRequestUser } from "@/lib/http/configScope";

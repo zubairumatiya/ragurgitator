@@ -211,16 +211,15 @@ function summaryFromCandidate(
   };
 }
 
-// --- Incremental top-up (migration 0033) -----------------------------------
-// Assign freshly ingested chunks to their nearest EXISTING centroid in every
-// saved preset of the active config, so their questions become gradeable on
-// /eval right away instead of being skipped until someone re-runs clustering.
+// Incremental top-up (0033). Assign freshly ingested chunks to their nearest
+// EXISTING centroid in every saved preset of the active config, so their questions
+// become gradeable on /eval right away instead of being skipped until someone
+// re-runs clustering.
 //
-// Deliberately NOT called when re-chunking a config in place (lib/rag/
-// reconfigure.ts): that mints new ids for the WHOLE corpus, so topping up would
-// paper over a preset whose centroids describe a chunking that no longer
-// exists. Leaving those runs untouched lets the existing missing-documents flag
-// fire on every document, which is the honest signal to re-fit.
+// Deliberately NOT called when re-chunking a config in place: that mints new ids for
+// the WHOLE corpus, so topping up would paper over a preset whose centroids describe
+// a chunking that no longer exists. Leaving those runs untouched lets the existing
+// missing-documents flag fire on every document, which is the honest signal to re-fit.
 //
 // Idempotent: the (cluster_run_id, chunk_id) primary key makes a repeat call a
 // no-op, so a retried ingest can't double-count drift.

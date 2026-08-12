@@ -1,28 +1,22 @@
 // Appraise → Semantic caching: collision-floor calibration. Pick a config, compute
-// the eval-bank collision floor for its vector-space (POST /collision-floor,
-// config-scoped via ?configId=), and review the safe band. Pure arithmetic
-// server-side — no LLM calls, available immediately.
+// the eval-bank collision floor for its vector-space, and review the safe band.
+// Pure arithmetic server-side — no LLM calls, available immediately, which is why
+// it's the first panel and where a threshold starts.
 //
-// First panel on the page: it's free (no LLM calls) and available as soon as a
-// config has labeled questions, so it's where a threshold starts.
+// The last report per config is SAVED (0037), so this panel loads it on mount and
+// whenever the config picker changes instead of re-running a sweep whose inputs
+// haven't moved. A saved report is displayed and broadcast exactly like a fresh one
+// — the only difference is the "Computed …" stamp and a stale hint when the
+// config's labeled-question count has moved since.
 //
-// The last report per config is SAVED (migration 0037), so this panel loads it on
-// mount and whenever the config picker changes instead of making you re-run a
-// sweep whose inputs haven't moved. A saved report is displayed and broadcast
-// exactly like a fresh one — the only difference is the "Computed …" stamp and,
-// when the config's labeled-question count has moved since, a stale hint.
+// The FIRST config's saved report arrives as a prop, read during the page's server
+// render. It used to be fetched here, behind a second fetch for the config list —
+// two round trips deep, so opening the tab painted an empty panel and then popped
+// the numbers in.
 //
-// The FIRST config's saved report arrives as a prop, read during the page's
-// server render (see app/appraise/semantic-cache/page.tsx). It used to be
-// fetched here, behind a second fetch for the config list — two round trips
-// deep, so opening the tab painted an empty panel and then popped the numbers
-// in. Now the first paint is complete and the client only fetches when the
-// picker moves to a config the server didn't read.
-//
-// READ-ONLY as far as thresholds go: this panel writes nothing that is served
-// from (the saved report is a display cache). The recommendation is broadcast to
-// ApplyThresholdPanel, which sits in this panel's own footer (the `action` slot)
-// and owns every write.
+// READ-ONLY as far as thresholds go: the saved report is a display cache. The
+// recommendation is broadcast to ApplyThresholdPanel, which sits in this panel's
+// footer and owns every write.
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -324,15 +318,14 @@ export function CollisionFloorPanel({
 }
 
 // The band on a line. The three tiles above give the numbers; this gives the one
-// thing three numbers side by side don't — how much ROOM there is between the
-// floor and the nearest same-answer pair, and where τ sits inside it. A wide band
-// means the threshold is a comfortable choice; a hair-thin one means the eval
-// bank barely separates same from different, and τ is a coin-flip.
+// thing three numbers side by side don't — how much ROOM there is between the floor
+// and the nearest same-answer pair, and where τ sits inside it. A wide band means
+// the threshold is a comfortable choice; a hair-thin one means the eval bank barely
+// separates same from different, and τ is a coin-flip.
 //
-// Positional, so it's HTML rather than SVG: percentage offsets on a track keep
-// the labels as real text at real sizes (an SVG stretched to the container's
-// width distorts any text in it), and there's no viewBox to keep in sync.
-// Emphasis form — everything context-gray, one accent for τ.
+// Positional, so it's HTML rather than SVG: percentage offsets on a track keep the
+// labels as real text at real sizes (an SVG stretched to the container's width
+// distorts any text in it), and there's no viewBox to keep in sync.
 function SafeBand({
   floor,
   recommended,

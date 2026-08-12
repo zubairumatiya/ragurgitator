@@ -1,17 +1,15 @@
 // API route: GET/POST /api/semantic-cache/pairs
 //
-// The GENERATED half of the cache-key eval pair set (migration 0040, Phase 2 of
-// docs/semantic-cache-key-model-plan.md).
+// The GENERATED half of the cache-key eval pair set (0040).
 //
-// GET  — counts: how many pairs exist, the same/different split, and how many
-//        eval questions still have none (so the panel can say what a run would
-//        cover before it's clicked).
-// POST — generate pairs for questions that have none. Honours this config's
-//        Batch API preference for the `cache_pair_generation` job:
-//          • "batch"    → submit the whole gap to the Anthropic batch API at
-//                         −50% and return the job; results land on a later poll.
+// GET  — counts: how many pairs exist, the same/different split, and how many eval
+//        questions still have none, so the panel can say what a run would cover.
+// POST — generate pairs for questions that have none. Honours this config's Batch
+//        API preference for the `cache_pair_generation` job:
+//          • "batch"    → submit the whole gap at −50% and return the job; results
+//                         land on a later poll.
 //          • "standard" → run a bounded inline pass now and return the counts.
-//        Same prompt, parse, and labels either way (semanticCachePairs).
+//        Same prompt, parse, and labels either way.
 //
 // Config-scoped: the gap query is scoped to the active config's eval bank, even
 // though the pair table itself is global (a pair is a property of two question

@@ -5,23 +5,21 @@
 // object, so an agent can reason about a config without its user copying numbers
 // out of four different pages by hand.
 //
-// It lives here rather than in app/api/mcp/route.ts because assembly and
-// transport are separate concerns and only one of them is interesting. The route
-// is auth plus wiring; this is the part with the domain in it.
+// It lives here rather than in the route because assembly and transport are
+// separate concerns: the route is auth plus wiring, this is the part with the
+// domain in it.
 //
 // WHAT IS DELIBERATELY NOT IN THE PAYLOAD: chunk text, document contents, and
 // embedding vectors. The tool describes CONFIGURATION, not corpus. That line is
-// what makes a read-only grant defensible to the person approving it — "your
-// agent can see how this is set up and what it cost" is a very different consent
-// question from "your agent can read your documents", and the second one is not
-// being asked here. Adding a corpus-reading tool later is fine; quietly widening
-// this one is not.
+// what makes a read-only grant defensible to the person approving it — "your agent
+// can see how this is set up and what it cost" is a very different consent question
+// from "your agent can read your documents". Adding a corpus-reading tool later is
+// fine; quietly widening this one is not.
 //
-// EVERY NUMBER COMES FROM AN EXISTING STORE FUNCTION. That is a requirement, not
-// a convenience: a second implementation of "what did this config save" would
-// drift from the dashboard within a month and there would be no way to tell
-// which one was lying. The single exception is the override→document join at the
-// bottom, which has no existing caller.
+// EVERY NUMBER COMES FROM AN EXISTING STORE FUNCTION. That is a requirement, not a
+// convenience: a second implementation of "what did this config save" would drift
+// from the dashboard within a month with no way to tell which one was lying. The
+// single exception is the override→document join at the bottom.
 import "server-only";
 
 import { z } from "zod";
@@ -34,22 +32,19 @@ import { type ChunkOverride, listOverrides } from "@/lib/rag/overrideStore";
 import { getCostsReport } from "@/lib/rag/savingsStore";
 import { listDocuments } from "@/lib/rag/vectorStore";
 
-// --- the two shapes the tool can return ------------------------------------
+// The two shapes the tool can return. Declared in zod and inferred into TS rather
+// than the other way round, because this doubles as the tool's advertised
+// `outputSchema` and two hand-synced definitions of one payload is a bug waiting
+// for a quiet afternoon.
 //
-// Declared in zod and inferred into TS rather than the other way round, because
-// this doubles as the tool's advertised `outputSchema` (lib/mcp/server.ts) and
-// two hand-synced definitions of one payload is a bug waiting for a quiet
-// afternoon.
-//
-// WHY EVERY TOP-LEVEL KEY IS OPTIONAL, which otherwise looks like laziness: the
-// tool answers in two modes — a picker when called with no id, a full summary
-// when called with one — and MCP requires an advertised outputSchema to have an
-// OBJECT root. A z.union would be an `anyOf` root, which additionally changes
-// the wire shape for 2025-era clients (the SDK wraps non-object-rooted results
-// as `{result:…}`). So the schema is one object carrying both branches, and the
-// tool description states which fields come back when. The alternative — no
-// outputSchema at all — still delivers structuredContent, but gives clients
-// nothing to validate against or to show a user.
+// WHY EVERY TOP-LEVEL KEY IS OPTIONAL: the tool answers in two modes — a picker
+// when called with no id, a full summary when called with one — and MCP requires an
+// advertised outputSchema to have an OBJECT root. A z.union would be an `anyOf`
+// root, which additionally changes the wire shape for 2025-era clients (the SDK
+// wraps non-object-rooted results as `{result:…}`). So the schema is one object
+// carrying both branches, and the tool description states which fields come back
+// when. The alternative — no outputSchema at all — still delivers
+// structuredContent, but gives clients nothing to validate against.
 
 const PickerShape = {
   configs: z

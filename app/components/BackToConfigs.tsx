@@ -2,16 +2,13 @@
 // Corpora), which sit outside /c/[configId] and so have no tab bar of their own.
 //
 // The naive href was "/", but / redirects to the FIRST OPEN config, so leaving a
-// config to check a metric and coming back dumped you on someone else's tab.
-// Instead we remember where you were: RememberConfigRoute (rendered by the
-// config layout) writes every /c/… pathname to sessionStorage, and the link
-// reads it back. sessionStorage — not localStorage — so a second window keeps
-// its own idea of "where I was", and a fresh session starts clean.
+// config to check a metric and coming back dumped you on someone else's tab. Instead
+// we remember where you were: RememberConfigRoute writes every /c/… pathname to
+// sessionStorage, and the link reads it back. sessionStorage — not localStorage — so
+// a second window keeps its own idea of "where I was".
 //
 // SSR-safe by construction: sessionStorage is read through useSyncExternalStore,
-// whose server snapshot is "/" — the server never touches storage, and the href
-// upgrades on hydration. Worst case the user clicks in the ~1 frame before
-// hydration and gets the old behaviour.
+// whose server snapshot is "/", and the href upgrades on hydration.
 "use client";
 
 import Link from "next/link";

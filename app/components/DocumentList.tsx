@@ -1,17 +1,14 @@
-// UI: lists documents currently in the (pgvector) store, with per-document
-// delete.
+// UI: lists documents currently in the (pgvector) store, with per-document delete.
 //
-// Fetches on mount and re-fetches when FileUpload dispatches the
-// `rag:ingested` window event after a successful upload, or after a delete
-// here.
+// Fetches on mount and re-fetches when FileUpload dispatches the `rag:ingested`
+// window event after a successful upload, or after a delete here.
 //
-// Remove is scoped to the ACTIVE CONFIG — this config's chunks for the document
-// and the eval LABELS that point at them, and nothing else. The document stays
-// in the user's library, every other config keeps its own copy, and the eval
-// QUESTIONS stay too: those are per-document by design (0002), so one question
-// bank serves every config. That's what the list being per-config implies, and
-// the confirm text spells it out because a "Delete" next to a file name reads as
-// "delete the file" — which is why this button says Remove.
+// Remove is scoped to the ACTIVE CONFIG — this config's chunks for the document and
+// the eval LABELS that point at them, and nothing else. The document stays in the
+// user's library, every other config keeps its own copy, and the eval QUESTIONS stay
+// too: those are per-document by design (0002), so one question bank serves every
+// config. The confirm text spells it out because a "Delete" next to a file name
+// reads as "delete the file" — which is why this button says Remove.
 "use client";
 
 import { useEffect, useState } from "react";

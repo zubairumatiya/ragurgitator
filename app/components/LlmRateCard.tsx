@@ -1,14 +1,13 @@
 // Appraise → Models, section B: what each ANSWER-GENERATION model costs.
 //
 // The sibling of ModelRateCard, and the same shape — a Server Component with no
-// client state, reading the registry and the price table rather than the DB, so
-// it says something useful before you've run anything.
+// client state, reading the registry and the price table rather than the DB, so it
+// says something useful before you've run anything.
 //
-// Why it exists at all: LLM_PRICES has been driving the spend ledger since 0034
-// but was never rendered anywhere. You could see what a model HAD cost you on
-// the Costs tab, but not what one WOULD cost before choosing it — and the config
-// Settings LLM picker now offers eleven models across two providers. Pricing you
-// can only read after the fact isn't much help at the moment of the decision.
+// Why it exists at all: LLM_PRICES has driven the spend ledger since 0034 but was
+// never rendered anywhere. You could see what a model HAD cost you on the Costs tab,
+// but not what one WOULD cost before choosing it — and the Settings LLM picker now
+// offers eleven models across two providers.
 import { InfoDot } from "@/app/components/InfoDot";
 import type { LlmRateCardRow } from "@/lib/rag/modelAppraisal";
 import { RATES_VERIFIED_ON } from "@/lib/rag/pricing";

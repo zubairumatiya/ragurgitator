@@ -1,19 +1,17 @@
 // API route: POST /api/eval/cancel
 //
-// Asks an in-flight NDJSON run to stop. Body: { runId } — the id the run
-// announced on its first line (`run-started`). Not config-scoped: a run id
-// already names one run belonging to one user, and the run itself is streaming
-// under whatever config it started in.
+// Asks an in-flight NDJSON run to stop. Body: { runId } — the id the run announced
+// on its first line. Not config-scoped: a run id already names one run belonging to
+// one user.
 //
 // COOPERATIVE, AND PARTIAL WORK IS KEPT. This flips a flag; the run stops at its
-// next checkpoint, which for an in-flight LLM call is when that call returns.
-// The run then commits what it already generated rather than throwing, because
-// the whole stream is one transaction — see lib/http/cancelRegistry.ts.
+// next checkpoint, which for an in-flight LLM call is when that call returns. The
+// run then commits what it already generated rather than throwing, because the whole
+// stream is one transaction.
 //
-// `found: false` means the id is unknown: the run finished, never existed, or
-// belongs to another user (deliberately indistinguishable, so this cannot probe
-// for other people's run ids). The UI treats it as success — either way, that
-// run is not going to spend anything more on this instance.
+// `found: false` means the id is unknown: the run finished, never existed, or belongs
+// to another user (deliberately indistinguishable, so this cannot probe for other
+// people's run ids). The UI treats it as success.
 import { z } from "zod";
 
 import { activeUserId } from "@/lib/auth/userScope";

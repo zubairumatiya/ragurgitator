@@ -1,30 +1,26 @@
-// One-shot (idempotent, re-runnable) backfill of embedding_cache (0020) from
-// every vector the app has already paid for:
+// One-shot (idempotent, re-runnable) backfill of embedding_cache (0020) from every
+// vector the app has already paid for:
 //
-//   1. Each ingestable model's chunks_<model>_<dim> table — every config that
-//      ever ingested banked (text, vector) pairs under its base model.
+//   1. Each ingestable model's chunks_<model>_<dim> table.
 //   2. Override pieces with their own text (size / size+model re-splits).
 //   3. Whole-chunk model overrides (text NULL = the source chunk's full text),
 //      joined back to the owning config's base chunks table for the text.
 //
 // Everything runs server-side (insert … select with sha256() and the pgvector
-// ::real[] cast); no vectors cross the wire. `on conflict do nothing` makes
-// re-runs and duplicate texts free.
+// ::real[] cast); no vectors cross the wire. `on conflict do nothing` makes re-runs
+// and duplicate texts free.
 //
-// OWNERSHIP (0050): embedding_cache is per-user, so every insert derives its
-// user_id from the vector's own provenance rather than taking one. That is why
-// this script needs no SCRIPT_USER_ID — each source row already reaches an owner
-// (chunks_* → document_embeddings → configs.user_id; config_chunk_overrides →
-// configs.user_id), and deriving is strictly better than an operator-supplied
+// OWNERSHIP (0050): embedding_cache is per-user, so every insert derives its user_id
+// from the vector's own provenance rather than taking one. That is why this script
+// needs no SCRIPT_USER_ID — deriving is strictly better than an operator-supplied
 // id, which would mis-attribute every row on a multi-tenant database.
 //
 //   Usage: DATABASE_URL=… npx tsx scripts/backfill-embedding-cache.ts
-// ---------------------------------------------------------------------------
-// privilegedSql, not sql: this script is deliberately cross-tenant — it derives
-// each row's owner from the vector's own provenance rather than running as one
-// user — so it is the third and last legitimate caller of the bypassing pool.
-// The restricted handle would (correctly) return nothing here, since a script
-// has no request scope and therefore no app.user_id for 0051's policies to read.
+//
+// privilegedSql, not sql: this script is deliberately cross-tenant, so it is the
+// third and last legitimate caller of the bypassing pool. The restricted handle
+// would (correctly) return nothing here, since a script has no request scope and
+// therefore no app.user_id for 0051's policies to read.
 import { privilegedSql as sql } from "../lib/db";
 import { EMBEDDING_MODELS } from "../lib/rag/embeddingModels";
 

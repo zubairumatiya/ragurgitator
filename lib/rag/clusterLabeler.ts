@@ -1,13 +1,13 @@
-// CLUSTER LABELING — the "Claude-naming step" referenced in
-// migrations/0008_clusters.sql (clusters.label is null until this runs).
+// CLUSTER LABELING — the "Claude-naming step" (clusters.label is null until this
+// runs).
 //
-// Turns a run's buckets into short, human-readable topic labels. Pure I/O around
-// one Claude call: the caller supplies each bucket's representative snippets (see
-// clusterStore.representativeChunksForRun) and we return one label per ordinal.
-// Batching every bucket into a single call lets the model see them together and
-// produce distinct, non-overlapping labels — and is far cheaper than k calls.
-// (Very large k makes for a big prompt; batch the buckets if that becomes a
-// problem.) Reuses config.llmModel so the label model tracks answer generation.
+// Turns a run's buckets into short, human-readable topic labels. Pure I/O around one
+// Claude call: the caller supplies each bucket's representative snippets and we
+// return one label per ordinal. Batching every bucket into a single call lets the
+// model see them together and produce distinct, non-overlapping labels — and is far
+// cheaper than k calls. (Very large k makes for a big prompt; batch the buckets if
+// that becomes a problem.) Reuses config.llmModel so the label model tracks answer
+// generation.
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { meteredMessage } from "@/lib/rag/meter";

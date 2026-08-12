@@ -1,12 +1,11 @@
 // UI: k-means clustering dashboard (/clusters).
 //
 // Set k and run k-means over the active corpus. Each run produces 3 candidates
-// (random restarts) so the randomness is visible — keep the ones you like as
-// named presets. Each bucket shows its cohesion; each run shows a
-// silhouette score so different k can be compared fairly (cohesion alone always
-// rises with k). The compare modal lines up headline metrics + sorted cohesion
-// profiles for up to 5 runs (buckets aren't aligned across runs — numbering is
-// arbitrary and k differs).
+// (random restarts) so the randomness is visible — keep the ones you like as named
+// presets. Each bucket shows its cohesion; each run shows a silhouette score so
+// different k can be compared fairly (cohesion alone always rises with k). The
+// compare modal lines up headline metrics + sorted cohesion profiles for up to 5
+// runs (buckets aren't aligned across runs — numbering is arbitrary and k differs).
 //
 // Server compute + persistence live in lib/rag/cluster.ts + clusterStore.ts.
 "use client";

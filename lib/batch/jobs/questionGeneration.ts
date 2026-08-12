@@ -3,23 +3,16 @@
 //
 // The ideal batch shape — one independent request per (chunk, difficulty) gap,
 // dozens-to-thousands at once. Shares the exact prompt + parse with the inline
-// generator via questionRequestParams / parseQuestions (lib/rag/eval.ts), so the
-// two paths can never drift.
-//
-// One request per QUESTION asked for: a chunk that Bulk actions wants two easy
-// questions for contributes two independent requests.
+// generator, so the two paths can never drift. One request per QUESTION asked for.
 //
 // apply is IDEMPOTENT: before inserting it re-counts what the (chunk, difficulty)
-// pair has against the target the batch was built for (the same comparison
-// chunksNeedingQuestionsByDifficulty made at build time), so a re-poll, retry, or
-// a competing inline generation can't push a chunk past its target.
+// pair has against the target the batch was built for, so a re-poll, retry, or a
+// competing inline generation can't push a chunk past its target.
 //
 // RESULTS ARE BANKED, NOT SERVED. apply writes every question it lands into
-// question_cache (0055) so a later config can pick it up for free, but build
-// never serves from that cache: reuse is a deliberate act — "Bulk actions → Add
-// question → Add cached" — so a batch submitted here buys exactly what was
-// asked for. Clear the cache first if you want the free half; the button is
-// idempotent and takes it without spending anything.
+// question_cache (0055) so a later config can pick it up for free, but build never
+// serves from that cache: reuse is a deliberate act — "Add cached" — so a batch
+// submitted here buys exactly what was asked for.
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import type { Difficulty } from "@/lib/rag/eval";

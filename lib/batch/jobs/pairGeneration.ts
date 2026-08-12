@@ -1,20 +1,18 @@
 // BATCH JOB: cache_pair_generation — routed by keyModelSweep.generateModel's own
 // provider, which is an Anthropic id today.
 //
-// Synthesizes the generated half of the cache-key eval pair set — one
-// independent request per eval question, so the whole bank goes out at once at
-// the −50% batch price. The one-off cost the sweep is built on
-// (docs/semantic-cache-key-model-plan.md, Phase 2).
+// Synthesizes the generated half of the cache-key eval pair set — one independent
+// request per eval question, so the whole bank goes out at once at the −50% batch
+// price. The one-off cost the sweep is built on.
 //
-// Shares pairRequestParams / parsePairs / pairsFrom with the inline path
-// (semanticCachePairs.generatePairs), so prompt, parse and LABELLING can never
-// drift between them — which matters more here than usual: the labels are
-// ANSWER-LEVEL by construction, and a divergence would silently poison the
-// pooled pair set with question-level labels.
+// Shares pairRequestParams / parsePairs / pairsFrom with the inline path, so prompt,
+// parse and LABELLING can never drift — which matters more here than usual: the
+// labels are ANSWER-LEVEL by construction, and a divergence would silently poison
+// the pooled pair set with question-level labels.
 //
 // apply is IDEMPOTENT: inserts go through insertPairs, whose canonical
-// (hash_a, hash_b) unique key + on-conflict-do-nothing makes a re-poll or retry
-// a no-op rather than a duplicate.
+// (hash_a, hash_b) unique key + on-conflict-do-nothing makes a re-poll or retry a
+// no-op rather than a duplicate.
 import { config } from "@/lib/config";
 import {
   insertPairs,

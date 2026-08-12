@@ -1,22 +1,18 @@
-// SEMANTIC CACHE — choosing τ from a calibration curve. Phase 4 of
-// docs/semantic-cache-key-model-plan.md.
+// SEMANTIC CACHE — choosing τ from a calibration curve.
 //
-// THIS FILE IMPORTS NOTHING, ON PURPOSE. It is bundled into a Client Component
-// (the key-model panel re-derives the leaderboard at whatever precision target
-// you drag the slider to), so it cannot reach anything node-only. That rules out
-// living in semanticCacheCore.ts, which imports `node:crypto` for
-// fingerprintFrom — hence a module of its own rather than one more export there.
+// THIS FILE IMPORTS NOTHING, ON PURPOSE. It is bundled into a Client Component (the
+// key-model panel re-derives the leaderboard at whatever precision target you drag
+// the slider to), so it cannot reach anything node-only. That rules out living in
+// semanticCacheCore.ts, which imports `node:crypto`.
 //
 // It exists so the RULE has exactly one implementation. The server picks τ from
-// judged events (calibrateFromJudged, semanticCacheCore) and the client picks τ
-// from the curve those events produced, at a target the server never saw. Those
-// two must agree exactly or the panel shows you a number that is not the one
-// that would be applied — so the server builds the curve and then calls straight
-// into here, and the client calls the same function on the same curve.
+// judged events and the client picks τ from the curve those events produced, at a
+// target the server never saw. Those two must agree exactly or the panel shows you
+// a number that is not the one that would be applied.
 //
-// A curve is all the information the choice needs: every candidate cut point,
-// with the precision and recall its prefix achieves. The raw events add nothing
-// to the decision, which is why this split is possible at all.
+// A curve is all the information the choice needs: every candidate cut point, with
+// the precision and recall its prefix achieves. The raw events add nothing to the
+// decision, which is why this split is possible at all.
 
 // One cut point. `acceptRateAtOrAbove` is the PRECISION of the set that would be
 // served at this sim (accepts ÷ n), `coverageAtOrAbove` its RECALL (accepts ÷
@@ -90,15 +86,13 @@ const acceptsIn = (p: CurvePoint): number => Math.round(p.acceptRateAtOrAbove * 
 // one that still clears `target` — the most inclusive threshold whose served set
 // keeps the false-hit rate under (1 − target).
 //
-// Non-monotonic dips are handled naturally: the guarantee is on the AGGREGATE
-// over the served set, so a dip that later recovers is allowed. That's why this
-// walks the whole curve instead of stopping at the first failure.
+// Non-monotonic dips are handled naturally: the guarantee is on the AGGREGATE over
+// the served set, so a dip that later recovers is allowed. That's why this walks
+// the whole curve instead of stopping at the first failure.
 //
-// A point is only considered at the END of a run of equal sims. Mid-run, the
-// prefix covers only PART of the tie group, but serving `sim >= τ` would admit
-// the whole group — so a rate measured there doesn't describe what we'd serve.
-// Real cosines rarely tie exactly, so this is a correctness guarantee rather
-// than a behaviour change on live data.
+// A point is only considered at the END of a run of equal sims. Mid-run, the prefix
+// covers only PART of the tie group, but serving `sim >= τ` would admit the whole
+// group — so a rate measured there doesn't describe what we'd serve.
 export function selectFromCurve(
   curve: CurvePoint[],
   target: number,

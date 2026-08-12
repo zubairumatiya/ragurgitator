@@ -1,14 +1,13 @@
 // K-MEANS (pure compute, no DB) for the /clusters page.
 //
-// Spherical k-means over the corpus embeddings. Voyage vectors are unit-length,
-// so cosine similarity is a plain dot product (see lib/rag/embeddings.ts) — we
-// assign by max dot, and after each "move centroid to the mean" step we
-// re-normalize the centroid back onto the unit sphere so dot = cosine keeps
-// holding (otherwise the averaged centroid drifts inside the sphere). See
-// lib/rag/eval.ts `cosine()` for the same unit-vector convention.
+// Spherical k-means over the corpus embeddings. Voyage vectors are unit-length, so
+// cosine similarity is a plain dot product — we assign by max dot, and after each
+// "move centroid to the mean" step we re-normalize the centroid back onto the unit
+// sphere so dot = cosine keeps holding (otherwise the averaged centroid drifts
+// inside the sphere).
 //
-// One `computeCandidate` = one k-means run from one random seed. A "run" in the
-// UI fires several of these (different seeds) so the user can see the spread the
+// One `computeCandidate` = one k-means run from one random seed. A "run" in the UI
+// fires several of these (different seeds) so the user can see the spread the
 // randomness produces and keep the one they like; the orchestration + DB live in
 // lib/rag/clusterStore.ts.
 

@@ -1,14 +1,13 @@
 // CONFIG-SCOPED fetch wrapper for client components.
 //
-// Pages live under /c/<configId>/… (see app/c/[configId]). Every /api/… call a
-// client makes must be scoped to the config of the tab it's on, otherwise the
-// store layer falls back to the Default config (resolveRequestConfig in
-// lib/rag/activeConfig.ts). Rather than thread configId through every component,
-// apiFetch reads it from the current URL path and injects ?configId=… so the
-// API route resolves the right ResolvedConfig.
+// Pages live under /c/<configId>/…. Every /api/… call a client makes must be scoped
+// to the config of the tab it's on, otherwise the store layer falls back to the
+// Default config. Rather than thread configId through every component, apiFetch
+// reads it from the current URL path and injects ?configId=… so the API route
+// resolves the right ResolvedConfig.
 //
-// NOTE: this is the BROWSER fetch wrapper. It is unrelated to lib/llm/client.ts
-// (the server-side Anthropic client). Only import this from "use client" code.
+// NOTE: this is the BROWSER fetch wrapper, unrelated to lib/llm/client.ts (the
+// server-side provider clients). Only import this from "use client" code.
 
 // The active tab's configId, parsed from /c/<id>/… ; null when off a config
 // route (e.g. the Appraise page) or during SSR where there's no location.

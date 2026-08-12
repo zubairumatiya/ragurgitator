@@ -1,27 +1,26 @@
 // Email-confirmation / OAuth landing route.
 //
 // A user arriving here has clicked a link in their mail client, so every failure
-// path must land somewhere that explains itself rather than showing a raw error.
-// This is a Route Handler and not a Server Component because establishing the
-// session writes cookies, and only handlers and actions can do that.
+// path must land somewhere that explains itself rather than showing a raw error. A
+// Route Handler and not a Server Component because establishing the session writes
+// cookies.
 //
 // TWO LINK SHAPES ARE ACCEPTED, and the order matters:
 //
-//   token_hash + type   verifyOtp(). What Supabase's SSR guide recommends for
-//                       email links, and the one that works when the link is
-//                       opened somewhere other than the browser that signed up.
+//   token_hash + type   verifyOtp(). What Supabase's SSR guide recommends for email
+//                       links, and the one that works when the link is opened
+//                       somewhere other than the browser that signed up.
 //   code                exchangeCodeForSession(). The PKCE flow.
 //
-// Why token_hash is preferred: PKCE stashes a code VERIFIER in a cookie at
-// signup and requires it back at exchange. Mail clients routinely open links in
-// a different browser (or on a phone), where that cookie does not exist — so
-// exchangeCodeForSession fails even though the link was perfectly valid, and
-// Supabase's /auth/v1/verify endpoint has ALREADY marked the address confirmed
-// by the time we see it. That combination is what produced the old "invalid or
-// has expired" message on a link that had just worked.
+// Why token_hash is preferred: PKCE stashes a code VERIFIER in a cookie at signup
+// and requires it back at exchange. Mail clients routinely open links in a different
+// browser, where that cookie does not exist — so exchangeCodeForSession fails even
+// though the link was valid, and Supabase's verify endpoint has ALREADY marked the
+// address confirmed by the time we see it. That combination produced the old
+// "invalid or has expired" message on a link that had just worked.
 //
-// Both are handled so this route keeps working before and after the email
-// template is switched to {{ .TokenHash }} — see docs/user-accounts-plan.md.
+// Both are handled so this route keeps working before and after the email template
+// is switched to {{ .TokenHash }}.
 import type { EmailOtpType } from "@supabase/supabase-js";
 import { NextResponse, type NextRequest } from "next/server";
 

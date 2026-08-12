@@ -2,23 +2,19 @@
 // stays a Server Component that reads the store — because rows expand, and that
 // needs both state and measurement in the browser.
 //
-// Cells clamp to three lines and the ROW ITSELF toggles open — there is no
-// chevron. A row only becomes clickable when its content is ACTUALLY cut off,
-// which cannot be decided on the server: it depends on the rendered column
-// width and the viewer's font. So each row measures itself (scrollHeight >
-// clientHeight while clamped) and re-measures through a ResizeObserver, so rows
-// gain and lose their affordance as the window resizes rather than having it
-// decided once at mount. A row with nothing hidden is inert: no pointer cursor,
-// no hover tint, no tab stop.
+// Cells clamp to three lines and the ROW ITSELF toggles open — there is no chevron.
+// A row only becomes clickable when its content is ACTUALLY cut off, which cannot
+// be decided on the server: it depends on the rendered column width and the
+// viewer's font. So each row measures itself and re-measures through a
+// ResizeObserver, gaining and losing its affordance as the window resizes. A row
+// with nothing hidden is inert: no pointer cursor, no hover tint, no tab stop.
 //
-// Question and answer expand TOGETHER, off one control. They're two halves of
-// one record, and independent toggles produced a row whose question was open
-// while its answer was clipped — two clicks to read one exchange, and a ragged
-// column of half-open cells.
+// Question and answer expand TOGETHER, off one control. They're two halves of one
+// record, and independent toggles produced a row whose question was open while its
+// answer was clipped — two clicks to read one exchange.
 //
 // `import type` for the row shape: the type is erased at compile time, so this
-// client module never pulls the server-only store chain behind it (same pattern
-// as Sidebar's ConfigSummary import).
+// client module never pulls the server-only store chain behind it.
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";

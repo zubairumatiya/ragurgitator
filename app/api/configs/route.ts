@@ -2,12 +2,11 @@
 //
 // GET returns the tabs the ConfigTabs bar renders: `open` (current tabs, ordered)
 // and `closed` (the reopen menu). POST creates a brand-new EMPTY config — a fresh
-// corpus + a config seeded with the lib/config.ts defaults — for the "+" button,
-// and returns it so the client can route to the new tab.
+// corpus + a config seeded with the lib/config.ts defaults — for the "+" button.
 //
 // These act ON the configs table itself rather than within one config's scope, so
-// they don't use withRequestConfig (configStore takes explicit ids). Body for
-// POST is optional: { name?: string }.
+// they don't use withRequestConfig (configStore takes explicit ids). Body for POST
+// is optional: { name?: string }.
 import { z } from "zod";
 import { invalidBody, readJsonBody } from "@/lib/http/body";
 import {

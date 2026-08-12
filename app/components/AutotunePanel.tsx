@@ -1,13 +1,11 @@
-// UI: the "Auto-resolve below min-rate" button + its modal (Phase C of
-// docs/eval-autotuning-plan.md §4.4).
+// UI: the "Auto-resolve below min-rate" button + its modal.
 //
 // The button is enabled only when at least one enabled metric has a min-rate.
-// Clicking opens a confirm dialog (below-bar count + cost warning); Run drives
-// the streamed POST /api/eval/autotune, rendering live per-chunk progress in
-// the same modal. Chunks where MORE than one candidate family cleared (apply
-// mode 'choose') come back as chunk-choice events — rendered as pickers whose
-// Apply buttons hit POST /api/eval/autotune/apply. Closing after a run reloads
-// the dashboard.
+// Clicking opens a confirm dialog (below-bar count + cost warning); Run drives the
+// streamed POST /api/eval/autotune, rendering live per-chunk progress in the same
+// modal. Chunks where MORE than one candidate family cleared (apply mode 'choose')
+// come back as chunk-choice events — rendered as pickers whose Apply buttons hit
+// POST /api/eval/autotune/apply. Closing after a run reloads the dashboard.
 "use client";
 
 import { useState } from "react";

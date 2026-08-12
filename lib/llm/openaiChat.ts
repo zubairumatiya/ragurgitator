@@ -1,21 +1,19 @@
 // ANTHROPIC ⇄ OPENAI CHAT COMPLETIONS TRANSLATION — pure, no client, no IO.
 //
-// Extracted from lib/rag/meter.ts because there are now TWO transports that need
-// the same translation: the synchronous call in meter.ts and the batch adapter in
-// lib/batch/providers.ts, which builds the same request bodies as JSONL lines and
-// parses ChatCompletions back out of the results file. Sharing the pair is what
-// makes the batch path trustworthy — a batched question-generation call and a
-// synchronous one are the SAME request by construction, not by two authors
-// agreeing. (Importing them from meter.ts would have dragged the spend ledger
-// into the batch adapter for nothing.)
+// Extracted from lib/rag/meter.ts because TWO transports need the same
+// translation: the synchronous call there and the batch adapter in
+// lib/batch/providers.ts, which builds the same request bodies as JSONL lines.
+// Sharing the pair is what makes the batch path trustworthy — a batched
+// question-generation call and a synchronous one are the SAME request by
+// construction, not by two authors agreeing.
 //
-// CHAT COMPLETIONS, NOT THE RESPONSES API. The GPT-5 family serves both, and
-// Chat Completions is by far the smaller diff from the Anthropic shape — same
+// CHAT COMPLETIONS, NOT THE RESPONSES API. The GPT-5 family serves both, and Chat
+// Completions is by far the smaller diff from the Anthropic shape — same
 // system-then-turns message list, same single text answer, same flat usage
 // counters. The Responses API's item/output model would need a second translation
 // layer to arrive at the same place.
 //
-// Four disagreements to normalise (docs/user-accounts-plan.md §9.1):
+// Four disagreements to normalise:
 //
 //   system prompt   top-level `system`   → a leading {role:"system"} message
 //   output cap      `max_tokens`         → `max_completion_tokens`
@@ -25,7 +23,7 @@
 // Anything this translation CANNOT carry across throws rather than being dropped
 // silently. A prompt that quietly lost its schema constraint or its tools would
 // come back as unparseable prose from a model that looks like it just did a bad
-// job, which is a much worse afternoon than a thrown error naming the field.
+// job — a much worse afternoon than a thrown error naming the field.
 import type Anthropic from "@anthropic-ai/sdk";
 import type OpenAI from "openai";
 
@@ -65,18 +63,17 @@ export function toChatParams(
 
   // REASONING EFFORT IS ALWAYS SET, never left to the model's default.
   //
-  // Anthropic's `max_tokens` caps VISIBLE output; OpenAI's
-  // `max_completion_tokens` is a shared budget that invisible reasoning tokens
-  // are also drawn from. Left on a reasoning default, a caller's cap means two
-  // different things on the two legs — and the tightest cap in the app
-  // (semanticCacheCalibration's 200-token judge) can be consumed entirely by
-  // reasoning, returning `content: null` with finish_reason "length", i.e. a
-  // judge that silently records nothing. Pinning effort to "none" makes every
-  // existing max_tokens value stay correct after translation.
+  // Anthropic's `max_tokens` caps VISIBLE output; OpenAI's `max_completion_tokens`
+  // is a shared budget that invisible reasoning tokens are also drawn from. Left on
+  // a reasoning default, a caller's cap means two different things on the two legs —
+  // and the tightest cap in the app (the 200-token judge) can be consumed entirely
+  // by reasoning, returning `content: null` with finish_reason "length", i.e. a judge
+  // that silently records nothing. Pinning effort to "none" makes every existing
+  // max_tokens value stay correct after translation.
   //
-  // The "enabled" branch is defensive only — no caller passes it today. It maps
-  // to "medium" (a neutral middle) rather than deriving an effort level from
-  // Anthropic's token budget, which would be an invented equivalence.
+  // The "enabled" branch is defensive only — no caller passes it today. It maps to
+  // "medium" rather than deriving an effort level from Anthropic's token budget,
+  // which would be an invented equivalence.
   body.reasoning_effort = params.thinking?.type === "enabled" ? "medium" : "none";
 
   // Structured outputs. Anthropic's output_config.format is a bare JSON schema;

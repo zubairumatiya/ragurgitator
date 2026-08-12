@@ -1,14 +1,14 @@
 // API route: POST /api/corpora/[id]/documents — add documents to a corpus.
 //
 // Accepts either:
-//   - multipart/form-data with `file` fields (.txt/.md/.pdf/.docx uploads) —
-//     loaded + stored globally (deduped by content hash), then added, or
+//   - multipart/form-data with `file` fields (.txt/.md/.pdf/.docx uploads) — loaded
+//     + stored globally (deduped by content hash), then added, or
 //   - JSON `{ documentIds: [...] }` — existing global documents to add.
 //
 // After membership is written, the docs are sync-embedded into every config
-// auto-synced to this corpus, streamed as NDJSON IngestEvents (that's the part
-// that costs embedding calls; zero synced configs = instant). Corpus-level, so
-// no withRequestConfig. `params` is a Promise in this Next.js version.
+// auto-synced to this corpus, streamed as NDJSON IngestEvents (that's the part that
+// costs embedding calls; zero synced configs = instant). Corpus-level, so no
+// withRequestConfig. `params` is a Promise in this Next.js version.
 import { streamError } from "@/lib/http/missingKeyServer";
 import { config } from "@/lib/config";
 import { ndjsonStream } from "@/lib/http/ndjson";

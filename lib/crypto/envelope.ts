@@ -1,21 +1,17 @@
-// ENVELOPE ENCRYPTION — pure core (no Azure, no DB, no I/O), so it's unit-
-// testable against a fake wrapper without provisioning a vault. Mirrors the
-// semanticCore.ts / semanticCache.ts split: the decisions that make the scheme
-// correct live HERE, and the Azure adapter (azureKeyVault.ts) only supplies
-// wrap/unwrap.
+// ENVELOPE ENCRYPTION — pure core (no Azure, no DB, no I/O), so it's unit-testable
+// against a fake wrapper without provisioning a vault. The decisions that make the
+// scheme correct live HERE; the Azure adapter only supplies wrap/unwrap.
 //
 // Two layers, each protecting the layer below:
 //
 //   inner   the API key, encrypted with AES-256-GCM under a per-secret DEK
 //   outer   that DEK, wrapped by a KEK that never leaves the key vault
 //
-// The property we're buying is that a DATABASE LEAK YIELDS NOTHING. Ciphertext,
-// a wrapped DEK, a nonce and a tag are inert without vault credentials, so a
-// pg_dump, a leaked backup, or a compromised read replica stop being incidents.
-// That holds regardless of how long plaintext lives in memory, which is why this
-// module optimises for correctness rather than for scrubbing RAM.
-//
-// See docs/user-accounts-plan.md §4.
+// The property we're buying is that a DATABASE LEAK YIELDS NOTHING. Ciphertext, a
+// wrapped DEK, a nonce and a tag are inert without vault credentials, so a pg_dump,
+// a leaked backup, or a compromised read replica stop being incidents. That holds
+// regardless of how long plaintext lives in memory, which is why this module
+// optimises for correctness rather than for scrubbing RAM.
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
 import { SecretKey } from "./secretKey";
@@ -58,20 +54,18 @@ export interface KeyWrapper {
 
 // TENANT BINDING
 //
-// AWS KMS has EncryptionContext — key/value pairs that must match on decrypt and
-// are logged. Azure Key Vault's wrap/unwrap has NO equivalent, so the binding
-// moves entirely into the AES-GCM additional authenticated data. AAD is
-// authenticated but not encrypted: it doesn't hide anything, it makes decryption
-// FAIL when the context differs.
+// AWS KMS has EncryptionContext — key/value pairs that must match on decrypt. Azure
+// Key Vault's wrap/unwrap has NO equivalent, so the binding moves entirely into the
+// AES-GCM additional authenticated data. AAD is authenticated but not encrypted: it
+// doesn't hide anything, it makes decryption FAIL when the context differs.
 //
 // Effect: a row copied from user A to user B (or from their 'anthropic' row into
-// their 'openai' row) fails its tag check instead of decrypting. Without this, a
-// row is portable between tenants by anyone with write access to the table.
+// their 'openai' row) fails its tag check instead of decrypting. Without this, a row
+// is portable between tenants by anyone with write access to the table.
 //
-// \x1f (ASCII unit separator) is the delimiter because it cannot occur in a uuid
-// or a provider slug, so no pair of (userId, provider) values can be made to
-// produce the same AAD as a different pair — the same injection reasoning as
-// fingerprintFrom() in semanticCacheCore.ts.
+// \x1f (ASCII unit separator) is the delimiter because it cannot occur in a uuid or
+// a provider slug, so no pair of (userId, provider) values can be made to produce
+// the same AAD as a different pair.
 export function aadFor(userId: string, provider: string): Buffer {
   if (!userId || !provider) {
     throw new Error("aadFor requires a non-empty userId and provider.");

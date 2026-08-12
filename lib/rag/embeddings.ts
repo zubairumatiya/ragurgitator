@@ -1,14 +1,12 @@
 // STEP 3 of ingestion (and also used at query time): EMBED
 //
-// Turns text into a vector (number[]) via the embedding model. The SAME model
-// embeds documents at ingest time and the user's question at query time, or
-// similarity search is meaningless — that's why both paths read config.
+// Turns text into a vector via the embedding model. The SAME model embeds documents
+// at ingest time and the user's question at query time, or similarity search is
+// meaningless — that's why both paths read config.
 //
-// `embed()` is a PROVIDER DISPATCHER: it resolves the model's spec from the
-// registry (lib/rag/embeddingModels.ts), picks the matching adapter
-// (lib/rag/embeddingProviders.ts), and batches by that provider's cap. Adapters
-// return normalized vectors (Voyage/OpenAI/Cohere already do; the local adapter
-// passes normalize:true), so downstream cosine reduces to a dot product.
+// `embed()` is a PROVIDER DISPATCHER: it resolves the model's spec from the registry,
+// picks the matching adapter, and batches by that provider's cap. Adapters return
+// normalized vectors, so downstream cosine reduces to a dot product.
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { modelSpec } from "@/lib/rag/embeddingModels";
 import { PROVIDERS, type EmbedRole } from "@/lib/rag/embeddingProviders";

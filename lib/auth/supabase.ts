@@ -1,20 +1,18 @@
 // SUPABASE AUTH CLIENTS.
 //
-// Four call sites need a client and each needs different cookie plumbing, so
-// they get four factories rather than one overloaded helper:
+// Four call sites need a client and each needs different cookie plumbing:
 //
 //   browserSupabase()   Client Components — reads/writes document.cookie
 //   serverSupabase()    Server Components, Server Actions, Route Handlers
-//   proxySupabase(req)  proxy.ts only — needs to write refreshed cookies onto
-//                       an outgoing NextResponse, which next/headers can't do
+//   proxySupabase(req)  proxy.ts only — writes refreshed cookies onto an outgoing
+//                       NextResponse, which next/headers can't do
 //   tokenSupabase()     lib/auth/mcpToken.ts only — NO cookie plumbing at all
 //
-// NOTE ON getUser() vs getSession(): only `auth.getUser()` is trustworthy on the
-// server. `getSession()` decodes the cookie WITHOUT verifying its signature
-// against the auth server, so anything derived from it is attacker-controllable
-// — a forged cookie yields a forged session. Every server-side read in this
-// codebase goes through getUser(), and lib/auth/dal.ts is the only place that
-// should be calling it at all.
+// getUser() vs getSession(): only `auth.getUser()` is trustworthy on the server.
+// `getSession()` decodes the cookie WITHOUT verifying its signature against the
+// auth server, so anything derived from it is attacker-controllable. Every
+// server-side read goes through getUser(), and lib/auth/dal.ts is the only place
+// that should be calling it at all.
 import { createBrowserClient, createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
@@ -23,15 +21,14 @@ import type { NextRequest, NextResponse } from "next/server";
 // PUBLISHABLE KEY (`sb_publishable_…`) — the successor to the legacy `anon` key.
 //
 // Supabase replaced the JWT-based anon/service_role pair with opaque publishable
-// and secret keys (github.com/orgs/supabase/discussions/29260). Both formats work
-// in the same client argument today, but the legacy keys are scheduled for
-// DELETION in late 2026 — so a new build targets the new format and treats the
-// old one as a fallback, not the other way round.
+// and secret keys. Both formats work in the same client argument today, but the
+// legacy keys are scheduled for DELETION in late 2026 — so a new build targets the
+// new format and treats the old one as a fallback.
 //
 // Why the new format is better here, beyond the deadline: an opaque key can be
-// rotated or revoked on its own, whereas the legacy anon key is a JWT signed
-// with the project's JWT secret — rotating it invalidates every other token
-// signed by that secret at the same time.
+// rotated or revoked on its own, whereas the legacy anon key is a JWT signed with
+// the project's JWT secret — rotating it invalidates every other token signed by
+// that secret at the same time.
 function publishableKey(): string | undefined {
   return (
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
@@ -89,19 +86,16 @@ export async function serverSupabase() {
 // SESSION-LESS variant, for verifying a BEARER TOKEN that arrived in a header
 // rather than a cookie (lib/auth/mcpToken.ts, and nothing else).
 //
-// The three factories above all bind a client to some cookie jar, which is
-// exactly wrong here: an MCP request carries its own credential and must be
-// judged on that credential alone. A client that could see cookies would happily
-// fall back to an ambient browser session if the header were missing or junk,
-// which turns "is this a valid MCP token?" into "is anyone logged in?" — and the
-// whole point of the client_id check in mcpToken.ts is that those two questions
-// have different answers.
+// The three factories above all bind a client to some cookie jar, which is exactly
+// wrong here: an MCP request carries its own credential and must be judged on that
+// alone. A client that could see cookies would fall back to an ambient browser
+// session if the header were missing or junk, turning "is this a valid MCP token?"
+// into "is anyone logged in?" — and the whole point of the client_id check is that
+// those two questions have different answers.
 //
-// So all three session behaviours are off. There is no storage to persist to, no
-// token to refresh, and no URL fragment to read: this client is used for exactly
-// one call, getClaims(jwt), which verifies a signature against the cached JWKS
-// and returns. Leaving them on would let it acquire state it has no business
-// having.
+// So all three session behaviours are off. This client is used for exactly one
+// call, getClaims(jwt); leaving them on would let it acquire state it has no
+// business having.
 export function tokenSupabase() {
   const { url, key } = config();
   return createClient(url, key, {

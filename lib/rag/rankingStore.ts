@@ -74,15 +74,13 @@ export async function getQuestionScope(
 // candidate pool a graded ranking is built from. Same HNSW pattern as
 // vectorStore.query: config-filtered ANN with ef_search raised inside the txn,
 // because the config_id predicate would otherwise starve the top-k once several
-// configs share a chunk table (docs/multi-config-plan.md §5.3). Scoping via the
-// chunk table's OWN config_id column — rather than joining document_embeddings
-// for it, the way the old bucket pool did — keeps the scope a plain column
-// predicate the index scan can apply as it walks; a join can't be pushed in
-// there, so it would only filter after the ANN had already picked its rows.
+// configs share a chunk table. Scoping via the chunk table's OWN config_id column —
+// rather than joining document_embeddings for it — keeps the scope a plain column
+// predicate the index scan can apply as it walks; a join can't be pushed in there,
+// so it would only filter after the ANN had already picked its rows.
 //
-// This is deliberately the same neighbourhood the retriever searches, so the
-// ideal ranking is drawn from the chunks retrieval could actually return.
-// Empty when nothing is ingested under this config yet.
+// Deliberately the same neighbourhood the retriever searches, so the ideal ranking
+// is drawn from the chunks retrieval could actually return.
 export async function poolNearest(
   queryVec: number[],
   limit: number,

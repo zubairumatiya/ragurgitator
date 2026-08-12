@@ -1,48 +1,39 @@
-// RESPONSE EFFICACY GATE  (FrugalGPT LLM-cascade scoring function)
+// RESPONSE EFFICACY GATE (FrugalGPT LLM-cascade scoring function)
 //
-// FrugalGPT (Chen, Zaharia & Zou, 2023) runs a chain of models cheapest → most
-// expensive and, after each answer, a small SCORING FUNCTION decides accept vs.
-// escalate. This module is that scoring function for our RAG flow. It is the
-// primary Phase-E savings lever — see docs/long-term-savings-research.md §4.2.
+// FrugalGPT runs a chain of models cheapest → most expensive and, after each
+// answer, a small SCORING FUNCTION decides accept vs. escalate. This module is
+// that scoring function for our RAG flow.
 //
-// TWO DISTINCT DECISIONS ON TWO INDEPENDENT AXES (that doc's §4.1):
+// TWO DISTINCT DECISIONS ON TWO INDEPENDENT AXES:
 //
-//   AXIS 1 — is there enough CONTEXT to answer at all?  Rung 1 (retrieval floor,
-//     the top cosine already on each source). Known BEFORE generation. A weak
-//     retrieval is a RETRIEVAL bottleneck — a stronger model can't invent context
-//     that wasn't retrieved, so this must NEVER trigger LLM escalation. pipeline.ask
-//     checks retrievalFloor() pre-generation and, when it's too low, answers once
-//     with the cheap model and stops. This gate REPORTS the floor as a signal but
-//     does not escalate on it. (Exported as retrievalFloor for that pre-gen check.)
+//   AXIS 1 — is there enough CONTEXT to answer at all? Rung 1 (retrieval floor),
+//     known BEFORE generation. A weak retrieval is a RETRIEVAL bottleneck — a
+//     stronger model can't invent context that wasn't retrieved, so this must
+//     NEVER trigger LLM escalation. pipeline.ask checks retrievalFloor()
+//     pre-generation and, when it's too low, answers once with the cheap model and
+//     stops. This gate REPORTS the floor as a signal but does not escalate on it.
 //
-//   AXIS 2 — did the model USE the context well?  Rungs 0+2, POST-generation, and
+//   AXIS 2 — did the model USE the context well? Rungs 0+2, POST-generation, and
 //     the ONLY escalation trigger:
 //       Rung 0 — HEURISTICS: refusal/hedge detection + a minimum answer length.
 //       Rung 2 — EMBEDDING GROUNDEDNESS: cosine(answer, chunk). retrieve() returns
-//         chunks WITHOUT vectors (score + text only), so we embed the answer once
-//         and read each chunk's stored base-space vector by id (chunkEmbeddings —
-//         one DB read). Did the answer stay faithful to the context it was given
-//         (RAG's core failure mode)?
-//     A stronger model CAN fix an axis-2 miss (adequate context, cheap model
-//     fumbled it), so score < threshold here means escalate.
+//         chunks WITHOUT vectors, so we embed the answer once and read each
+//         chunk's stored base-space vector by id (one DB read).
+//     A stronger model CAN fix an axis-2 miss, so score < threshold means escalate.
 //
 // `score`/`verdict` are AXIS-2 ONLY. Conflating the axes — escalating on weak
-// retrieval — pays strong-model prices to fail again on the same thin context,
-// the exact mistake §4.1 warns against.
+// retrieval — pays strong-model prices to fail again on the same thin context.
 //
 // Per-chunk overrides don't affect rung 2. cosine is only meaningful WITHIN one
-// embedding space, so both sides are base-space: the answer is embedded under the
-// config's base model, and chunkEmbeddings reads each chunk's BASE vector — every
-// chunk keeps its base row, an override only ADDS a foreign-space representation
-// used for retrieval ranking. We never mix the answer with an override's foreign
-// vector (the cross-space error retriever.ts warns about). Caveat: for a chunk
-// retrieved BECAUSE of its override space, its base vector is a consistent but
-// possibly conservative view of the match.
+// embedding space, so both sides are base-space: every chunk keeps its base row,
+// and an override only ADDS a foreign-space representation used for retrieval
+// ranking. We never mix the answer with an override's foreign vector. Caveat: for
+// a chunk retrieved BECAUSE of its override space, its base vector is a consistent
+// but possibly conservative view of the match.
 //
 // Thresholds live in config.cascade and are deliberately exposed: tuning
-// `efficacyThreshold` against a labelled set is the "threshold sweep" — the same
-// search-a-parameter-against-a-metric shape as lib/rag/autotune, but a sibling
-// tuner (a scalar cutoff vs. autotune's size×model ladder), not that engine.
+// `efficacyThreshold` against a labelled set is a sibling tuner to autotune (a
+// scalar cutoff vs. a size×model ladder), not that engine.
 import { config } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { cosine, embedQueryCached } from "@/lib/rag/embedCache";

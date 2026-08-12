@@ -1,29 +1,26 @@
 // PROVIDER ADAPTERS — the only place that talks to a batch API over the wire.
 //
 // Three providers behind one interface (submit / poll / results / cancel):
-//   • Anthropic — native SDK (client.messages.batches.*), for LLM jobs on a
-//     claude-* model. 24h window, −50%.
-//   • OpenAI — native SDK (client.files.* + client.batches.*), for LLM jobs on a
-//     gpt-* model. 24h window (the only one it accepts), −50%.
+//   • Anthropic — native SDK, for LLM jobs on a claude-* model. 24h window, −50%.
+//   • OpenAI — native SDK, for LLM jobs on a gpt-* model. 24h window (the only one
+//     it accepts), −50%.
 //   • Voyage — REST (no SDK batch surface in voyageai@0.2.1), used by
 //     ingest_embedding. Files API + JSONL, OpenAI-Batch-compatible. 12h, −33%.
 //
-// WHICH LLM PROVIDER a job uses is decided by its build() from the model it put
-// in the requests (BuiltBatch.provider), never per-kind — so the same batch lever
-// is available to a GPT config as to a Claude one. What makes that cheap is that
-// requests are ALWAYS Anthropic-shaped: the OpenAI adapter translates each line
-// on the way out and each result body on the way back (lib/llm/openaiChat.ts,
-// shared verbatim with the synchronous path), so every apply() handler reads
-// `body.content[0].text` without knowing who served it.
+// WHICH LLM PROVIDER a job uses is decided by its build() from the model it put in
+// the requests, never per-kind — so the same batch lever is available to a GPT
+// config as to a Claude one. What makes that cheap is that requests are ALWAYS
+// Anthropic-shaped: the OpenAI adapter translates each line on the way out and each
+// result body on the way back (shared verbatim with the synchronous path), so every
+// apply() handler reads `body.content[0].text` without knowing who served it.
 //
-// Everything above this line is provider-agnostic (normalized BatchStatus /
-// BatchResultRow). Raw provider status strings are mapped here and nowhere else.
+// Everything above this line is provider-agnostic. Raw provider status strings are
+// mapped here and nowhere else.
 //
-// NOTE: the live calls can't be exercised in the unit suite (async windows, real
-// keys, real billing). Status mapping and result parsing are pulled into pure,
-// exported helpers (mapAnthropicStatus / mapOpenAiStatus / mapVoyageStatus /
-// parseOpenAiResults / parseVoyageResults) so those — the parts most likely to be
-// wrong — are unit-tested with canned payloads. See lib/batch/providerStatus.test.ts.
+// The live calls can't be exercised in the unit suite (async windows, real keys,
+// real billing), so status mapping and result parsing are pulled into pure exported
+// helpers — the parts most likely to be wrong — and unit-tested with canned
+// payloads.
 import type Anthropic from "@anthropic-ai/sdk";
 import { toFile } from "openai";
 import { activeUserId } from "@/lib/auth/userScope";
@@ -126,13 +123,10 @@ const anthropicAdapter: ProviderAdapter = {
   },
 };
 
-// OpenAI (SDK — client.files.* + client.batches.*)
-// ===========================================================================
-//
-// Structurally the Voyage adapter (upload JSONL → create → poll → download), but
-// through the SDK rather than raw fetch, and with the MODEL PER LINE rather than
-// at batch level: Chat Completions batching puts the whole request body on each
-// row, which is why SubmitMeta stays {} here exactly as it does for Anthropic.
+// OpenAI. Structurally the Voyage adapter (upload JSONL → create → poll →
+// download), but through the SDK rather than raw fetch, and with the MODEL PER LINE
+// rather than at batch level: Chat Completions batching puts the whole request body
+// on each row, which is why SubmitMeta stays {} here as it does for Anthropic.
 //
 //   {"custom_id":"…","method":"POST","url":"/v1/chat/completions","body":{…}}
 //

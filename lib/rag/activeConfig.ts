@@ -1,19 +1,18 @@
 // ACTIVE CONFIG — request-scoped RAG configuration.
 //
-// The app used to read a single hard-coded `config` (lib/config.ts) everywhere.
-// With saved configs (the multi-config epic, see docs/multi-config-plan.md) the
-// per-request config is resolved from the `configs` table and made available to
-// the store/orchestration layer through an AsyncLocalStorage scope — so the deep
-// SQL helpers can read `activeConfig()` without threading an argument through
-// every call site.
+// The app used to read a single hard-coded `config` everywhere. With saved configs
+// the per-request config is resolved from the `configs` table and made available to
+// the store/orchestration layer through an AsyncLocalStorage scope — so the deep SQL
+// helpers can read `activeConfig()` without threading an argument through every call
+// site.
 //
-// Route handlers wrap their work in `withConfig(await resolveRequestConfig(req),
-// …)`. For streaming routes the scope must be entered INSIDE the stream producer
-// (the ReadableStream.start callback runs after the handler returns — see
+// Route handlers wrap their work in `withConfig(await resolveRequestConfig(req), …)`.
+// For streaming routes the scope must be entered INSIDE the stream producer (the
+// ReadableStream.start callback runs after the handler returns — see
 // lib/http/ndjson.ts), so withConfig is reusable at any layer.
 //
-// lib/config.ts remains the source of GLOBAL settings (upload limits, eval/
-// ranking knobs) and the DEFAULTS used to seed new configs.
+// lib/config.ts remains the source of GLOBAL settings and the DEFAULTS used to seed
+// new configs.
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import { activeUserId } from "@/lib/auth/userScope";

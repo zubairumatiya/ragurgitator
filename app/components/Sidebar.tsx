@@ -1,17 +1,14 @@
 // UI: the left-hand, togglable sidebar (Client Component), rendered by the root
-// layout so it frames every page (config tabs, Appraise, the corpora page). It
-// holds the signed-in account row, then collapsible sections — "My corpora"
-// (saved document sets), "My configs" (experiments/tabs) and "My cache" — with
-// sign-out pinned to the bottom.
+// layout so it frames every page. It holds the signed-in account row, then
+// collapsible sections — "My corpora", "My configs" and "My cache" — with sign-out
+// pinned to the bottom.
 //
-// Self-fetching (GET /api/corpora?includeEmpty=1, GET /api/configs) rather than
-// server-fed: the root layout must not read the DB (it also renders build-time
-// statics like the 404 page). Lists refresh on route change and on the
-// CORPORA_CHANGED window event, which mutating components fire. The sidebar's
-// open/closed state and each section's collapse state persist in localStorage,
-// exposed to React via useSyncExternalStore (SSR snapshot = open; localStorage
-// isn't readable during SSR, and this avoids a setState-in-effect restore).
-// Styling mirrors ConfigTabs/Nav (zinc palette).
+// Self-fetching rather than server-fed: the root layout must not read the DB (it
+// also renders build-time statics like the 404 page). Lists refresh on route change
+// and on the CORPORA_CHANGED window event. The sidebar's open/closed state and each
+// section's collapse state persist in localStorage, exposed via
+// useSyncExternalStore (SSR snapshot = open; localStorage isn't readable during
+// SSR, and this avoids a setState-in-effect restore).
 "use client";
 
 import Link from "next/link";
@@ -255,22 +252,18 @@ export function Sidebar() {
   );
 }
 
-// Signed-in identity, at the TOP of the sidebar — above the lists, under the
-// collapse row. It's the way into /account (provider keys, account deletion),
-// which is a thing you reach for often, so it gets the same weight as a corpus
-// or config row rather than the footnote size it used to have at the bottom.
-// Sign-out stays pinned to the bottom: the destructive action should not sit
+// Signed-in identity, at the TOP of the sidebar. It's the way into /account, which
+// is a thing you reach for often, so it gets the same weight as a corpus or config
+// row. Sign-out stays pinned to the bottom: the destructive action should not sit
 // under the cursor of the thing you now click regularly.
 //
-// Fetches its own DTO (GET /api/auth/me) for the same reason the lists above
-// do: the root layout must stay DB-free, so nothing is server-fed into this
-// tree. Renders nothing until the email lands — the row is the email, so there
-// is no useful skeleton, and a placeholder that resizes would jitter the lists.
+// Fetches its own DTO for the same reason the lists above do: the root layout must
+// stay DB-free. Renders nothing until the email lands — the row IS the email, so
+// there is no useful skeleton, and a placeholder that resizes would jitter the lists.
 //
-// Collapsing the sidebar unmounts this (see the `!open` early return above),
-// so a module-level cache seeds the next mount's initial state — reopening
-// shows the email immediately instead of blanking and refetching. Still
-// refetches in the background to catch a changed email.
+// Collapsing the sidebar unmounts this, so a module-level cache seeds the next
+// mount's initial state — reopening shows the email immediately instead of blanking
+// and refetching. Still refetches in the background to catch a changed email.
 let cachedEmail: string | null = null;
 
 function AccountRow() {

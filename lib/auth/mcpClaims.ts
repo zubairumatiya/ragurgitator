@@ -1,27 +1,25 @@
 // MCP TOKEN CLAIMS — the decision about which verified JWTs become an identity.
 //
 // Split out of lib/auth/mcpToken.ts, which is "server-only" because it holds the
-// Supabase client. Everything here is pure: no imports, no I/O, no secrets. The
-// same split as lib/http/missingKey.ts vs missingKeyServer.ts, and for a better
-// reason than symmetry — a "server-only" module cannot be loaded by the test
-// runner, and this is the code that most needs tests.
+// Supabase client. Everything here is pure: no imports, no I/O, no secrets — and a
+// "server-only" module cannot be loaded by the test runner, so this is the code
+// that most needs tests.
 //
-// THE CLIENT_ID CHECK IS THE SECURITY OF THE FEATURE. Read this before touching
-// it. A browser session token — the one behind the cookie of anyone signed into
-// the web app — is signed by the SAME project with the SAME key, so it passes
-// signature verification here perfectly. If we accepted every validly-signed
-// JWT, "having a session" and "having an MCP grant" would be the same thing, and
-// any leaked cookie anywhere in the app would hand over the MCP surface for
-// free. Only tokens minted by the OAuth server carry a `client_id` claim, so
-// requiring it is what separates "this user approved an agent" from "this user
-// is logged in". The first test in mcpClaims.test.ts is exactly this case; it is
-// not optional and it has no cheaper equivalent.
+// THE CLIENT_ID CHECK IS THE SECURITY OF THE FEATURE. Read this before touching it.
+// A browser session token — the one behind the cookie of anyone signed into the web
+// app — is signed by the SAME project with the SAME key, so it passes signature
+// verification here perfectly. If we accepted every validly-signed JWT, "having a
+// session" and "having an MCP grant" would be the same thing, and any leaked cookie
+// anywhere in the app would hand over the MCP surface for free. Only tokens minted
+// by the OAuth server carry a `client_id` claim, so requiring it is what separates
+// "this user approved an agent" from "this user is logged in". The first test in
+// mcpClaims.test.ts is exactly this case; it is not optional.
 //
 // WHAT IS DELIBERATELY NOT CHECKED: scopes, and the RFC 8707 `resource` binding.
-// Supabase issues only the standard OIDC scopes (openid, email, profile, phone),
-// so there is no `mcp:read` to require, and its tokens are not audience-bound to
-// this server. Requiring a scope that is always present, or reading a `resource`
-// claim that is never set, would look like defence and provide none.
+// Supabase issues only the standard OIDC scopes, so there is no `mcp:read` to
+// require, and its tokens are not audience-bound to this server. Requiring a scope
+// that is always present, or reading a `resource` claim that is never set, would
+// look like defence and provide none.
 import { type AuthInfo, OAuthError, OAuthErrorCode } from "@modelcontextprotocol/server";
 
 // Identity lifted off the verified token and carried to the tool body through

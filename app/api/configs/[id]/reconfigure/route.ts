@@ -4,13 +4,13 @@
 // deliberately NOT a new config). Body:
 //   { baseModel?, chunkSize?, chunkOverlap?, topK?, documentId? }
 //
-// Config-wide (no documentId): updates the config row, re-embeds its documents
-// under the new settings, and remaps eval labels by text overlap (see
-// lib/rag/reconfigure). Document-scoped (documentId set): applies the change to
-// that document's chunks as per-chunk overrides; the config row is untouched.
+// Config-wide (no documentId): updates the config row, re-embeds its documents under
+// the new settings, and remaps eval labels by text overlap. Document-scoped
+// (documentId set): applies the change to that document's chunks as per-chunk
+// overrides; the config row is untouched.
 //
-// Streams IngestEvents as NDJSON so the dialog shows progress. Scoped to the
-// config named in the path. `params` is a Promise in this Next.js version.
+// Streams IngestEvents as NDJSON so the dialog shows progress. Scoped to the config
+// named in the path. `params` is a Promise in this Next.js version.
 import { streamError } from "@/lib/http/missingKeyServer";
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";

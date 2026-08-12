@@ -4,13 +4,13 @@
 //        • jobs        — ACCOUNT-WIDE ledger, newest-first (config-labeled).
 //        • savings     — the CURRENT config's preference (config-scoped).
 //        • inFlight    — this config's non-terminal jobs (the overwrite warning).
-//        • inheritedThreshold — the cache cosine floor this config runs at when
-//          it sets no override (space calibration, else the default) + which.
+//        • inheritedThreshold — the cache cosine floor this config runs at when it
+//          sets no override (space calibration, else the default) + which.
 //        • emailConfigured — whether Resend can actually email (honest UI copy).
 // PATCH — save the Savings preference (a nested partial; read-merge-write).
 //
-// Config-scoped (withRequestConfig) for the per-config bits; the job list is
-// global but harmlessly read inside the same scope.
+// Config-scoped for the per-config bits; the job list is global but harmlessly read
+// inside the same scope.
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";

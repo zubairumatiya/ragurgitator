@@ -3,12 +3,11 @@
 // A confirm() dialog would be less code, but it is one reflexive click from a
 // destroyed account and it is suppressible by the browser. Requiring the user to
 // TYPE something makes the action deliberate — and the gate is enforced by the
-// submit button's disabled state, not by trusting a checkbox the server can't
-// see.
+// submit button's disabled state.
 //
-// The server does NOT re-check the typed word. It is a UX guard against
-// misclicks, not a security control: the real authorization is requireUser() in
-// the action, and a user is always allowed to delete their own account.
+// The server does NOT re-check the typed word. It is a UX guard against misclicks,
+// not a security control: the real authorization is requireUser() in the action, and
+// a user is always allowed to delete their own account.
 "use client";
 
 import { useState } from "react";

@@ -1,18 +1,14 @@
-// DB layer for COST ACCOUNTING (migration 0034; docs/savings-accounting-plan.md).
-//
-// Two concerns, both raw SQL via the shared `sql` client:
+// DB layer for COST ACCOUNTING (0034). Two concerns, both raw SQL:
 //   1. WRITE — recordSaving / recordSpend: upsert a per-(config, lever|surface)
-//      running total. Called fire-and-forget from the savings sites (embed cache,
-//      cascade, semantic cache, batch apply, aggregate ranking) and the metered
+//      running total, called fire-and-forget from the savings sites and the metered
 //      LLM wrapper. saved_usd is SIGNED so the cascade nets escalations.
-//   2. READ — getCostsReport: roll the two tables up (account-wide, or scoped to
-//      one config) and hand the Costs page its itemized spreadsheet + the three
-//      view totals.
+//   2. READ — getCostsReport: roll the two tables up (account-wide, or scoped to one
+//      config) and hand the Costs page its itemized spreadsheet + view totals.
 //
 // Best-effort throughout, matching embedCache / semanticCache: a missing table
-// (42P01, pre-migration) makes writes no-op and the read return an empty report,
-// so the feature is safe to ship ahead of the migration and never breaks a hot
-// path. Recording errors are swallowed (telemetry must not fail an answer).
+// makes writes no-op and the read return an empty report, so the feature is safe to
+// ship ahead of the migration and never breaks a hot path. Recording errors are
+// swallowed — telemetry must not fail an answer.
 import { activeUserId } from "@/lib/auth/userScope";
 import { isolated, sql } from "@/lib/db";
 import { activeConfigOrNull } from "@/lib/rag/activeConfig";

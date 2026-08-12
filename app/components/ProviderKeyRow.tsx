@@ -1,13 +1,13 @@
 // UI: one provider's key — its state, and the form to set or replace it.
 //
 // The input is WRITE-ONLY by construction. It is never given a value or a
-// defaultValue, so there is nothing to repopulate it from: the saved key is not
-// in the DTO the server sent, and after a save the form resets to empty. The
-// only thing the user ever sees about a stored key is its last four characters.
+// defaultValue, so there is nothing to repopulate it from: the saved key is not in
+// the DTO the server sent, and after a save the form resets to empty. The only thing
+// the user ever sees about a stored key is its last four characters.
 //
-// There is no "edit" affordance because there is no readable value to edit —
-// only REPLACE (save again) and DELETE. That mirrors what the database can
-// actually do, rather than implying a round trip that cannot exist.
+// There is no "edit" affordance because there is no readable value to edit — only
+// REPLACE (save again) and DELETE. That mirrors what the database can actually do,
+// rather than implying a round trip that cannot exist.
 "use client";
 
 import { useActionState, useEffect, useRef } from "react";

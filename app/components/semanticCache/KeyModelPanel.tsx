@@ -1,21 +1,19 @@
-// Appraise → Semantic caching: the CACHE-KEY MODEL leaderboard (Phase 3 of
-// docs/semantic-cache-key-model-plan.md).
+// Appraise → Semantic caching: the CACHE-KEY MODEL leaderboard.
 //
-// Answers one question — which embedding model should incoming questions be
-// keyed under? — by measurement rather than argument. Every candidate is scored
-// on the SAME pooled pair set, each gets its OWN τ at the same precision target,
-// and they're ranked by the recall that τ achieves.
+// Answers one question — which embedding model should incoming questions be keyed
+// under? — by measurement rather than argument. Every candidate is scored on the
+// SAME pooled pair set, each gets its OWN τ at the same precision target, and
+// they're ranked by the recall that τ achieves.
 //
-// Last panel on the page, and the only one that isn't about a threshold: it
-// changes WHICH SPACE a config's threshold is read from, so it belongs after
-// you've seen the spaces and what they serve at.
+// Last panel on the page, and the only one that isn't about a threshold: it changes
+// WHICH SPACE a config's threshold is read from.
 //
 // Three actions, in the order you'd use them:
-//   1. Generate pairs — the one-off LLM cost the sweep is built on. Without
-//      hard negatives every model scores ~the same and the table says nothing.
+//   1. Generate pairs — the one-off LLM cost the sweep is built on. Without hard
+//      negatives every model scores ~the same and the table says nothing.
 //   2. Run sweep      — embedding-only, cached, so re-runs are nearly free.
-//   3. Apply          — writes the per-config override (or all configs). Refuses
-//      an uncalibrated target space unless explicitly confirmed.
+//   3. Apply          — writes the per-config override. Refuses an uncalibrated
+//      target space unless explicitly confirmed.
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -94,19 +92,18 @@ const GEN_MAX = 200;
 // Its default, and a sane starting position — a run you can watch finish.
 const GEN_DEFAULT = 25;
 
-// A row read AT A GIVEN TARGET. The sweep ships each model's whole curve, so
-// every number below is re-derived on the client and the server's own
-// threshold/recall/precision fields go unused — they are just this, frozen at
-// the config's stored target.
+// A row read AT A GIVEN TARGET. The sweep ships each model's whole curve, so every
+// number below is re-derived on the client and the server's own
+// threshold/recall/precision fields go unused.
 //
 // `kind` is the distinction the table turns on:
 //   at-target        met the target; these are the comparable numbers.
 //   best-attainable  missed it — showing the best operating point it DOES reach,
-//                    which is not comparable to an at-target row and must never
-//                    be rendered as though it were.
-//   none             nothing to show: model unavailable, errored, or no prefix
-//                    ever reached minSamples. "No data" and "data, but short of
-//                    target" are different answers and look different.
+//                    which is not comparable to an at-target row and must never be
+//                    rendered as though it were.
+//   none             nothing to show: model unavailable, errored, or no prefix ever
+//                    reached minSamples. "No data" and "data, but short of target"
+//                    are different answers and look different.
 type RowKind = "at-target" | "best-attainable" | "none";
 
 type DerivedRow = {
@@ -161,20 +158,18 @@ function deriveRow(
   };
 }
 
-// Ranking, in blocks. At-target rows first, best-attainable after, unscored
-// last. The blocks are the point: one recall column across all of them would
-// compare numbers measured at DIFFERENT precisions, which is exactly what
-// holding the target equal exists to prevent. A 90%-recall row that only manages
-// 60% precision is not beating an 80%-recall row that held 99%.
+// Ranking, in blocks. At-target rows first, best-attainable after, unscored last.
+// The blocks are the point: one recall column across all of them would compare
+// numbers measured at DIFFERENT precisions. A 90%-recall row that only manages 60%
+// precision is not beating an 80%-recall row that held 99%.
 //
 // The two blocks then sort by DIFFERENT keys, for the same reason:
-//   at-target        by recall — they all met the same precision, so recall is
-//                    the objective and the only thing left to compare.
-//   best-attainable  by PRECISION — nobody met the target, so the question is
-//                    "who came closest", and their recalls sit at precisions
-//                    that differ from row to row. Sorting these by recall reads
-//                    as a ranking and isn't one; it also contradicted the
-//                    "Closest was X" line, which ranks by precision.
+//   at-target        by recall — they all met the same precision, so recall is the
+//                    objective and the only thing left to compare.
+//   best-attainable  by PRECISION — nobody met the target, so the question is "who
+//                    came closest", and their recalls sit at precisions that differ
+//                    from row to row. Sorting these by recall reads as a ranking and
+//                    isn't one.
 const KIND_ORDER: Record<RowKind, number> = {
   "at-target": 0,
   "best-attainable": 1,
@@ -407,19 +402,17 @@ export function KeyModelPanel() {
     window.dispatchEvent(new Event(SC_CHANGED));
   };
 
-  // Write the dragged position back as the config's STORED calibration target
-  // (configs.batch_savings → semanticCache.acceptTarget), which is what the
-  // shadow-judge sweep and this leaderboard read on their next run.
+  // Write the dragged position back as the config's STORED calibration target, which
+  // is what the shadow-judge sweep and this leaderboard read on their next run.
   //
-  // It lives here, next to the slider, because this is where the number is
-  // chosen: you drag until the table shows a τ you'd accept, and the setting
-  // should be one click from there rather than in a dropdown on another page.
-  // It is NOT the apply box below — that writes which model a config keys under,
-  // and the two must not read as variations of one action, hence the wording.
+  // It lives here, next to the slider, because this is where the number is chosen:
+  // you drag until the table shows a τ you'd accept. It is NOT the apply box below —
+  // that writes which model a config keys under, and the two must not read as
+  // variations of one action, hence the wording.
   //
   // Not scoped by tab: Appraise sits outside /c/[configId], so apiFetch sends no
-  // configId and the write lands on the same config the sweep resolved its
-  // target from — the one named in the button.
+  // configId and the write lands on the same config the sweep resolved its target
+  // from — the one named in the button.
   const saveTarget = async () => {
     if (!sweep || targetOverride === null) return;
     setBusy("target");

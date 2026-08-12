@@ -1,15 +1,13 @@
 // THE MCP SERVER INSTANCE — tool registration and the per-request factory.
 //
-// createMcpHandler calls this factory once per HTTP request rather than holding
-// one long-lived server, which is what makes a multi-tenant MCP endpoint safe on
-// a shared process: the instance is constructed around ONE caller's identity and
-// is discarded with the response, so there is no server object that could
-// outlive a request and answer the next one with the last one's user.
+// createMcpHandler calls this factory once per HTTP request rather than holding one
+// long-lived server, which is what makes a multi-tenant MCP endpoint safe on a
+// shared process: the instance is constructed around ONE caller's identity and is
+// discarded with the response.
 //
-// That is also why the tool closure captures `user` instead of reading it from
-// some ambient place at call time. The identity arrives on the verified token
-// (lib/auth/mcpToken.ts), is handed to the factory as ctx.authInfo, and is bound
-// here — one hop, no globals.
+// That is also why the tool closure captures `user` instead of reading it from some
+// ambient place at call time. The identity arrives on the verified token, is handed
+// to the factory as ctx.authInfo, and is bound here — one hop, no globals.
 import "server-only";
 
 import { McpServer } from "@modelcontextprotocol/server";

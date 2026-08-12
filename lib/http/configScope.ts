@@ -1,26 +1,23 @@
 // Bridge between the HTTP layer and the request scopes. Every route handler runs
 // its work inside one of the two wrappers here, which do three things in order:
-// authenticate, enter the user scope, and (for the config-scoped variant)
-// resolve and enter the active config.
+// authenticate, enter the user scope, and (for the config-scoped variant) resolve
+// and enter the active config.
 //
 // THIS IS THE AUTHENTICATION BOUNDARY FOR /api. proxy.ts deliberately does not
-// redirect API routes — a fetch() that follows a 307 to /login and then parses
-// the HTML as JSON produces an error message with nothing to do with the actual
-// problem — so route handlers must return their own 401. Putting that in the
-// wrapper every route already used means it cannot be forgotten one route at a
-// time, which is how 53 of 54 routes ended up unauthenticated before Phase 2.
+// redirect API routes — a fetch() that follows a 307 to /login and parses the HTML
+// as JSON produces an error with nothing to do with the actual problem — so route
+// handlers must return their own 401. Putting that in the wrapper every route
+// already used means it cannot be forgotten one route at a time, which is how 53
+// of 54 routes ended up unauthenticated before Phase 2.
 //
 // configId travels in via a `configId` query param or `x-config-id` header.
-// resolveRequestConfig now also verifies the config belongs to the session user,
-// so an unowned id resolves to a clean 404 rather than someone else's tab.
+// resolveRequestConfig also verifies the config belongs to the session user, so an
+// unowned id resolves to a clean 404 rather than someone else's tab.
 //
-// For NDJSON streaming routes the scopes are captured into the stream producer
-// by lib/http/ndjson.ts, so wrapping the handler body is enough.
-//
-// Both wrappers also OWN THE DETACHED QUEUE (lib/detached.ts): they install it
-// and hand Next's `after` the flush that drains it once the response is out.
-// after() is called BEFORE withUser, so the async context it binds carries no
-// transaction handle — that ordering is load-bearing, not incidental.
+// Both wrappers also OWN THE DETACHED QUEUE (lib/detached.ts): they install it and
+// hand Next's `after` the flush that drains it once the response is out. after() is
+// called BEFORE withUser, so the async context it binds carries no transaction
+// handle — that ordering is load-bearing, not incidental.
 import { after } from "next/server";
 
 import { requireUserForApi, unauthorizedJson } from "@/lib/auth/dal";
@@ -30,20 +27,17 @@ import { missingKeyResponse } from "@/lib/http/missingKeyServer";
 import { UnknownConfigError, resolveRequestConfig, withConfig } from "@/lib/rag/activeConfig";
 
 // A MISSING PROVIDER KEY BELONGS HERE for the same reason the 401 does: under
-// strict BYOK every user hits it on their first run, and handling it one route at
-// a time is how it would be missed in the routes nobody thought about. The
-// wrappers already stand between every handler and the client, so this is the one
-// place it cannot be forgotten. Anything else rethrows untouched.
+// strict BYOK every user hits it on their first run, and handling it one route at a
+// time is how it would be missed in the routes nobody thought about. Anything else
+// rethrows untouched.
 //
-// NDJSON routes do NOT come through here — their `run` callback owns its errors
-// by contract (lib/http/ndjson.ts) and emits streamError() instead, which builds
-// the same payload. See lib/http/missingKey.ts.
+// NDJSON routes do NOT come through here — their `run` callback owns its errors by
+// contract and emits streamError() instead, which builds the same payload.
 //
-// EXPORTED for lib/http/mcpScope.ts, which is the third scope entry point on the
-// HTTP side and needs the identical behaviour. Sharing it rather than copying it
-// is the point: two copies is how the "one place it cannot be forgotten" claim
-// above stops being true. It is not part of the public route API — nothing but a
-// scope wrapper should be calling it.
+// EXPORTED for lib/http/mcpScope.ts, the third scope entry point, which needs the
+// identical behaviour. Sharing rather than copying is the point: two copies is how
+// the "one place it cannot be forgotten" claim above stops being true. Nothing but
+// a scope wrapper should be calling it.
 export async function catchingMissingKey<T>(fn: () => Promise<T>): Promise<T | Response> {
   try {
     return await fn();

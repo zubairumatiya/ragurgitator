@@ -76,17 +76,15 @@ export function mapOpenAiStatus(s: string): BatchStatus {
 //   {"custom_id":"…","response":{"status_code":200,"body":{…ChatCompletion…}},"error":null}
 //
 // UNLIKE VOYAGE, failures are not (only) inline: OpenAI writes them to a separate
-// error_file_id, so the output file is mostly succeeded rows. The failed COUNT
-// still arrives through request_counts.failed — which is what the panel renders —
-// so this only has to recognise the failures that do appear here (a non-200
-// status_code, or an `error` on the line) rather than go fetch the second file.
+// error_file_id, so the output file is mostly succeeded rows. The failed COUNT still
+// arrives through request_counts.failed — which is what the panel renders — so this
+// only has to recognise the failures that do appear here rather than go fetch the
+// second file.
 //
-// `translate` is the ChatCompletion → Anthropic Message conversion, injected
-// rather than imported so this module stays free of the "@/" alias the tsx test
-// runner can't resolve (see the header). providers.ts passes toAnthropicMessage,
-// which is what makes a batched request and a synchronous one produce the same
-// body — and therefore lets every apply() handler read body.content[0].text
-// without knowing which provider served it.
+// `translate` is the ChatCompletion → Anthropic Message conversion, injected rather
+// than imported so this module stays free of the "@/" alias the tsx test runner
+// can't resolve. providers.ts passes toAnthropicMessage, which is what makes a
+// batched request and a synchronous one produce the same body.
 export function parseOpenAiResults(
   jsonl: string,
   translate: (completion: OpenAI.Chat.Completions.ChatCompletion) => unknown,

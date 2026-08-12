@@ -1,14 +1,14 @@
 // API route: GET/DELETE /api/corpora/[id]
 //
 // GET returns everything the corpus detail page (and the create-config dialog's
-// duplicate detection) needs in one shot: the corpus, its member documents
-// (with content hashes), the configs attached to it (synced or not), and the
-// global documents NOT yet in it (the "add existing document" picker).
+// duplicate detection) needs in one shot: the corpus, its member documents (with
+// content hashes), the configs attached to it, and the global documents NOT yet in
+// it.
 //
-// DELETE removes the corpus. Configs attached to it survive — the 0017 FK
-// clears their corpus_id, so auto-sync simply breaks; their embedded documents
-// are untouched. Global (not config-scoped). `params` is a Promise in this
-// Next.js version.
+// DELETE removes the corpus. Configs attached to it survive — the 0017 FK clears
+// their corpus_id, so auto-sync simply breaks; their embedded documents are
+// untouched. Global (not config-scoped). `params` is a Promise in this Next.js
+// version.
 import { withRequestUser } from "@/lib/http/configScope";
 import {
   deleteCorpus,

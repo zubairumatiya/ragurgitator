@@ -1,33 +1,29 @@
 // CANCELLING AN IN-FLIGHT NDJSON RUN.
 //
-// An NDJSON producer is deliberately detached from the request that started it
-// (see lib/http/ndjson.ts), so closing the tab does NOT stop it: `enqueue`
-// throws, the error is swallowed, and the loop keeps spending. This registry is
-// the missing back channel — one process-local map of the runs currently
-// streaming, so a second request (POST /api/eval/cancel) can flip a flag the
-// producer's loops read between units of work.
+// An NDJSON producer is deliberately detached from the request that started it, so
+// closing the tab does NOT stop it: `enqueue` throws, the error is swallowed, and
+// the loop keeps spending. This registry is the missing back channel — one
+// process-local map of the runs currently streaming, so a second request can flip a
+// flag the producer's loops read between units of work.
 //
-// CANCELLATION IS A FLAG, NEVER AN EXCEPTION. The whole run is one transaction
-// that commits when the stream ends, so throwing out of a loop would roll back
-// every question the run already generated and streamed to the screen — tokens
-// already spent, output discarded, and the question_cache banking gone with it.
-// Loops must therefore BREAK and return normally; partial work commits and
-// "Score pending" finishes whatever it left unscored. Anything that reads
-// isCancelled() and throws re-introduces exactly the bug this exists to avoid.
+// CANCELLATION IS A FLAG, NEVER AN EXCEPTION. The whole run is one transaction that
+// commits when the stream ends, so throwing out of a loop would roll back every
+// question the run already generated and streamed to the screen — tokens spent,
+// output discarded, question_cache banking gone with it. Loops must BREAK and
+// return normally; partial work commits and "Score pending" finishes the rest.
+// Anything that reads isCancelled() and throws re-introduces exactly the bug this
+// exists to avoid.
 //
-// It follows that cancellation is COOPERATIVE and not instant: the run stops at
-// its next checkpoint, which for an in-flight LLM call is when that call
-// returns. The UI says "Cancelling…" for that reason.
+// It follows that cancellation is COOPERATIVE and not instant: the run stops at its
+// next checkpoint, which for an in-flight LLM call is when that call returns.
 //
-// Process-local by design: one runId lives in the one process streaming it. On a
-// multi-instance deployment a cancel that lands on another instance finds
-// nothing and reports `found: false`, which the UI treats as "already over" —
-// the honest answer when we cannot reach the run. Durable cross-instance
-// cancellation would need the flag in Postgres, and the run polling it.
+// Process-local by design. On a multi-instance deployment a cancel that lands on
+// another instance finds nothing and reports `found: false`, which the UI treats as
+// "already over" — the honest answer when we cannot reach the run. Durable
+// cross-instance cancellation would need the flag in Postgres.
 //
-// globalThis-backed for the same reason the pools are (lib/db.ts): HMR
-// re-evaluates modules in dev, and a fresh Map would orphan every run
-// registered against the old one, mid-stream.
+// globalThis-backed for the same reason the pools are: HMR re-evaluates modules in
+// dev, and a fresh Map would orphan every run registered against the old one.
 
 type ActiveRun = { userId: string; cancelled: boolean };
 

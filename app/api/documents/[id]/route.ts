@@ -1,12 +1,11 @@
 // API route: DELETE /api/documents/[id]
 //
-// Removes the ACTIVE CONFIG's embedding of a document — its chunks, the eval
-// labels pointing at them, and its per-chunk overrides (see
-// deleteEmbeddingRunFor). Scoped on purpose: the list this is called from (GET
-// /api/documents) is per-config, so a delete on it has to be per-config too.
-// Every other config keeps its own embedding, the eval questions stay (they are
-// per-document by design, shared across configs), and the document itself stays
-// in the user's library, re-embeddable with no re-upload.
+// Removes the ACTIVE CONFIG's embedding of a document — its chunks, the eval labels
+// pointing at them, and its per-chunk overrides. Scoped on purpose: the list this is
+// called from is per-config, so a delete on it has to be per-config too. Every other
+// config keeps its own embedding, the eval questions stay (per-document by design,
+// shared across configs), and the document itself stays in the user's library,
+// re-embeddable with no re-upload.
 //
 // `params` is a Promise in this Next.js version — await it.
 import { withRequestConfig } from "@/lib/http/configScope";

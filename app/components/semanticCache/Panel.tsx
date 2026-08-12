@@ -1,27 +1,21 @@
 // The section frame every panel on Appraise → Semantic caching wears.
 //
-// It exists because the four panels used to each invent their own chrome — one
-// unboxed with a rule underneath, one bare, one a bordered card with its own
-// padding, one relying on the page to draw a rule above it. Four treatments for
-// four peers made the page read as a pile of widgets rather than one calibration
-// workflow, and the panels' shared parts (heading, "?" dot, an action row) drifted
-// apart in spacing every time one was edited.
+// It exists because the four panels used to each invent their own chrome. Four
+// treatments for four peers made the page read as a pile of widgets rather than one
+// calibration workflow, and the panels' shared parts drifted apart in spacing every
+// time one was edited.
 //
 // So the frame is one component and the panels only supply content:
-//   • `step`    — the panel's place in the working order (cheapest evidence
-//                 first; see the page). The numbers are the whole reason the
-//                 order is legible on screen instead of only in a code comment.
-//   • `title` / `about`    — heading + the "?" tooltip.
-//   • `subtitle`          — one line on what the panel COSTS to use, which is
-//                 what actually decides whether you reach for it now.
+//   • `step`    — the panel's place in the working order (cheapest evidence first).
+//   • `title` / `about`  — heading + the "?" tooltip.
+//   • `subtitle`         — one line on what the panel COSTS to use, which is what
+//                 actually decides whether you reach for it now.
 //   • `action`  — a status/scope control that belongs on the heading row.
-//   • `footer`  — a WRITE control. Both panels that write (the threshold apply
-//                 box and the key-model apply row) put it here, so "the thing
-//                 that changes what's live" is always in the same place: a tinted
-//                 strip flush with the card's bottom edge.
+//   • `footer`  — a WRITE control. Both panels that write put it here, so "the
+//                 thing that changes what's live" is always in the same place.
 //
-// No state and no hooks, so it renders in a Server Component (the page frame) and
-// inside the self-fetching Client Components alike.
+// No state and no hooks, so it renders in a Server Component and inside the
+// self-fetching Client Components alike.
 import type { ReactNode } from "react";
 
 import { InfoDot } from "@/app/components/InfoDot";
@@ -101,13 +95,12 @@ export const NOTE_AMBER =
 // than something worth knowing, so it draws the eye instead of receding.
 //
 // Use it where the explanation is long but the reader only needs it once — a
-// paragraph that explains a table's empty column is five lines of prose sitting
-// permanently above four lines of table, and it reads as an error banner every
-// time you open the page. The "!" keeps the signal ("this is why") at a glyph's
-// cost and parks the reasoning on hover.
+// paragraph explaining a table's empty column is five lines of prose sitting
+// permanently above four lines of table, and it reads as an error banner every time
+// you open the page.
 //
-// Color is never the only channel: the glyph itself says "!", and it's paired
-// with a short text label at every call site.
+// Color is never the only channel: the glyph itself says "!", and it's paired with
+// a short text label at every call site.
 export function WarnDot({ text, align = "left" }: { text: string; align?: "center" | "left" | "right" }) {
   return (
     <Tooltip text={text} align={align}>

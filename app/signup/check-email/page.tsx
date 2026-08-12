@@ -1,13 +1,11 @@
-// Where signUp lands once Supabase has accepted the account and sent a
-// confirmation link. Public — proxy.ts lets /signup/* through, which matters
-// because the user has no session yet and won't get one until they click the
-// link in their inbox.
+// Where signUp lands once Supabase has accepted the account and sent a confirmation
+// link. Public — proxy.ts lets /signup/* through, which matters because the user has
+// no session yet and won't get one until they click the link in their inbox.
 //
-// The copy is deliberately conditional ("if that address is new"): Supabase
-// returns an identical response for an address that is already registered, and
-// the whole point of that is to keep signup from confirming who has an account.
-// Wording this as a flat "we sent you an email" would leak exactly what the
-// server worked to hide.
+// The copy is deliberately conditional ("if that address is new"): Supabase returns
+// an identical response for an address that is already registered, precisely to keep
+// signup from confirming who has an account. A flat "we sent you an email" would
+// leak exactly what the server worked to hide.
 import Link from "next/link";
 
 export const metadata = { title: "Check your email" };

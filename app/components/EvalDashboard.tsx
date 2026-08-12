@@ -1,14 +1,14 @@
 // UI: retrieval eval dashboard (/eval).
 //
-// Shows Recall@k, MRR@k, and nDCG for the active config, a per-document
-// breakdown, the run history, and a per-question detail table with inline
-// editing. The "Score pending" button scores only the questions without a fresh
-// result; generating new ones is Bulk actions → Add.
+// Shows Recall@k, MRR@k, and nDCG for the active config, a per-document breakdown,
+// the run history, and a per-question detail table with inline editing. "Score
+// pending" scores only the questions without a fresh result; generating new ones is
+// Bulk actions → Add.
 //
-// Recall@k answers "did the ground truth land in the window"; MRR@k adds "how
-// close to the top" (1/rank, 0 past mrr_k) — two configs can tie on recall
-// while one consistently ranks the chunk higher. The per-question rank already
-// shows on the hit badge, so MRR only appears as the headline aggregate.
+// Recall@k answers "did the ground truth land in the window"; MRR@k adds "how close
+// to the top" — two configs can tie on recall while one consistently ranks the
+// chunk higher. The per-question rank already shows on the hit badge, so MRR only
+// appears as the headline aggregate.
 "use client";
 
 import {
@@ -106,21 +106,19 @@ type ChunkGroup = {
   questions: QuestionDetail[];
 };
 
-// Group questions by their labeled chunk, preserving the server's order (document
-// order, then oldest-first within a chunk) so groups appear in a stable sequence.
+// Group questions by their labeled chunk, preserving the server's order so groups
+// appear in a stable sequence.
 //
 // SEEDED FROM `chunks` FIRST, so every chunk under the config gets a card whether
 // or not it has questions. That is what makes a freshly ingested document visible
-// on this page immediately: the card's header, its "add question" form and its
-// "try a model" runner are all keyed by chunk id, none of them need a question to
-// exist. Before this, a chunk was reachable only once something had generated a
-// question against it, which left a new document looking as though it had not
-// been ingested at all.
+// immediately: the card's header, its "add question" form and its "try a model"
+// runner are all keyed by chunk id. Before this, a chunk was reachable only once
+// something had generated a question against it, which left a new document looking
+// as though it had not been ingested at all.
 //
-// The questions loop still creates a group when it meets a chunk that isn't in
-// the list — `chunks` comes from the active config's chunk table, so a question
-// labeled to a chunk that has since been re-chunked away keeps rendering instead
-// of vanishing.
+// The questions loop still creates a group when it meets a chunk that isn't in the
+// list, so a question labeled to a chunk that has since been re-chunked away keeps
+// rendering instead of vanishing.
 function groupByChunk(
   questions: QuestionDetail[],
   chunks: ChunkRef[],
@@ -2509,21 +2507,19 @@ function Stat({
   );
 }
 
-// The baseline ticker (0057): what this config's per-chunk tuning — autotune's
-// applied overrides and manual delegates — has bought on the corpus as it
-// stands, against the same config with no overrides in effect.
+// The baseline ticker (0057): what this config's per-chunk tuning has bought on the
+// corpus as it stands, against the same config with no overrides in effect.
 //
 // UNITS. Recall moves in percentage POINTS, not percent: 40% → 42% is +2pp, and
-// "+5%" would be genuinely ambiguous between the two readings. MRR and nDCG are
-// already 0–1 scores, so they show raw deltas at two decimals.
+// "+5%" would be genuinely ambiguous. MRR and nDCG are already 0–1 scores, so they
+// show raw deltas at two decimals.
 //
-// COLOUR IS NEVER THE ONLY SIGNAL. Red/green is exactly the pair that fails for
-// the most common colour-vision deficiency, so the arrow glyph carries the
-// direction on its own.
+// COLOUR IS NEVER THE ONLY SIGNAL. Red/green is exactly the pair that fails for the
+// most common colour-vision deficiency, so the arrow glyph carries the direction on
+// its own.
 //
-// Renders nothing (not a dash) when there is no baseline to compare with: the
-// caller only asks for one when the config has overrides, and a row of dashes
-// would imply a measurement that was never taken.
+// Renders nothing (not a dash) when there is no baseline to compare with: a row of
+// dashes would imply a measurement that was never taken.
 function MetricTicker({
   live,
   base,

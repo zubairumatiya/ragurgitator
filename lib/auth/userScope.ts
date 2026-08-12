@@ -1,43 +1,41 @@
 // ACTIVE USER — request-scoped identity.
 //
-// The deliberate twin of lib/rag/activeConfig.ts, and it exists for the same
-// reason: the store layer runs many levels below the route handler, and
-// threading a userId through every call site would mean touching several hundred
-// signatures to add one predicate to each query. AsyncLocalStorage carries it
-// instead, so `select … where user_id = ${activeUserId()}` works at any depth.
+// The deliberate twin of lib/rag/activeConfig.ts, for the same reason: the store
+// layer runs many levels below the route handler, and threading a userId through
+// every call site would mean touching several hundred signatures to add one
+// predicate to each query. AsyncLocalStorage carries it instead, so
+// `select … where user_id = ${activeUserId()}` works at any depth.
 //
 // Entered in exactly four places, and nowhere else:
 //
 //   1. lib/http/configScope.ts   — withRequestConfig / withRequestUser (routes)
 //   2. lib/auth/dal.ts           — withPageUser (Server Components, actions)
 //   3. lib/http/mcpScope.ts      — withMcpUser (the MCP endpoint, /api/mcp)
-//   4. scripts/*                 — from SCRIPT_USER_ID, see the Phase 7 note in
-//                                  docs/user-accounts-plan.md
+//   4. scripts/*                 — from SCRIPT_USER_ID
 //
-// Keeping that list short is what makes the scope auditable: every entry point
-// has already verified a session (or is an operator running a script), so code
-// inside a scope can treat activeUser() as authenticated fact.
+// Keeping that list short is what makes the scope auditable: every entry point has
+// already verified a session (or is an operator running a script), so code inside a
+// scope can treat activeUser() as authenticated fact.
 //
-// The third is the newest and the odd one out: its credential is a BEARER TOKEN
-// rather than a cookie, verified against the project JWKS in lib/auth/mcpToken.ts
-// before the scope opens. The authenticated-fact guarantee is unchanged — what
-// differs is only where the proof came from — but note that a token, unlike a
-// cookie, is presented explicitly, so withMcpUser takes the user as an argument
-// instead of resolving it from ambient request state.
+// The third is the odd one out: its credential is a BEARER TOKEN rather than a
+// cookie, verified against the project JWKS before the scope opens. The
+// authenticated-fact guarantee is unchanged — only the proof's origin differs —
+// but a token, unlike a cookie, is presented explicitly, so withMcpUser takes the
+// user as an argument instead of resolving it from ambient request state.
 //
 // The first three also own the DETACHED QUEUE (lib/detached.ts): they install it
 // and hand Next's `after` the flush that drains it once the response is out, and
 // the flush re-enters this scope from the RequestUser they captured. Scripts do
 // not, so telemetry there runs inline — which is why detached() has to work both
-// ways. Note that a deferred write has to carry the ACTIVE CONFIG too: the third
-// scope (lib/rag/activeConfig.ts) is where nine of the telemetry sites resolve
-// their config_id, and losing it makes them silently write nothing.
+// ways. A deferred write has to carry the ACTIVE CONFIG too: nine of the telemetry
+// sites resolve their config_id from it, and losing it makes them silently write
+// nothing.
 //
-// Streaming routes are the one place that needs care. lib/http/ndjson.ts runs
-// its producer after the route handler has returned, so it re-enters this scope
-// itself rather than inheriting it — the async context AsyncResource.bind
-// restores carries a transaction that has already committed. See the ordering
-// note in that file; it is not a detail you can rearrange safely.
+// Streaming routes need care. lib/http/ndjson.ts runs its producer after the route
+// handler has returned, so it re-enters this scope itself rather than inheriting it
+// — the async context AsyncResource.bind restores carries a transaction that has
+// already committed. See the ordering note in that file; it is not a detail you can
+// rearrange safely.
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import { withUserTransaction } from "@/lib/db";

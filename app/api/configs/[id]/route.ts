@@ -2,10 +2,10 @@
 //
 //   PATCH  — mutate one tab: { name } rename, { isOpen } close/reopen,
 //            { tabOrder } move, { corpusSync } toggle corpus auto-sync (0017),
-//            { llmModel } set the answer-generation model (§9.2).
-//            Mixed bodies apply each field present.
-//   POST   — duplicate this config (copy-on-write, no embedding calls); returns
-//            the new config. POST-to-a-resource = "make a copy of it".
+//            { llmModel } set the answer-generation model. Mixed bodies apply each
+//            field present.
+//   POST   — duplicate this config (copy-on-write, no embedding calls); returns the
+//            new config. POST-to-a-resource = "make a copy of it".
 //   DELETE — permanently delete this config and the data it owns.
 //
 // configStore takes explicit ids, so these don't need withRequestConfig. The last

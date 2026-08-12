@@ -1,21 +1,19 @@
 // RFC 9728 PROTECTED RESOURCE METADATA — "who authorizes access to /api/mcp?"
 //
 // Reached at /.well-known/oauth-protected-resource/api/mcp via a rewrite in
-// next.config.ts, not by living at that path. Dot-prefixed directories under
-// app/ are not reliably routed, and the alternative — a catch-all that parses
-// the path — buys nothing when there are exactly two documents to serve.
+// next.config.ts, not by living at that path: dot-prefixed directories under app/
+// are not reliably routed, and a catch-all that parses the path buys nothing when
+// there are exactly two documents to serve.
 //
-// UNAUTHENTICATED BY DESIGN, which is the whole point of the RFC: a client that
-// has never seen this server hits /api/mcp, gets a 401 naming this URL, fetches
-// it, and learns which authorization server to go and get a token from. Every
-// step happens before it could possibly have a credential. proxy.ts has
-// /.well-known in PUBLIC_PREFIXES for exactly this reason, and there is a
-// matching HANDLER_EXEMPT entry in scripts/guards.ts.
+// UNAUTHENTICATED BY DESIGN, which is the whole point of the RFC: a client that has
+// never seen this server hits /api/mcp, gets a 401 naming this URL, fetches it, and
+// learns which authorization server to get a token from. Every step happens before
+// it could possibly have a credential. proxy.ts has /.well-known in PUBLIC_PREFIXES
+// for exactly this reason, with a matching HANDLER_EXEMPT entry in scripts/guards.ts.
 //
 // The document itself is derived, never hand-written: the SDK's builder also
-// validates the issuer URL (HTTPS outside localhost, no fragment, no query), so
-// a misconfigured Supabase project fails here with a clear message rather than
-// three hops later inside somebody's agent.
+// validates the issuer URL, so a misconfigured Supabase project fails here with a
+// clear message rather than three hops later inside somebody's agent.
 import { buildOAuthProtectedResourceMetadata } from "@modelcontextprotocol/server";
 
 import { authorizationServerMetadata, mcpServerUrl } from "@/lib/mcp/metadata";

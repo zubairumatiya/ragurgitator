@@ -1,19 +1,16 @@
-// UI: "New config" dialog (Client Component) — custom-settings creation for
-// real A/B testing. The user picks:
+// UI: "New config" dialog (Client Component) — custom-settings creation for real
+// A/B testing. The user picks:
 //   - a document SOURCE: "New (start blank)", or "From existing corpora" which
-//     reveals a multi-select of corpora (their docs are union'd and de-duped by
-//     content hash — the picker warns on duplicates).
-//   - optionally "save selection as new corpus" (a merged, reusable corpus) and
-//     "auto-sync" (corpus ↔ config membership flows both ways; needs a single
+//     reveals a multi-select (their docs are union'd and de-duped by content hash).
+//   - optionally "save selection as new corpus" and "auto-sync" (needs a single
 //     target corpus — the one selected, or the newly saved one).
-//   - a base embedding model (greyed out when its provider key is missing / it
-//     has no vector table — data from GET /api/embedding-models)
+//   - a base embedding model (greyed out when its provider key is missing or it has
+//     no vector table)
 //   - chunk size / overlap / top-k
 //
 // On submit it POSTs /api/configs; with source corpora it then streams
-// /api/configs/[id]/populate (body { corpusIds }) to embed the de-duped docs
-// under the new config, showing progress. Then it routes to the new tab.
-// Styling mirrors FileUpload / EvalDashboard (zinc palette).
+// /api/configs/[id]/populate to embed the de-duped docs under the new config,
+// showing progress, then routes to the new tab.
 "use client";
 
 import { useEffect, useState } from "react";

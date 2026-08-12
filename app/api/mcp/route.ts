@@ -1,20 +1,19 @@
 // THE MCP ENDPOINT. JSON-RPC over HTTP, authenticated by an OAuth bearer token.
 //
-// This is the only route in the app not behind a session cookie, which is the
-// entire reason it exists — an agent running in someone's terminal has no cookie
-// jar. The authentication boundary is withMcpRequest (lib/http/mcpScope.ts), the
-// bearer-token counterpart of the cookie wrappers: it verifies the token, refuses
-// anything without a client_id claim, and enforces the mcp_enabled kill switch
-// before a single JSON-RPC byte is parsed.
+// The only route in the app not behind a session cookie, which is the entire reason
+// it exists — an agent running in someone's terminal has no cookie jar. The
+// authentication boundary is withMcpRequest, the bearer-token counterpart of the
+// cookie wrappers: it verifies the token, refuses anything without a client_id
+// claim, and enforces the mcp_enabled kill switch before a single JSON-RPC byte is
+// parsed.
 //
-// The handler is built ONCE at module scope but the McpServer inside it is built
-// PER REQUEST, from the identity on that request's token. That is what makes a
-// multi-tenant MCP endpoint safe on a shared process: there is no server object
-// that could outlive a request and answer the next one as the previous user.
+// The handler is built ONCE at module scope but the McpServer inside it is built PER
+// REQUEST, from the identity on that request's token. That is what makes a
+// multi-tenant MCP endpoint safe on a shared process: there is no server object that
+// could outlive a request and answer the next one as the previous user.
 //
 // No `export const runtime`: Node is already the default, and postgres.js plus
-// AsyncLocalStorage rule out edge anyway. There is no runtime export anywhere
-// else in this repo and this is not the file to start.
+// AsyncLocalStorage rule out edge anyway.
 import { createMcpHandler } from "@modelcontextprotocol/server";
 
 import { mcpIdentity } from "@/lib/auth/mcpToken";

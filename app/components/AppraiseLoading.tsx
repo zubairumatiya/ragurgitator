@@ -1,24 +1,19 @@
 // Instant loading shell shared by every Appraise leaf page, wired up through a
 // one-line loading.tsx in each of app/appraise/{costs,semantic-cache,configs}/.
 //
-// Why it exists: every Appraise page is `force-dynamic`, and per
-// node_modules/next/dist/docs/01-app/02-guides/prefetching.md a dynamic route is
-// NOT prefetched at all unless it has a loading boundary — the router had
-// nothing cached, no shell to stream into, and no fallback to paint. Clicking
-// "📊 Appraise" therefore left you sitting on the *previous* page for a full
-// server round trip with zero feedback, which reads as "Appraise takes ages to
-// load". It's worst right after /eval loads, when the tab is still busy with
-// EvalDashboard's payload and the browser is fetching the destination's chunks
-// cold.
+// Why it exists: every Appraise page is `force-dynamic`, and a dynamic route is NOT
+// prefetched at all unless it has a loading boundary — the router had nothing
+// cached, no shell to stream into, and no fallback to paint. Clicking "Appraise"
+// therefore left you on the *previous* page for a full server round trip with zero
+// feedback.
 //
 // The boundary lives in the LEAF segments, not in app/appraise/, on purpose: a
 // loading.tsx at the section root would also wrap app/appraise/page.tsx, and
-// flushing its shell first downgrades that page's redirect() from a real HTTP
-// 307 to a client-side bounce (headers are already sent).
+// flushing its shell first downgrades that page's redirect() from a real HTTP 307
+// to a client-side bounce (headers are already sent).
 //
-// The frame is duplicated from the pages rather than hoisted into a layout
-// because each page owns its own InfoDot copy; keep the wrapper classes in sync
-// with app/appraise/*/page.tsx.
+// The frame is duplicated from the pages rather than hoisted into a layout because
+// each page owns its own InfoDot copy; keep the wrapper classes in sync.
 import { AppraiseNav } from "@/app/components/AppraiseNav";
 import { BackToConfigs } from "@/app/components/BackToConfigs";
 

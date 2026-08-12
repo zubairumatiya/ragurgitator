@@ -1,20 +1,17 @@
 // DATA ACCESS LAYER — the authorization boundary.
 //
-// Per the Next 16 auth guide (node_modules/next/dist/docs/01-app/02-guides/
-// authentication.md), proxy.ts is an OPTIMISTIC check only: it runs on every
-// route including prefetches, reads the cookie, and redirects. It is not a
-// security boundary and must never be the only thing standing between a request
-// and someone's data.
+// Per the Next 16 auth guide, proxy.ts is an OPTIMISTIC check only: it runs on
+// every route including prefetches, reads the cookie, and redirects. It is not a
+// security boundary and must never be the only thing standing between a request and
+// someone's data.
 //
-// THIS is the boundary. Every Server Component and Server Action that touches
-// user data calls withPageUser(); every route handler goes through
-// withRequestConfig / withRequestUser (lib/http/configScope.ts). Both end up
-// here, close to the data rather than at the edge.
+// THIS is the boundary. Every Server Component and Server Action that touches user
+// data calls withPageUser(); every route handler goes through withRequestConfig /
+// withRequestUser. Both end up here, close to the data rather than at the edge.
 //
-// React's cache() memoizes per render pass, so a page whose layout, page, and
-// three leaf components each call requireUser() performs ONE getUser() round
-// trip. That's what makes "check at every call site" affordable enough to
-// actually do — the guide's recommended pattern.
+// React's cache() memoizes per render pass, so a page whose layout, page and three
+// leaf components each call requireUser() performs ONE getUser() round trip —
+// what makes "check at every call site" affordable enough to actually do.
 import "server-only";
 
 import { cache } from "react";
@@ -77,22 +74,16 @@ export function unauthorizedJson(): Response {
 // The page/action counterpart to withRequestConfig: require a session, then run
 // `fn` inside the user scope so the store layer can read activeUserId().
 //
-// Server Components need this explicitly per page rather than once in a layout.
-// A layout receives its children already-rendered as a prop, so a scope entered
-// in the layout body does not enclose the page's own data fetching — the ALS
-// context simply isn't active when the child renders. Wrapping each page's reads
-// is the honest version of that constraint.
+// Server Components need this explicitly per page rather than once in a layout. A
+// layout receives its children already-rendered as a prop, so a scope entered in
+// the layout body does not enclose the page's own data fetching — the ALS context
+// simply isn't active when the child renders.
 //
-// Cheap despite the repetition: requireUser is cache()d per render pass, so a
-// page whose layout and three components each wrap their reads still performs
-// one getUser() round trip.
-//
-// Also installs the detached queue (lib/detached.ts). Page renders will mostly
-// install one and flush nothing — they read — and that is the intended cost:
-// flushDetached returns on an empty queue before touching the pool, so an idle
-// queue is one closure and one after() registration. Server Actions come through
-// the same door, and after() runs even when the response ends in redirect() or a
-// thrown error, so an action that queues work still flushes it.
+// Also installs the detached queue. Page renders will mostly install one and flush
+// nothing — they read — and that is the intended cost: flushDetached returns on an
+// empty queue before touching the pool. Server Actions come through the same door,
+// and after() runs even when the response ends in redirect() or a thrown error, so
+// an action that queues work still flushes it.
 export async function withPageUser<T>(fn: (user: SessionUser) => Promise<T>): Promise<T> {
   const user = await requireUser();
   return withDetachedQueue(user, after, () => withUser(user, () => fn(user)));

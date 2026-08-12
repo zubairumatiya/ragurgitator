@@ -1,14 +1,13 @@
 // API route: POST /api/eval/bulk-generate
 //
 // "Bulk actions → Add question → {easy|medium|hard} ×N → Add" on /eval: adds the
-// requested difficulties to the active config's mix, then adds N questions at
-// each to every chunk in scope (or, with `topUp`, tops each chunk up TO N,
-// skipping the ones already there) and scores the unscored. With `cachedOnly`, every chunk in
-// scope is instead topped up from question_cache — any difficulty, no counts, no
-// generation, no batch, no cost. Streams progress as NDJSON (one
-// EvalEvent per line) so the dashboard reuses the Process-new-chunks progress
-// bar. Body: { counts: { easy?: n, medium?: n, hard?: n } }, or the legacy
-// { difficulty: 'easy'|'medium'|'hard' } (one question per chunk).
+// requested difficulties to the active config's mix, then adds N questions at each
+// to every chunk in scope (or, with `topUp`, tops each chunk up TO N) and scores the
+// unscored. With `cachedOnly`, every chunk in scope is instead topped up from
+// question_cache — any difficulty, no counts, no generation, no cost.
+//
+// Streams progress as NDJSON. Body: { counts: { easy?, medium?, hard? } }, or the
+// legacy { difficulty } (one question per chunk).
 import { streamError } from "@/lib/http/missingKeyServer";
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
