@@ -50,7 +50,11 @@ export function withMcpUser<T>(user: RequestUser, fn: () => Promise<T>): Promise
 // Missing row → false, not a throw. A user with no profile row has certainly not
 // opted in, and "off" is the safe reading of an ambiguous state for a switch
 // whose entire job is to deny.
-async function mcpEnabled(): Promise<boolean> {
+// Exported for describe_authorization, which reports it back to the user. By the
+// time a tool runs the answer is necessarily `true` — the boundary below refuses
+// otherwise — but "what is currently authorized" is a question about the switch's
+// state, and answering it from the same reader the gate uses beats asserting it.
+export async function mcpEnabled(): Promise<boolean> {
   const rows = await sql<{ mcp_enabled: boolean }[]>`
     select mcp_enabled from user_profiles where id = ${activeUserId()}
   `;

@@ -220,6 +220,12 @@ export type CreateConfigOptions = {
   chunkSize: number;
   chunkOverlap: number;
   topK: number;
+  // The answer-generation model. Omitted by the "new config" dialog, which has no
+  // LLM picker — Settings sets it afterwards. Threaded through for the MCP
+  // create_config tool, where the choice drives chat cost and asking the agent to
+  // follow up with a PATCH would just be a second call that can fail on its own.
+  // Validate before calling: this layer stores the id, llmSpec() judges it.
+  llmModel?: string;
 };
 
 // Create a config from a multi-corpus selection (corpus decoupling, 0017). The
@@ -227,7 +233,7 @@ export type CreateConfigOptions = {
 // de-duped union under the new settings. The config is ATTACHED to a corpus
 // only when the target is unambiguous: the saved-as corpus, or the single
 // selected one; with several corpora and no save-as it keeps its docs but
-// points at no corpus. llm_model stays the lib/config.ts default.
+// points at no corpus. llm_model falls back to the lib/config.ts default.
 export async function createConfigWithSettings(
   opts: CreateConfigOptions,
 ): Promise<ConfigSummary> {
@@ -249,7 +255,7 @@ export async function createConfigWithSettings(
     chunkSize: opts.chunkSize,
     chunkOverlap: opts.chunkOverlap,
     topK: opts.topK,
-    llmModel: config.llmModel,
+    llmModel: opts.llmModel ?? config.llmModel,
   });
 }
 

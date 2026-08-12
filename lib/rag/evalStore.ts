@@ -109,6 +109,12 @@ export type QuestionDetail = {
   // "Ignore in rates" (§7): still rendered (greyed) but excluded from the
   // Recall/nDCG aggregates, the min-rate pass/fail counts, and autotune targeting.
   ignored: boolean;
+  // The subset of `ignored` that is there by the holdout draw (0061) rather than
+  // by a human's click. Held-out questions ARE scored — `hit`, `foundRank`, `rr`
+  // and `ndcg` are all populated — so the generalization number is computed from
+  // these rows; it can never be read off the dashboard summary, which excludes
+  // them by design.
+  heldOut: boolean;
 };
 
 // One autotune-run outcome row for the yellow ◷ hover (§6.4): a question's
@@ -322,6 +328,108 @@ export async function chunksNeedingQuestions(
     documentEmbeddingId: r.document_embedding_id,
     needed: target - r.label_count,
   }));
+}
+
+// One page of chunks for an outside author (the MCP `list_chunks` tool): the
+// passage plus enough context to write a question about it and enough counting to
+// know which chunks still need one.
+export type ChunkPageRow = {
+  chunkId: string;
+  documentId: string;
+  fileName: string;
+  position: number | null;
+  text: string;
+  questionCount: number;
+  // Total chunks in scope, repeated on every row by the window function. The
+  // caller reads it off row zero to report progress; an empty page has no total
+  // and reports zero, which is also the truth.
+  total: number;
+};
+
+// A stable-ordered page of the active config's chunks. Ordered by document then
+// position rather than by id because paging is only coherent if the order is:
+// two calls with different offsets have to be windows onto ONE list, and c.id is
+// a uuid, which orders by nothing a reader would recognise.
+export async function listChunkPage(
+  offset: number,
+  limit: number,
+  documentId?: string,
+): Promise<ChunkPageRow[]> {
+  const table = await activeChunksTable();
+  if (!table) return [];
+  const docScope = documentId && isUuid(documentId) ? documentId : null;
+
+  const rows = await sql<
+    {
+      id: string;
+      document_id: string;
+      file_name: string;
+      position: number | null;
+      text: string;
+      question_count: number;
+      total: number;
+    }[]
+  >`
+    select c.id, c.document_id, doc.file_name, c.position, c.text,
+           e.have as question_count,
+           count(*) over()::int as total
+    from ${sql(table)} c
+    join document_embeddings de on de.id = c.document_embedding_id
+    join documents doc on doc.id = c.document_id
+    cross join lateral (
+      select count(*)::int as have
+      from eval_labels l
+      where l.source_chunk_id = c.id
+        and l.document_embedding_id = c.document_embedding_id
+    ) e
+    where de.config_id = ${activeConfig().id}
+      and (${docScope}::uuid is null or c.document_id = ${docScope}::uuid)
+    order by doc.file_name, c.position, c.id
+    offset ${offset} limit ${limit}
+  `;
+
+  return rows.map((r) => ({
+    chunkId: r.id,
+    documentId: r.document_id,
+    fileName: r.file_name,
+    position: r.position,
+    text: r.text,
+    questionCount: r.question_count,
+    total: r.total,
+  }));
+}
+
+// Resolve MANY chunk ids to the document + embedding run their label must name,
+// in one query. Same resolution as addManualQuestion and getChunkForGeneration —
+// and the same refusal: an id belonging to another config (or to nothing) simply
+// isn't in the returned map, so the caller reports it per item rather than
+// failing a whole batch over one bad id.
+export async function resolveChunksForLabeling(
+  chunkIds: string[],
+): Promise<Map<string, { documentId: string; documentEmbeddingId: string }>> {
+  const resolved = new Map<string, { documentId: string; documentEmbeddingId: string }>();
+  const ids = chunkIds.filter(isUuid);
+  if (ids.length === 0) return resolved;
+
+  const table = await activeChunksTable();
+  if (!table) return resolved;
+
+  const rows = await sql<
+    { id: string; document_id: string; document_embedding_id: string }[]
+  >`
+    select c.id, c.document_id, c.document_embedding_id
+    from ${sql(table)} c
+    join document_embeddings de on de.id = c.document_embedding_id
+    where c.id = any(${ids}::uuid[])
+      and de.config_id = ${activeConfig().id}
+  `;
+  for (const r of rows) {
+    resolved.set(r.id, {
+      documentId: r.document_id,
+      documentEmbeddingId: r.document_embedding_id,
+    });
+  }
+  return resolved;
 }
 
 // A chunk in scope together with the questions it ALREADY shows under the active
@@ -2124,6 +2232,7 @@ type EvalDetailRow = {
   scored_at: Date | null;
   retrieval_state: string | null;
   ignored: boolean;
+  held_out: boolean;
 };
 
 type DetailContext = {
@@ -2198,6 +2307,7 @@ function mapQuestionDetails(
       rr,
       ndcg: qNdcg,
       ignored: r.ignored,
+      heldOut: r.held_out,
     };
   });
   return { questions, retrievalStale, editStaleIds };
@@ -2234,7 +2344,8 @@ async function baselineDetailRows(table: string): Promise<EvalDetailRow[]> {
       c.position as expected_position,
       lt.hit, lt.found_rank, lt.retrieved_ids, lt.retrieved_scores,
       lt.scored_at, lt.retrieval_state,
-      (ig.eval_question_id is not null) as ignored
+      (ig.eval_question_id is not null) as ignored,
+      (ig.reason is not distinct from 'holdout') as held_out
     from eval_questions q
     join active_labels al on al.eval_question_id = q.id
     join documents d on d.id = q.document_id
@@ -2358,7 +2469,8 @@ export async function getChunkQuestions(
       c.position as expected_position,
       lt.hit, lt.found_rank, lt.retrieved_ids, lt.retrieved_scores,
       lt.scored_at, lt.retrieval_state,
-      (ig.eval_question_id is not null) as ignored
+      (ig.eval_question_id is not null) as ignored,
+      (ig.reason is not distinct from 'holdout') as held_out
     from eval_questions q
     join active_labels al on al.eval_question_id = q.id
     join documents d on d.id = q.document_id
@@ -2461,6 +2573,7 @@ export async function getSummary(): Promise<EvalSummary> {
         scored_at: Date | null;
         retrieval_state: string | null;
         ignored: boolean;
+        held_out: boolean;
       }[]
     >`
       with active_labels as (
@@ -2500,7 +2613,8 @@ export async function getSummary(): Promise<EvalSummary> {
         lt.retrieved_scores,
         lt.scored_at,
         lt.retrieval_state,
-        (ig.eval_question_id is not null) as ignored
+        (ig.eval_question_id is not null) as ignored,
+        (ig.reason is not distinct from 'holdout') as held_out
       from eval_questions q
       join active_labels al on al.eval_question_id = q.id
       join documents d on d.id = q.document_id

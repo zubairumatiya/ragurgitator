@@ -29,7 +29,16 @@ const handler = createMcpHandler((ctx) => {
     // building a server bound to nobody.
     throw new Error("MCP server factory called without a verified identity.");
   }
-  return buildMcpServer({ id: identity.userId, email: identity.email });
+  // clientId is guaranteed by mcpClaims (a token without one is rejected before
+  // it ever becomes an AuthInfo); the `??` is only to satisfy the optional type.
+  // expiresAt is the JWT's own `exp`, and it travels with the identity because a
+  // write grant approved during this request may not outlive the token that
+  // asked for it.
+  return buildMcpServer({
+    user: { id: identity.userId, email: identity.email },
+    clientId: ctx.authInfo?.clientId ?? "",
+    tokenExpSeconds: ctx.authInfo?.expiresAt,
+  });
 });
 
 // All three verbs go to the same handler. Under the SDK's default stateless

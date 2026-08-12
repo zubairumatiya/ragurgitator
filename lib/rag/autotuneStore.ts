@@ -1,10 +1,17 @@
 // DB layer for autotune run history (migration 0016, Phase C of
 // docs/eval-autotuning-plan.md) plus the config-scoped question ignores the
 // engine must exclude from targeting (0014's config_question_ignores — written
-// by the Phase D "ignore in rates" UI, but respected here from day one).
+// by the Phase D "ignore in rates" UI, but respected here from day one) and the
+// holdout draw that reuses that same table (0061).
 // Raw SQL via the shared `sql` client; scoped to the ACTIVE config.
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
+import {
+  type HoldoutCandidate,
+  type HoldoutSettings,
+  holdoutTarget,
+  selectHoldout,
+} from "@/lib/rag/holdout";
 
 export type AutotuneRunHeader = {
   recallK: number | null;
@@ -91,6 +98,101 @@ export async function setQuestionIgnored(
       where config_id = ${cfg.id} and eval_question_id = ${questionId}
     `;
   }
+}
+
+// --- Holdout (0061) ---
+//
+// The test set is stored AS ignores, with reason 'holdout'. That buys exclusion
+// from autotune targeting, from the confirm veto and from the keepBest sum for
+// free, and the reason string is what keeps a redraw from eating a human's
+// manual "ignore in rates" click. The consequence to know: un-ignoring a
+// held-out question from /eval removes it from the test set until the next draw.
+
+export const HOLDOUT_REASON = "holdout";
+
+// Questions eligible for the draw: every labeled question in this config that
+// isn't already ignored for a NON-holdout reason. Manually ignored questions are
+// out of the rates anyway, so they could never be part of a measured test set —
+// leaving them in the pool would only inflate the drawn count.
+export async function listHoldoutCandidates(): Promise<HoldoutCandidate[]> {
+  const cfg = activeConfig();
+  const rows = await sql<{ eval_question_id: string; difficulty: string | null }[]>`
+    select distinct q.id as eval_question_id, q.difficulty
+    from eval_questions q
+    join eval_labels l on l.eval_question_id = q.id
+    join document_embeddings de on de.id = l.document_embedding_id
+    left join config_question_ignores ig
+      on ig.eval_question_id = q.id and ig.config_id = ${cfg.id}
+    where de.config_id = ${cfg.id}
+      and (ig.eval_question_id is null or ig.reason = ${HOLDOUT_REASON})
+  `;
+  return rows.map((r) => ({ questionId: r.eval_question_id, difficulty: r.difficulty }));
+}
+
+// The current test set. Read by the results step, which must compute holdout
+// rates from per-question rows — held-out questions are still SCORED, they are
+// just excluded from the dashboard's aggregates.
+export async function listHoldoutQuestionIds(): Promise<Set<string>> {
+  const cfg = activeConfig();
+  const rows = await sql<{ eval_question_id: string }[]>`
+    select eval_question_id from config_question_ignores
+    where config_id = ${cfg.id} and reason = ${HOLDOUT_REASON}
+  `;
+  return new Set(rows.map((r) => r.eval_question_id));
+}
+
+// Draw (or clear) the test set for the active config from its saved settings.
+// Idempotent: the same settings over the same questions produce the same rows,
+// so calling it on every settings save is a no-op unless something moved.
+export async function syncHoldout(
+  settings: HoldoutSettings,
+): Promise<{ total: number; held: number }> {
+  const cfg = activeConfig();
+  const current = await listHoldoutQuestionIds();
+
+  if (!settings.enabled) {
+    if (current.size > 0) {
+      await sql`
+        delete from config_question_ignores
+        where config_id = ${cfg.id} and reason = ${HOLDOUT_REASON}
+      `;
+    }
+    const [row] = await sql<{ n: number }[]>`
+      select count(distinct q.id)::int as n
+      from eval_questions q
+      join eval_labels l on l.eval_question_id = q.id
+      join document_embeddings de on de.id = l.document_embedding_id
+      where de.config_id = ${cfg.id}
+    `;
+    return { total: row?.n ?? 0, held: 0 };
+  }
+
+  const candidates = await listHoldoutCandidates();
+  const picked = selectHoldout(
+    candidates,
+    holdoutTarget(candidates.length, settings),
+    settings.seed,
+    current,
+  );
+
+  // One transaction: a half-applied redraw would leave the config with a test
+  // set that matches neither the old settings nor the new ones.
+  await sql.begin(async (tx) => {
+    await tx`
+      delete from config_question_ignores
+      where config_id = ${cfg.id} and reason = ${HOLDOUT_REASON}
+        and eval_question_id <> all(${picked}::uuid[])
+    `;
+    if (picked.length > 0) {
+      await tx`
+        insert into config_question_ignores (config_id, eval_question_id, reason)
+        select ${cfg.id}, id, ${HOLDOUT_REASON}
+        from unnest(${picked}::uuid[]) as id
+        on conflict (config_id, eval_question_id) do nothing
+      `;
+    }
+  });
+  return { total: candidates.length, held: picked.length };
 }
 
 // Question ids the active config has marked "ignore in rates" — excluded from

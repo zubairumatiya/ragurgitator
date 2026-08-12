@@ -446,6 +446,9 @@ export function EvalDashboard() {
             rr: null,
             ndcg: null,
             ignored: false,
+            // A question born this second is in neither set until the next
+            // holdout draw, which happens on the next settings save.
+            heldOut: false,
           },
         ],
       };
@@ -1547,12 +1550,23 @@ const QuestionRow = memo(function QuestionRow({
           </span>
         )}
         <span className="flex shrink-0 items-center gap-1.5">
+          {/* Held-out questions are ignores too, so they need their own label —
+              "ignored" would read as a judgement about the question rather than
+              as membership of the test set. */}
           {q.ignored && (
             <span
-              title="Ignored in rates — excluded from Recall/nDCG and autotune targeting"
-              className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+              title={
+                q.heldOut
+                  ? "Held out (test set) — excluded from the rates and from autotune, but still scored: this is where the generalization number comes from"
+                  : "Ignored in rates — excluded from Recall/nDCG and autotune targeting"
+              }
+              className={
+                q.heldOut
+                  ? "rounded-full bg-sky-100 px-2 py-0.5 text-xs text-sky-700 dark:bg-sky-900/40 dark:text-sky-400"
+                  : "rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+              }
             >
-              ignored
+              {q.heldOut ? "holdout" : "ignored"}
             </span>
           )}
           {!q.ignored &&
@@ -1654,9 +1668,11 @@ const QuestionRow = memo(function QuestionRow({
                   onClick={() => onToggleIgnore(q)}
                   disabled={busy}
                   title={
-                    q.ignored
-                      ? "Count this question in rates again"
-                      : "Exclude this question from rates and autotune targeting (manual false-positive mode)"
+                    q.heldOut
+                      ? "Pull this question out of the held-out test set — the next holdout draw may put it back"
+                      : q.ignored
+                        ? "Count this question in rates again"
+                        : "Exclude this question from rates and autotune targeting (manual false-positive mode)"
                   }
                   className="cursor-pointer hover:underline disabled:cursor-not-allowed disabled:opacity-50"
                 >

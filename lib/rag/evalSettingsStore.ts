@@ -7,6 +7,7 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { fragment, sql } from "@/lib/db";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";
 import type { Difficulty } from "@/lib/rag/eval";
+import type { HoldoutSettings } from "@/lib/rag/holdout";
 import { noteFusionPoolChange } from "@/lib/rag/overrideStore";
 
 export type MetricCriteria = {
@@ -37,6 +38,10 @@ export type AutotuneSettings = {
   // (0030). null = ALL usable models (the cheapest-first ladder minus the base
   // model and any keyless provider); an empty array = size-only (no models).
   modelScope: string[] | null;
+  // Held-out TEST SET (0061): questions autotune must never see, so the
+  // post-tune delta on them measures generalization rather than fit. The draw
+  // itself lives in lib/rag/holdout.ts + syncHoldout; these are only the dials.
+  holdout: HoldoutSettings;
   // Fusion pool for the trial dry-runs only (0027): how many base candidates
   // each trial re-embeds under a candidate model. null = follow live
   // retrieval's pool. Search-only — the confirm re-score stays on the live
@@ -85,6 +90,10 @@ type CriteriaRow = {
   autotune_chunk_scope: string[] | null;
   autotune_model_scope: string[] | null;
   autotune_fusion_pool: number | null;
+  autotune_holdout_enabled: boolean;
+  autotune_holdout_mode: string;
+  autotune_holdout_size: number;
+  autotune_holdout_seed: number;
   retrieval_fusion_pool: number | null;
 };
 
@@ -112,6 +121,12 @@ function toCriteria(row: CriteriaRow): EvalCriteria {
       chunkScope: row.autotune_chunk_scope,
       modelScope: row.autotune_model_scope,
       fusionPool: row.autotune_fusion_pool,
+      holdout: {
+        enabled: row.autotune_holdout_enabled,
+        mode: row.autotune_holdout_mode === "count" ? "count" : "pct",
+        size: row.autotune_holdout_size,
+        seed: row.autotune_holdout_seed,
+      },
     },
     retrieval: { fusionPool: row.retrieval_fusion_pool },
   };
@@ -124,7 +139,10 @@ const COLUMNS = fragment`
   eval_difficulties,
   autotune_size_ladder, autotune_overlap_pct, autotune_apply, autotune_search,
   autotune_stop_early, autotune_keep_best, autotune_chunk_scope,
-  autotune_model_scope, autotune_fusion_pool, retrieval_fusion_pool
+  autotune_model_scope, autotune_fusion_pool,
+  autotune_holdout_enabled, autotune_holdout_mode, autotune_holdout_size,
+  autotune_holdout_seed,
+  retrieval_fusion_pool
 `;
 
 // Criteria for a specific config; null when the id is malformed / missing.
@@ -151,7 +169,9 @@ export type CriteriaPatch = {
   mrr?: Partial<MetricCriteria>;
   ndcg?: Partial<MetricCriteria>;
   difficulties?: Difficulty[];
-  autotune?: Partial<AutotuneSettings>;
+  autotune?: Partial<Omit<AutotuneSettings, "holdout">> & {
+    holdout?: Partial<HoldoutSettings>;
+  };
   retrieval?: Partial<RetrievalSettings>;
 };
 
@@ -172,7 +192,13 @@ export async function updateCriteria(
     difficulties: patch.difficulties
       ? DIFFICULTIES.filter((d) => patch.difficulties!.includes(d))
       : cur.difficulties,
-    autotune: { ...cur.autotune, ...patch.autotune },
+    autotune: {
+      ...cur.autotune,
+      ...patch.autotune,
+      // Merged one level deeper than the rest: the UI sends whichever holdout
+      // dial the user touched, and a shallow spread would blank the others.
+      holdout: { ...cur.autotune.holdout, ...patch.autotune?.holdout },
+    },
     retrieval: { ...cur.retrieval, ...patch.retrieval },
   };
 
@@ -198,6 +224,10 @@ export async function updateCriteria(
       autotune_chunk_scope = ${next.autotune.chunkScope}::uuid[],
       autotune_model_scope = ${next.autotune.modelScope}::text[],
       autotune_fusion_pool = ${next.autotune.fusionPool},
+      autotune_holdout_enabled = ${next.autotune.holdout.enabled},
+      autotune_holdout_mode = ${next.autotune.holdout.mode},
+      autotune_holdout_size = ${next.autotune.holdout.size},
+      autotune_holdout_seed = ${next.autotune.holdout.seed},
       retrieval_fusion_pool = ${next.retrieval.fusionPool},
       updated_at          = now()
     where id = ${configId} and user_id = ${activeUserId()}

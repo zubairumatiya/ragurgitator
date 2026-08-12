@@ -10,6 +10,11 @@
 // autotuning settings. The body is a nested partial — only changed fields are sent;
 // updateCriteria read-merge-writes the rest.
 //
+// PATCH also has one side effect beyond the settings row: when the body carries
+// the holdout dials (0061) it redraws the held-out test set and returns its size,
+// so "held out 98 of 390" is confirmed by the server rather than predicted by the
+// form.
+//
 // Config-scoped so it acts on the tab the dropdown is on.
 import { z } from "zod";
 import { autotuneModelLadder } from "@/lib/config";
@@ -23,6 +28,11 @@ import {
 } from "@/lib/rag/embeddingModels";
 import { listLlmOptions } from "@/lib/llm/llmModels";
 import { availableProviders } from "@/lib/rag/providerAvailability";
+import {
+  listHoldoutCandidates,
+  listHoldoutQuestionIds,
+  syncHoldout,
+} from "@/lib/rag/autotuneStore";
 import { getActiveCriteria, updateCriteria } from "@/lib/rag/evalSettingsStore";
 import { listAutotuneScopeOptions } from "@/lib/rag/evalStore";
 
@@ -32,12 +42,17 @@ export async function GET(request: Request) {
       // One round trip, not two: availableProviders() is an independent,
       // indexed row-existence query (see keyedProviders — no ciphertext, no
       // Key Vault), so it has nothing to wait on from the other three.
-      const [criteria, config, scopeOptions, availability] = await Promise.all([
-        getActiveCriteria(),
-        getConfig(activeConfig().id),
-        listAutotuneScopeOptions(),
-        availableProviders(),
-      ]);
+      const [criteria, config, scopeOptions, availability, candidates, held] =
+        await Promise.all([
+          getActiveCriteria(),
+          getConfig(activeConfig().id),
+          listAutotuneScopeOptions(),
+          availableProviders(),
+          // The holdout dials mean nothing without the split they produced, and
+          // the count is what tells the user a redraw actually landed.
+          listHoldoutCandidates(),
+          listHoldoutQuestionIds(),
+        ]);
       if (!config) return Response.json({ error: "Config not found." }, { status: 404 });
       // The alternate models a run could try (ladder order), grouped by shared
       // vector space in the Settings checklist. Includes models whose provider
@@ -66,6 +81,7 @@ export async function GET(request: Request) {
         autotuneModels,
         aggregateModels,
         llmModels,
+        holdout: { total: candidates.length, held: held.size },
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to load criteria.";
@@ -111,6 +127,18 @@ const Body = z.object({
       modelScope: z.array(z.string()).nullable().optional(),
       // Trial fusion pool (0027): null = follow live retrieval's pool.
       fusionPool: z.number().int().min(1).max(1000).nullable().optional(),
+      // Held-out test set (0061). `size` is a percentage under mode 'pct' and a
+      // question count under 'count'; the seed is stored so the split can be
+      // re-derived. A percentage is clamped to 90 below — a holdout past that
+      // leaves autotune nothing to tune, which is a mistake, not a setting.
+      holdout: z
+        .object({
+          enabled: z.boolean().optional(),
+          mode: z.enum(["pct", "count"]).optional(),
+          size: z.number().min(0).max(100000).optional(),
+          seed: z.number().int().min(0).max(2147483647).optional(),
+        })
+        .optional(),
     })
     .optional(),
   retrieval: z
@@ -127,11 +155,22 @@ export async function PATCH(request: Request) {
 
   return withRequestConfig(request, async () => {
     try {
-      const criteria = await updateCriteria(activeConfig().id, body.data);
+      const patch = body.data;
+      const holdoutPatch = patch.autotune?.holdout;
+      if (holdoutPatch?.size !== undefined && holdoutPatch.mode !== "count") {
+        holdoutPatch.size = Math.min(90, holdoutPatch.size);
+      }
+      const criteria = await updateCriteria(activeConfig().id, patch);
       if (!criteria) {
         return Response.json({ error: "Config not found." }, { status: 404 });
       }
-      return Response.json({ criteria });
+      // Redraw the test set whenever the holdout dials are in the body. Safe to
+      // run on every save: the draw is a pure function of (questions, size,
+      // seed) and keeps existing members, so an unchanged save moves nothing.
+      const holdout = holdoutPatch
+        ? await syncHoldout(criteria.autotune.holdout)
+        : null;
+      return Response.json({ criteria, holdout });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to save criteria.";
       return Response.json({ error: message }, { status: 500 });

@@ -150,6 +150,9 @@ type Seed = {
   autotuneModels: AutotuneModelOption[];
   aggregateModels: AutotuneModelOption[];
   llmModels: LlmModelOption[];
+  // The split the server last drew (0061) — null only when the request predates
+  // the field, since the route always sends it.
+  holdout: { total: number; held: number } | null;
   // GET /api/batch is non-fatal (the Savings section still renders without it),
   // so it is nullable and the panel keeps its defaults when it fails.
   batch: {
@@ -189,6 +192,17 @@ export function EvalSettings() {
   // Fusion pools (0027): "" = unset (autotune follows live; live uses auto).
   const [autotunePool, setAutotunePool] = useState("");
   const [retrievalPool, setRetrievalPool] = useState("");
+  // Holdout (0061): the dials, plus the split the server last reported. Size and
+  // seed are TEXT for the same reason the metric minimums are — a half-typed
+  // number must not be rounded out from under the cursor.
+  const [holdoutOn, setHoldoutOn] = useState(false);
+  const [holdoutMode, setHoldoutMode] = useState<"pct" | "count">("pct");
+  const [holdoutSize, setHoldoutSize] = useState("25");
+  const [holdoutSeed, setHoldoutSeed] = useState("1");
+  const [holdoutSplit, setHoldoutSplit] = useState<{
+    total: number;
+    held: number;
+  } | null>(null);
   // Autotune chunk scope (0025): null = all chunks; a Set = the custom picks.
   const [scopeDocs, setScopeDocs] = useState<AutotuneScopeDocument[]>([]);
   const [scopeSel, setScopeSel] = useState<Set<string> | null>(null);
@@ -317,6 +331,7 @@ export function EvalSettings() {
       autotuneModels?: AutotuneModelOption[];
       aggregateModels?: AutotuneModelOption[];
       llmModels?: LlmModelOption[];
+      holdout?: { total: number; held: number };
       error?: string;
     } | null;
     if (!res.ok || !data?.criteria || !data.config) {
@@ -359,6 +374,7 @@ export function EvalSettings() {
         autotuneModels: data.autotuneModels ?? [],
         aggregateModels: data.aggregateModels ?? [],
         llmModels: data.llmModels ?? [],
+        holdout: data.holdout ?? null,
         batch,
       },
     };
@@ -390,6 +406,11 @@ export function EvalSettings() {
     setRetrievalPool(
       c.retrieval.fusionPool != null ? String(c.retrieval.fusionPool) : "",
     );
+    setHoldoutOn(c.autotune.holdout.enabled);
+    setHoldoutMode(c.autotune.holdout.mode);
+    setHoldoutSize(String(c.autotune.holdout.size));
+    setHoldoutSeed(String(c.autotune.holdout.seed));
+    setHoldoutSplit(data.holdout ?? null);
     setScopeDocs(data.scopeOptions);
     setScopeSel(
       c.autotune.chunkScope === null ? null : new Set(c.autotune.chunkScope),
@@ -596,6 +617,16 @@ export function EvalSettings() {
         chunkScope,
         modelScope,
         fusionPool: parseKOrNull(autotunePool),
+        // Always sent, so the server redraws the split on every save — which is
+        // what keeps the test set correctly sized as questions are added. The
+        // draw keeps existing members, so a save that changed nothing else
+        // moves no question between train and holdout.
+        holdout: {
+          enabled: holdoutOn,
+          mode: holdoutMode,
+          size: Math.max(0, Number(holdoutSize) || 0),
+          seed: Math.max(0, Math.floor(Number(holdoutSeed) || 0)),
+        },
       },
       retrieval: { fusionPool: parseKOrNull(retrievalPool) },
     };
@@ -609,11 +640,17 @@ export function EvalSettings() {
       });
       const data = (await res.json().catch(() => null)) as {
         error?: string;
+        holdout?: { total: number; held: number };
+        criteria?: EvalCriteria;
       } | null;
       if (!res.ok) {
         setErr(data?.error ?? `Request failed (${res.status}).`);
         return;
       }
+      // Read the split back rather than predicting it: the server clamps the
+      // percentage and draws against the questions that actually exist.
+      if (data?.holdout) setHoldoutSplit(data.holdout);
+      if (data?.criteria) setHoldoutSize(String(data.criteria.autotune.holdout.size));
       // Auto-sync and the LLM model both live on the config ROW, not the
       // criteria — one separate PATCH, carrying whichever of them actually
       // changed. The route applies each field present, so they ride together
@@ -1116,6 +1153,104 @@ export function EvalSettings() {
                 className="cursor-pointer"
               />
             </div>
+            {/* HOLDOUT (0061): a test set autotune never sees, so the delta on
+                it measures generalization rather than fit. Held out by QUESTION,
+                not by chunk — see lib/rag/holdout.ts. */}
+            <div className="flex items-center justify-between gap-2 py-0.5">
+              <Tooltip
+                align="left"
+                text={
+                  "Keep a share of the questions out of autotune entirely. Their chunks " +
+                  "are still tuned from the questions that remain, so re-scoring the " +
+                  "held-out ones afterwards shows whether the tuning helps queries it " +
+                  "was never fitted to. The draw is stratified by difficulty, so the " +
+                  "test set can't come out easier than the training set."
+                }
+              >
+                <span className="text-zinc-600 transition-colors group-hover:text-zinc-900 dark:text-zinc-400 dark:group-hover:text-zinc-100">
+                  Hold out a test set
+                </span>
+              </Tooltip>
+              <input
+                type="checkbox"
+                checked={holdoutOn}
+                onChange={(e) => setHoldoutOn(e.target.checked)}
+                className="cursor-pointer"
+              />
+            </div>
+            {holdoutOn && (
+              <div className="mb-1 ml-2 space-y-1 border-l border-zinc-200 pl-2 dark:border-zinc-800">
+                <div className="flex items-center justify-between gap-2 py-0.5">
+                  <span className="text-zinc-600 dark:text-zinc-400">Size</span>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={holdoutSize}
+                      onChange={(e) => setHoldoutSize(e.target.value)}
+                      className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-0.5 text-left text-xs tabular-nums text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
+                    />
+                    <Seg
+                      active={holdoutMode === "pct"}
+                      onClick={() => setHoldoutMode("pct")}
+                      title="A percentage of the labeled questions (capped at 90%)"
+                    >
+                      %
+                    </Seg>
+                    <Seg
+                      active={holdoutMode === "count"}
+                      onClick={() => setHoldoutMode("count")}
+                      title="An absolute number of questions"
+                    >
+                      count
+                    </Seg>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between gap-2 py-0.5">
+                  <Tooltip
+                    align="left"
+                    text={
+                      "The random seed the split is drawn from, saved with the config. " +
+                      "Same seed + same questions = same test set, so the result can be " +
+                      "re-derived later instead of taken on trust. Change it to draw a " +
+                      "different split."
+                    }
+                  >
+                    <span className="text-zinc-600 transition-colors group-hover:text-zinc-900 dark:text-zinc-400 dark:group-hover:text-zinc-100">
+                      Seed
+                    </span>
+                  </Tooltip>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={holdoutSeed}
+                      onChange={(e) => setHoldoutSeed(e.target.value)}
+                      className="w-24 rounded-md border border-zinc-300 bg-white px-2 py-0.5 text-left text-xs tabular-nums text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setHoldoutSeed(
+                          String(Math.floor(Math.random() * 2147483647)),
+                        )
+                      }
+                      title="New random seed"
+                      className="cursor-pointer rounded border border-zinc-300 px-1.5 py-0.5 text-xs text-zinc-500 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                    >
+                      ⟳
+                    </button>
+                  </div>
+                </div>
+                <p className="text-[11px] leading-snug text-zinc-500">
+                  {holdoutSplit
+                    ? `${holdoutSplit.held} of ${holdoutSplit.total} questions held out (${holdoutSplit.total - holdoutSplit.held} for tuning).`
+                    : "Saved settings draw the split."}{" "}
+                  Held-out questions are still scored — they are excluded from the
+                  rates and from autotune, so read their result per question.
+                </p>
+              </div>
+            )}
             <div className="flex items-center justify-between gap-2 py-0.5">
               <Tooltip
                 align="left"
