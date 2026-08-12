@@ -1,13 +1,14 @@
 // ---------------------------------------------------------------------------
 // SUPABASE AUTH CLIENTS.
 //
-// Three call sites need a client and each needs different cookie plumbing, so
-// they get three factories rather than one overloaded helper:
+// Four call sites need a client and each needs different cookie plumbing, so
+// they get four factories rather than one overloaded helper:
 //
 //   browserSupabase()   Client Components — reads/writes document.cookie
 //   serverSupabase()    Server Components, Server Actions, Route Handlers
 //   proxySupabase(req)  proxy.ts only — needs to write refreshed cookies onto
 //                       an outgoing NextResponse, which next/headers can't do
+//   tokenSupabase()     lib/auth/mcpToken.ts only — NO cookie plumbing at all
 //
 // NOTE ON getUser() vs getSession(): only `auth.getUser()` is trustworthy on the
 // server. `getSession()` decodes the cookie WITHOUT verifying its signature
@@ -17,6 +18,7 @@
 // should be calling it at all.
 // ---------------------------------------------------------------------------
 import { createBrowserClient, createServerClient } from "@supabase/ssr";
+import { createClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 import type { NextRequest, NextResponse } from "next/server";
 
@@ -85,6 +87,31 @@ export async function serverSupabase() {
         }
       },
     },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// SESSION-LESS variant, for verifying a BEARER TOKEN that arrived in a header
+// rather than a cookie (lib/auth/mcpToken.ts, and nothing else).
+//
+// The three factories above all bind a client to some cookie jar, which is
+// exactly wrong here: an MCP request carries its own credential and must be
+// judged on that credential alone. A client that could see cookies would happily
+// fall back to an ambient browser session if the header were missing or junk,
+// which turns "is this a valid MCP token?" into "is anyone logged in?" — and the
+// whole point of the client_id check in mcpToken.ts is that those two questions
+// have different answers.
+//
+// So all three session behaviours are off. There is no storage to persist to, no
+// token to refresh, and no URL fragment to read: this client is used for exactly
+// one call, getClaims(jwt), which verifies a signature against the cached JWKS
+// and returns. Leaving them on would let it acquire state it has no business
+// having.
+// ---------------------------------------------------------------------------
+export function tokenSupabase() {
+  const { url, key } = config();
+  return createClient(url, key, {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
   });
 }
 

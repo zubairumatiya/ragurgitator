@@ -18,6 +18,7 @@
     "@azure/identity": "^4.13.1",
     "@azure/keyvault-keys": "^4.10.2",
     "@huggingface/transformers": "^4.2.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "@supabase/ssr": "^0.12.4",
     "@supabase/supabase-js": "^2.112.0",
     "cohere-ai": "^8.0.0",

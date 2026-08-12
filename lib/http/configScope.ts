@@ -40,7 +40,13 @@ import { UnknownConfigError, resolveRequestConfig, withConfig } from "@/lib/rag/
 // NDJSON routes do NOT come through here — their `run` callback owns its errors
 // by contract (lib/http/ndjson.ts) and emits streamError() instead, which builds
 // the same payload. See lib/http/missingKey.ts.
-async function catchingMissingKey<T>(fn: () => Promise<T>): Promise<T | Response> {
+//
+// EXPORTED for lib/http/mcpScope.ts, which is the third scope entry point on the
+// HTTP side and needs the identical behaviour. Sharing it rather than copying it
+// is the point: two copies is how the "one place it cannot be forgotten" claim
+// above stops being true. It is not part of the public route API — nothing but a
+// scope wrapper should be calling it.
+export async function catchingMissingKey<T>(fn: () => Promise<T>): Promise<T | Response> {
   try {
     return await fn();
   } catch (err) {

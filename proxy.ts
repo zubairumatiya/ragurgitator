@@ -22,7 +22,15 @@ import { NextResponse, type NextRequest } from "next/server";
 import { proxySupabase } from "@/lib/auth/supabase";
 
 // Reachable without a session. Everything else redirects.
-const PUBLIC_PREFIXES = ["/login", "/signup", "/auth"];
+//
+// /.well-known is the OAuth discovery surface for the MCP server. It is
+// unauthenticated BY DEFINITION — a client fetches it to find out how to get a
+// credential, so requiring one would be circular — and it has to be listed here
+// because the proxy runs before next.config.ts rewrites, so without it an
+// agent's discovery request is answered with a 307 to the login page and the
+// flow dies at step one. It exposes only two public URLs (this server's identity
+// and Supabase's issuer), which is exactly what RFC 9728 intends to be public.
+const PUBLIC_PREFIXES = ["/login", "/signup", "/auth", "/.well-known"];
 
 const isPublic = (path: string) => PUBLIC_PREFIXES.some((p) => path.startsWith(p));
 
@@ -65,8 +73,14 @@ export async function proxy(request: NextRequest) {
 
   if (!user && !isPublic(path)) {
     const login = new URL("/login", request.nextUrl);
-    // Preserve where they were headed so login can bounce them back.
-    if (path !== "/") login.searchParams.set("next", path);
+    // Preserve where they were headed so login can bounce them back — INCLUDING
+    // the query string. It used to send the path alone, which is fine for the
+    // pages that carry their state in the path but silently breaks any deep link
+    // whose meaning lives in a param: /oauth/consent?authorization_id=… survives
+    // login only to arrive with nothing to consent to. safeNext() in
+    // app/auth/actions.ts still guards the value, and a leading "/" plus a
+    // query string is not an open redirect.
+    if (path !== "/") login.searchParams.set("next", `${path}${request.nextUrl.search}`);
     return NextResponse.redirect(login);
   }
 

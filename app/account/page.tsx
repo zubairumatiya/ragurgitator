@@ -23,19 +23,31 @@ import {
   PROVIDER_META,
   type ProviderKeyDto,
 } from "@/lib/auth/providerKeys";
+import { serverSupabase } from "@/lib/auth/supabase";
+import { sql } from "@/lib/db";
+import { mcpServerUrl } from "@/lib/mcp/metadata";
 import { BackToConfigs } from "@/app/components/BackToConfigs";
 import { DeleteAccountForm } from "@/app/components/DeleteAccountForm";
+import { McpConnectionCard, type McpGrantDto } from "@/app/components/McpConnectionCard";
 import { ProviderKeyRow } from "@/app/components/ProviderKeyRow";
 
 export const metadata = { title: "Account" };
 
 export default async function AccountPage() {
-  const { user, keys } = await withPageUser(async (user) => ({
+  const { user, keys, mcpEnabled } = await withPageUser(async (user) => ({
     user,
     keys: await listProviderKeys(user.id),
+    mcpEnabled: await readMcpEnabled(user.id),
   }));
 
   const byProvider = new Map<string, ProviderKeyDto>(keys.map((k) => [k.provider, k]));
+
+  // Read OUTSIDE the scope: this is a Supabase Auth call, not a store call, so
+  // it has no business holding the RLS transaction open across a network round
+  // trip. Skipped entirely when the feature is off — there is nothing to show.
+  const { grants, grantsError } = mcpEnabled
+    ? await readMcpGrants()
+    : { grants: [], grantsError: null };
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col px-6 py-10">
@@ -68,6 +80,13 @@ export default async function AccountPage() {
         </div>
       </section>
 
+      <McpConnectionCard
+        enabled={mcpEnabled}
+        serverUrl={mcpServerUrl().href}
+        grants={grants}
+        grantsError={grantsError}
+      />
+
       <section className="mt-12 rounded border border-red-200 p-4 dark:border-red-900/50">
         <h2 className="text-sm font-medium text-red-700 dark:text-red-400">Delete account</h2>
         <p className="mt-1 max-w-prose text-xs text-zinc-500">
@@ -79,4 +98,44 @@ export default async function AccountPage() {
       </section>
     </div>
   );
+}
+
+// Missing row → false, matching mcpEnabled() in lib/http/mcpScope.ts. The page
+// and the endpoint must agree on what an absent profile means, or the card shows
+// "on" for an account the server refuses.
+async function readMcpEnabled(userId: string): Promise<boolean> {
+  const rows = await sql<{ mcp_enabled: boolean }[]>`
+    select mcp_enabled from user_profiles where id = ${userId}
+  `;
+  return rows[0]?.mcp_enabled ?? false;
+}
+
+// An unreachable grant list is REPORTED, not swallowed into an empty array. The
+// overwhelmingly likely cause is that the OAuth server has not been enabled on
+// the Supabase project yet, and "nothing is connected" would be a confident
+// wrong answer to a question we could not actually ask.
+async function readMcpGrants(): Promise<{ grants: McpGrantDto[]; grantsError: string | null }> {
+  try {
+    const supabase = await serverSupabase();
+    const { data, error } = await supabase.auth.oauth.listGrants();
+    if (error) {
+      return {
+        grants: [],
+        grantsError:
+          "Could not read connected agents. If you have just enabled MCP access, check that the " +
+          "OAuth server is turned on for this Supabase project.",
+      };
+    }
+    return {
+      grants: (data ?? []).map((grant) => ({
+        clientId: grant.client.id,
+        clientName: grant.client.name || "Unnamed client",
+        scopes: grant.scopes,
+        grantedAt: grant.granted_at,
+      })),
+      grantsError: null,
+    };
+  } catch {
+    return { grants: [], grantsError: "Could not read connected agents." };
+  }
 }

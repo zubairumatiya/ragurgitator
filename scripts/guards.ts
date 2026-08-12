@@ -117,9 +117,17 @@ const SCOPE_EXEMPT: Record<string, string> = {
   "app/api/auth/me/route.ts": "pure Supabase session read, no store call",
   "app/auth/actions.ts": "sign in / sign up / sign out, no store call",
   "app/auth/callback/route.ts": "verifyOtp only, runs before a profile exists",
+  "app/oauth/consent/page.tsx": "OAuth consent — Supabase Auth only, no store call",
+  "app/api/oauth/decision/route.ts": "OAuth approve / deny — Supabase Auth only, no store call",
 };
 
-const SCOPE_ENTRIES = /withPageUser|withRequestUser|withRequestConfig/;
+// The MCP pair from lib/http/mcpScope.ts, listed for the same reason as their
+// cookie siblings: /api/mcp touches the store, so it must open a scope, and
+// matching by name is what makes that checkable without running anything.
+// withMcpRequest is what a route calls (it gates, then opens the scope);
+// withMcpUser is the scope itself, for anything entering it directly.
+const SCOPE_ENTRIES =
+  /withPageUser|withRequestUser|withRequestConfig|withMcpRequest|withMcpUser/;
 const STORE_IMPORT = /@\/lib\/(rag|auth|batch|llm)/;
 
 function isEntryPoint(path: string) {
@@ -163,10 +171,25 @@ function sweepScopes() {
 // open: each shared a file with a gated sibling, so the filename matched.
 // ---------------------------------------------------------------------------
 const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
-const GATES = /withRequestUser|withRequestConfig|requireUserForApi|requireUser\(/;
+// withMcpRequest (lib/http/mcpScope.ts) is the bearer-token boundary for
+// /api/mcp: it verifies the OAuth token, rejects anything that is not an MCP
+// token, and enforces the mcp_enabled kill switch. It belongs in this list for
+// exactly the same reason withRequestUser does.
+const GATES =
+  /withRequestUser|withRequestConfig|requireUserForApi|requireUser\(|withMcpRequest/;
 
 const HANDLER_EXEMPT: Record<string, string> = {
   "app/auth/callback/route.ts:GET": "the email confirmation link itself — no session yet, by definition",
+  // RFC 9728 discovery. A client fetches these to find out WHERE to get a
+  // credential, so requiring one would be circular — the 401 challenge on
+  // /api/mcp points at them by design. They serve two public URLs (this
+  // server's identity and Supabase's issuer) and read nothing user-specific.
+  "app/api/mcp-discovery/protected-resource/route.ts:GET":
+    "unauthenticated OAuth discovery — RFC 9728, read before any credential exists",
+  "app/api/mcp-discovery/protected-resource/route.ts:OPTIONS": "CORS preflight for the above",
+  "app/api/mcp-discovery/authorization-server/route.ts:GET":
+    "unauthenticated OAuth discovery — RFC 8414 pass-through for pre-9728 clients",
+  "app/api/mcp-discovery/authorization-server/route.ts:OPTIONS": "CORS preflight for the above",
 };
 
 function sweepApiGates() {

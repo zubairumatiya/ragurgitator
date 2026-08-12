@@ -28,7 +28,7 @@ import { requireUser, withPageUser } from "@/lib/auth/dal";
 import { serverSupabase } from "@/lib/auth/supabase";
 import { deleteProviderKey, isProviderId, saveProviderKey } from "@/lib/auth/providerKeys";
 import { invalidateProviderClients } from "@/lib/llm/client";
-import { privilegedSql } from "@/lib/db";
+import { privilegedSql, sql } from "@/lib/db";
 
 export type KeyFormState = {
   error?: string;
@@ -79,6 +79,73 @@ export async function deleteKey(_prev: KeyFormState, formData: FormData): Promis
   invalidateProviderClients(userId);
   revalidatePath("/account");
   return { provider };
+}
+
+// ---------------------------------------------------------------------------
+// MCP ACCESS — the kill switch, and per-client revocation.
+//
+// Two different kinds of "off", and both exist because they fail differently.
+// setMcpEnabled is the account-wide switch (migrations/0059_mcp_access.sql):
+// it takes effect on the very next request, needs no knowledge of which clients
+// exist, and is the thing to reach for when you don't know what leaked.
+// revokeMcpGrant is surgical — it deletes ONE client's sessions and invalidates
+// its refresh tokens at Supabase — and is what you want when the answer is
+// "that one laptop", not "everything".
+//
+// Neither takes an id from the form for the user, same rule as above.
+// revokeMcpGrant does take a clientId, which is safe because Supabase scopes the
+// revocation to the caller's own grants: a forged client id revokes nothing.
+// ---------------------------------------------------------------------------
+export type McpFormState = {
+  error?: string;
+  saved?: boolean;
+};
+
+export async function setMcpEnabled(
+  _prev: McpFormState,
+  formData: FormData,
+): Promise<McpFormState> {
+  // An unchecked checkbox submits nothing at all, so absence IS false — this
+  // reads the form exactly as the browser sends it rather than requiring a
+  // hidden companion field.
+  const enabled = formData.get("mcpEnabled") === "on";
+
+  try {
+    await withPageUser(async (user) => {
+      await sql`update user_profiles set mcp_enabled = ${enabled} where id = ${user.id}`;
+    });
+  } catch {
+    return { error: "Could not update MCP access. Try again." };
+  }
+
+  revalidatePath("/account");
+  return { saved: true };
+}
+
+export async function revokeMcpGrant(
+  _prev: McpFormState,
+  formData: FormData,
+): Promise<McpFormState> {
+  const clientId = formData.get("clientId")?.toString() ?? "";
+  if (!clientId) return { error: "Missing client." };
+
+  // Authenticate only — the revocation itself is scoped by Supabase to this
+  // session's user, and no store call is made, so there is no scope to enter.
+  await requireUser();
+
+  const supabase = await serverSupabase();
+  const { error } = await supabase.auth.oauth.revokeGrant({ clientId });
+  if (error) {
+    return { error: error.message || "Could not disconnect that client." };
+  }
+
+  // Revoking the grant stops Supabase minting new tokens for the client and
+  // kills its sessions, but an access token it ALREADY holds stays
+  // signature-valid until it expires — getClaims verifies a signature, not
+  // session liveness. Nothing here can shorten that, which is the honest reason
+  // the account-wide switch above exists alongside this one.
+  revalidatePath("/account");
+  return { saved: true };
 }
 
 // ---------------------------------------------------------------------------
