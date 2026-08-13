@@ -15,7 +15,7 @@ import { z } from "zod";
 
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
-import { stepFor } from "@/lib/jobs/registry";
+import { backgroundBlocker, stepFor } from "@/lib/jobs/registry";
 import { backgroundThresholdSeconds, estimate } from "@/lib/jobs/timing";
 import { JOB_KINDS, JOB_UNITS, type JobKind } from "@/lib/jobs/types";
 import { emailConfigured } from "@/lib/notify/email";
@@ -38,6 +38,19 @@ export async function POST(request: Request) {
     // background for it.
     if (!step) {
       return Response.json({ kind, backgroundable: false, units: null, seconds: null });
+    }
+    // Wired, but refused under the current settings (autotune's apply='choose').
+    // Answered the same way an unwired kind is: the dashboard still shows "this
+    // will take a while", it just does not offer a background that would not work.
+    const blocked = await backgroundBlocker(kind);
+    if (blocked) {
+      return Response.json({
+        kind,
+        backgroundable: false,
+        blockedReason: blocked,
+        units: null,
+        seconds: null,
+      });
     }
     const { totalUnits } = await step.plan((body.data.scope ?? {}) as never);
     const eta = await estimate(kind, totalUnits);

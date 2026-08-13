@@ -8,6 +8,12 @@
 // snapshotted into the chunk's "Models tried" list, and the run ends with a
 // dirty-set re-score plus an eval_runs snapshot and an autotune_runs history row.
 //
+// This file is the ENGINE ONLY — the candidate search and its confirm. Ordering
+// the chunks, deciding when to stop, and the closing re-score and accounting live
+// in lib/jobs/steps/autotune.ts, which drives the pieces below as a resumable
+// step. They were one function until docs/autotune-slicing-plan.md; see the note
+// above prepareAutotune for why they no longer are.
+//
 // keepBest (0026): when NO candidate clears a chunk's bar, the best
 // strictly-improving candidate is kept under a relaxed-but-real confirm — no new
 // failures, and the failing pairs' metric values must actually rise on real
@@ -20,28 +26,20 @@
 // ground-truth rank lands within ndcg_k without regressing. The per-chunk confirm
 // re-score is the arbiter either way — it also catches override state drifting
 // between a chunk's search and its apply.
-import { NEVER_STOP, type ShouldStop } from "@/lib/http/cancelRegistry";
 import type { StreamErrorEvent } from "@/lib/http/missingKey";
 import { autotuneModelLadder } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
-import {
-  insertAutotuneRun,
-  listIgnoredQuestionIds,
-  type AutotuneOutcome,
-  type AutotuneStopReason,
-} from "@/lib/rag/autotuneStore";
+import { listIgnoredQuestionIds, type AutotuneStopReason } from "@/lib/rag/autotuneStore";
 import { splitText } from "@/lib/rag/chunker";
 import { embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
 import { modelSpec } from "@/lib/rag/embeddingModels";
 import { availableProviders } from "@/lib/rag/providerAvailability";
 import {
-  rescoreAffectedQuestions,
   runModelTrial,
   scoreQuestions,
   setChunkModelOverride,
   setChunkSizeModelOverride,
   setChunkSizeOverride,
-  type ChangedChunk,
   type TrialVariation,
 } from "@/lib/rag/eval";
 import { effectiveK, type EvalCriteria } from "@/lib/rag/evalSettingsStore";
@@ -59,7 +57,6 @@ import {
   getChunkOverridePieces,
   listOverrides,
   overrideEmbeddings,
-  retrievalStateFingerprint,
   setChunkOverridePieces,
   type ChunkOverride,
   type OverrideEmbedding,
@@ -73,25 +70,6 @@ export type { AutotuneStopReason };
 
 export type AutotuneMetric = "recall" | "mrr" | "ndcg";
 export type CandidateFamily = "size" | "model" | "size+model";
-
-// HOW LONG ONE RUN MAY SEARCH (docs/autotune-slicing-plan.md §2).
-//
-// A request scope is a transaction (0051) and an NDJSON producer re-enters it
-// once for the whole run, so the unit of durability is the ENTIRE run: on
-// 2026-08-13 a 66-minute run hit one statement error 160 questions into its
-// closing re-score and Postgres discarded all 22 overrides it had confirmed
-// through real retrieval — 45 minutes of provider calls, already billed. The
-// budget does not prevent that error; it bounds what one occurrence costs.
-//
-// Correct rather than merely truncating, because targets are recomputed from the
-// current summary on every run: a chunk that got tuned is no longer failing and
-// drops out, so running again continues where this stopped with no stored cursor.
-//
-// 20 minutes: well under the 66 that failed, and long enough that an ordinary
-// sweep finishes inside one. Env-tunable like JOBS_SLICE_BUDGET_MS. Bounds the
-// chunk SEARCH only — the closing re-score is unbounded here and is what Phase 2
-// (the JobStep conversion) exists to slice.
-const BUDGET_MS = Number(process.env.AUTOTUNE_BUDGET_MS ?? 1_200_000);
 
 // Tie-break when candidate scores are EQUAL (common — score is Σ 1/rank, so
 // same ranks give identical floats): prefer the cheaper override family.
@@ -226,7 +204,7 @@ type TargetQuestion = {
 // "must be a hit"; MRR compares the per-question reciprocal rank at mrr_k;
 // nDCG is graded against its own min-rate). Unscored, stale, and ungraded-nDCG
 // questions are not targetable.
-function failingMetrics(q: QuestionDetail, criteria: EvalCriteria): AutotuneMetric[] {
+export function failingMetrics(q: QuestionDetail, criteria: EvalCriteria): AutotuneMetric[] {
   if (q.ignored || q.hit === null || q.stale) return [];
   const out: AutotuneMetric[] = [];
   const r = criteria.recall;
@@ -600,62 +578,81 @@ export async function applyAutotuneCandidate(
   };
 }
 
-// The run itself — driven by the streamed POST /api/eval/autotune route.
-// `shouldStop` is polled between chunks, the same seam early-stop already
-// breaks at: a cancelled run keeps every override it confirmed and still
-// finishes its re-score and outcome accounting. It is a flag, never an
-// exception — see lib/http/cancelRegistry.ts.
-export async function runAutotune(
-  emit: Emit = () => {},
-  shouldStop: ShouldStop = NEVER_STOP,
-): Promise<void> {
-  const t0 = performance.now();
-  // Per-phase wall-clock accounting on top of the total (durationMs): where the
-  // run's time actually goes, so an optimization can be aimed before it's built.
-  //   search  — the fusedTrialRanks dry-runs (Stages 1-3), incl. their embeds.
-  //   confirm — applyAutotuneCandidate: persist + real-retrieval re-score/revert
-  //             (+ the kept-trial snapshot). The confirm's own rescore lives here.
-  //   rescore — the run-end dirty-set ripple re-score (rescoreAffectedQuestions).
-  // These are diagnostic and need not sum to durationMs (getSummary/splitText/etc.
-  // are the unaccounted remainder).
-  const phase = { search: 0, confirm: 0, rescore: 0 };
-  const timed = async <T>(bucket: keyof typeof phase, fn: () => Promise<T>): Promise<T> => {
-    const s = performance.now();
-    try {
-      return await fn();
-    } finally {
-      phase[bucket] += performance.now() - s;
-    }
-  };
+// --- THE ENGINE, AS PIECES A DRIVER CAN STOP BETWEEN ------------------------
+//
+// A run used to be one function call, which made it one transaction and therefore
+// one unit of durability: docs/autotune-slicing-plan.md opens with a 66-minute run
+// that lost 22 confirmed overrides — and their spend — to a single statement error
+// in its closing re-score. Below is the same engine, split at the seams a driver
+// can checkpoint on: prepare the run, search ONE chunk, close the books.
+// lib/jobs/steps/autotune.ts is the state machine over those pieces, and it is the
+// only caller; both the streamed route and the background runner drive it.
+//
+// The split is sound because the work is self-eliminating: targets are recomputed
+// from the CURRENT summary each time, so a chunk that got tuned is no longer
+// failing and drops out on its own. Everything that is NOT recoverable that way
+// lives on the step's cursor, and is documented there.
+
+// Everything a run's search needs that does not change from chunk to chunk.
+export type AutotunePrep = {
+  criteria: EvalCriteria;
+  bars: MetricBars;
+  baseModel: string;
+  topK: number;
+  sizes: number[];
+  models: string[];
+  trialPool: number | null;
+  overlapPct: number;
+  search: string;
+  applyMode: string;
+  keepBest: boolean;
+  stopEarly: boolean;
+  // Which metrics are being targeted at all — the aggregate bars stopEarly
+  // compares against, and the k's the history row records.
+  recallTargeting: boolean;
+  mrrTargeting: boolean;
+  ndcgTargeting: boolean;
+};
+
+// A run's targets as of RIGHT NOW: below-bar questions, and the chunk order the
+// search should visit them in. Recomputed per slice on purpose.
+export type AutotuneTargeting = {
+  prep: AutotunePrep;
+  targets: TargetQuestion[];
+  orderedChunks: [string, TargetQuestion[]][];
+  rates: { recall: number | null; mrr: number | null; ndcg: number | null };
+};
+
+export type PrepareResult =
+  | ({ ok: true } & AutotuneTargeting)
+  | { ok: false; error: string };
+
+const overlapForSize = (size: number, pct: number) =>
+  Math.min(size - 1, Math.max(0, Math.round(size * pct)));
+
+// Read the config's criteria and the current summary, and work out what this run
+// would target if it started now. No writes, so a driver may call it once per
+// slice — which is exactly how a resumed run finds out what is left to do.
+export async function prepareAutotune(): Promise<PrepareResult> {
   const cfg = activeConfig();
-  // Run-start override state, for the final dirty-set re-score: only chunks
-  // whose override changed between here and the end can affect other
-  // questions' stored results (rescoreAffectedQuestions).
-  const startState = await retrievalStateFingerprint();
-  const startOverrides = new Set((await listOverrides()).map((o) => o.sourceChunkId));
   const summary = await getSummary();
   const criteria = summary.criteria;
 
-  const recallTargeting =
-    criteria.recall.enabled && criteria.recall.minRate !== null;
+  const recallTargeting = criteria.recall.enabled && criteria.recall.minRate !== null;
   const mrrTargeting = criteria.mrr.enabled && criteria.mrr.minRate !== null;
   const ndcgTargeting = criteria.ndcg.enabled && criteria.ndcg.minRate !== null;
   if (!recallTargeting && !mrrTargeting && !ndcgTargeting) {
-    emit({
-      type: "error",
-      message: "Set a min-rate on an enabled metric in Settings before autotuning.",
-    });
-    return;
+    return {
+      ok: false,
+      error: "Set a min-rate on an enabled metric in Settings before autotuning.",
+    };
   }
 
-  const recallK = effectiveK(criteria.recall, cfg.topK);
-  const mrrK = effectiveK(criteria.mrr, cfg.topK);
-  const ndcgK = effectiveK(criteria.ndcg, cfg.topK);
   const bars: MetricBars = {
-    recallK,
-    mrrK,
+    recallK: effectiveK(criteria.recall, cfg.topK),
+    mrrK: effectiveK(criteria.mrr, cfg.topK),
     mrrMinRate: criteria.mrr.minRate ?? 0,
-    ndcgK,
+    ndcgK: effectiveK(criteria.ndcg, cfg.topK),
   };
   const ignored = await listIgnoredQuestionIds();
   // Chunk scope (0025): a non-null list restricts the run to those chunks;
@@ -695,519 +692,361 @@ export async function runAutotune(
   // Worst chunks first: lowest mean baseline reciprocal rank (a complete miss
   // counts 0), tie-broken toward more targeted questions. Those chunks drag
   // the aggregate rates hardest, so the biggest lifts land earliest — which is
-  // what makes stopEarly's cutoff cheap instead of arbitrary.
+  // what makes stopEarly's cutoff cheap instead of arbitrary. Deterministic, so
+  // a resumed run continues down the same ordering it was working through.
   const meanRr = (ts: TargetQuestion[]) =>
     ts.reduce((s, t) => s + (t.beforeRank === null ? 0 : 1 / t.beforeRank), 0) / ts.length;
   const orderedChunks = [...byChunk.entries()].sort(
     (a, b) => meanRr(a[1]) - meanRr(b[1]) || b[1].length - a[1].length,
   );
 
-  const search = criteria.autotune.search;
-  const applyMode = criteria.autotune.apply;
-  const keepBest = criteria.autotune.keepBest;
-  emit({
-    type: "autotune-start",
-    targeted: targets.length,
-    chunks: byChunk.size,
-    search,
-    apply: applyMode,
-  });
-  if (targets.length === 0) {
-    emit({
-      type: "autotune-done",
-      stopReason: null,
-      chunksSearched: 0,
-      chunksTotal: 0,
-      targeted: 0,
-      resolved: 0,
-      unresolved: 0,
-      improved: 0,
-      pendingChoice: 0,
-      attempts: 0,
-      recall: summary.recall,
-      mrr: summary.mrr,
-      ndcg: summary.ndcg,
-      durationMs: Math.round(performance.now() - t0),
-    });
-    return;
-  }
+  return {
+    ok: true,
+    prep: {
+      criteria,
+      bars,
+      baseModel: cfg.embeddingModel,
+      topK: cfg.topK,
+      sizes: criteria.autotune.sizeLadder,
+      models: await usableModelLadder(criteria.autotune.modelScope),
+      trialPool: criteria.autotune.fusionPool,
+      overlapPct: criteria.autotune.overlapPct,
+      search: criteria.autotune.search,
+      applyMode: criteria.autotune.apply,
+      keepBest: criteria.autotune.keepBest,
+      stopEarly: criteria.autotune.stopEarly,
+      recallTargeting,
+      mrrTargeting,
+      ndcgTargeting,
+    },
+    targets,
+    orderedChunks,
+    rates: { recall: summary.recall, mrr: summary.mrr, ndcg: summary.ndcg },
+  };
+}
 
-  const sizes = criteria.autotune.sizeLadder;
-  const trialPool = criteria.autotune.fusionPool;
-  const overlapFor = (size: number) =>
-    Math.min(size - 1, Math.max(0, Math.round(size * criteria.autotune.overlapPct)));
-  const models = await usableModelLadder(criteria.autotune.modelScope);
+// Are all targeted metrics' AGGREGATE rates at their min-rate? (stopEarly, 0024.)
+// Mid-run summaries can carry stale neighbours — only the applied chunk's
+// questions are re-scored — so this is approximate; the dirty-set re-score
+// remains the arbiter of the stored rates.
+export function barsReached(
+  prep: AutotunePrep,
+  rates: { recall: number | null; mrr: number | null; ndcg: number | null },
+): boolean {
+  const c = prep.criteria;
+  return (
+    (!prep.recallTargeting || (rates.recall !== null && rates.recall >= c.recall.minRate!)) &&
+    (!prep.mrrTargeting || (rates.mrr !== null && rates.mrr >= c.mrr.minRate!)) &&
+    (!prep.ndcgTargeting || (rates.ndcg !== null && rates.ndcg >= c.ndcg.minRate!))
+  );
+}
+
+// What one chunk's turn produced. The engine's unit of work, and the job's unit
+// of progress: a chunk is the only point at which state is consistent, since
+// nothing is persisted mid-search.
+export type ChunkResult = {
+  status: "resolved" | "improved" | "choice" | "unresolved";
+  // Set when a candidate survived its confirm, so the caller knows to re-read the
+  // aggregate rates (stopEarly) — the applied override itself is read back from
+  // the override rows, never from memory (see the cursor's note on deriving it).
+  kept: boolean;
+  attempts: number;
+  // Targeted questions on this chunk left awaiting an apply='choose' decision.
+  pendingChoice: number;
+  // Deferred "Models tried" snapshot for a kept candidate (L10) — the caller
+  // drains these after the accounting, not between chunks.
+  snapshot: PendingSnapshot | null;
+  confirms: number;
+  reverts: number;
+};
+
+// A kept candidate awaiting its "Models tried" snapshot. Just the knobs, not the
+// whole AutotuneCandidate: this rides in a job cursor, and the ranks array is
+// search bookkeeping nothing downstream reads.
+export type PendingSnapshot = {
+  chunkId: string;
+  family: CandidateFamily;
+  size: number | null;
+  overlap: number | null;
+  model: string | null;
+};
+
+// ONE CHUNK'S TURN: search sizes, then models, then combos, and confirm the best
+// through real retrieval. Everything it changes is committed by the time it
+// returns, which is what lets a driver stop here and resume later.
+export async function searchChunk(
+  prep: AutotunePrep,
+  chunkId: string,
+  chunkTargets: TargetQuestion[],
+  emit: Emit,
+): Promise<ChunkResult> {
+  const { bars, sizes, models, trialPool, baseModel } = prep;
+  const overlapFor = (size: number) => overlapForSize(size, prep.overlapPct);
   // Per-chunk cap on search RUNGS (a rung = one size, or one model's two
   // branches) so even exhaustive mode is bounded (A4/A5).
   const rungCap = sizes.length + 2 * models.length + 6;
 
   let attempts = 0;
-  let pendingChoice = 0;
-  // L8 diagnostics: confirm cycles run, how many ended in a revert (the search
-  // over-promising), and how many of those skipped the re-score via L7.
   let confirms = 0;
   let reverts = 0;
+  let kept = false;
+  let snapshot: PendingSnapshot | null = null;
 
-  // L10: kept candidates awaiting their "Models tried" snapshot. Deferred out of
-  // the chunk loop because each one re-runs a FULL model trial (re-chunk,
-  // re-embed, re-rank the pool) — 97.6s across a run, 41% of confirm — purely to
-  // populate a UI list. Nothing inside the run reads eval_model_trials back;
-  // only /api/eval/trials, /api/eval/chunks/[chunkId]/trials and try-model do.
-  // Drained after the done event, so the run's RESULT no longer waits on
-  // bookkeeping. Note this is a latency win, not a work win: the snapshots still
-  // cost the same, they just stop sitting between chunks.
-  const pendingSnapshots: { chunkId: string; candidate: AutotuneCandidate }[] = [];
+  // L15: one read of the override state + one base ANN per question, shared by
+  // every rung this chunk tries. Rebuilt per chunk because the previous chunk's
+  // confirm may have persisted an override; within THIS chunk's search nothing
+  // can change it.
+  const searchCtx = await buildSearchContext(chunkId);
 
-  // Applied override per chunk, for the outcome rows.
-  const applied = new Map<
-    string,
-    { kind: CandidateFamily; model: string | null; size: number | null }
-  >();
-
-  // stopEarly (0024): are all targeted metrics' AGGREGATE rates at their
-  // min-rate? Checked against the latest summary after each kept override.
-  // Mid-run summaries can carry stale neighbours (only the applied chunk's
-  // questions are re-scored), so this is approximate — the final re-score
-  // below remains the arbiter of the stored rates.
-  const barsReached = (s: {
-    recall: number | null;
-    mrr: number | null;
-    ndcg: number | null;
-  }): boolean =>
-    (!recallTargeting || (s.recall !== null && s.recall >= criteria.recall.minRate!)) &&
-    (!mrrTargeting || (s.mrr !== null && s.mrr >= criteria.mrr.minRate!)) &&
-    (!ndcgTargeting || (s.ndcg !== null && s.ndcg >= criteria.ndcg.minRate!));
-  const stopEarly = criteria.autotune.stopEarly;
-  let latestRates = { recall: summary.recall, mrr: summary.mrr, ndcg: summary.ndcg };
-  let barsMet = stopEarly && barsReached(latestRates);
-
-  // Why the sweep ended, for the done event and the history row. Null means it
-  // ran out of chunks, which is the only ending that makes `resolved/targeted` a
-  // coverage-complete rate.
-  let stopReason: AutotuneStopReason | null = null;
-
-  let chunkIndex = 0;
-  for (const [chunkId, chunkTargets] of orderedChunks) {
-    // Checkpoint: between chunks, i.e. between searches. Break, don't throw —
-    // the run's transaction commits, so the overrides confirmed so far stay.
-    // Granularity is one chunk because that is the only point where state is
-    // consistent: nothing is persisted mid-search, so stopping between rungs
-    // would throw away the chunk's work rather than bank it.
-    if (shouldStop()) {
-      stopReason = "cancelled";
-      break;
+  const baselineScore = chunkTargets.reduce(
+    (s, t) => s + (t.beforeRank === null ? 0 : 1 / t.beforeRank),
+    0,
+  );
+  const candidates: AutotuneCandidate[] = [];
+  let bestSize: AutotuneCandidate | null = null; // best IMPROVING stage-1 size
+  // Best candidate seen at ANY stage that beats the baseline, clearing or not —
+  // the keepBest fallback when nothing survives the bar.
+  let bestEffort: AutotuneCandidate | null = null;
+  const consider = (cand: AutotuneCandidate): AutotuneCandidate => {
+    const cur = bestEffort;
+    if (
+      cand.score > baselineScore &&
+      (cur === null ||
+        cand.score > cur.score ||
+        (cand.score === cur.score && familyRank[cand.family] < familyRank[cur.family]))
+    ) {
+      bestEffort = cand;
     }
-    if (barsMet) {
-      stopReason = "early";
-      emit({ type: "early-stop", skippedChunks: orderedChunks.length - chunkIndex, ...latestRates });
-      break;
-    }
-    const elapsed = performance.now() - t0;
-    if (elapsed > BUDGET_MS) {
-      stopReason = "budget";
+    return cand;
+  };
+  let rungs = 0;
+  let resolvedHere = false;
+  let skippedHere = false; // apply said the chunk already passes — stop trying
+  let lastFailure: string | null = null;
+
+  // Applies `cand` with confirm/revert; emits chunk-resolved (or, for a kept
+  // improve-mode candidate that didn't fully clear, chunk-improved). A failure is
+  // NOT emitted here — the chunk may have more finalists to try (a revert restores
+  // the prior override state exactly, so the runner-up starts clean); the caller
+  // emits one chunk-unresolved after the last.
+  const tryApply = async (
+    cand: AutotuneCandidate,
+    mode: "clear" | "improve" = "clear",
+  ): Promise<boolean> => {
+    // L10: the kept-trial snapshot is deferred out of the chunk loop — see
+    // PendingSnapshot. Measured 2026-08-03 at 97.6s, 41% of confirm, entirely to
+    // populate a UI list the run itself never reads back.
+    const res = await applyAutotuneCandidate(chunkId, cand, mode, { snapshot: false });
+    // L8: how often the approximate search over-promises. Measured 2026-08-02 at
+    // 3% (1 of 33) — the search is accurate, so confirm cycles are almost never
+    // wasted on candidates that get rejected. Kept because it's free and it's the
+    // number that killed L7; a future workload could differ.
+    confirms += 1;
+    if (res.status === "reverted") reverts += 1;
+    if (res.status === "kept") {
+      kept = true;
+      snapshot = {
+        chunkId,
+        family: cand.family,
+        size: cand.size,
+        overlap: cand.overlap,
+        model: cand.model,
+      };
       emit({
-        type: "budget-stop",
-        searchedChunks: chunkIndex,
-        skippedChunks: orderedChunks.length - chunkIndex,
-        elapsedMs: Math.round(elapsed),
+        type: mode === "clear" || res.remaining === 0 ? "chunk-resolved" : "chunk-improved",
+        chunkId,
+        candidate: cand,
       });
-      break;
+      return true;
     }
-    chunkIndex += 1;
-    emit({
-      type: "chunk-start",
-      chunkId,
-      fileName: chunkTargets[0].fileName,
-      position: chunkTargets[0].position,
-      index: chunkIndex,
-      total: byChunk.size,
-      questions: chunkTargets.length,
-    });
+    lastFailure = res.detail;
+    if (res.status === "skipped") skippedHere = true;
+    return false;
+  };
 
-    // L15: one read of the override state + one base ANN per question, shared by
-    // every rung this chunk tries. Rebuilt per chunk because the previous
-    // chunk's confirm may have persisted an override; within THIS chunk's
-    // search nothing can change it.
-    const searchCtx = await buildSearchContext(chunkId);
+  const done = (status: ChunkResult["status"], pendingChoice = 0): ChunkResult => ({
+    status,
+    kept,
+    attempts,
+    pendingChoice,
+    snapshot,
+    confirms,
+    reverts,
+  });
 
-    const baselineScore = chunkTargets.reduce(
-      (s, t) => s + (t.beforeRank === null ? 0 : 1 / t.beforeRank),
-      0,
+  const [chunkRow] = await getChunksByIds([chunkId]);
+  const chunkText = chunkRow?.text ?? null;
+  if (chunkText === null) {
+    emit({ type: "chunk-unresolved", chunkId, reason: "Chunk no longer exists." });
+    return done("unresolved");
+  }
+
+  // ---- STAGE 1: chunk size, base model ----------------------------------
+  for (const size of sizes) {
+    if (rungs >= rungCap) break;
+    rungs += 1;
+    const overlap = overlapFor(size);
+    const pieces = await splitText(chunkText, size, overlap);
+    const ranks = await fusedTrialRanks(
+      chunkTargets, chunkId, pieces, "size", baseModel, trialPool, searchCtx,
     );
-    const candidates: AutotuneCandidate[] = [];
-    let bestSize: AutotuneCandidate | null = null; // best IMPROVING stage-1 size
-    // Best candidate seen at ANY stage that beats the baseline, clearing or
-    // not — the keepBest fallback when nothing survives the bar.
-    let bestEffort: AutotuneCandidate | null = null;
-    const consider = (cand: AutotuneCandidate): AutotuneCandidate => {
-      const cur = bestEffort;
-      if (
-        cand.score > baselineScore &&
-        (cur === null ||
-          cand.score > cur.score ||
-          (cand.score === cur.score && familyRank[cand.family] < familyRank[cur.family]))
-      ) {
-        bestEffort = cand;
+    attempts += chunkTargets.length;
+    emit({ type: "attempt", chunkId, stage: "size", detail: `size ${size}`, attempts });
+    const cand = consider(mkCandidate("size", size, overlap, null, chunkTargets, ranks, bars));
+    if (cand.score > (bestSize?.score ?? baselineScore)) bestSize = cand;
+    if (cand.clears) {
+      if (prep.search === "first_success") {
+        // A clean Stage-1 size win auto-applies regardless of apply mode (#2).
+        // If the confirm reverts it, keep searching (later sizes, then
+        // models/combos) instead of writing the chunk off; the failed candidate
+        // is not collected, so DECIDE won't retry it.
+        resolvedHere = await tryApply(cand);
+        if (resolvedHere || skippedHere) break;
+      } else {
+        candidates.push(cand);
       }
-      return cand;
-    };
-    let rungs = 0;
-    let resolvedHere = false;
-    let skippedHere = false; // apply said the chunk already passes — stop trying
-    let lastFailure: string | null = null;
+    }
+  }
+  if (resolvedHere) return done("resolved");
+  if (skippedHere) {
+    emit({ type: "chunk-unresolved", chunkId, reason: lastFailure! });
+    return done("unresolved");
+  }
 
-    // Applies `cand` with confirm/revert; emits chunk-resolved (or, for a kept
-    // improve-mode candidate that didn't fully clear, chunk-improved). A
-    // failure is NOT emitted here — the chunk may have more finalists to try
-    // (a revert restores the prior override state exactly, so the runner-up
-    // starts clean); the caller emits one chunk-unresolved after the last.
-    const tryApply = async (
-      cand: AutotuneCandidate,
-      mode: "clear" | "improve" = "clear",
-    ): Promise<boolean> => {
-      // L10: the kept-trial snapshot is deferred out of the chunk loop — see
-      // `pendingSnapshots` above and the drain after the done event. Measured
-      // 2026-08-03 at 97.6s, 41% of confirm, entirely to populate a UI list the
-      // run itself never reads back.
-      const res = await timed("confirm", () =>
-        applyAutotuneCandidate(chunkId, cand, mode, { snapshot: false }),
+  // ---- STAGE 2: models — full chunk (B) and best sub-size (A) ------------
+  for (const model of models) {
+    if (rungs >= rungCap) break;
+    rungs += 2;
+    const rungCands: AutotuneCandidate[] = [];
+
+    const ranksB = await fusedTrialRanks(
+      chunkTargets, chunkId, [chunkText], "model", model, trialPool, searchCtx,
+    );
+    attempts += chunkTargets.length;
+    emit({ type: "attempt", chunkId, stage: "model", detail: model, attempts });
+    const candB = consider(mkCandidate("model", null, null, model, chunkTargets, ranksB, bars));
+    if (candB.clears) rungCands.push(candB);
+
+    if (bestSize !== null) {
+      const pieces = await splitText(chunkText, bestSize.size!, bestSize.overlap ?? 0);
+      const ranksA = await fusedTrialRanks(
+        chunkTargets, chunkId, pieces, "size+model", model, trialPool, searchCtx,
       );
-      // L8: how often the approximate search over-promises. Measured 2026-08-02
-      // at 3% (1 of 33) — the search is accurate, so confirm cycles are almost
-      // never wasted on candidates that get rejected. Kept because it's free and
-      // it's the number that killed L7; a future workload could differ.
-      confirms += 1;
-      if (res.status === "reverted") reverts += 1;
-      if (res.status === "kept") {
-        applied.set(chunkId, {
-          kind: cand.family,
-          model: cand.model,
-          size: cand.size,
-        });
-        pendingSnapshots.push({ chunkId, candidate: cand });
-        emit({
-          type: mode === "clear" || res.remaining === 0 ? "chunk-resolved" : "chunk-improved",
-          chunkId,
-          candidate: cand,
-        });
-        if (stopEarly) {
-          const s = await getSummary();
-          latestRates = { recall: s.recall, mrr: s.mrr, ndcg: s.ndcg };
-          barsMet = barsReached(latestRates);
-        }
-        return true;
-      }
-      lastFailure = res.detail;
-      if (res.status === "skipped") skippedHere = true;
-      return false;
-    };
-
-    const [chunkRow] = await getChunksByIds([chunkId]);
-    const chunkText = chunkRow?.text ?? null;
-    if (chunkText === null) {
-      emit({ type: "chunk-unresolved", chunkId, reason: "Chunk no longer exists." });
-      continue;
+      attempts += chunkTargets.length;
+      emit({
+        type: "attempt",
+        chunkId,
+        stage: "combo",
+        detail: `size ${bestSize.size} × ${model}`,
+        attempts,
+      });
+      const candA = consider(
+        mkCandidate(
+          "size+model", bestSize.size, bestSize.overlap, model, chunkTargets, ranksA, bars,
+        ),
+      );
+      if (candA.clears) rungCands.push(candA);
     }
 
-    // ---- STAGE 1: chunk size, base model --------------------------------
-    for (const size of sizes) {
-      if (rungs >= rungCap) break;
-      rungs += 1;
+    candidates.push(...rungCands);
+    if (prep.search === "first_success" && rungCands.length > 0) break;
+  }
+
+  // ---- STAGE 3: combo fallback — remaining sizes × models ----------------
+  if (candidates.length === 0) {
+    outer: for (const size of sizes) {
+      if (size === bestSize?.size) continue; // already tried in Stage 2
       const overlap = overlapFor(size);
       const pieces = await splitText(chunkText, size, overlap);
-      const ranks = await timed("search", () =>
-        fusedTrialRanks(chunkTargets, chunkId, pieces, "size", cfg.embeddingModel, trialPool, searchCtx),
-      );
-      attempts += chunkTargets.length;
-      emit({ type: "attempt", chunkId, stage: "size", detail: `size ${size}`, attempts });
-      const cand = consider(mkCandidate("size", size, overlap, null, chunkTargets, ranks, bars));
-      if (cand.score > (bestSize?.score ?? baselineScore)) bestSize = cand;
-      if (cand.clears) {
-        if (search === "first_success") {
-          // A clean Stage-1 size win auto-applies regardless of apply mode (#2).
-          // If the confirm reverts it, keep searching (later sizes, then
-          // models/combos) instead of writing the chunk off; the failed
-          // candidate is not collected, so DECIDE won't retry it.
-          resolvedHere = await tryApply(cand);
-          if (resolvedHere || skippedHere) break;
-        } else {
-          candidates.push(cand);
-        }
-      }
-    }
-    if (resolvedHere) continue;
-    if (skippedHere) {
-      emit({ type: "chunk-unresolved", chunkId, reason: lastFailure! });
-      continue;
-    }
-
-    // ---- STAGE 2: models — full chunk (B) and best sub-size (A) ----------
-    for (const model of models) {
-      if (rungs >= rungCap) break;
-      rungs += 2;
-      const rungCands: AutotuneCandidate[] = [];
-
-      const ranksB = await timed("search", () =>
-        fusedTrialRanks(chunkTargets, chunkId, [chunkText], "model", model, trialPool, searchCtx),
-      );
-      attempts += chunkTargets.length;
-      emit({ type: "attempt", chunkId, stage: "model", detail: model, attempts });
-      const candB = consider(mkCandidate("model", null, null, model, chunkTargets, ranksB, bars));
-      if (candB.clears) rungCands.push(candB);
-
-      if (bestSize !== null) {
-        const pieces = await splitText(chunkText, bestSize.size!, bestSize.overlap ?? 0);
-        const ranksA = await timed("search", () =>
-          fusedTrialRanks(chunkTargets, chunkId, pieces, "size+model", model, trialPool, searchCtx),
+      for (const model of models) {
+        if (rungs >= rungCap) break outer;
+        rungs += 1;
+        const ranks = await fusedTrialRanks(
+          chunkTargets, chunkId, pieces, "size+model", model, trialPool, searchCtx,
         );
         attempts += chunkTargets.length;
         emit({
           type: "attempt",
           chunkId,
           stage: "combo",
-          detail: `size ${bestSize.size} × ${model}`,
+          detail: `size ${size} × ${model}`,
           attempts,
         });
-        const candA = consider(
-          mkCandidate(
-            "size+model",
-            bestSize.size,
-            bestSize.overlap,
-            model,
-            chunkTargets,
-            ranksA,
-            bars,
-          ),
+        const cand = consider(
+          mkCandidate("size+model", size, overlap, model, chunkTargets, ranks, bars),
         );
-        if (candA.clears) rungCands.push(candA);
-      }
-
-      candidates.push(...rungCands);
-      if (search === "first_success" && rungCands.length > 0) break;
-    }
-
-    // ---- STAGE 3: combo fallback — remaining sizes × models --------------
-    if (candidates.length === 0) {
-      outer: for (const size of sizes) {
-        if (size === bestSize?.size) continue; // already tried in Stage 2
-        const overlap = overlapFor(size);
-        const pieces = await splitText(chunkText, size, overlap);
-        for (const model of models) {
-          if (rungs >= rungCap) break outer;
-          rungs += 1;
-          const ranks = await timed("search", () =>
-            fusedTrialRanks(chunkTargets, chunkId, pieces, "size+model", model, trialPool, searchCtx),
-          );
-          attempts += chunkTargets.length;
-          emit({
-            type: "attempt",
-            chunkId,
-            stage: "combo",
-            detail: `size ${size} × ${model}`,
-            attempts,
-          });
-          const cand = consider(
-            mkCandidate("size+model", size, overlap, model, chunkTargets, ranks, bars),
-          );
-          if (cand.clears) {
-            candidates.push(cand);
-            if (search === "first_success") break outer;
-          }
+        if (cand.clears) {
+          candidates.push(cand);
+          if (prep.search === "first_success") break outer;
         }
       }
     }
-
-    // ---- DECIDE ----------------------------------------------------------
-    // keepBest fallback: when nothing cleared the bar (or every finalist
-    // failed its real-retrieval confirm below), keep the best strictly-
-    // improving candidate instead — under improve mode's relaxed-but-real
-    // confirm, so it too reverts unless real retrieval actually got better.
-    const tryBestEffort = async (): Promise<boolean> =>
-      keepBest && !skippedHere && bestEffort !== null
-        ? tryApply(bestEffort, "improve")
-        : false;
-
-    if (candidates.length === 0) {
-      if (!(await tryBestEffort())) {
-        emit({
-          type: "chunk-unresolved",
-          chunkId,
-          reason:
-            lastFailure ?? "No size, model, or combo cleared the bar (approximate search).",
-        });
-      }
-      continue;
-    }
-    // Best candidate per family, best-scoring first — score ties go to the
-    // cheaper family (familyRank), which decides who gets first shot at the
-    // confirm ('exhaustive' compares all collected candidates; 'first_success'
-    // typically holds a single rung's).
-    const bestByFamily = new Map<CandidateFamily, AutotuneCandidate>();
-    for (const c of candidates) {
-      const cur = bestByFamily.get(c.family);
-      if (!cur || c.score > cur.score) bestByFamily.set(c.family, c);
-    }
-    const finalists = [...bestByFamily.values()].sort(
-      (a, b) => b.score - a.score || familyRank[a.family] - familyRank[b.family],
-    );
-
-    if (finalists.length > 1 && applyMode === "choose") {
-      pendingChoice += chunkTargets.length;
-      emit({
-        type: "chunk-choice",
-        chunkId,
-        fileName: chunkTargets[0].fileName,
-        position: chunkTargets[0].position,
-        candidates: finalists,
-      });
-      continue;
-    }
-    // Try finalists in score order until one survives the real-retrieval
-    // confirm — a single over-promising approximation shouldn't cost the
-    // chunk its whole turn when a runner-up also cleared. 'skipped' means
-    // nothing is failing anymore, so later finalists would fail identically.
-    for (const finalist of finalists) {
-      resolvedHere = await tryApply(finalist);
-      if (resolvedHere || skippedHere) break;
-    }
-    if (!resolvedHere && !(await tryBestEffort())) {
-      emit({ type: "chunk-unresolved", chunkId, reason: lastFailure! });
-    }
   }
 
-  // RIPPLE RE-SCORE + SNAPSHOT. Dirty-set re-score: only questions the run's
-  // override changes could have touched go through real retrieval again; the rest
-  // are PROVEN unchanged and re-stamped. It also freezes the eval_runs snapshot
-  // Appraise reads.
-  //
-  // Net-changed chunks = the KEPT ones. A reverted candidate restores the chunk's
-  // pre-confirm override exactly, so only chunks whose confirm kept a new override
-  // differ from the run-start state.
-  const endOverrides = new Map(
-    (await listOverrides()).map((o) => [o.sourceChunkId, o]),
-  );
-  const changed: ChangedChunk[] = [...applied.keys()].map((id) => ({
-    chunkId: id,
-    finalModel: endOverrides.get(id)?.model ?? null,
-    startOverridden: startOverrides.has(id),
-  }));
-  const { skipped } = await timed("rescore", () =>
-    rescoreAffectedQuestions(changed, startState, (e) => {
-      if (e.type === "score-start") emit({ type: "rescore-start", total: e.total });
-      if (e.type === "score-result") {
-        emit({ type: "rescore-progress", done: e.done, total: e.total });
-      }
-    }),
-  );
+  // ---- DECIDE ------------------------------------------------------------
+  // keepBest fallback: when nothing cleared the bar (or every finalist failed its
+  // real-retrieval confirm below), keep the best strictly-improving candidate
+  // instead — under improve mode's relaxed-but-real confirm, so it too reverts
+  // unless real retrieval actually got better.
+  const tryBestEffort = async (): Promise<boolean> =>
+    prep.keepBest && !skippedHere && bestEffort !== null
+      ? tryApply(bestEffort, "improve")
+      : false;
 
-  // ---- OUTCOMES + RUN HEADER ----------------------------------------------
-  const final = await getSummary();
-  const finalByQ = new Map(final.questions.map((q) => [q.questionId, q]));
-
-  let resolved = 0;
-  let improved = 0; // still below the bar, but a targeted metric's value rose
-  const outcomes: AutotuneOutcome[] = [];
-  for (const t of targets) {
-    const after = finalByQ.get(t.questionId);
-    const stillFailing = after ? failingMetrics(after, criteria) : t.metrics;
-    if (stillFailing.length === 0) {
-      resolved += 1;
-    } else if (
-      after !== undefined &&
-      t.metrics.some((m) => {
-        const beforeValue =
-          m === "recall" ? (t.beforeHit ? 1 : 0) : m === "mrr" ? (t.beforeRr ?? 0) : (t.beforeNdcg ?? 0);
-        return pairValue(after, m) > beforeValue + 1e-9;
-      })
-    ) {
-      improved += 1;
-    }
-    const ov = applied.get(t.sourceChunkId) ?? null;
-    for (const m of t.metrics) {
-      outcomes.push({
-        questionId: t.questionId,
-        sourceChunkId: t.sourceChunkId,
-        metric: m,
-        beforeValue:
-          m === "recall" ? (t.beforeHit ? 1 : 0) : m === "mrr" ? t.beforeRr : t.beforeNdcg,
-        beforeRank: t.beforeRank,
-        afterValue:
-          after === undefined
-            ? null
-            : m === "recall"
-              ? after.hit === null
-                ? null
-                : after.hit
-                  ? 1
-                  : 0
-              : m === "mrr"
-                ? after.rr
-                : after.ndcg,
-        afterRank: after?.foundRank ?? null,
-        overrideKind: ov?.kind ?? null,
-        overrideModel: ov?.model ?? null,
-        overrideSize: ov?.size ?? null,
-      });
-    }
+  if (candidates.length === 0) {
+    if (await tryBestEffort()) return done("improved");
+    emit({
+      type: "chunk-unresolved",
+      chunkId,
+      reason: lastFailure ?? "No size, model, or combo cleared the bar (approximate search).",
+    });
+    return done("unresolved");
   }
-
-  // Stopped BEFORE the history insert: the number describes the run's work, not
-  // the bookkeeping that records it.
-  const durationMs = Math.round(performance.now() - t0);
-
-  await insertAutotuneRun(
-    {
-      recallK: recallTargeting ? recallK : null,
-      recallMinRate: criteria.recall.minRate,
-      mrrK: mrrTargeting ? mrrK : null,
-      mrrMinRate: criteria.mrr.minRate,
-      ndcgK: ndcgTargeting ? ndcgK : null,
-      ndcgMinRate: criteria.ndcg.minRate,
-      targeted: targets.length,
-      resolved,
-      unresolved: targets.length - resolved,
-      improved,
-      attempts,
-      stopReason,
-      chunksTotal: orderedChunks.length,
-      chunksSearched: chunkIndex,
-    },
-    outcomes,
+  // Best candidate per family, best-scoring first — score ties go to the cheaper
+  // family (familyRank), which decides who gets first shot at the confirm
+  // ('exhaustive' compares all collected candidates; 'first_success' typically
+  // holds a single rung's).
+  const bestByFamily = new Map<CandidateFamily, AutotuneCandidate>();
+  for (const c of candidates) {
+    const cur = bestByFamily.get(c.family);
+    if (!cur || c.score > cur.score) bestByFamily.set(c.family, c);
+  }
+  const finalists = [...bestByFamily.values()].sort(
+    (a, b) => b.score - a.score || familyRank[a.family] - familyRank[b.family],
   );
 
-  console.log(
-    `[rag:autotune] done: targeted=${targets.length} resolved=${resolved} ` +
-      `chunks=${chunkIndex}/${orderedChunks.length} stop=${stopReason ?? "complete"} ` +
-      `improved=${improved} pendingChoice=${pendingChoice} attempts=${attempts} ` +
-      `rescoreSkipped=${skipped} in ${durationMs}ms ` +
-      `(search=${Math.round(phase.search)}ms confirm=${Math.round(phase.confirm)}ms ` +
-      `rescore=${Math.round(phase.rescore)}ms) ` +
-      `confirms=${confirms} reverts=${reverts}`,
-  );
-  emit({
-    type: "autotune-done",
-    stopReason,
-    chunksSearched: chunkIndex,
-    chunksTotal: orderedChunks.length,
-    targeted: targets.length,
-    resolved,
-    unresolved: targets.length - resolved,
-    improved,
-    pendingChoice,
-    attempts,
-    recall: final.recall,
-    mrr: final.mrr,
-    ndcg: final.ndcg,
-    durationMs,
+  if (finalists.length > 1 && prep.applyMode === "choose") {
+    emit({
+      type: "chunk-choice",
+      chunkId,
+      fileName: chunkTargets[0].fileName,
+      position: chunkTargets[0].position,
+      candidates: finalists,
+    });
+    return done("choice", chunkTargets.length);
+  }
+  // Try finalists in score order until one survives the real-retrieval confirm — a
+  // single over-promising approximation shouldn't cost the chunk its whole turn
+  // when a runner-up also cleared. 'skipped' means nothing is failing anymore, so
+  // later finalists would fail identically.
+  for (const finalist of finalists) {
+    resolvedHere = await tryApply(finalist);
+    if (resolvedHere || skippedHere) break;
+  }
+  if (resolvedHere) return done("resolved");
+  if (await tryBestEffort()) return done("improved");
+  emit({ type: "chunk-unresolved", chunkId, reason: lastFailure! });
+  return done("unresolved");
+}
+
+// Drain one deferred "Models tried" snapshot (L10). Best-effort by construction:
+// saveKeptTrialSnapshot swallows its own failures, so a snapshot that fails never
+// affects the applied override, which stands on its own confirm.
+export async function drainSnapshot(s: PendingSnapshot): Promise<void> {
+  await saveKeptTrialSnapshot(s.chunkId, {
+    family: s.family,
+    size: s.size,
+    overlap: s.overlap,
+    model: s.model,
   });
-
-  // L10: the deferred snapshots. AFTER the done event on purpose — the caller
-  // already has its result, so this no longer sits on the critical path. Still
-  // INSIDE the request handler: the NDJSON stream stays open until this function
-  // returns, and moving it past that would let the platform kill the work.
-  // Best-effort exactly as it was inline (saveKeptTrialSnapshot swallows its own
-  // failures), so a snapshot that fails never affects the applied override.
-  for (const { chunkId, candidate } of pendingSnapshots) {
-    await saveKeptTrialSnapshot(chunkId, candidate);
-  }
 }

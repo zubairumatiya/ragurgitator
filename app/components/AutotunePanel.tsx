@@ -10,6 +10,7 @@
 
 import { useState } from "react";
 import { apiFetch } from "@/lib/http/client";
+import { BackgroundOfferDialog, type Estimate } from "@/app/components/BackgroundOfferDialog";
 import type {
   AutotuneCandidate,
   AutotuneEvent,
@@ -125,6 +126,12 @@ export function AutotunePanel({
   const [choices, setChoices] = useState<PendingChoice[]>([]);
   const [done, setDone] = useState<DoneStats | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The "this will take a while" offer, and the confirmation once one is launched.
+  // Autotune is the longest bulk action here, so it is the one most worth handing
+  // to a background job — except in apply='choose' mode, which needs this tab; the
+  // estimate route answers backgroundable: false for it and no offer appears.
+  const [offer, setOffer] = useState<Estimate | null>(null);
+  const [launched, setLaunched] = useState<string | null>(null);
 
   const { recall, mrr, ndcg, autotune } = summary.criteria;
   const hasTarget =
@@ -140,7 +147,32 @@ export function AutotunePanel({
     setChoices([]);
     setDone(null);
     setError(null);
+    setOffer(null);
+    setLaunched(null);
     setOpen(true);
+  }
+
+  // Ask the server how long this looks like taking before spending anything, and
+  // offer the background when it crosses the threshold. Fails open: a broken ETA
+  // runs the sweep the way it has always run rather than standing in the way.
+  async function start() {
+    try {
+      const res = await apiFetch("/api/jobs/estimate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "autotune", scope: {} }),
+      });
+      if (res.ok) {
+        const estimate = (await res.json()) as Estimate;
+        if (estimate.offerBackground && estimate.backgroundable) {
+          setOffer(estimate);
+          return;
+        }
+      }
+    } catch {
+      // fall through to running here
+    }
+    await run();
   }
 
   function close() {
@@ -404,7 +436,7 @@ export function AutotunePanel({
                   </button>
                   <button
                     type="button"
-                    onClick={run}
+                    onClick={start}
                     disabled={below === 0}
                     title={below === 0 ? "Nothing is below its min-rate" : undefined}
                     className="cursor-pointer rounded-md bg-black px-3 py-1 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
@@ -512,6 +544,12 @@ export function AutotunePanel({
               </p>
             )}
 
+            {launched && (
+              <p className="rounded border border-green-300 bg-green-50 px-2 py-1.5 text-xs text-green-800 dark:border-green-800 dark:bg-green-950/40 dark:text-green-300">
+                {launched}
+              </p>
+            )}
+
             {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
 
             {ran && !running && (
@@ -539,6 +577,25 @@ export function AutotunePanel({
             )}
           </div>
         </div>
+      )}
+
+      {offer && (
+        <BackgroundOfferDialog
+          estimate={offer}
+          scope={{}}
+          onRunHere={() => {
+            setOffer(null);
+            void run();
+          }}
+          onLaunched={(message) => {
+            setOffer(null);
+            // `ran` so closing reconciles the dashboard: the job is already
+            // changing overrides and scores behind this modal.
+            setRan(true);
+            setLaunched(message);
+          }}
+          onClose={() => setOffer(null)}
+        />
       )}
     </>
   );

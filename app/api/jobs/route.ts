@@ -10,7 +10,7 @@ import { parseBody } from "@/lib/http/body";
 import { withRequestConfig, withRequestUser } from "@/lib/http/configScope";
 import { launchJob } from "@/lib/jobs/runner";
 import { activeJobsForConfig, listJobs } from "@/lib/jobs/store";
-import { isWired } from "@/lib/jobs/registry";
+import { backgroundBlocker, isWired } from "@/lib/jobs/registry";
 import { JOB_KINDS, JOB_LABELS, type JobKind } from "@/lib/jobs/types";
 import { activeConfig } from "@/lib/rag/activeConfig";
 
@@ -37,6 +37,12 @@ export async function POST(request: Request) {
         { status: 501 },
       );
     }
+    // Wired, but not under these settings — currently only autotune's
+    // apply='choose', which needs a tab open to collect the choices. Refused here
+    // as well as hidden by the estimate route, since the estimate is advisory and
+    // this is the door.
+    const blocked = await backgroundBlocker(kind);
+    if (blocked) return Response.json({ error: blocked }, { status: 409 });
     // One job of a kind per config at a time. Two concurrent re-scores of the same
     // corpus would interleave their result rows and both freeze a snapshot of a
     // corpus the other was still rewriting — and the user gets two emails saying

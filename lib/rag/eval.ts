@@ -932,12 +932,29 @@ export type ChangedChunk = {
   startOverridden: boolean;
 };
 
-export async function rescoreAffectedQuestions(
+// The screen's verdict over the whole corpus, and the input to both halves of the
+// re-score that follows it.
+//
+// SPLIT FROM THE SCORING so autotune's tail can slice (docs/autotune-slicing-plan
+// .md §3): at 470 questions the re-score is ~9 minutes on its own, which is more
+// than one function invocation gets. Nothing here writes, so a slice may re-run it
+// freely — and re-running is what makes the phase self-eliminating, since a
+// question scored under `finalState` by an earlier slice drops out of `dirty` on
+// the next one without any stored list of what is left.
+export type AffectedScreen = {
+  finalState: string;
+  dirty: QuestionToScore[];
+  // Questions the screen PROVED a re-retrieval could not have moved. They still
+  // carry the old fingerprint until settleAffectedRescore re-stamps them, so they
+  // stay in this list across slices rather than draining like `dirty` does.
+  cleanLabelIds: string[];
+  total: number;
+};
+
+export async function screenAffectedQuestions(
   changed: ChangedChunk[],
   startState: string,
-  emit: Emit = () => {},
-): Promise<{ scored: number; skipped: number; recall: number | null }> {
-  const t0 = performance.now();
+): Promise<AffectedScreen> {
   const cfg = activeConfig();
   const criteria = await getActiveCriteria();
   const depth = retrievalDepth(criteria, cfg.topK);
@@ -1030,11 +1047,20 @@ export async function rescoreAffectedQuestions(
       `(${cleanLabelIds.length} proven clean, ${skipped - cleanLabelIds.length} already fresh) ` +
       `across ${changed.length} changed chunk(s)`,
   );
+  return { finalState, dirty, cleanLabelIds, total: questions.length };
+}
 
-  const scored = await scoreQuestions(dirty, emit);
+// The tail, once nothing is dirty any more: stamp the proven-clean rows, drop the
+// change log, freeze the snapshot. Separate from the scoring so it runs exactly
+// once no matter how many slices the scoring took — and idempotent, because a
+// slice that dies after committing its work will run it again.
+export async function settleAffectedRescore(
+  screen: AffectedScreen,
+  startState: string,
+): Promise<{ recall: number | null; mrr: number | null; ndcg: number | null }> {
   // Proven-clean rows carry results a real re-retrieval would reproduce —
   // only their fingerprint stamp changes.
-  await restampLatestResults(cleanLabelIds, startState, finalState);
+  await restampLatestResults(screen.cleanLabelIds, startState, screen.finalState);
   // Every label is now fresh under finalState (re-scored, re-stamped, or
   // already fresh), so the change log can drop like after a full re-score.
   await clearRetrievalChanges();
@@ -1043,7 +1069,7 @@ export async function rescoreAffectedQuestions(
   // Always snapshot (when there's anything to snapshot): autotune's history
   // and Appraise expect an eval_runs row at the end of every run, even one
   // whose final re-score proved everything clean.
-  if (questions.length > 0) {
+  if (screen.total > 0) {
     await createRunSnapshot({
       questionCount: summary.scored,
       hitCount: summary.hits,
@@ -1052,20 +1078,11 @@ export async function rescoreAffectedQuestions(
       k: summary.recallK,
     });
   }
-
   console.log(
-    `[rag:eval] rescoreAffectedQuestions done: scored=${scored} skipped=${skipped} ` +
-      `recall=${summary.recall ?? "n/a"} in ${Math.round(performance.now() - t0)}ms`,
+    `[rag:eval] dirty-set re-score settled: recall=${summary.recall ?? "n/a"} ` +
+      `over ${screen.total} question(s)`,
   );
-  emit({
-    type: "done",
-    generated: 0,
-    scored,
-    recall: summary.recall,
-    mrr: summary.mrr,
-    ndcg: summary.ndcg,
-  });
-  return { scored, skipped, recall: summary.recall };
+  return { recall: summary.recall, mrr: summary.mrr, ndcg: summary.ndcg };
 }
 
 // Re-chunk experiment: an ephemeral per-chunk "what-if" (autotune Stage 1).

@@ -55,7 +55,12 @@ import {
   type ClaimedJob,
 } from "@/lib/jobs/store";
 import { recordTiming } from "@/lib/jobs/timing";
-import { type BackgroundJob, type JobKind, type JobProgress } from "@/lib/jobs/types";
+import {
+  type BackgroundJob,
+  type JobKind,
+  type JobProgress,
+  type StopSignal,
+} from "@/lib/jobs/types";
 import {
   resolveConfig,
   withConfig,
@@ -179,6 +184,9 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
   // whole job, and this slice only knows about its own share (0066).
   let failedUnits = job.failedUnits;
   let lastUnitError: string | null = job.lastUnitError;
+  // Sticky across slices via the row (0067): once a step says it has left the
+  // phase that spends, a cancel stops ending the job.
+  let mustFinish = job.mustFinish;
 
   // Best-effort, out of band, and never allowed to throw: a progress write that
   // fails must not cost the slice the work it is reporting on.
@@ -202,10 +210,21 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
   // Handed to the step and polled between units of work. Same contract as
   // lib/http/cancelRegistry.ts: this is a FLAG, and a step that reads it must
   // break out of its loop and return normally so partial work commits.
-  const shouldStop = () => {
-    if (Date.now() > deadline) return true;
-    return cancelSeen;
-  };
+  // The deadline is unconditional; the cancel is not. A step in its accounting
+  // tail (0067) has already spent the money and only has books to close, so
+  // stopping it there would leave the corpus in the state the spend created and
+  // nothing recording that it happened. It still slices on the deadline, so this
+  // cannot turn into an unstoppable loop.
+  const shouldStop: StopSignal = Object.assign(
+    () => {
+      if (Date.now() > deadline) return true;
+      return cancelSeen && !mustFinish;
+    },
+    // The cancel is reported even while mustFinish is suppressing the boolean,
+    // because the only reader is a step deciding whether more of the SAME work is
+    // coming — and once it has been cancelled, none is.
+    { reason: () => (cancelSeen ? "cancel" : Date.now() > deadline ? "deadline" : null) },
+  );
 
   const emit = (progress: JobProgress) => {
     doneUnits = progress.doneUnits;
@@ -244,6 +263,7 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
     ),
   );
   doneUnits = result.doneUnits;
+  mustFinish = mustFinish || result.mustFinish === true;
 
   // The cursor moves only now, after the work above has committed.
   const stillOurs = await inOwnScope(owner, () =>
@@ -253,6 +273,7 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
       failedUnits,
       lastUnitError,
       lastMessage,
+      mustFinish,
       extendLeaseSeconds: LEASE_SECONDS,
     }),
   );
@@ -264,7 +285,7 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
   }
 
   const cancelled = await inOwnScope(owner, () => isCancelRequested(job.id));
-  if (cancelled && !result.done) {
+  if (cancelled && !result.done && !mustFinish) {
     const done = await inOwnScope(owner, () =>
       finishJob(job.id, leaseToken, {
         status: "cancelled",
@@ -298,7 +319,10 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
     : {};
   const done = await inOwnScope(owner, () =>
     finishJob(job.id, leaseToken, {
-      status: "succeeded",
+      // A tail that ran to the end after a cancel still ends CANCELLED: it closed
+      // the books on the work it did, which is not the same as having done the
+      // work that was asked for.
+      status: cancelled ? "cancelled" : "succeeded",
       result: summary,
       doneUnits,
       lastMessage: null,
@@ -350,7 +374,7 @@ async function notify(owner: RequestUser, job: BackgroundJob): Promise<void> {
 export async function launchJob(kind: JobKind, scope: unknown): Promise<BackgroundJob> {
   const step = stepFor(kind);
   if (!step) throw new Error(`No step registered for job kind ${kind}.`);
-  const { totalUnits } = await step.plan(scope as never);
+  const { totalUnits, cursor } = await step.plan(scope as never);
   const cfg = activeConfig();
   const record = await getConfig(cfg.id);
   const job = await createJob({
@@ -358,6 +382,7 @@ export async function launchJob(kind: JobKind, scope: unknown): Promise<Backgrou
     configId: cfg.id,
     configLabel: record?.label ?? "—",
     scope,
+    cursor,
     totalUnits,
   });
   // Not awaited for completion — postJobTick returns as soon as the tick is

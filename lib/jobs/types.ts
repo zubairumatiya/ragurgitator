@@ -89,6 +89,9 @@ export type BackgroundJob = {
   failedUnits: number;
   lastUnitError: string | null;
   lastMessage: string | null;
+  // The step has left the phase that spends and is closing its books (0067). A
+  // cancel no longer ends the job while this is set — see StepResult.mustFinish.
+  mustFinish: boolean;
   leaseExpiresAt: string | null;
   attempts: number;
   error: string | null;
@@ -171,12 +174,37 @@ export type JobProgress<E = unknown> = {
   failure?: string;
 };
 
+// WHY a step is being asked to stop. Most steps do not care — they break out of
+// their loop and return where they got to either way — but a step with a tail
+// does, because the three answers mean opposite things to it:
+//
+//   deadline  this slice is over; hand back and we will call you again.
+//   cancel    there will be no more of the work you were doing.
+//   budget    the same, self-imposed: the STREAMED driver has no deadline of its
+//             own, and an unsliced run is a single point of failure whose blast
+//             radius grows with its length (docs/autotune-slicing-plan.md §2).
+//
+// Optional so the plain `() => boolean` every existing step and test passes still
+// satisfies the type; a step that reads it must have a sensible default.
+export type StopReason = "deadline" | "cancel" | "budget";
+export type StopSignal = (() => boolean) & { reason?: () => StopReason | null };
+
 export type StepResult<C> = {
   cursor: C;
   done: boolean;
   // Cumulative, not per-slice: the runner stores it directly, so a slice that
   // resumed at 300 reports 340, not 40. Absolute is the resumable form.
   doneUnits: number;
+  // "I am past the phase that spends; what is left is accounting." Sticky once
+  // set. A cancel stops reaching this step's remaining slices — the runner keeps
+  // chaining rather than going terminal — while the slice DEADLINE still applies,
+  // so a tail slices like any other work and cannot wedge the job.
+  //
+  // Only for a tail whose absence would leave the corpus inconsistent or a spend
+  // unrecorded. Re-score and bulk nDCG have no such tail: cancelling them leaves
+  // partial work the stale badge already accounts for. Autotune does, because its
+  // search has already changed the retrieval state of every question (0067).
+  mustFinish?: boolean;
 };
 
 export type JobStep<S, C, R = unknown, E = unknown> = {
@@ -185,7 +213,7 @@ export type JobStep<S, C, R = unknown, E = unknown> = {
     scope: S,
     cursor: C,
     emit: (progress: JobProgress<E>) => void,
-    shouldStop: () => boolean,
+    shouldStop: StopSignal,
   ): Promise<StepResult<C>>;
   finalize?(scope: S, cursor: C): Promise<R>;
 };

@@ -11,6 +11,8 @@ import type { JobStep } from "@/lib/jobs/types";
 import { type JobKind } from "@/lib/jobs/types";
 import { rescoreStep } from "@/lib/jobs/steps/rescore";
 import { bulkNdcgStep } from "@/lib/jobs/steps/bulkNdcg";
+import { autotuneStep } from "@/lib/jobs/steps/autotune";
+import { getActiveCriteria } from "@/lib/rag/evalSettingsStore";
 
 // Each step is precisely typed where it is defined; the registry is the one place
 // the scope, cursor and result types are necessarily heterogeneous. `never` for the
@@ -23,23 +25,15 @@ type AnyStep = JobStep<never, unknown, unknown, unknown>;
 const STEPS: Partial<Record<JobKind, AnyStep>> = {
   rescore: rescoreStep,
   bulk_ndcg: bulkNdcgStep,
-  // autotune — NOT WIRED, and not because it is unimportant: it is the longest job
-  // here and the one that most wants a background. It is unwired because its
-  // conversion is a real refactor rather than a wrapper, and half of one would be
-  // worse than none.
+  // The conversion this file used to describe as outstanding is done — see
+  // lib/jobs/steps/autotune.ts for what its cursor had to carry, and
+  // docs/autotune-slicing-plan.md for the run that made the case.
   //
-  // What it needs, from having traced it: runAutotune recomputes its targets from
-  // the CURRENT summary (failing questions per chunk), so the work is largely
-  // self-eliminating and a resumed run naturally picks up the remaining gaps. But
-  // three things are run-scoped rather than derivable, and would have to move into
-  // the cursor: the run-start retrieval fingerprint and override set (the run-end
-  // dirty-set re-score, rescoreAffectedQuestions, is defined against them), and the
-  // chunks this run already tried and could not improve — without those, a resumed
-  // run would re-attempt the same hopeless chunk every slice. Its emit stream also
-  // feeds an interactive panel that collects pending choices, so the events have to
-  // survive slicing intact.
-  //
-  // Until then autotune runs as it always has: streamed, with the tab open.
+  // One mode still cannot go to the background: apply='choose' exists to collect
+  // per-chunk decisions from a panel that is reading the stream, and in the
+  // background nothing is. The launch and estimate routes refuse it by name rather
+  // than letting a job run that would silently apply nothing.
+  autotune: autotuneStep,
 };
 
 export function stepFor(kind: JobKind): AnyStep | null {
@@ -48,4 +42,25 @@ export function stepFor(kind: JobKind): AnyStep | null {
 
 export function isWired(kind: JobKind): boolean {
   return kind in STEPS;
+}
+
+// Why this kind cannot go to the background RIGHT NOW, under the active config —
+// null when it can. Separate from isWired because this one depends on settings
+// rather than on whether the conversion has been written.
+//
+// autotune's apply='choose' is the only case: its whole point is a panel that
+// collects a per-chunk decision from the event stream, and in background mode
+// nothing is reading that stream. A job would run, find several passing families
+// per chunk, apply none of them, and email the user that it succeeded. Persisting
+// pending choices to a table is the eventual answer; refusing by name is the
+// honest v1.
+export async function backgroundBlocker(kind: JobKind): Promise<string | null> {
+  if (kind !== "autotune") return null;
+  const criteria = await getActiveCriteria();
+  if (criteria.autotune.apply !== "choose") return null;
+  return (
+    "Autotune can't run in the background while Apply is set to “you choose”: " +
+    "picking between fixes needs this tab open. Switch it to auto-apply the best, " +
+    "or run it here."
+  );
 }

@@ -300,6 +300,44 @@ export async function getRetrievalChangedAt(): Promise<Date | null> {
   }
 }
 
+// PER-CHUNK override fingerprints — retrievalStateFingerprint's question asked
+// one chunk at a time: has THIS chunk's override changed?
+//
+// An autotune run needs the answer to decide which chunks its dirty-set re-score
+// must account for. It used to answer it by remembering, in memory, which chunks
+// it had applied an override to — which cannot survive a run that stops and
+// resumes, and which silently misses a chunk whose override was already persisted
+// by a slice that then crashed before its cursor moved. Comparing a snapshot of
+// these against the live ones answers it from the data instead, and catches the
+// case an id-only comparison misses: a chunk that HAD an override and got a
+// different one is changed, even though its id is in both sets.
+//
+// Hashes the same fields the global fingerprint canonicalizes (model, kind, piece
+// order, span, text), so two overrides that retrieve identically fingerprint
+// identically. Same 42P01 tolerance as listOverrides below.
+export async function overrideFingerprints(): Promise<Map<string, string>> {
+  const cfg = activeConfig();
+  try {
+    const rows = await sql<{ source_chunk_id: string; fingerprint: string }[]>`
+      select source_chunk_id,
+             md5(string_agg(
+               model || '|' || kind || '|' || piece_index::text || '|' ||
+                 coalesce(token_start::text, '') || '|' ||
+                 coalesce(token_end::text, '') || '|' ||
+                 coalesce(md5(text), ''),
+               E'\n' order by piece_index
+             )) as fingerprint
+      from config_chunk_overrides
+      where config_id = ${cfg.id}
+      group by source_chunk_id
+    `;
+    return new Map(rows.map((r) => [r.source_chunk_id, r.fingerprint]));
+  } catch (err) {
+    if ((err as { code?: string }).code === "42P01") return new Map();
+    throw err;
+  }
+}
+
 // Every override for the active config (chunk id + which model), for retrieval
 // fan-out and UI badges. Called on every retrieval, so it tolerates the table
 // not existing yet (migration 0013 unapplied): Postgres "undefined_table"

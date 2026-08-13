@@ -1,0 +1,32 @@
+-- ============================================================================
+-- 0067_background_job_must_finish.sql
+--
+-- SOME JOBS HAVE A TAIL THAT CANCEL DOES NOT GET TO SKIP.
+--
+-- Cancelling a bulk action means "stop spending", and for re-score and bulk nDCG
+-- that is the whole story: the runner writes 'cancelled' as soon as a slice comes
+-- back unfinished, the work already committed stands, and the stale badge tells
+-- the user what is left.
+--
+-- Autotune is not that shape. Its search phase persists per-chunk overrides, which
+-- changes the retrieval fingerprint for the WHOLE corpus — so stopping there
+-- leaves every other question's stored result silently wrong-under-the-new-state,
+-- and leaves no autotune_runs row for money that was definitely spent. The
+-- streamed engine has always known this: a cancel breaks its chunk loop and the
+-- run still re-scores the dirty set and writes its history. The tail is
+-- accounting, not more searching, and it is bounded by what the search already
+-- changed.
+--
+-- So a step can declare, once it leaves the phase that spends, that the job is in
+-- a tail: `must_finish` is set at the checkpoint that carries it there, and the
+-- runner then keeps chaining slices through a cancel instead of going terminal.
+-- The DEADLINE is still honoured — a tail slices like anything else — so this
+-- cannot wedge a job into an unstoppable loop; it only changes what a cancel
+-- means, from "stop now" to "stop searching, then close the books".
+--
+-- On the row rather than inside `cursor` because the runner is the reader, and
+-- the runner is deliberately blind to cursor contents (0062).
+-- ============================================================================
+
+alter table background_jobs
+  add column must_finish boolean not null default false;

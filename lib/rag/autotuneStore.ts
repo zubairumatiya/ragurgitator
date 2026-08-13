@@ -53,20 +53,29 @@ export type AutotuneOutcome = {
 
 // Persist a finished run: header + every targeted question's before→after, in
 // one transaction so a half-written run never shows up in the audit trail.
+//
+// IDEMPOTENT UNDER A GIVEN id. The caller supplies one, generated when the run
+// started, because a sliced run commits its work before its cursor moves — so the
+// slice that writes this can die and be re-run, and "the audit trail gained a
+// second copy of the same run" would be a worse failure than the one that rule
+// exists to prevent. Re-running replaces the row and its outcomes rather than
+// adding to them; the id is the run's identity, not a sequence number.
 export async function insertAutotuneRun(
+  runId: string,
   header: AutotuneRunHeader,
   outcomes: AutotuneOutcome[],
 ): Promise<string> {
   const cfg = activeConfig();
   return sql.begin(async (tx) => {
+    await tx`delete from autotune_runs where id = ${runId} and config_id = ${cfg.id}`;
     const [run] = await tx<{ id: string }[]>`
       insert into autotune_runs
-        (config_id, recall_k, recall_min_rate, mrr_k, mrr_min_rate,
+        (id, config_id, recall_k, recall_min_rate, mrr_k, mrr_min_rate,
          ndcg_k, ndcg_min_rate,
          targeted, resolved, unresolved, improved, attempts,
          stop_reason, chunks_total, chunks_searched)
       values
-        (${cfg.id}, ${header.recallK}, ${header.recallMinRate},
+        (${runId}, ${cfg.id}, ${header.recallK}, ${header.recallMinRate},
          ${header.mrrK}, ${header.mrrMinRate},
          ${header.ndcgK}, ${header.ndcgMinRate},
          ${header.targeted}, ${header.resolved}, ${header.unresolved},

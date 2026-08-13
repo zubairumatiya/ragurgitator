@@ -42,6 +42,7 @@ type JobRow = {
   failed_units: number;
   last_unit_error: string | null;
   last_message: string | null;
+  must_finish: boolean;
   lease_expires_at: Date | null;
   attempts: number;
   error: string | null;
@@ -56,7 +57,7 @@ type JobRow = {
 const JOB_COLUMNS = fragment`
   id, config_id, config_label, kind, status, scope, cursor, result,
   total_units, done_units, failed_units, last_unit_error, last_message,
-  lease_expires_at, attempts, error,
+  must_finish, lease_expires_at, attempts, error,
   acknowledged, email_sent, created_at, updated_at, started_at, finished_at
 `;
 
@@ -80,6 +81,7 @@ function toJob(r: JobRow): BackgroundJob {
     failedUnits: r.failed_units,
     lastUnitError: r.last_unit_error,
     lastMessage: r.last_message,
+    mustFinish: r.must_finish,
     leaseExpiresAt: iso(r.lease_expires_at),
     attempts: r.attempts,
     error: r.error,
@@ -99,16 +101,22 @@ export type NewJob = {
   configId: string;
   configLabel: string;
   scope: unknown;
+  // plan()'s starting cursor. Stored at create time because for some steps it is
+  // not merely "position zero" — autotune's carries the run's frozen retrieval
+  // state and target baselines, which cannot be recovered once the first slice has
+  // already changed them. A step whose start cursor is trivial can leave it null
+  // and default in run(), which is what the first two conversions do.
+  cursor?: unknown;
   totalUnits: number;
 };
 
 export async function createJob(args: NewJob): Promise<BackgroundJob> {
   const rows = await sql<JobRow[]>`
     insert into background_jobs
-      (user_id, kind, config_id, config_label, scope, total_units, status)
+      (user_id, kind, config_id, config_label, scope, cursor, total_units, status)
     values
       (${activeUserId()}, ${args.kind}, ${args.configId}, ${args.configLabel},
-       ${toJsonb(args.scope)}, ${args.totalUnits}, 'queued')
+       ${toJsonb(args.scope)}, ${toJsonb(args.cursor ?? null)}, ${args.totalUnits}, 'queued')
     returning ${JOB_COLUMNS}
   `;
   return toJob(rows[0]);
@@ -214,6 +222,9 @@ export type Checkpoint = {
   failedUnits?: number;
   lastUnitError?: string | null;
   lastMessage?: string | null;
+  // Sticky in the store as well as in the step: only ever set to true, so a
+  // checkpoint that omits it can't take a job back out of its tail.
+  mustFinish?: boolean;
   // Push the lease out by this many seconds. A slice that is still working should
   // keep its lease alive; one that is handing over should not.
   extendLeaseSeconds?: number;
@@ -238,6 +249,7 @@ export async function checkpointJob(
   if (patch.failedUnits !== undefined) row.failed_units = patch.failedUnits;
   if (patch.lastUnitError !== undefined) row.last_unit_error = patch.lastUnitError;
   if (patch.lastMessage !== undefined) row.last_message = patch.lastMessage;
+  if (patch.mustFinish) row.must_finish = true;
   if (patch.extendLeaseSeconds !== undefined) {
     row.lease_expires_at = sql`now() + ${`${patch.extendLeaseSeconds} seconds`}::interval`;
   }
