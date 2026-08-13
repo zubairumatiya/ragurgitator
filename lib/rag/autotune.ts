@@ -28,6 +28,7 @@ import {
   insertAutotuneRun,
   listIgnoredQuestionIds,
   type AutotuneOutcome,
+  type AutotuneStopReason,
 } from "@/lib/rag/autotuneStore";
 import { splitText } from "@/lib/rag/chunker";
 import { embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
@@ -66,8 +67,31 @@ import {
 import { fuseWithOverrides } from "@/lib/rag/retriever";
 import type { RetrievedChunk } from "@/types/rag";
 
+// Re-exported so the client panel can name a run's ending without importing the
+// store (which pulls in the database client).
+export type { AutotuneStopReason };
+
 export type AutotuneMetric = "recall" | "mrr" | "ndcg";
 export type CandidateFamily = "size" | "model" | "size+model";
+
+// HOW LONG ONE RUN MAY SEARCH (docs/autotune-slicing-plan.md §2).
+//
+// A request scope is a transaction (0051) and an NDJSON producer re-enters it
+// once for the whole run, so the unit of durability is the ENTIRE run: on
+// 2026-08-13 a 66-minute run hit one statement error 160 questions into its
+// closing re-score and Postgres discarded all 22 overrides it had confirmed
+// through real retrieval — 45 minutes of provider calls, already billed. The
+// budget does not prevent that error; it bounds what one occurrence costs.
+//
+// Correct rather than merely truncating, because targets are recomputed from the
+// current summary on every run: a chunk that got tuned is no longer failing and
+// drops out, so running again continues where this stopped with no stored cursor.
+//
+// 20 minutes: well under the 66 that failed, and long enough that an ordinary
+// sweep finishes inside one. Env-tunable like JOBS_SLICE_BUDGET_MS. Bounds the
+// chunk SEARCH only — the closing re-score is unbounded here and is what Phase 2
+// (the JobStep conversion) exists to slice.
+const BUDGET_MS = Number(process.env.AUTOTUNE_BUDGET_MS ?? 1_200_000);
 
 // Tie-break when candidate scores are EQUAL (common — score is Σ 1/rank, so
 // same ranks give identical floats): prefer the cheaper override family.
@@ -138,6 +162,16 @@ export type AutotuneEvent =
       mrr: number | null;
       ndcg: number | null;
     }
+  | {
+      // BUDGET_MS elapsed, so the sweep stopped between chunks with everything
+      // it had confirmed committed. Unlike early-stop this is NOT a success —
+      // the skipped chunks are still failing — so the UI must say "run again to
+      // continue" rather than anything that reads as done.
+      type: "budget-stop";
+      searchedChunks: number;
+      skippedChunks: number;
+      elapsedMs: number;
+    }
   // The run's id, first line of every NDJSON stream (emitted by ndjsonStream
   // itself, not by the engine) — what POST /api/eval/cancel needs to reach it.
   | { type: "run-started"; runId: string }
@@ -145,10 +179,15 @@ export type AutotuneEvent =
   | { type: "rescore-progress"; done: number; total: number }
   | {
       type: "autotune-done";
-      // Cancel was pressed: the chunk search stopped early, exactly like
-      // early-stop does. Everything applied before that point is kept, and the
-      // run still re-scores, snapshots, and reports below.
-      cancelled?: boolean;
+      // Why the sweep ended, null when it visited every targeted chunk. All
+      // three short endings keep everything applied so far and still re-score,
+      // snapshot and report below — they differ only in what the user should do
+      // next, which is why this is a reason and not a boolean.
+      stopReason: AutotuneStopReason | null;
+      // Coverage, so `resolved`/`targeted` can't be read as a rate over work the
+      // run never attempted.
+      chunksSearched: number;
+      chunksTotal: number;
       targeted: number;
       resolved: number;
       unresolved: number;
@@ -676,6 +715,9 @@ export async function runAutotune(
   if (targets.length === 0) {
     emit({
       type: "autotune-done",
+      stopReason: null,
+      chunksSearched: 0,
+      chunksTotal: 0,
       targeted: 0,
       resolved: 0,
       unresolved: 0,
@@ -739,13 +781,36 @@ export async function runAutotune(
   let latestRates = { recall: summary.recall, mrr: summary.mrr, ndcg: summary.ndcg };
   let barsMet = stopEarly && barsReached(latestRates);
 
+  // Why the sweep ended, for the done event and the history row. Null means it
+  // ran out of chunks, which is the only ending that makes `resolved/targeted` a
+  // coverage-complete rate.
+  let stopReason: AutotuneStopReason | null = null;
+
   let chunkIndex = 0;
   for (const [chunkId, chunkTargets] of orderedChunks) {
     // Checkpoint: between chunks, i.e. between searches. Break, don't throw —
     // the run's transaction commits, so the overrides confirmed so far stay.
-    if (shouldStop()) break;
+    // Granularity is one chunk because that is the only point where state is
+    // consistent: nothing is persisted mid-search, so stopping between rungs
+    // would throw away the chunk's work rather than bank it.
+    if (shouldStop()) {
+      stopReason = "cancelled";
+      break;
+    }
     if (barsMet) {
+      stopReason = "early";
       emit({ type: "early-stop", skippedChunks: orderedChunks.length - chunkIndex, ...latestRates });
+      break;
+    }
+    const elapsed = performance.now() - t0;
+    if (elapsed > BUDGET_MS) {
+      stopReason = "budget";
+      emit({
+        type: "budget-stop",
+        searchedChunks: chunkIndex,
+        skippedChunks: orderedChunks.length - chunkIndex,
+        elapsedMs: Math.round(elapsed),
+      });
       break;
     }
     chunkIndex += 1;
@@ -1103,12 +1168,16 @@ export async function runAutotune(
       unresolved: targets.length - resolved,
       improved,
       attempts,
+      stopReason,
+      chunksTotal: orderedChunks.length,
+      chunksSearched: chunkIndex,
     },
     outcomes,
   );
 
   console.log(
     `[rag:autotune] done: targeted=${targets.length} resolved=${resolved} ` +
+      `chunks=${chunkIndex}/${orderedChunks.length} stop=${stopReason ?? "complete"} ` +
       `improved=${improved} pendingChoice=${pendingChoice} attempts=${attempts} ` +
       `rescoreSkipped=${skipped} in ${durationMs}ms ` +
       `(search=${Math.round(phase.search)}ms confirm=${Math.round(phase.confirm)}ms ` +
@@ -1117,7 +1186,9 @@ export async function runAutotune(
   );
   emit({
     type: "autotune-done",
-    cancelled: shouldStop(),
+    stopReason,
+    chunksSearched: chunkIndex,
+    chunksTotal: orderedChunks.length,
     targeted: targets.length,
     resolved,
     unresolved: targets.length - resolved,

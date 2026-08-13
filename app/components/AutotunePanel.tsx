@@ -10,7 +10,11 @@
 
 import { useState } from "react";
 import { apiFetch } from "@/lib/http/client";
-import type { AutotuneCandidate, AutotuneEvent } from "@/lib/rag/autotune";
+import type {
+  AutotuneCandidate,
+  AutotuneEvent,
+  AutotuneStopReason,
+} from "@/lib/rag/autotune";
 import { failsBar } from "@/lib/rag/evalBar";
 import type { EvalSummary } from "@/lib/rag/evalStore";
 
@@ -49,9 +53,12 @@ type Progress =
   | { phase: "rescore"; done: number; total: number };
 
 type DoneStats = {
-  // The run was cancelled mid-search: the counts below are real, they just
-  // cover the chunks it reached. Nothing is rolled back.
-  cancelled?: boolean;
+  // The sweep ended short: the counts below are real, they just cover the chunks
+  // it reached. Nothing is rolled back — see the summary line for how that is
+  // said out loud.
+  stopReason: AutotuneStopReason | null;
+  chunksSearched: number;
+  chunksTotal: number;
   targeted: number;
   resolved: number;
   unresolved: number;
@@ -69,6 +76,30 @@ function formatDuration(ms: number): string {
   if (s < 60) return `${s.toFixed(1)}s`;
   return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
 }
+
+// The lead sentence of the summary. A run that stopped short must not be
+// readable as a finished sweep: `resolved/targeted` counts questions on chunks it
+// never searched, so the coverage goes FIRST and the next action is spelled out.
+// 'early' is the exception — it stopped because the bars were met, which is a
+// success and needs no "run again".
+function summaryLead(done: DoneStats): string {
+  const covered = `${done.chunksSearched} of ${done.chunksTotal} chunk(s)`;
+  switch (done.stopReason) {
+    case "budget":
+      return `Paused on the time budget — tuned ${covered}. Run again to continue.`;
+    case "cancelled":
+      return `Cancelled — tuned ${covered}, all kept. Run again to continue.`;
+    case "early":
+      return `Min-rates reached after ${covered}.`;
+    default:
+      return "Done.";
+  }
+}
+
+// Was there work left on the table? Drives the "Run again" button: only the two
+// endings that stopped with chunks still failing.
+const canContinue = (done: DoneStats): boolean =>
+  done.stopReason === "budget" || done.stopReason === "cancelled";
 
 export function AutotunePanel({
   summary,
@@ -129,6 +160,9 @@ export function AutotunePanel({
     setDone(null);
     setRunId(null);
     setCancelling(false);
+    // Cleared so a continuation run's log is its own. Pending choices are NOT
+    // cleared — they are unapplied decisions the user still owes an answer to.
+    setLog([]);
     try {
       const res = await apiFetch("/api/eval/autotune", { method: "POST" });
       if (!res.ok || !res.body) {
@@ -201,6 +235,12 @@ export function AutotunePanel({
             case "early-stop":
               pushLog(
                 `⏹ min-rates reached — skipped ${event.skippedChunks} remaining chunk(s) to save cost`,
+              );
+              break;
+            case "budget-stop":
+              pushLog(
+                `⏳ time budget reached after ${formatDuration(event.elapsedMs)} — ` +
+                  `${event.skippedChunks} chunk(s) not searched yet`,
               );
               break;
             case "rescore-start":
@@ -458,7 +498,7 @@ export function AutotunePanel({
 
             {done && (
               <p className="text-zinc-700 dark:text-zinc-300">
-                {done.cancelled ? "Cancelled" : "Done"}: {done.resolved}/{done.targeted} resolved
+                {summaryLead(done)} {done.resolved}/{done.targeted} resolved
                 {done.improved > 0
                   ? `, ${done.improved} improved (still below bar)`
                   : ""}
@@ -475,7 +515,19 @@ export function AutotunePanel({
             {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
 
             {ran && !running && (
-              <div className="flex justify-end">
+              <div className="flex justify-end gap-2">
+                {/* A paused or cancelled sweep left chunks unsearched. Targets
+                    are recomputed from the current summary, so this simply
+                    continues — the chunks already tuned no longer qualify. */}
+                {done && canContinue(done) && (
+                  <button
+                    type="button"
+                    onClick={run}
+                    className="cursor-pointer rounded-md border border-zinc-300 px-3 py-1 text-xs font-medium hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                  >
+                    Run again
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={close}

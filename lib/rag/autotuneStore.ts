@@ -25,7 +25,18 @@ export type AutotuneRunHeader = {
   unresolved: number;
   improved: number; // still below the bar, but a targeted metric got better
   attempts: number;
+  // Coverage (0065). `targeted`/`resolved` only read as a rate when the run
+  // visited every chunk it targeted, and three things stop it before that.
+  // null stopReason = it did.
+  stopReason: AutotuneStopReason | null;
+  chunksTotal: number;
+  chunksSearched: number;
 };
+
+// Why a run ended short. 'early' is stopEarly's bars-reached cutoff (0024) —
+// the only one of the three that is a SUCCESS, which is why callers must not
+// collapse these into a single "incomplete" boolean.
+export type AutotuneStopReason = "budget" | "cancelled" | "early";
 
 export type AutotuneOutcome = {
   questionId: string;
@@ -52,13 +63,15 @@ export async function insertAutotuneRun(
       insert into autotune_runs
         (config_id, recall_k, recall_min_rate, mrr_k, mrr_min_rate,
          ndcg_k, ndcg_min_rate,
-         targeted, resolved, unresolved, improved, attempts)
+         targeted, resolved, unresolved, improved, attempts,
+         stop_reason, chunks_total, chunks_searched)
       values
         (${cfg.id}, ${header.recallK}, ${header.recallMinRate},
          ${header.mrrK}, ${header.mrrMinRate},
          ${header.ndcgK}, ${header.ndcgMinRate},
          ${header.targeted}, ${header.resolved}, ${header.unresolved},
-         ${header.improved}, ${header.attempts})
+         ${header.improved}, ${header.attempts},
+         ${header.stopReason}, ${header.chunksTotal}, ${header.chunksSearched})
       returning id
     `;
     for (const o of outcomes) {
