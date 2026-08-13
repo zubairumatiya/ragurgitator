@@ -271,7 +271,7 @@ export function AutotunePanel({
               break;
             case "budget-stop":
               pushLog(
-                `⏳ time budget reached after ${formatDuration(event.elapsedMs)} — ` +
+                `⏳ ${formatDuration(event.elapsedMs)} time budget reached — ` +
                   `${event.skippedChunks} chunk(s) not searched yet`,
               );
               break;

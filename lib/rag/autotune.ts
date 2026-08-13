@@ -148,6 +148,8 @@ export type AutotuneEvent =
       type: "budget-stop";
       searchedChunks: number;
       skippedChunks: number;
+      // The budget itself, not a stopwatch reading: it is checked between chunks,
+      // so the real elapsed time is this plus however long the last chunk took.
       elapsedMs: number;
     }
   // The run's id, first line of every NDJSON stream (emitted by ndjsonStream
