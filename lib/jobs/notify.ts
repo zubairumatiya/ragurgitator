@@ -28,6 +28,14 @@ function headline(job: BackgroundJob): string {
   const did = pluralize(job.doneUnits, unit);
   switch (job.status) {
     case "succeeded":
+      // "Finished with 12 of 89 units failed" is a different sentence from
+      // "finished", and the mail is the only place most of these jobs are ever
+      // read (0066). Reported in the headline rather than a footnote because a
+      // sweep with holes in it is a result the user has to act on.
+      if (job.failedUnits > 0) {
+        return `<strong>${label}</strong> finished in ${duration(job)}, but ` +
+          `${job.failedUnits.toLocaleString()} of ${did} failed and were skipped.`;
+      }
       return `<strong>${label}</strong> finished — ${did} processed in ${duration(job)}.`;
     case "cancelled":
       return `<strong>${label}</strong> was cancelled. The ${did} it had already ` +
@@ -71,6 +79,9 @@ export function jobMail(job: BackgroundJob, to: string) {
     `Config: <em>${escapeHtml(job.configLabel)}</em>`,
     ...resultLines(job.result),
     job.error ? `Error: ${escapeHtml(job.error)}` : "",
+    // The breadcrumb the aborted-transaction case never had: one example of what
+    // went wrong, kept on the row rather than in a stream nobody was reading.
+    job.lastUnitError ? `Last failure: ${escapeHtml(job.lastUnitError)}` : "",
     `<a href="${link}">Open the eval dashboard</a>`,
   ].filter(Boolean);
   return {

@@ -175,6 +175,10 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
   let lastProgressAt = 0;
   let doneUnits = job.doneUnits;
   let lastMessage: string | null = job.lastMessage;
+  // Carried in from the row rather than started at zero: these accumulate over the
+  // whole job, and this slice only knows about its own share (0066).
+  let failedUnits = job.failedUnits;
+  let lastUnitError: string | null = job.lastUnitError;
 
   // Best-effort, out of band, and never allowed to throw: a progress write that
   // fails must not cost the slice the work it is reporting on.
@@ -184,6 +188,8 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
       await inOwnScope(owner, () =>
         checkpointJob(job.id, leaseToken, {
           doneUnits,
+          failedUnits,
+          lastUnitError,
           lastMessage,
           extendLeaseSeconds: LEASE_SECONDS,
         }),
@@ -204,6 +210,14 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
   const emit = (progress: JobProgress) => {
     doneUnits = progress.doneUnits;
     if (progress.message !== undefined) lastMessage = progress.message;
+    // The one thing in JobProgress the streaming driver does NOT also need: a
+    // per-unit failure is already in `event` for a human watching the stream, and
+    // nothing here is watching. Counted rather than replaced, so the job's
+    // "succeeded" can't hide the units it dropped getting there.
+    if (progress.failure !== undefined) {
+      failedUnits += 1;
+      lastUnitError = progress.failure;
+    }
     // Fire-and-forget on purpose: emit() is called from inside a tight loop that
     // must not await a database round trip per unit. The throttle keeps these
     // from overlapping in practice, and each one is independently safe.
@@ -236,6 +250,8 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
     checkpointJob(job.id, leaseToken, {
       cursor: result.cursor,
       doneUnits,
+      failedUnits,
+      lastUnitError,
       lastMessage,
       extendLeaseSeconds: LEASE_SECONDS,
     }),

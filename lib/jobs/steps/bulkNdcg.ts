@@ -138,6 +138,10 @@ export const bulkNdcgStep: JobStep<
           emit({
             doneUnits: graded,
             message: `Graded ${graded} question${graded === 1 ? "" : "s"}`,
+            // The failure has to leave the event stream too: in background mode
+            // nothing reads `event`, so without this the job counts the question
+            // as graded and reports a clean finish (0066).
+            failure: ok ? undefined : (error ?? "Ranking build failed."),
             event: {
               type: "ranking-progress",
               done: graded,

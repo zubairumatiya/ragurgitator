@@ -129,6 +129,19 @@ function BackgroundJobRow({
           {job.error}
         </p>
       )}
+      {/* Units the step swallowed a failure on. Amber, not red: the job itself is
+          fine and its other work stands — but "succeeded" must not be the only
+          thing this row says when part of the sweep is missing (0066). */}
+      {job.failedUnits > 0 && (
+        <p
+          className="mt-0.5 truncate text-xs text-amber-700 dark:text-amber-400"
+          title={job.lastUnitError ?? undefined}
+        >
+          {job.failedUnits.toLocaleString()} {unit}
+          {job.failedUnits === 1 ? "" : "s"} failed and were skipped
+          {job.lastUnitError ? ` — ${job.lastUnitError}` : ""}
+        </p>
+      )}
 
       <div className="mt-1 flex gap-2">
         {isBgCancellable(job.status) && (

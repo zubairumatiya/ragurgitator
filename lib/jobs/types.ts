@@ -83,6 +83,11 @@ export type BackgroundJob = {
   result: unknown;  // headline numbers for the email and the panel
   totalUnits: number;
   doneUnits: number;
+  // Units the step swallowed a failure on (0066). Counted separately from
+  // `error`, which is a whole-job death: these are holes in the work of a job
+  // that otherwise finished.
+  failedUnits: number;
+  lastUnitError: string | null;
   lastMessage: string | null;
   leaseExpiresAt: string | null;
   attempts: number;
@@ -157,6 +162,13 @@ export type JobProgress<E = unknown> = {
   doneUnits: number;
   message?: string;
   event?: E;
+  // "This unit failed and I carried on." Set it wherever a step catches per-unit
+  // errors, which every long sweep does — one bad question must not abort the
+  // run. Without this the failure exists only in `event`, which the background
+  // runner drops, and the job reports having processed work it dropped (0066).
+  //
+  // Presence is the increment: emit it once per failed unit, not as a total.
+  failure?: string;
 };
 
 export type StepResult<C> = {
