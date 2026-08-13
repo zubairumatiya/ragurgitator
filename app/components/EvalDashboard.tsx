@@ -53,6 +53,10 @@ import type {
   ModelTrialResult,
 } from "@/lib/rag/eval";
 import { AutotunePanel } from "@/app/components/AutotunePanel";
+import {
+  BackgroundOfferDialog,
+  type Estimate,
+} from "@/app/components/BackgroundOfferDialog";
 import { ConfigChangeDialog } from "@/app/components/ConfigChangeDialog";
 import { EVAL_CRITERIA_CHANGED } from "@/app/components/EvalSettings";
 import { NdcgRankingPanel } from "@/app/components/NdcgRankingPanel";
@@ -265,6 +269,14 @@ export function EvalDashboard() {
   // the run is already over.
   const [runId, setRunId] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+
+  // A long bulk action that has been estimated but not started: the "run it in the
+  // background instead?" offer, holding everything needed to go either way.
+  const [offer, setOffer] = useState<{
+    estimate: Estimate;
+    scope: Record<string, unknown>;
+    runHere: () => void;
+  } | null>(null);
 
   // Which row is in edit mode. The draft text itself lives inside QuestionRow —
   // keeping it here re-rendered all 80 chunk cards on every keystroke.
@@ -684,14 +696,46 @@ export function EvalDashboard() {
         `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
     );
 
-  const onRescore = (documentIds: string[] | null) =>
-    runStream(
-      "/api/eval/rescore",
-      (r) =>
-        `Re-scored ${r.scored} question(s). ` +
-        `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
-      documentIds ? { documentIds } : undefined,
-    );
+  // Ask the server how long a bulk action looks like taking, and whether that is
+  // long enough to offer the background instead. Returns true when the offer was
+  // shown, i.e. the caller must NOT also start the run.
+  //
+  // Fails open: an estimate that errors or times out just runs the action the way
+  // it always ran. A broken ETA must not stand between a user and their button.
+  async function offerBackgroundIfLong(
+    kind: string,
+    scope: Record<string, unknown>,
+    runHere: () => void,
+  ): Promise<boolean> {
+    try {
+      const res = await apiFetch("/api/jobs/estimate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind, scope }),
+      });
+      if (!res.ok) return false;
+      const estimate = (await res.json()) as Estimate;
+      if (!estimate.offerBackground || !estimate.backgroundable) return false;
+      setOffer({ estimate, scope, runHere });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  const onRescore = async (documentIds: string[] | null) => {
+    const scope = documentIds ? { documentIds } : {};
+    const runHere = () =>
+      runStream(
+        "/api/eval/rescore",
+        (r) =>
+          `Re-scored ${r.scored} question(s). ` +
+          `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
+        documentIds ? { documentIds } : undefined,
+      );
+    if (await offerBackgroundIfLong("rescore", scope, runHere)) return;
+    await runHere();
+  };
 
   // Bulk actions → Add question → {difficulty ×N} → Add: add N questions at each
   // requested difficulty to every chunk in scope (corpus-wide, or the selected
@@ -737,14 +781,19 @@ export function EvalDashboard() {
   // builder, run corpus-wide). Same NDJSON stream. `rebuild` also refreshes
   // aggregate-truth questions and re-scores them, so ideals built before the
   // latest ingests account for the chunks that arrived since.
-  const onBulkNdcg = (documentIds: string[] | null, rebuild: boolean) =>
-    runStream(
-      "/api/eval/bulk-ndcg",
-      (r) =>
-        `${rebuild ? "Rebuilt" : "Graded"} ${r.graded ?? 0} question(s), scored ${r.scored}. ` +
-        `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
-      { documentIds: documentIds ?? undefined, rebuild },
-    );
+  const onBulkNdcg = async (documentIds: string[] | null, rebuild: boolean) => {
+    const scope = { documentIds: documentIds ?? undefined, rebuild };
+    const runHere = () =>
+      runStream(
+        "/api/eval/bulk-ndcg",
+        (r) =>
+          `${rebuild ? "Rebuilt" : "Graded"} ${r.graded ?? 0} question(s), scored ${r.scored}. ` +
+          `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
+        scope,
+      );
+    if (await offerBackgroundIfLong("bulk_ndcg", scope, runHere)) return;
+    await runHere();
+  };
 
   // Bulk actions → Add LLM nDCG rankings: for every question in scope that
   // already has an aggregate, ask the LLM to re-order its top-k (the panel's
@@ -1044,6 +1093,19 @@ export function EvalDashboard() {
             router.refresh();
             reload();
           }}
+        />
+      )}
+
+      {offer && (
+        <BackgroundOfferDialog
+          estimate={offer.estimate}
+          scope={offer.scope}
+          onRunHere={offer.runHere}
+          onLaunched={(message) => {
+            setOffer(null);
+            setNotice(message);
+          }}
+          onClose={() => setOffer(null)}
         />
       )}
 

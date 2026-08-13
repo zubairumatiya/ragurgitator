@@ -907,59 +907,11 @@ export async function bulkAddCachedQuestions(
   return { reused, scored, recall: summary.recall };
 }
 
-// The "Re-score all" button: re-run retrieval for EVERY labeled question under
-// the active config and freeze a snapshot. Unlike scorePendingQuestions this
-// ignores existing results (inserting fresh rows; history is preserved), so recall
-// stays apples-to-apples after the corpus changes — e.g. a newly added doc
-// introduces distractors that push a previously-hit chunk out of the top-k.
-export async function rescoreAllQuestions(
-  emit: Emit = () => {},
-  documentIds?: string[],
-  shouldStop: ShouldStop = NEVER_STOP,
-): Promise<{
-  scored: number;
-  recall: number | null;
-}> {
-  const t0 = performance.now();
-  const questions = await allLabeledQuestions(documentIds);
-  console.log(
-    `[rag:eval] re-scoring all ${questions.length} question(s) @ k=${activeConfig().topK}`,
-  );
-  const scored = await scoreQuestions(questions, emit, shouldStop);
-  const cancelled = shouldStop();
-  // An unscoped re-score refreshes every result; a document-scoped one leaves
-  // other documents' stale rows (and thus the badge's change log) in place. A
-  // cancelled run refreshed only part of the corpus, so it clears nothing.
-  if (!cancelled && (!documentIds || documentIds.length === 0)) {
-    await clearRetrievalChanges();
-  }
-
-  const summary = await getSummary();
-  if (scored > 0) {
-    await createRunSnapshot({
-      questionCount: summary.scored,
-      hitCount: summary.hits,
-      mrr: summary.mrr,
-      ndcg: summary.ndcg,
-      k: summary.recallK,
-    });
-  }
-
-  console.log(
-    `[rag:eval] rescoreAllQuestions done: scored=${scored} ` +
-      `recall=${summary.recall ?? "n/a"} in ${Math.round(performance.now() - t0)}ms`,
-  );
-  emit({
-    type: "done",
-    cancelled,
-    generated: 0,
-    scored,
-    recall: summary.recall,
-    mrr: summary.mrr,
-    ndcg: summary.ndcg,
-  });
-  return { scored, recall: summary.recall };
-}
+// "Re-score all" MOVED to lib/jobs/steps/rescore.ts, where it is expressed as a
+// resumable step so the same implementation can run streamed (the button) or
+// sliced across invocations (a background job). The route drives it through
+// lib/jobs/stream.ts. Nothing here imports it back: the dependency runs jobs → rag
+// in one direction only.
 
 // DIRTY-SET RE-SCORE — autotune's replacement for the final full re-score.
 //

@@ -197,6 +197,8 @@ npm run guard          # multi-tenancy invariants: key handling, scopes, auth ga
 npm run vault:check    # Azure Key Vault wrap/unwrap round-trip
 npm run rls:check      # tenant isolation: owner sees all, stranger sees none
 npm run cascade:check  # deletion contract: keys delete alone, accounts delete all
+
+npm run jobs:smoke     # drive a background job end to end (needs the dev server)
 ```
 
 `guard` is pure static analysis — no database, no network, no env — so it is safe

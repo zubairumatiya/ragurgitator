@@ -113,9 +113,15 @@ const SCOPE_EXEMPT: Record<string, string> = {
 // matching by name is what makes that checkable without running anything.
 // withMcpRequest is what a route calls (it gates, then opens the scope);
 // withMcpUser is the scope itself, for anything entering it directly.
+// withJobSecret (lib/http/jobSecret.ts) is the boundary for /api/jobs/tick, the
+// one route with no session — a shared-secret signature over the job id. It opens
+// no scope itself; the runner it calls resolves the job's OWNER and enters that
+// user's scope (runSlice → inOwnScope), which is why the tick route's handler body
+// legitimately shows a gate but no scope entry. runSlice is named here so that
+// stays checkable rather than being an exemption.
 const SCOPE_ENTRIES =
-  /withPageUser|withRequestUser|withRequestConfig|withMcpRequest|withMcpUser/;
-const STORE_IMPORT = /@\/lib\/(rag|auth|batch|llm)/;
+  /withPageUser|withRequestUser|withRequestConfig|withMcpRequest|withMcpUser|runSlice|sweepStalledJobsAcrossUsers/;
+const STORE_IMPORT = /@\/lib\/(rag|auth|batch|llm|jobs)/;
 
 function isEntryPoint(path: string) {
   return /(?:^|\/)(?:route|actions)\.ts$|(?:^|\/)(?:page|layout)\.tsx$/.test(path);
@@ -159,8 +165,12 @@ const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"
 // /api/mcp: it verifies the OAuth token, rejects anything that is not an MCP
 // token, and enforces the mcp_enabled kill switch. It belongs in this list for
 // exactly the same reason withRequestUser does.
+// withJobSecret belongs here for the same reason withMcpRequest does: it is an
+// authentication boundary whose credential is not a cookie. It verifies an HMAC
+// over the job id (or a bearer secret for the cron sweep) before any work is
+// scheduled, and it is the ONLY gate allowed to stand in for a session.
 const GATES =
-  /withRequestUser|withRequestConfig|requireUserForApi|requireUser\(|withMcpRequest/;
+  /withRequestUser|withRequestConfig|requireUserForApi|requireUser\(|withMcpRequest|withJobSecret/;
 
 const HANDLER_EXEMPT: Record<string, string> = {
   "app/auth/callback/route.ts:GET": "the email confirmation link itself — no session yet, by definition",

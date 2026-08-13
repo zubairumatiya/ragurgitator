@@ -10,6 +10,7 @@
 // Handlers are idempotent, so the modest double-apply window from two overlapping
 // polls is harmless.
 import { withConfig, resolveConfig } from "@/lib/rag/activeConfig";
+import { activeUser } from "@/lib/auth/userScope";
 import {
   createBatchJob,
   failStaleSubmittingJobs,
@@ -130,9 +131,13 @@ async function applyJob(job: BatchJob): Promise<BatchJob> {
 
 // Fire the completion email once (best-effort), stamping email_sent so a later
 // poll doesn't re-send.
+//
+// The recipient is the OWNER of the batch, taken from the scope this poll is
+// running in — never a deployment-wide address. pollAndApply is always entered
+// under the user whose jobs it advances, so activeUser() is that owner.
 async function maybeNotify(job: BatchJob): Promise<BatchJob> {
   if (job.emailSent) return job;
-  const sent = await sendCompletionEmail(job);
+  const sent = await sendCompletionEmail(job, activeUser().email);
   return sent ? ((await updateBatchJob(job.id, { emailSent: true })) ?? job) : job;
 }
 

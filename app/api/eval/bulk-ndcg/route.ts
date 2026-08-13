@@ -6,13 +6,19 @@
 // vector query over the corpus), promote it to ground truth, and score the
 // still-unscored. Streams progress as NDJSON (one EvalEvent per line) for the
 // dashboard's progress bar. Body: { documentIds?, rebuild? }.
+//
+// The work is lib/jobs/steps/bulkNdcg.ts, driven here to completion. The same step
+// also runs as a background job (POST /api/jobs) when the estimate says it will
+// outlast the user's patience — one implementation, two drivers.
 import { streamError } from "@/lib/http/missingKeyServer";
 import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
 import { ndjsonStream } from "@/lib/http/ndjson";
+import { runStepStreamed } from "@/lib/jobs/stream";
+import { bulkNdcgStep } from "@/lib/jobs/steps/bulkNdcg";
 import type { EvalEvent } from "@/lib/rag/eval";
-import { bulkBuildRankings } from "@/lib/rag/ranking";
+import { getSummary } from "@/lib/rag/evalStore";
 
 const Body = z.object({
   // Bulk-actions document scope: grade only these documents' questions
@@ -33,7 +39,28 @@ export async function POST(request: Request) {
   return withRequestConfig(request, async () =>
     ndjsonStream<EvalEvent>(async (send, shouldStop) => {
       try {
-        await bulkBuildRankings(send, documentIds, rebuild, shouldStop);
+        const run = await runStepStreamed(
+          "bulk_ndcg",
+          bulkNdcgStep,
+          { documentIds, rebuild },
+          send,
+          shouldStop,
+        );
+        // One read for the closing line, whether or not finalize ran: finalize's
+        // return value is the same numbers, and a cancelled run has to get them
+        // from somewhere. `scored` is the config's total; this run's own
+        // contribution is `graded`.
+        const summary = await getSummary();
+        send({
+          type: "done",
+          cancelled: run.cancelled,
+          generated: 0,
+          graded: run.doneUnits,
+          scored: summary.scored,
+          recall: summary.recall,
+          mrr: summary.mrr,
+          ndcg: summary.ndcg,
+        });
       } catch (err) {
         send(streamError(err, "Bulk nDCG grading failed."));
       }
