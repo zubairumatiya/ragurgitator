@@ -151,10 +151,46 @@ function groupByChunk(
   return groups;
 }
 
+// Carry the previous render's group objects forward for every chunk whose
+// contents didn't change. groupByChunk rebuilds all of them from scratch, so a
+// single patchQuestion mid-run handed all ~236 cards a fresh `group` prop and
+// defeated their memo — one scored question re-rendered the entire list, ~164
+// times a run. Questions are patched immutably, so per-question reference
+// equality is the exact "did this chunk change" test. Returns `prev` itself
+// when nothing moved, so `groups` is stable too.
+function reuseUnchangedGroups(
+  prev: ChunkGroup[],
+  next: ChunkGroup[],
+): ChunkGroup[] {
+  const prevById = new Map(prev.map((g) => [g.chunkId, g]));
+  let changed = prev.length !== next.length;
+  const merged = next.map((g, i) => {
+    const old = prevById.get(g.chunkId);
+    if (
+      old === undefined ||
+      old.fileName !== g.fileName ||
+      old.position !== g.position ||
+      old.questions.length !== g.questions.length ||
+      old.questions.some((q, j) => q !== g.questions[j])
+    ) {
+      changed = true;
+      return g;
+    }
+    // Same object, different slot: the card is memo-skipped but the list order
+    // moved, so the array still has to be a new one.
+    if (prev[i] !== old) changed = true;
+    return old;
+  });
+  return changed ? merged : prev;
+}
+
 // Stable empty array for chunk groups with no saved trials. A fresh `[]` literal
 // per render would hand every such card a new prop and defeat its memo — which,
 // with most chunks having no trials, is nearly all of them.
 const NO_TRIALS: SavedModelTrial[] = [];
+
+// Same idea for the "no summary yet" group list, so it doesn't churn.
+const NO_GROUPS: ChunkGroup[] = [];
 
 // Narrow a dashboard-wide "which row is open" id to one chunk group: the id if it
 // names one of this group's questions, else null. Lets the parent hand each
@@ -923,11 +959,20 @@ export function EvalDashboard() {
   // Group the questions by source chunk once per summary, not once per render —
   // this used to run inline in the JSX, so every keystroke re-grouped all 164
   // questions before re-rendering all 80 cards.
-  const groups = useMemo(
-    () =>
-      summary === null ? [] : groupByChunk(summary.questions, summary.chunks),
-    [summary],
-  );
+  // ...and reuse the previous groups for untouched chunks, so a live score
+  // event re-renders the one card it landed in instead of all of them. The ref
+  // write is safe under Strict Mode's double render: merging a result against
+  // itself returns that same result.
+  const groupsRef = useRef<ChunkGroup[]>(NO_GROUPS);
+  const groups = useMemo(() => {
+    const next =
+      summary === null
+        ? NO_GROUPS
+        : groupByChunk(summary.questions, summary.chunks);
+    const merged = reuseUnchangedGroups(groupsRef.current, next);
+    groupsRef.current = merged;
+    return merged;
+  }, [summary]);
 
   // Disable the actions when they'd be no-ops. "Score pending" scores whatever
   // has no fresh result (new, edited, or retrieval-stale); "Re-score" re-runs
@@ -1371,7 +1416,13 @@ const ChunkGroupCard = memo(function ChunkGroupCard({
     override && override.kind !== "size" ? override.model : null;
 
   return (
-    <div className="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
+    // content-visibility lets the browser skip style, layout and paint for the
+    // cards scrolled out of view — with a few hundred chunks that is nearly all
+    // of them — while keeping one continuous list and find-in-page (the browser
+    // reveals a skipped card when the search lands in it). `auto` on the
+    // intrinsic size means the placeholder height below is only used until a
+    // card has been on screen once; after that its real height is remembered.
+    <div className="overflow-hidden rounded-lg border border-zinc-200 [contain-intrinsic-size:auto_320px] [content-visibility:auto] dark:border-zinc-800">
       {/* Which chunk these questions belong to */}
       <div className="flex items-center justify-between gap-3 border-b border-zinc-200 bg-zinc-50 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900/40">
         <span className="flex min-w-0 items-center gap-1.5 font-mono text-xs text-zinc-600 dark:text-zinc-400">
