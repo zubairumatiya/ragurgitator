@@ -31,12 +31,24 @@ export type AutotuneRunHeader = {
   stopReason: AutotuneStopReason | null;
   chunksTotal: number;
   chunksSearched: number;
+  // Holes in a sweep that otherwise looks complete (0068). `chunksFailed` counts
+  // chunks whose search threw — they are in chunksSearched, because the run did
+  // finish with them, it just finished badly. `tailStatus` is 'stuck' when the
+  // re-score gave up on a dirty set that would not shrink and settled anyway;
+  // separate from stopReason, which answers why the SEARCH stopped.
+  chunksFailed: number;
+  tailStatus: "stuck" | null;
 };
 
 // Why a run ended short. 'early' is stopEarly's bars-reached cutoff (0024) —
-// the only one of the three that is a SUCCESS, which is why callers must not
-// collapse these into a single "incomplete" boolean.
-export type AutotuneStopReason = "budget" | "cancelled" | "early";
+// the only one of these that is a SUCCESS, which is why callers must not
+// collapse them into a single "incomplete" boolean. 'aborted' is the ending that
+// used to have no name: prepareAutotune failing mid-run, i.e. the criteria were
+// edited while the run was going, which left stop_reason null and made a
+// truncated run read as a completed one.
+//
+// Do not gate UI on an allowlist of these — see leftWork in autotuneSlice.ts.
+export type AutotuneStopReason = "budget" | "cancelled" | "early" | "aborted";
 
 export type AutotuneOutcome = {
   questionId: string;
@@ -73,14 +85,15 @@ export async function insertAutotuneRun(
         (id, config_id, recall_k, recall_min_rate, mrr_k, mrr_min_rate,
          ndcg_k, ndcg_min_rate,
          targeted, resolved, unresolved, improved, attempts,
-         stop_reason, chunks_total, chunks_searched)
+         stop_reason, chunks_total, chunks_searched, chunks_failed, tail_status)
       values
         (${runId}, ${cfg.id}, ${header.recallK}, ${header.recallMinRate},
          ${header.mrrK}, ${header.mrrMinRate},
          ${header.ndcgK}, ${header.ndcgMinRate},
          ${header.targeted}, ${header.resolved}, ${header.unresolved},
          ${header.improved}, ${header.attempts},
-         ${header.stopReason}, ${header.chunksTotal}, ${header.chunksSearched})
+         ${header.stopReason}, ${header.chunksTotal}, ${header.chunksSearched},
+         ${header.chunksFailed}, ${header.tailStatus})
       returning id
     `;
     for (const o of outcomes) {

@@ -50,6 +50,7 @@ import {
   getChunksByIds,
   getModelTrialQuestions,
   getSummary,
+  type EvalSummary,
   type QuestionDetail,
 } from "@/lib/rag/evalStore";
 import {
@@ -188,7 +189,7 @@ type Emit = (event: AutotuneEvent) => void;
 
 // A below-bar question: which enabled-with-min-rate metrics it fails, plus its
 // current standing (the "before" side of the outcome rows).
-type TargetQuestion = {
+export type TargetQuestion = {
   questionId: string;
   question: string;
   sourceChunkId: string;
@@ -623,6 +624,12 @@ export type AutotuneTargeting = {
   targets: TargetQuestion[];
   orderedChunks: [string, TargetQuestion[]][];
   rates: { recall: number | null; mrr: number | null; ndcg: number | null };
+  // The summary these targets were derived from. Returned rather than re-read
+  // because a sliced run needs the per-question STALE flag as well as the
+  // targets, and `targets` deliberately cannot carry it: a stale question is not
+  // targetable, which is the whole reason a slice must look past the target list
+  // to decide whether a planned chunk is really done.
+  summary: EvalSummary;
 };
 
 export type PrepareResult =
@@ -724,7 +731,48 @@ export async function prepareAutotune(): Promise<PrepareResult> {
     targets,
     orderedChunks,
     rates: { recall: summary.recall, mrr: summary.mrr, ndcg: summary.ndcg },
+    summary,
   };
+}
+
+// One chunk's targets and staleness AS OF NOW, without re-reading the corpus.
+//
+// prepareAutotune answers the same question for every chunk at once, which is the
+// right shape at plan time and the wrong shape inside the search loop: keeping one
+// override makes every other chunk stale, so a slice that re-derived global
+// targeting after each per-chunk refresh would pay a full summary read per chunk —
+// ~74 of them on a real run — to learn about one.
+//
+// `questionIds` is the chunk's FROZEN plan membership. Values come back live;
+// membership never widens. Ignores need no handling of their own — failingMetrics
+// already treats an ignored question as not-failing.
+export async function chunkTargetsNow(
+  chunkId: string,
+  questionIds: string[],
+): Promise<{ targets: TargetQuestion[]; stale: boolean }> {
+  const { questions, criteria } = await getChunkQuestions(chunkId);
+  const wanted = new Set(questionIds);
+  const targets: TargetQuestion[] = [];
+  let stale = false;
+  for (const q of questions) {
+    if (!wanted.has(q.questionId)) continue;
+    if (q.stale) stale = true;
+    const metrics = failingMetrics(q, criteria);
+    if (metrics.length === 0) continue;
+    targets.push({
+      questionId: q.questionId,
+      question: q.question,
+      sourceChunkId: q.sourceChunkId,
+      fileName: q.fileName,
+      position: q.expectedPosition,
+      metrics,
+      beforeHit: q.hit === true,
+      beforeRank: q.foundRank,
+      beforeRr: q.rr,
+      beforeNdcg: q.ndcg,
+    });
+  }
+  return { targets, stale };
 }
 
 // Are all targeted metrics' AGGREGATE rates at their min-rate? (stopEarly, 0024.)

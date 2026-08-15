@@ -11,6 +11,7 @@
 import { useState } from "react";
 import { apiFetch } from "@/lib/http/client";
 import { BackgroundOfferDialog, type Estimate } from "@/app/components/BackgroundOfferDialog";
+import { leftWork } from "@/lib/jobs/steps/autotuneSlice";
 import type {
   AutotuneCandidate,
   AutotuneEvent,
@@ -82,25 +83,32 @@ function formatDuration(ms: number): string {
 // readable as a finished sweep: `resolved/targeted` counts questions on chunks it
 // never searched, so the coverage goes FIRST and the next action is spelled out.
 // 'early' is the exception — it stopped because the bars were met, which is a
-// success and needs no "run again".
+// success and needs no "run again". The default arm has to handle a short run
+// too: a run can leave chunks unvisited with no stop reason at all.
 function summaryLead(done: DoneStats): string {
   const covered = `${done.chunksSearched} of ${done.chunksTotal} chunk(s)`;
+  const more = canContinue(done) ? " Run again to continue." : "";
   switch (done.stopReason) {
     case "budget":
-      return `Paused on the time budget — tuned ${covered}. Run again to continue.`;
+      return `Paused on the time budget — tuned ${covered}.${more}`;
     case "cancelled":
-      return `Cancelled — tuned ${covered}, all kept. Run again to continue.`;
+      return `Cancelled — tuned ${covered}, all kept.${more}`;
     case "early":
       return `Min-rates reached after ${covered}.`;
+    case "aborted":
+      return `Stopped — the targeting criteria changed mid-run. Tuned ${covered}.${more}`;
     default:
-      return "Done.";
+      return canContinue(done) ? `Tuned ${covered}.${more}` : "Done.";
   }
 }
 
-// Was there work left on the table? Drives the "Run again" button: only the two
-// endings that stopped with chunks still failing.
-const canContinue = (done: DoneStats): boolean =>
-  done.stopReason === "budget" || done.stopReason === "cancelled";
+// Was there work left on the table? Drives the "Run again" button.
+//
+// Derived from the counts, not from a list of stop reasons — see leftWork. The
+// allowlist this replaced ('budget' || 'cancelled') is precisely how a truncated
+// run stayed quiet: a new way to stop short falls off a list silently, and the
+// bug that motivated all of this produced no stop reason at all.
+const canContinue = (done: DoneStats): boolean => leftWork(done);
 
 export function AutotunePanel({
   summary,

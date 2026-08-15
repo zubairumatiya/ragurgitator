@@ -1,0 +1,45 @@
+-- ============================================================================
+-- 0068_autotune_run_holes.sql
+--
+-- A SWEEP THAT VISITED EVERY CHUNK IS NOT A SWEEP THAT WORKED ON EVERY CHUNK.
+--
+-- 0065 made coverage countable (chunks_searched vs chunks_total) and that is
+-- still the right question for "was there work left on the table". Two things it
+-- cannot answer turned up while making the sliced run correct, and both are ways
+-- a row currently reads as a clean finish when it was not:
+--
+--   chunks_failed   runSearch catches a chunk search exception, gives up on the
+--                   chunk, and counts it toward chunks_searched — so a run that
+--                   errored on 12 of 74 chunks reports 74 searched. A background
+--                   job records this in failed_units (0066), but a streamed run
+--                   has no job row, so the history row is the only honest place
+--                   for it. Counted separately rather than deducted from
+--                   chunks_searched, because the run really did finish with
+--                   those chunks; it just finished badly.
+--
+--   tail_status     the re-score phase has a guard for a dirty set that will not
+--                   shrink: it logs a warning and settles anyway, so the corpus
+--                   gets stamped clean under a state some question never
+--                   actually reached. Today that writes a history row
+--                   indistinguishable from a sweep that came clean on its own.
+--                   'stuck' says otherwise.
+--
+--                   Deliberately NOT a stop_reason. stop_reason answers "why did
+--                   the SEARCH stop"; this answers "how did the TAIL end". They
+--                   are independent — a budget-stopped run can have a clean tail
+--                   and a complete sweep can have a stuck one — and collapsing
+--                   them into one column makes both unreadable.
+--
+-- Text rather than an enum, and nullable and unbackfilled, for 0065's reasons:
+-- rows written before this genuinely do not know, and defaulting chunks_failed
+-- to 0 would assert exactly the thing the column exists to stop assuming.
+--
+-- Note for readers of 0065: 'aborted' joins stop_reason's vocabulary in the same
+-- change (prepareAutotune failing mid-run — the criteria were edited while the
+-- run was going). No migration needed for it, which is the point of that column
+-- being text.
+-- ============================================================================
+
+alter table autotune_runs
+  add column chunks_failed integer,
+  add column tail_status text;

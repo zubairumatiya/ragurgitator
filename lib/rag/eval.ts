@@ -1085,6 +1085,58 @@ export async function settleAffectedRescore(
   return { recall: summary.recall, mrr: summary.mrr, ndcg: summary.ndcg };
 }
 
+// THE STALE SET, with no run to define it against — the input to autotune's
+// `settle` phase (docs/autotune-slicing-fixes-plan.md §D.1).
+//
+// screenAffectedQuestions answers "which questions could THIS run's changed chunks
+// have moved", which needs a run: a start state to compare against and a list of
+// what changed. A recovery has neither. It has a corpus somebody else left stale
+// — an abandoned run's committed overrides with its re-score never finished — and
+// one question to ask: which stored results were scored under a retrieval state
+// that is no longer the current one.
+//
+// That is what staleness MEANS, it cannot be lost, and re-scoring exactly this set
+// always restores a corpus that can be planned against. Deliberately UNSCREENED:
+// config_retrieval_changes would let most of these be proven clean instead of
+// re-scored, but the screen needs the start state and the changed-chunk list that
+// a recovery is missing, and guessing either one restamps rows as fresh that a
+// real re-retrieval would have moved. The stale stamps win over the change log
+// whenever they disagree, so the cheap path is not available here — and the cost
+// of re-scoring is exactly the work the abandoned run did not finish.
+export async function staleQuestions(state: string): Promise<QuestionToScore[]> {
+  const questions = await allLabeledQuestions();
+  const latest = await latestResultsForScreening(state);
+  const stale = questions.filter((q) => {
+    const r = latest.get(q.labelId);
+    if (!r || r.scoredAt === null) return true;
+    // Edit-stale counts too: the stored score is for text that has since changed,
+    // so it is no more plannable than a retrieval-stale one.
+    if (r.scoredAt < r.updatedAt) return true;
+    return r.retrievalState !== state;
+  });
+  return stale.map(({ questionId, question, labelId, sourceChunkId }) => ({
+    questionId,
+    question,
+    labelId,
+    sourceChunkId,
+  }));
+}
+
+// Close the books on a settle that re-scored its whole set: no row was proven
+// clean without being scored, so there is nothing to re-stamp — only the change
+// log to drop and the snapshot to freeze. Shares settleAffectedRescore's shape so
+// the two endings of a re-score stay recognizably the same thing.
+export async function settleStale(): Promise<void> {
+  const [finalState, questions] = await Promise.all([
+    retrievalStateFingerprint(),
+    allLabeledQuestions(),
+  ]);
+  await settleAffectedRescore(
+    { finalState, dirty: [], cleanLabelIds: [], total: questions.length },
+    "",
+  );
+}
+
 // Re-chunk experiment: an ephemeral per-chunk "what-if" (autotune Stage 1).
 //
 // Re-split ONE labeled chunk at a trial (size, overlap), embed the pieces, and

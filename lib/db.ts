@@ -71,6 +71,31 @@ const appPool =
     // the length of a scope rather than a query, and page renders open several
     // sibling scopes (layout, page and leaves each call withPageUser).
     max: 15,
+    // DISABLED DELIBERATELY, and this one is load-bearing. postgres.js defaults
+    // max_lifetime to `60 * (30 + Math.random() * 30)` seconds — a per-connection
+    // random draw between 30 and 60 minutes — and on expiry it calls end() on the
+    // connection whether or not a transaction is open on it. Since 0051 a scope IS
+    // a transaction pinned to one connection for its whole life, so any operation
+    // outliving that draw is killed mid-flight and rolls back everything.
+    //
+    // It cost three autotune runs on 2026-08-13/14 before it was found, and the
+    // reason it took three is that the failure is usually SILENT: when the timer
+    // fires after the run's last emitted event, the client sees a clean finish and
+    // only the commit is lost. The provider calls still bill, and recordSpend is a
+    // savepoint inside the same transaction, so even the spend ledger rolls back.
+    //
+    // "Just keep operations short" is not the fix: the timer starts at CONNECT, so
+    // the budget a run gets is 30-60 minutes minus however old its pooled
+    // connection already was. There is no duration that is safe by construction.
+    // Recycling still happens through idle_timeout; what is given up is the
+    // periodic reaping of connections that are busy, which is precisely the case
+    // where reaping is destructive here.
+    //
+    // Per-slice commits (lib/jobs/stream.ts) make an individual transaction short
+    // enough that this should never fire anyway. That is an argument for the bound
+    // being cheap, not for leaving it to chance: the streamed driver is only one
+    // of the long paths, and the others have not been sliced yet.
+    max_lifetime: 0,
   });
 
 if (process.env.NODE_ENV !== "production") {

@@ -8,8 +8,11 @@
 // and the provider calls that produced them stayed billed. Slicing does not
 // prevent that error. It bounds one occurrence to a slice.
 //
-// FOUR PHASES, because the tail is as long as the search and has to slice too.
+// FIVE PHASES, because the tail is as long as the search and has to slice too.
 //
+//   settle    — re-score a corpus somebody else left stale, BEFORE freezing a plan
+//               against it. Skipped entirely when nothing is stale, which is the
+//               normal case. See runSettle for why it has to come first.
 //   search    — one chunk per unit: try sizes, then models, then combos, and
 //               confirm the winner through real retrieval (lib/rag/autotune.ts).
 //   rescore   — the dirty-set ripple re-score. ~9 minutes at 470 questions, so it
@@ -27,30 +30,51 @@
 // always did, now said through the contract instead of through its control flow
 // (0067).
 //
-// WHAT THE CURSOR HAS TO CARRY. Most of a run is recomputed per slice and that is
-// the point: targets come from the CURRENT summary, so a chunk that got tuned is
-// no longer failing and drops out by itself. Five things are not recoverable that
-// way, and the plan's §3 table is where they come from:
+// WHAT THE CURSOR HAS TO CARRY, and the one thing it got wrong for a while.
 //
+// The original design recomputed the chunk list every slice, on the theory that
+// the work is self-eliminating: targets come from the CURRENT summary, so a chunk
+// that got tuned is no longer failing and drops out by itself. That is true of a
+// chunk that got tuned. It is catastrophically untrue of every OTHER chunk —
+// keeping one override changes the retrieval fingerprint for the whole corpus, so
+// after slice 1 every question except the tuned chunk's own is stale,
+// failingMetrics() returns [] for a stale question, and slice 2 planned an empty
+// sweep and fell through to its tail reporting nothing. The streamed driver never
+// showed this because it loops the whole list inside one run() call.
+//
+// So the chunk list is FROZEN at plan time and filtered per slice instead of
+// rebuilt (lib/jobs/steps/autotuneSlice.ts holds that filter, and the regression
+// test for it). Five things are not recoverable per slice:
+//
+//   plan                         the frozen, ordered chunk list. Ordering is
+//                                prepareAutotune's worst-first sort captured
+//                                once, so freezing costs nothing in quality.
 //   startState / startOverrides  the dirty-set re-score is defined against the
 //                                run's STARTING retrieval state; recompute it
 //                                per slice and it becomes the state this slice
 //                                started in, which proves nothing.
-//   gaveUp                       a chunk nothing could improve stays failing
-//                                forever, so without this a resumed run
-//                                re-attempts the same hopeless chunk every slice.
-//   baselines                    frozen before-values. Target MEMBERSHIP must
-//                                keep recomputing (that is what makes the work
-//                                self-eliminating), but the before-values feed
-//                                the outcome rows — recompute those across a
-//                                slice boundary and every row compares against a
-//                                baseline that has already moved, and the run
-//                                reports smaller deltas than it achieved.
+//   covered                      the chunks the run is finished with, for ANY
+//                                reason — searched, gave up on, or skipped
+//                                because a neighbour's override already fixed
+//                                them. One set rather than three, because to the
+//                                filter they are the same thing, and because
+//                                chunks_searched is its size: count a skip as
+//                                unvisited and a complete run reports a short
+//                                sweep forever.
+//   baselines                    frozen before-values. They feed the outcome
+//                                rows — recompute those across a slice boundary
+//                                and every row compares against a baseline that
+//                                has already moved, and the run reports smaller
+//                                deltas than it achieved.
 //   runId                        so the history row is idempotent: work commits
 //                                before the cursor does, so the slice that writes
 //                                it can be re-run.
 //
-// And the fifth is not a cursor field but the reason startOverrides holds
+// Membership is frozen; VALUES are not. The TargetQuestion rows handed to
+// searchChunk are rebuilt from live summary rows each slice, so candidate ranking
+// is scored against the chunk's current standing rather than a stale snapshot.
+//
+// One more thing is not a cursor field but the reason startOverrides holds
 // FINGERPRINTS rather than ids: THE APPLIED SET IS DERIVED, NEVER ACCUMULATED.
 // It used to be an in-memory Map of chunks this run applied to. Under "work
 // commits before the cursor moves", a crashed slice redoes a chunk whose override
@@ -62,9 +86,17 @@
 import { randomUUID } from "node:crypto";
 
 import { NEVER_STOP } from "@/lib/http/cancelRegistry";
+import {
+  drainStuck,
+  nextChunks,
+  passSize,
+  type PlanEntry,
+  type QuestionState,
+} from "@/lib/jobs/steps/autotuneSlice";
 import type { JobProgress, JobStep, StopSignal } from "@/lib/jobs/types";
 import {
   barsReached,
+  chunkTargetsNow,
   drainSnapshot,
   failingMetrics,
   prepareAutotune,
@@ -79,10 +111,18 @@ import {
   scoreQuestions,
   screenAffectedQuestions,
   settleAffectedRescore,
+  settleStale,
+  staleQuestions,
   type ChangedChunk,
 } from "@/lib/rag/eval";
 import type { EvalCriteria } from "@/lib/rag/evalSettingsStore";
-import { getSummary, type EvalSummary, type QuestionDetail } from "@/lib/rag/evalStore";
+import {
+  getQuestionToScore,
+  getSummary,
+  type EvalSummary,
+  type QuestionDetail,
+  type QuestionToScore,
+} from "@/lib/rag/evalStore";
 import {
   listOverrides,
   overrideFingerprints,
@@ -124,24 +164,44 @@ type FrozenBaseline = {
 export type AutotuneScope = Record<string, never>;
 
 export type AutotuneCursor = {
-  phase: "search" | "rescore" | "outcomes" | "snapshots";
+  phase: "settle" | "search" | "rescore" | "outcomes" | "snapshots";
   runId: string;
   startState: string;
   startOverrides: Record<string, string>; // chunk id → override fingerprint at run start
   baselines: Record<string, FrozenBaseline>; // question id → frozen before-values
-  gaveUp: string[];
-  searched: number;
-  chunksTotal: number;
+  // Frozen, ordered worst-chunk-first — but NOT necessarily at t=0. Null means
+  // `settle` has not finished yet and there is nothing honest to freeze: a plan
+  // derived from a stale corpus is an empty one, which is the bug this file's
+  // header describes, one level up. Non-null from the first `search` slice on.
+  plan: PlanEntry[] | null;
+  covered: string[]; // chunks the run is done with — searched, gave up, or skipped
+  // Chunks whose search threw. A subset of `covered` — the run is done with them
+  // — kept apart so the history row can say a sweep finished with holes in it
+  // rather than reporting all of them as searched (§C fix 3).
+  failed: string[];
   attempts: number;
   pendingChoice: number;
   stopReason: AutotuneStopReason | null;
+  // How the TAIL ended, as distinct from why the search stopped: 'stuck' means
+  // the re-score settled a dirty set that would not shrink. See runRescore.
+  tailStatus: "stuck" | null;
   snapshots: PendingSnapshot[];
   // How many questions the previous re-score pass found dirty. The phase has no
   // cursor of its own — it re-screens and the set drains — so this is the only
   // thing standing between it and an infinite loop if a question can never come
   // back clean. See runRescore.
   lastDirty: number | null;
+  // The same guard for `settle`, which drains the same way and against the same
+  // hazard. Kept apart from lastDirty because the two phases run against
+  // different sets and a settle that would not shrink says nothing about the
+  // tail's progress later.
+  lastStale: number | null;
 };
+
+// A cursor past `settle`, i.e. one whose plan is frozen. The search phase is
+// written against this rather than against a nullable field, so "is the plan
+// frozen by now" is answered once, at the phase boundary, instead of at every use.
+type PlannedCursor = AutotuneCursor & { plan: PlanEntry[] };
 
 export type AutotuneResult = {
   targeted: number;
@@ -197,7 +257,11 @@ export const autotuneStep: JobStep<
   // why the frozen values are captured here rather than written anywhere.
   async plan() {
     const cursor = await freshCursor();
-    return { totalUnits: cursor.chunksTotal, cursor };
+    // An un-frozen plan still owes the bar a denominator. Chunks with a stale or
+    // failing question is what the plan will be once `settle` has run, and it is
+    // exactly `plan.length` when nothing is stale — so the estimate is only an
+    // estimate in the case that has one.
+    return { totalUnits: cursor.plan?.length ?? (await estimateChunks()), cursor };
   },
 
   async run(_scope, cursor, emit, shouldStop) {
@@ -205,7 +269,8 @@ export const autotuneStep: JobStep<
     // freezes its run-start state here instead — later than launch, but still
     // before the first chunk is touched, which is the property that matters.
     const c = cursor ?? (await freshCursor());
-    if (c.phase === "search") return runSearch(c, emit, shouldStop);
+    if (c.phase === "settle") return runSettle(c, emit, shouldStop);
+    if (c.phase === "search") return runSearch(await ensurePlanned(c), emit, shouldStop);
     if (c.phase === "rescore") return runRescore(c, emit, shouldStop);
     if (c.phase === "outcomes") return runOutcomes(c, emit);
     return runSnapshots(c, emit, shouldStop);
@@ -224,8 +289,8 @@ export const autotuneStep: JobStep<
       improved,
       pendingChoice: cursor.pendingChoice,
       attempts: cursor.attempts,
-      chunksSearched: cursor.searched,
-      chunksTotal: cursor.chunksTotal,
+      chunksSearched: cursor.covered.length,
+      chunksTotal: cursor.plan?.length ?? 0,
       stopReason: cursor.stopReason,
       recall: summary.recall,
       mrr: summary.mrr,
@@ -236,26 +301,45 @@ export const autotuneStep: JobStep<
 
 // The run's starting point, and the only place its un-recomputable values are
 // captured. Reads only — it is also what the ETA route reaches through plan().
+//
+// The plan and the baselines are the two things that CANNOT be captured here when
+// the corpus is stale, because both are derived from prepareAutotune's targets and
+// failingMetrics() returns [] for a stale question. So a run that finds stale work
+// starts in `settle` with neither, and freezes both when it gets there. Nothing
+// else moves: startState and startOverrides are the run's true starting point and
+// settle changes neither (it re-scores; it does not touch an override).
 async function freshCursor(): Promise<AutotuneCursor> {
-  const prepared = await prepareAutotune();
+  const startState = await retrievalStateFingerprint();
+  const stale = await staleQuestions(startState);
   const cursor: AutotuneCursor = {
-    phase: "search",
+    phase: stale.length > 0 ? "settle" : "search",
     runId: randomUUID(),
-    startState: await retrievalStateFingerprint(),
+    startState,
     startOverrides: Object.fromEntries(await overrideFingerprints()),
     baselines: {},
-    gaveUp: [],
-    searched: 0,
-    chunksTotal: prepared.ok ? prepared.orderedChunks.length : 0,
+    plan: null,
+    covered: [],
+    failed: [],
     attempts: 0,
     pendingChoice: 0,
     stopReason: null,
+    tailStatus: null,
     snapshots: [],
     lastDirty: null,
+    lastStale: null,
   };
-  if (!prepared.ok) return cursor;
+  return stale.length > 0 ? cursor : freezePlan(cursor);
+}
+
+// Freeze the ordered chunk list and the frozen baselines against the corpus AS IT
+// IS NOW. Called once per run — either straight from freshCursor when nothing was
+// stale, or from the end of `settle` when the corpus has been made plannable.
+async function freezePlan(c: AutotuneCursor): Promise<AutotuneCursor> {
+  const prepared = await prepareAutotune();
+  if (!prepared.ok) return { ...c, phase: "search", plan: [] };
+  const baselines: Record<string, FrozenBaseline> = { ...c.baselines };
   for (const t of prepared.targets) {
-    cursor.baselines[t.questionId] = {
+    baselines[t.questionId] = {
       chunkId: t.sourceChunkId,
       metrics: t.metrics,
       hit: t.beforeHit,
@@ -264,7 +348,38 @@ async function freshCursor(): Promise<AutotuneCursor> {
       ndcg: t.beforeNdcg,
     };
   }
-  return cursor;
+  return {
+    ...c,
+    phase: "search",
+    baselines,
+    plan: prepared.orderedChunks.map(([chunkId, ts]) => ({
+      chunkId,
+      questionIds: ts.map((t) => t.questionId),
+    })),
+  };
+}
+
+// A cursor that reached `search` without a plan. Only two things produce one: a
+// cursor persisted before the plan was frozen at all (this file's older shape),
+// and a settle that somehow handed over without freezing. Both are recoverable by
+// doing the freeze now — the corpus has already been settled, so this reads the
+// same thing freezePlan would have.
+async function ensurePlanned(c: AutotuneCursor): Promise<PlannedCursor> {
+  const planned = c.plan === null || c.plan === undefined ? await freezePlan(c) : c;
+  return planned as PlannedCursor;
+}
+
+// The denominator for a run whose plan is not frozen yet: chunks holding at least
+// one question that is stale or below its bar. Read-only, like everything plan()
+// reaches.
+async function estimateChunks(): Promise<number> {
+  const summary = await getSummary();
+  const criteria = summary.criteria as EvalCriteria;
+  const chunks = new Set<string>();
+  for (const q of summary.questions) {
+    if (q.stale || failingMetrics(q, criteria).length > 0) chunks.add(q.sourceChunkId);
+  }
+  return chunks.size;
 }
 
 // How the run did, per targeted question: resolved (nothing it was targeted for
@@ -294,46 +409,138 @@ function tally(
   return { resolved, improved, after };
 }
 
+// --- phase 0: settle --------------------------------------------------------
+
+// A PLAN MAY NOT BE FROZEN AGAINST A STALE CORPUS
+// (docs/autotune-slicing-fixes-plan.md §D.1).
+//
+// This phase exists because of what a dead run now leaves behind. It used to
+// leave nothing: a streamed run was one transaction, so dying rolled the whole
+// thing back and the next run planned against an untouched corpus. Once slices
+// commit, an abandoned run leaves committed overrides AND a corpus whose every
+// other question is stale under them — and prepareAutotune excludes a stale
+// question, so the next run plans a near-empty sweep and reports "nothing to
+// target" over a config that plainly needs tuning. That is the same defect as the
+// slice-2 bug in this file's header, one level up: derive work from a corpus
+// somebody else made stale and the answer is silently empty.
+//
+// The background job has had this hole all along (a job that fails for good
+// strands the same state); per-slice streaming only makes it reachable often. One
+// implementation covers both, because `settle` is a PHASE, not driver code —
+// neither driver knows what a phase is, so there is no second copy to drift.
+//
+// Belt and braces with the per-chunk freshening in autotuneSlice.ts, and both are
+// worth keeping: this makes the PLAN and its ordering honest, while the per-chunk
+// re-score makes each individual skip decision honest even for staleness this
+// phase did not anticipate.
+async function runSettle(c: AutotuneCursor, emit: Emit, shouldStop: () => boolean) {
+  const stale = await staleQuestions(c.startState);
+
+  // The same guard runRescore carries, against the same hazard: a question that
+  // cannot come back clean would re-score forever, and on the streamed path
+  // mustFinish is not yet set so there is nothing else to stop it.
+  // A settle that cannot finish ENDS THE RUN, which is where this guard differs
+  // from the one in runRescore. That one settles anyway and says so through
+  // tail_status, because by then the money is spent and the books have to close on
+  // it. Here nothing has been spent and no override has moved, so the choice is
+  // between saying "this corpus cannot be scored" and planning against it — and
+  // planning against it is precisely the empty sweep this phase exists to prevent.
+  if (drainStuck(stale.length, c.lastStale)) {
+    const message =
+      `Could not re-score ${stale.length} stale question(s), so there is no ` +
+      `trustworthy corpus to tune against. Re-score all questions, then try again.`;
+    console.warn(`[rag:autotune] settle made no progress at ${stale.length} stale; giving up`);
+    emit({ doneUnits: 0, event: { type: "error", message } });
+    return { cursor: c, done: true, doneUnits: 0 };
+  }
+
+  if (stale.length === 0) {
+    // Settled: drop the change log and freeze the snapshot, then freeze the plan
+    // against a corpus that can now answer "is this question failing".
+    await settleStale();
+    return { cursor: await freezePlan(c), done: false, doneUnits: 0 };
+  }
+
+  emit({ doneUnits: 0, event: { type: "rescore-start", total: stale.length } });
+  let i = 0;
+  while (i < stale.length && !shouldStop()) {
+    const batch = stale.slice(i, i + RESCORE_BATCH);
+    const offset = i;
+    await scoreQuestions(
+      batch,
+      (event) => {
+        if (event.type === "score-result") {
+          emit({
+            doneUnits: 0,
+            message: `Settling ${offset + event.done} of ${stale.length} stale questions`,
+            event: { type: "rescore-progress", done: offset + event.done, total: stale.length },
+          });
+        }
+      },
+      NEVER_STOP,
+    );
+    i += batch.length;
+  }
+
+  return {
+    cursor: { ...c, lastStale: passSize(i, stale.length, c.lastStale) },
+    done: false,
+    doneUnits: 0,
+  };
+}
+
 // --- phase 1: search --------------------------------------------------------
 
-async function runSearch(c: AutotuneCursor, emit: Emit, shouldStop: StopSignal) {
+async function runSearch(c: PlannedCursor, emit: Emit, shouldStop: StopSignal) {
+  const covered = new Set(c.covered);
+  const failed = new Set(c.failed);
   const prepared = await prepareAutotune();
   if (!prepared.ok) {
-    emit({ doneUnits: c.searched, event: { type: "error", message: prepared.error } });
+    emit({ doneUnits: covered.size, event: { type: "error", message: prepared.error } });
     // Before the first chunk this is just "there is nothing to target" — no
     // overrides changed, so the tail would write an empty history row against an
     // unchanged corpus. After it, the criteria were edited mid-run: the searching
-    // is over but the books still have to close on what it already spent.
-    if (c.searched === 0) return { cursor: c, done: true, doneUnits: 0 };
+    // is over but the books still have to close on what it already spent. That
+    // ending used to leave stopReason null, which read as a completed sweep.
+    if (covered.size === 0) return { cursor: c, done: true, doneUnits: 0 };
     return {
-      cursor: { ...c, phase: "rescore" as const },
+      cursor: { ...c, phase: "rescore" as const, stopReason: "aborted" as const },
       done: false,
-      doneUnits: c.searched,
+      doneUnits: covered.size,
       mustFinish: true,
     };
   }
-  const { prep, orderedChunks } = prepared;
-  const gaveUp = new Set(c.gaveUp);
+  const { prep, summary } = prepared;
+  const chunksTotal = c.plan.length;
 
   // First slice only: the run's shape, once, with the totals it started from.
-  if (c.searched === 0 && gaveUp.size === 0) {
+  if (covered.size === 0) {
     emit({
       doneUnits: 0,
       event: {
         type: "autotune-start",
         targeted: prepared.targets.length,
-        chunks: orderedChunks.length,
+        chunks: chunksTotal,
         search: prep.search,
         apply: prep.applyMode,
       },
     });
   }
 
+  // Live values for the frozen plan's questions, indexed once. `targets` is the
+  // fresh-and-below-bar set, so presence in it IS the failing test, and it also
+  // carries the current before-values searchChunk ranks candidates against.
+  const targetsByQuestion = new Map(prepared.targets.map((t) => [t.questionId, t]));
+  const planned = new Set(c.plan.map((e) => e.chunkId));
+
   // Newly seen targets get a frozen baseline too: a question can start failing
   // between slices (a neighbouring override moved it), and it is a target of this
-  // run from the moment the run first sees it.
+  // run from the moment the run first sees it — but only if its chunk is in the
+  // frozen plan. A chunk that starts failing mid-run is the NEXT run's work, and
+  // baselining it here would land it in the outcome rows as
+  // targeted-and-unresolved, diluting a rate this run never had a shot at.
   for (const t of prepared.targets) {
-    if (!(t.questionId in c.baselines)) {
+    if (!(t.questionId in c.baselines) && planned.has(t.sourceChunkId)) {
       c.baselines[t.questionId] = {
         chunkId: t.sourceChunkId,
         metrics: t.metrics,
@@ -345,17 +552,18 @@ async function runSearch(c: AutotuneCursor, emit: Emit, shouldStop: StopSignal) 
     }
   }
 
-  const todo = orderedChunks.filter(([id]) => !gaveUp.has(id));
+  const live = liveQuestionState(summary, targetsByQuestion);
+  const todo = nextChunks(c.plan, covered, live);
   let rates = prepared.rates;
-  let searched = c.searched;
   let attempts = c.attempts;
   let pendingChoice = c.pendingChoice;
   let index = 0;
 
-  for (const [chunkId, chunkTargets] of todo) {
+  for (const decision of todo) {
+    const chunkId = decision.chunkId;
     if (prep.stopEarly && barsReached(prep, rates)) {
       emit({
-        doneUnits: searched,
+        doneUnits: covered.size,
         event: {
           type: "early-stop",
           skippedChunks: todo.length - index,
@@ -378,17 +586,23 @@ async function runSearch(c: AutotuneCursor, emit: Emit, shouldStop: StopSignal) 
       const why = shouldStop.reason?.() ?? "deadline";
       if (why === "deadline") {
         return {
-          cursor: { ...c, searched, attempts, pendingChoice, gaveUp: [...gaveUp] },
+          cursor: {
+            ...c,
+            attempts,
+            pendingChoice,
+            covered: [...covered],
+            failed: [...failed],
+          },
           done: false,
-          doneUnits: searched,
+          doneUnits: covered.size,
         };
       }
       if (why === "budget") {
         emit({
-          doneUnits: searched,
+          doneUnits: covered.size,
           event: {
             type: "budget-stop",
-            searchedChunks: searched,
+            searchedChunks: covered.size,
             skippedChunks: todo.length - index,
             elapsedMs: STREAM_BUDGET_MS,
           },
@@ -398,16 +612,43 @@ async function runSearch(c: AutotuneCursor, emit: Emit, shouldStop: StopSignal) 
       break;
     }
     index += 1;
+
+    // Membership was frozen at plan time; the VALUES are read live, so candidates
+    // are ranked against the chunk's current standing rather than a snapshot.
+    let chunkTargets = decision.questionIds
+      .map((id) => targetsByQuestion.get(id))
+      .filter((t) => t !== undefined);
+
+    // A planned chunk whose questions have gone stale: re-score just those (~1.2
+    // per chunk) so the skip-or-search decision is a fact rather than a guess.
+    // applyAutotuneCandidate already does this same re-score, just after the
+    // search — too late to have saved the effort the search costs.
+    if (decision.action === "rescore") {
+      // Same shape as applyAutotuneCandidate's rescoreChunk: the lookups run
+      // concurrently so assembling the batch is one round trip, then a single
+      // scoreQuestions call pays the per-call fixed costs once.
+      const toScore = (
+        await Promise.all(decision.questionIds.map((id) => getQuestionToScore(id)))
+      ).filter((q): q is QuestionToScore => q !== null);
+      if (toScore.length > 0) await scoreQuestions(toScore, () => {}, NEVER_STOP);
+      chunkTargets = (await chunkTargetsNow(chunkId, decision.questionIds)).targets;
+    }
+
+    // Covered either way: the run is finished with this chunk, and a chunk a
+    // neighbour's override already fixed is coverage, not work left undone.
+    covered.add(chunkId);
+    if (chunkTargets.length === 0) continue;
+
     emit({
-      doneUnits: searched,
-      message: `Tuning chunk ${searched + 1} of ${c.chunksTotal}`,
+      doneUnits: covered.size - 1,
+      message: `Tuning chunk ${covered.size} of ${chunksTotal}`,
       event: {
         type: "chunk-start",
         chunkId,
         fileName: chunkTargets[0].fileName,
         position: chunkTargets[0].position,
-        index: searched + 1,
-        total: c.chunksTotal,
+        index: covered.size,
+        total: chunksTotal,
         questions: chunkTargets.length,
       },
     });
@@ -415,32 +656,27 @@ async function runSearch(c: AutotuneCursor, emit: Emit, shouldStop: StopSignal) 
     let result;
     try {
       result = await searchChunk(prep, chunkId, chunkTargets, (event) =>
-        emit({ doneUnits: searched, event }),
+        emit({ doneUnits: covered.size - 1, event }),
       );
     } catch (err) {
       // One chunk's search failing must not end the sweep — the chunks already
       // confirmed are committed and the rest are still worth trying. Recorded as a
-      // failed unit so a job that finishes with holes says so (0066).
+      // failed unit so a job that finishes with holes says so (0066), and counted
+      // on the cursor so the history row can say the same for a streamed run,
+      // which has no job row to carry it.
       const message = err instanceof Error ? err.message : "Chunk search failed.";
       emit({
-        doneUnits: searched + 1,
+        doneUnits: covered.size,
         failure: message,
         event: { type: "chunk-unresolved", chunkId, reason: message },
       });
-      gaveUp.add(chunkId);
-      searched += 1;
+      failed.add(chunkId);
       continue;
     }
 
     attempts += result.attempts;
     pendingChoice += result.pendingChoice;
-    searched += 1;
     if (result.snapshot) c.snapshots.push(result.snapshot);
-    // A chunk that resolved or improved drops out of the next slice's targets by
-    // itself. One that did not is still failing and would be retried forever, so
-    // it is written down. 'choice' likewise: its decision is the user's, and the
-    // run has nothing further to try on it.
-    if (result.status === "unresolved" || result.status === "choice") gaveUp.add(chunkId);
     if (prep.stopEarly && result.kept) {
       const s = await getSummary();
       rates = { recall: s.recall, mrr: s.mrr, ndcg: s.ndcg };
@@ -452,15 +688,33 @@ async function runSearch(c: AutotuneCursor, emit: Emit, shouldStop: StopSignal) 
     cursor: {
       ...c,
       phase: "rescore" as const,
-      searched,
       attempts,
       pendingChoice,
-      gaveUp: [...gaveUp],
+      covered: [...covered],
+      failed: [...failed],
     },
     done: false,
-    doneUnits: searched,
+    doneUnits: covered.size,
     mustFinish: true,
   };
+}
+
+// Every planned question's standing right now. Staleness comes from the summary
+// row (a stale question has a stored score computed under a retrieval state that
+// no longer exists); failing comes from membership in the target list, which is
+// already the fresh-and-below-bar set with ignores and chunk scope applied.
+function liveQuestionState(
+  summary: EvalSummary,
+  targetsByQuestion: ReadonlyMap<string, unknown>,
+): Map<string, QuestionState> {
+  const live = new Map<string, QuestionState>();
+  for (const q of summary.questions) {
+    live.set(
+      q.questionId,
+      q.stale ? "stale" : targetsByQuestion.has(q.questionId) ? "failing" : "passing",
+    );
+  }
+  return live;
 }
 
 // --- phase 2: the dirty-set re-score ----------------------------------------
@@ -475,7 +729,7 @@ async function runRescore(c: AutotuneCursor, emit: Emit, shouldStop: () => boole
   // re-score forever, and in the streamed driver there is no deadline to stop it
   // because mustFinish has already switched the budget off. A pass that scores
   // everything it found and does not shrink the set is not going to.
-  const stuck = c.lastDirty !== null && screen.dirty.length >= c.lastDirty;
+  const stuck = drainStuck(screen.dirty.length, c.lastDirty);
   if (stuck) {
     console.warn(
       `[rag:autotune] re-score made no progress at ${screen.dirty.length} dirty ` +
@@ -488,16 +742,20 @@ async function runRescore(c: AutotuneCursor, emit: Emit, shouldStop: () => boole
     // freeze the snapshot. Idempotent, so a slice that dies here simply redoes it.
     await settleAffectedRescore(screen, c.startState);
     return {
-      cursor: { ...c, phase: "outcomes" as const },
+      // Settling a set that would not shrink stamps rows clean under a state some
+      // question never actually reached. The warning above says so to the log; the
+      // history row has to say it too, or a run that gave up on its tail is
+      // indistinguishable from one that came clean.
+      cursor: { ...c, phase: "outcomes" as const, tailStatus: stuck ? ("stuck" as const) : null },
       done: false,
-      doneUnits: c.searched,
+      doneUnits: c.covered.length,
       mustFinish: true,
     };
   }
 
   // No cursor of its own: a question scored under the final state drops out of the
   // next screen, so the phase eliminates its own work exactly like the search does.
-  emit({ doneUnits: c.searched, event: { type: "rescore-start", total: screen.dirty.length } });
+  emit({ doneUnits: c.covered.length, event: { type: "rescore-start", total: screen.dirty.length } });
   let i = 0;
   while (i < screen.dirty.length && !shouldStop()) {
     const batch = screen.dirty.slice(i, i + RESCORE_BATCH);
@@ -507,7 +765,7 @@ async function runRescore(c: AutotuneCursor, emit: Emit, shouldStop: () => boole
       (event) => {
         if (event.type === "score-result") {
           emit({
-            doneUnits: c.searched,
+            doneUnits: c.covered.length,
             message: `Re-scoring ${offset + event.done} of ${screen.dirty.length} affected questions`,
             event: {
               type: "rescore-progress",
@@ -522,11 +780,8 @@ async function runRescore(c: AutotuneCursor, emit: Emit, shouldStop: () => boole
     i += batch.length;
   }
 
-  // Only counts as a pass when the slice got through the whole set — a slice cut
-  // short by its deadline has a smaller `i` for a reason that says nothing about
-  // whether the work is making progress.
-  const lastDirty = i >= screen.dirty.length ? screen.dirty.length : c.lastDirty;
-  return { cursor: { ...c, lastDirty }, done: false, doneUnits: c.searched, mustFinish: true };
+  const lastDirty = passSize(i, screen.dirty.length, c.lastDirty);
+  return { cursor: { ...c, lastDirty }, done: false, doneUnits: c.covered.length, mustFinish: true };
 }
 
 // --- phase 3: the history row -----------------------------------------------
@@ -583,21 +838,23 @@ async function runOutcomes(c: AutotuneCursor, emit: Emit) {
       improved,
       attempts: c.attempts,
       stopReason: c.stopReason,
-      chunksTotal: c.chunksTotal,
-      chunksSearched: c.searched,
+      chunksTotal: c.plan?.length ?? 0,
+      chunksSearched: c.covered.length,
+      chunksFailed: c.failed.length,
+      tailStatus: c.tailStatus,
     },
     outcomes,
   );
   console.log(
     `[rag:autotune] books closed: targeted=${targeted} resolved=${resolved} improved=${improved} ` +
-      `chunks=${c.searched}/${c.chunksTotal} stop=${c.stopReason ?? "complete"} ` +
+      `chunks=${c.covered.length}/${c.plan?.length ?? 0} stop=${c.stopReason ?? "complete"} ` +
       `attempts=${c.attempts} pendingChoice=${c.pendingChoice}`,
   );
-  emit({ doneUnits: c.searched, message: "Recording results" });
+  emit({ doneUnits: c.covered.length, message: "Recording results" });
   return {
     cursor: { ...c, phase: "snapshots" as const },
     done: false,
-    doneUnits: c.searched,
+    doneUnits: c.covered.length,
     mustFinish: true,
   };
 }
@@ -617,12 +874,12 @@ async function runSnapshots(c: AutotuneCursor, emit: Emit, shouldStop: () => boo
   while (left.length > 0 && !shouldStop()) {
     await drainSnapshot(left[0]);
     left.shift();
-    emit({ doneUnits: c.searched, message: `Saving trials (${left.length} left)` });
+    emit({ doneUnits: c.covered.length, message: `Saving trials (${left.length} left)` });
   }
   return {
     cursor: { ...c, snapshots: left },
     done: left.length === 0,
-    doneUnits: c.searched,
+    doneUnits: c.covered.length,
     mustFinish: true,
   };
 }
