@@ -12,7 +12,9 @@
     "rls:check": "node --env-file=.env.local --import tsx scripts/rls-check.ts",
     "cascade:check": "node --env-file=.env.local --import tsx scripts/cascade-check.ts",
     "guard": "node --import tsx scripts/guards.ts",
-    "jobs:smoke": "node --env-file=.env.local --import tsx scripts/jobs-smoke.ts"
+    "jobs:smoke": "node --env-file=.env.local --import tsx scripts/jobs-smoke.ts",
+    "resume:7b": "node --env-file=.env.local --import tsx scripts/resume-7b.ts",
+    "phase8": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/phase8.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.97.1",
