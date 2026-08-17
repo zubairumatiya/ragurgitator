@@ -369,6 +369,9 @@ test("attainability: a recommendation leaves nothing to explain", () => {
     { sim: 0.98, verdict: "accept" as const },
     { sim: 0.95, verdict: "accept" as const },
     { sim: 0.9, verdict: "accept" as const },
+    // Below every candidate τ, and present only so the sample carries both
+    // classes — an all-accept set is now refused outright as one-class.
+    { sim: 0.5, verdict: "reject" as const },
   ];
   const r = calibrateFromJudged(events, 0.9, 1);
   assert.equal(r.recommended, 0.9);
@@ -485,6 +488,60 @@ test("attainability: the best prefix is a prefix the sweep would have considered
   assert.ok(Math.abs(r.attainability.bestRate! - 0.75) < 1e-9);
 });
 
+// A sample with only one class cannot locate a boundary: precision is 1 at every
+// cut point, so the "recommended" τ is just the lowest sim observed. This account's
+// real traffic is exactly that shape (91 accepts, 0 rejects) and it recommends 0.81
+// against a live 0.95 — a three-fold loosening argued from a sample containing no
+// evidence of where matches fail.
+test("attainability: an all-accept sample yields no τ at all", () => {
+  const events = [
+    { sim: 0.98, verdict: "accept" as const },
+    { sim: 0.95, verdict: "accept" as const },
+    { sim: 0.81, verdict: "accept" as const },
+  ];
+  const r = calibrateFromJudged(events, 0.9, 1);
+  assert.equal(r.recommended, null);
+  assert.equal(r.attainability.blocker, "one-class-sample");
+  // Nothing survives that would let a caller reconstruct the suppressed τ.
+  assert.equal(r.precisionAtRecommended, null);
+  assert.equal(r.coverageAtRecommended, null);
+  // The observed operating point is still reported — the panel shows it, it just
+  // may not call it a recommendation.
+  assert.equal(r.attainability.bestRate, 1);
+  assert.equal(r.attainability.bestRateAt!.sim, 0.98);
+});
+
+test("attainability: one-class does not preempt below-min-samples", () => {
+  // Also all-accept, but no prefix was ever ELIGIBLE, so the honest complaint is
+  // still the size of the sample. Precedence matters: "judge more events" and
+  // "judge something that fails" are different instructions.
+  const r = calibrateFromJudged(
+    [
+      { sim: 0.98, verdict: "accept" as const },
+      { sim: 0.95, verdict: "accept" as const },
+    ],
+    0.9,
+    20,
+  );
+  assert.equal(r.recommended, null);
+  assert.equal(r.attainability.blocker, "below-min-samples");
+});
+
+test("attainability: an all-reject sample keeps saying target-unreachable", () => {
+  // One-class too, but no τ was ever on offer, and the reach of the target is the
+  // more useful thing to say about it. This path is deliberately untouched.
+  const r = calibrateFromJudged(
+    [
+      { sim: 0.98, verdict: "reject" as const },
+      { sim: 0.95, verdict: "reject" as const },
+    ],
+    0.9,
+    1,
+  );
+  assert.equal(r.recommended, null);
+  assert.equal(r.attainability.blocker, "target-unreachable");
+});
+
 // --- recall (coverage) — the half the sweep never computed -------------------
 
 test("calibrateFromJudged: coverage is the share of ALL accepts the prefix serves", () => {
@@ -494,12 +551,16 @@ test("calibrateFromJudged: coverage is the share of ALL accepts the prefix serve
     { sim: 0.95, verdict: "accept" as const },
     { sim: 0.9, verdict: "accept" as const },
     { sim: 0.85, verdict: "accept" as const },
+    // Sits below τ, so it changes none of the arithmetic this test pins — it is
+    // here only to keep the sample two-class. Without it there is no τ at all
+    // and the coverage this exists to check has nowhere to be measured.
+    { sim: 0.6, verdict: "reject" as const },
   ];
   const r = calibrateFromJudged(events, 1.0, 1);
   assert.equal(r.totalAccepts, 4);
   assert.equal(r.curve[1].coverageAtOrAbove, 0.5);
-  // Precision holds at 1.0 all the way down, so τ walks to the bottom and
-  // recall reaches 1 — the "no rejects to protect against" case.
+  // Precision holds at 1.0 down to 0.85, so τ walks there and recall reaches 1
+  // — every accept is served, with no reject admitted alongside them.
   assert.equal(r.recommended, 0.85);
   assert.equal(r.coverageAtRecommended, 1);
 });

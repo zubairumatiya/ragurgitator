@@ -148,6 +148,11 @@ function deriveRow(
   // minSamples) genuinely has nothing to report.
   const at = sel.attainability;
   if (at.bestRateAt === null) return none(at);
+  // A one-class pair set is unscored, NOT best-attainable. Its best prefix reads
+  // 100% precision, which as a leaderboard row is a claim that this model never
+  // makes a false hit — when the truth is that nothing in the sample could have
+  // been one. Worse than saying nothing.
+  if (at.blocker === "one-class-sample") return none(at);
   return {
     row,
     kind: "best-attainable",
@@ -498,10 +503,17 @@ export function KeyModelPanel() {
   const noThresholds =
     derived.length > 0 && !derived.some((d) => d.kind === "at-target");
   // No eligible prefix ANYWHERE means the set never reached minSamples — the
-  // target was never even tested, so pointing at it would be misleading.
+  // target was never even tested, so pointing at it would be misleading. A
+  // one-class set is excluded because its problem is the opposite one: it has
+  // pairs to spare, they just carry a single label, and "add more pairs" is the
+  // wrong instruction when what's missing is a second class.
   const tooFewPairs =
     scored.length > 0 &&
-    scored.every((d) => d.attainability!.blocker !== "target-unreachable");
+    scored.every(
+      (d) =>
+        d.attainability!.blocker !== "target-unreachable" &&
+        d.attainability!.blocker !== "one-class-sample",
+    );
   // The closest any model got, and what the target would have cost it. Ranked by
   // achieved precision: this is the "you asked for 99%, the best model managed
   // 68% over 22 pairs, and 99% with those 7 rejects needs n ≥ 700" line.

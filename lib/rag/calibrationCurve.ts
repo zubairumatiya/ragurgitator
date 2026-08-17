@@ -35,11 +35,18 @@ export type CurvePoint = {
 //                       This is the interesting one: `bestRate` is how close the
 //                       best of them got, and `requiredN` is how large a prefix
 //                       that target would have needed given its reject count.
+//   one-class-sample    a prefix cleared `target`, but every judged event in the
+//                       sample is the SAME class. With no rejects anywhere,
+//                       precision is 1 at every cut point and the "recommended" τ
+//                       is just the lowest sim anyone happened to observe — it
+//                       measures the sample's floor, not a safe threshold. No τ is
+//                       offered; `bestRate` still describes the observed point.
 //   null                a τ was recommended; nothing to explain.
 export type AttainabilityBlocker =
   | "no-events"
   | "below-min-samples"
   | "target-unreachable"
+  | "one-class-sample"
   | null;
 
 export type Attainability = {
@@ -135,6 +142,19 @@ export function selectFromCurve(
   // — there was nothing to recall.
   const last = curve[curve.length - 1];
   const totalAccepts = last === undefined ? 0 : acceptsIn(last);
+  const totalRejects = last === undefined ? 0 : last.n - totalAccepts;
+
+  // A one-class sample can't calibrate anything. Gated on a τ having been picked
+  // so this only fires where a number would actually have been handed out: an
+  // all-REJECT sample at a sane target already yields no τ, and
+  // "target-unreachable" says something more useful about it than this would.
+  const oneClassSample =
+    recommended !== null && (totalAccepts === 0 || totalRejects === 0);
+  if (oneClassSample) {
+    recommended = null;
+    precisionAtRecommended = null;
+    coverage = null;
+  }
 
   // requiredN inverts the acceptance test: accepts/n ≥ target with r rejects
   // means (n − r)/n ≥ target, i.e. n ≥ r / (1 − target). At target = 1 the
@@ -149,11 +169,13 @@ export function selectFromCurve(
   const blocker: AttainabilityBlocker =
     recommended !== null
       ? null
-      : curve.length === 0
-        ? "no-events"
-        : bestRateAt === null
-          ? "below-min-samples"
-          : "target-unreachable";
+      : oneClassSample
+        ? "one-class-sample"
+        : curve.length === 0
+          ? "no-events"
+          : bestRateAt === null
+            ? "below-min-samples"
+            : "target-unreachable";
 
   return {
     recommended,
