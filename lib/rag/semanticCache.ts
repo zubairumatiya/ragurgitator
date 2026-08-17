@@ -51,6 +51,12 @@ export type CachedResult = {
 // same vector under the same model without re-embedding.
 export type CacheKey = { model: string; vector: number[] };
 
+// Provenance of a semantic_cache_shadow row (0069). 'traffic' is a question
+// someone actually asked; 'probe' is one a calibration driver synthesised. The
+// serving threshold is swept over 'traffic' alone — a curve built from engineered
+// near-misses is a worst-case bound, not this account's question distribution.
+export type ShadowOrigin = "traffic" | "probe";
+
 // A miss also hands back the RETRIEVAL query vector when the lookup happens to
 // already have it — i.e. when the cache-key model and the config's embedding
 // model coincide, which is the default. Decoupled, they're vectors in different
@@ -265,13 +271,27 @@ async function resolveThreshold(
 // All three settings come from the CALLER rather than being read here, so this
 // stays a pure function of its inputs and one lookup can't disagree with another
 // about which config it's serving.
+//
+// `shadow` overrides how the nearest match is shadow-logged, and exists for
+// CALIBRATION DRIVERS ONLY — no serving path passes it, so live traffic keeps the
+// configured floor and the 'traffic' origin. A probe pass uses it to record below
+// shadowLogFloor without lowering the floor globally (docs/resume-metrics-plan.md
+// §F2: whether 0.80 should move is the question being measured, so the
+// measurement can't presuppose an answer) and to stamp its rows 'probe' so they
+// stay out of the live recommendation (0069).
 export async function semanticCacheLookup(
   question: string,
   {
     serve,
     threshold: override,
     keyModel: keyModelOverride,
-  }: { serve: boolean; threshold: number | null; keyModel: string | null },
+    shadow,
+  }: {
+    serve: boolean;
+    threshold: number | null;
+    keyModel: string | null;
+    shadow?: { floor?: number; origin?: ShadowOrigin };
+  },
 ): Promise<CacheProbe> {
   const cfg = activeConfig();
   const keyModel = resolveKeyModel(keyModelOverride);
@@ -328,7 +348,7 @@ export async function semanticCacheLookup(
     //
     // Guard-blocked matches are logged too, flagged: the guard trades recall for
     // safety, and the only way to know what that cost is to judge what it rejected.
-    if (match && match.sim >= config.semanticCache.shadowLogFloor) {
+    if (match && match.sim >= (shadow?.floor ?? config.semanticCache.shadowLogFloor)) {
       await detached(() =>
         recordShadow(
           cfg,
@@ -339,6 +359,7 @@ export async function semanticCacheLookup(
           match.value.result.answer,
           match.sim,
           guardBlocked,
+          shadow?.origin ?? "traffic",
         ),
       );
     }
@@ -496,6 +517,17 @@ async function recordSemanticSaving(result: CachedResult, question: string): Pro
 // the KEY model's space, and both the sweep and semantic_cache_thresholds are
 // keyed by that space. Stamping the retrieval model would file the label against
 // a space its number doesn't belong to.
+//
+// `origin` (0069) separates real traffic from calibration probes; see the lookup's
+// `shadow` option for why that has to be a stored fact.
+//
+// Columns added by a migration are OPTIONAL at insert time: each is dropped from
+// the row and the insert retried when postgres reports it undefined (42703), so a
+// deployment running ahead of its migrations keeps logging shadow events with
+// less detail instead of losing them. Ordered newest migration first, since that
+// is the one most likely to be missing.
+const SHADOW_OPTIONAL_COLUMNS = ["origin", "guard_blocked"] as const;
+
 async function recordShadow(
   cfg: ResolvedConfig,
   keyModel: string,
@@ -505,59 +537,41 @@ async function recordShadow(
   servedAnswer: string,
   sim: number,
   guardBlocked: boolean,
+  origin: ShadowOrigin,
 ): Promise<void> {
-  try {
-    await isolated(
-      () => sql`
-        insert into semantic_cache_shadow
-          (config_id, embedding_model, space, fingerprint,
-           new_query, new_query_hash, matched_query, served_answer, sim, guard_blocked)
-        values
-          (${cfg.id}, ${keyModel}, ${spaceOf(keyModel)}, ${fingerprint},
-           ${newQuery}, ${sha256(newQuery)}, ${matchedQuery}, ${servedAnswer}, ${sim}, ${guardBlocked})
-        on conflict (config_id, fingerprint, new_query_hash) do nothing
-      `,
-    );
-  } catch (err) {
-    if (isMissingTable(err)) return;
-    // Migration 0038 not applied yet (undefined_column) → log the event without
-    // the flag rather than losing shadow coverage entirely, same spirit as the
-    // missing-table tolerance above. Drop this fallback once 0038 is applied.
-    if ((err as { code?: string }).code === "42703") {
-      await recordShadowPreGuard(cfg, keyModel, fingerprint, newQuery, matchedQuery, servedAnswer, sim);
+  const row: Record<string, unknown> = {
+    config_id: cfg.id,
+    embedding_model: keyModel,
+    space: spaceOf(keyModel),
+    fingerprint,
+    new_query: newQuery,
+    new_query_hash: sha256(newQuery),
+    matched_query: matchedQuery,
+    served_answer: servedAnswer,
+    sim,
+    guard_blocked: guardBlocked,
+    origin,
+  };
+
+  for (const dropped of [null, ...SHADOW_OPTIONAL_COLUMNS]) {
+    if (dropped) delete row[dropped];
+    try {
+      await isolated(
+        () => sql`
+          insert into semantic_cache_shadow ${sql(row)}
+          on conflict (config_id, fingerprint, new_query_hash) do nothing
+        `,
+      );
+      return;
+    } catch (err) {
+      if (isMissingTable(err)) return;
+      if ((err as { code?: string }).code === "42703") continue;
+      // Telemetry only — swallow so a shadow-log failure never breaks a lookup.
+      console.warn(`[rag:semantic-cache] shadow log failed: ${(err as Error).message}`);
       return;
     }
-    // Telemetry only — swallow so a shadow-log failure never breaks a lookup.
-    console.warn(`[rag:semantic-cache] shadow log failed: ${(err as Error).message}`);
   }
-}
-
-// Pre-0038 insert shape, used only when guard_blocked doesn't exist yet.
-async function recordShadowPreGuard(
-  cfg: ResolvedConfig,
-  keyModel: string,
-  fingerprint: string,
-  newQuery: string,
-  matchedQuery: string,
-  servedAnswer: string,
-  sim: number,
-): Promise<void> {
-  try {
-    await isolated(
-      () => sql`
-        insert into semantic_cache_shadow
-          (config_id, embedding_model, space, fingerprint,
-           new_query, new_query_hash, matched_query, served_answer, sim)
-        values
-          (${cfg.id}, ${keyModel}, ${spaceOf(keyModel)}, ${fingerprint},
-           ${newQuery}, ${sha256(newQuery)}, ${matchedQuery}, ${servedAnswer}, ${sim})
-        on conflict (config_id, fingerprint, new_query_hash) do nothing
-      `,
-    );
-  } catch (err) {
-    if (isMissingTable(err)) return;
-    console.warn(`[rag:semantic-cache] shadow log failed: ${(err as Error).message}`);
-  }
+  console.warn("[rag:semantic-cache] shadow log failed: no insert shape matched the table");
 }
 
 // Matches on the FULL key, llm_model included: the same question banked under

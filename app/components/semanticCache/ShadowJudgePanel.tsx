@@ -40,6 +40,13 @@ const pctOf = (n: number) => `${(n * 100).toFixed(1)}%`;
 const MODELS = config.semanticCache.judgeModelOptions;
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 
+// A curve with no REJECTS in it. Precision is then 100% at every threshold, so the
+// sweep's "recommended τ" is just the lowest sim in the sample — a fact about what
+// happened to be observed, not a boundary. Real traffic on a small corpus produces
+// exactly this: every would-hit is a fair match, and nothing marks where they stop
+// being fair.
+const degenerate = (r: CalibrationReport) => r.totalJudged > 0 && r.totalAccepts === r.totalJudged;
+
 export function ShadowJudgePanel() {
   const [spaces, setSpaces] = useState<ShadowSpace[]>([]);
   const [space, setSpace] = useState("");
@@ -84,12 +91,20 @@ export function ShadowJudgePanel() {
         // Offer the swept τ upward. Re-emitted whenever the curve reloads (space
         // switch, fresh verdicts) so the apply box tracks what's on screen; it
         // ignores the value if the user has typed one of their own.
-        if (report?.recommended !== null && report !== null) {
+        //
+        // NOT offered when the judged set is all accepts. P(accept | sim ≥ τ) is
+        // 100% at every τ then, so the sweep returns the LOWEST SIM ANYONE HAS
+        // OBSERVED and calls it a recommendation — on this corpus that reads 0.81
+        // against a live 0.95, and pre-filling it into the apply box invites a
+        // three-fold drop in the serving threshold on the strength of a sample that
+        // contains no evidence of where matches fail. A one-class sample cannot
+        // locate a boundary; the note below says so instead.
+        if (report?.recommended !== null && report !== null && !degenerate(report)) {
           emitRecommendation({
             value: report.recommended,
             space: s,
             origin: "Shadow judge",
-            notes: `shadow-judge n=${report.totalJudged} target=${report.target}`,
+            notes: `shadow-judge n=${report.totalJudged} target=${report.target} rows=${report.origin}`,
             sampleSize: report.totalJudged,
           });
         }
@@ -173,7 +188,8 @@ export function ShadowJudgePanel() {
           >
             {spaces.map((s) => (
               <option key={s.space} value={s.space}>
-                {s.space} ({s.judged}/{s.total} judged)
+                {s.space} ({s.judged}/{s.total} judged
+                {s.probes > 0 ? `, ${s.probes} probe` : ""})
               </option>
             ))}
           </select>
@@ -286,15 +302,41 @@ export function ShadowJudgePanel() {
                     ? `, ${(curve.overallAcceptRate * 100).toFixed(0)}% accept`
                     : ""}
                   ; needs ≥ {curve.minSamples}
+                  {/* A τ swept over synthetic near-misses is a worst-case bound, not
+                      a setting — so when probe rows exist, say that they're out and
+                      how many, rather than letting "n judged" imply real traffic. */}
+                  {curve.excludedByOrigin > 0 && (
+                    <> · real traffic only ({curve.excludedByOrigin} probe rows excluded)</>
+                  )}
                 </span>
               )}
             </div>
 
             <CalibrationCurve curve={curve} />
 
+            {/* WHY a τ is shown but not offered. Without this the panel prints a
+                number and silently declines to forward it, which reads as a bug. */}
+            {curve && rec !== null && degenerate(curve) && (
+              <p className={NOTE_AMBER}>
+                Not offered for applying: all {curve.totalJudged} judged events were
+                accepted, so precision is 100% at every threshold and the sweep returns
+                the lowest similarity in the sample rather than a boundary. Nothing here
+                shows where matches start failing
+                {curve.excludedByOrigin > 0 ? (
+                  <>
+                    {" "}
+                    — the {curve.excludedByOrigin} excluded probe rows do, but a curve
+                    built from engineered near-misses is a worst-case bound, not this
+                    account&apos;s traffic
+                  </>
+                ) : null}
+                . Keep the current threshold until real rejects appear.
+              </p>
+            )}
+
             {/* Points UP to the apply box, in the Collision floor panel's footer
                 at the top of the page. */}
-            {rec !== null && (
+            {rec !== null && !degenerate(curve!) && (
               <p className="text-xs text-zinc-500 dark:text-zinc-400">
                 Sent to the <strong className="font-medium">Set threshold</strong> box at the
                 bottom of the Collision floor panel — nothing is live until you apply it

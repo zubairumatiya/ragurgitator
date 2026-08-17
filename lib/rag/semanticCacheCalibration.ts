@@ -20,7 +20,11 @@ import { allLabeledQuestions, getCachedQueryEmbeddings } from "@/lib/rag/evalSto
 import { meteredMessage } from "@/lib/rag/meter";
 import { costEmbed, estimateTokensAll } from "@/lib/rag/pricing";
 import { recordSaving } from "@/lib/rag/savingsStore";
-import { resolveKeyModel, type EffectiveAcceptTarget } from "@/lib/rag/semanticCache";
+import {
+  resolveKeyModel,
+  type EffectiveAcceptTarget,
+  type ShadowOrigin,
+} from "@/lib/rag/semanticCache";
 import {
   calibrateFromJudged,
   collisionFloor,
@@ -245,6 +249,10 @@ export type ShadowSpace = {
   space: string;
   total: number;
   judged: number;
+  // Of `total`, how many are synthetic (0069). Surfaced because the panel's
+  // "n judged" is otherwise read as a count of real traffic, and after a probe
+  // pass most of it isn't.
+  probes: number;
   minSim: number;
   maxSim: number;
 };
@@ -257,6 +265,7 @@ export async function listShadowSpaces(): Promise<ShadowSpace[]> {
         select space,
                count(*)::int as total,
                count(verdict)::int as judged,
+               count(*) filter (where origin = 'probe')::int as probes,
                min(sim)::float as "minSim",
                max(sim)::float as "maxSim"
         from semantic_cache_shadow
@@ -277,6 +286,7 @@ export type ShadowEvent = {
   judgeSource: "llm" | "human" | null;
   judgeModel: string | null;
   judgeReason: string | null;
+  origin: ShadowOrigin;
   createdAt: string;
 };
 
@@ -307,11 +317,12 @@ export async function listShadowEvents(opts: {
           judge_source: "llm" | "human" | null;
           judge_model: string | null;
           judge_reason: string | null;
+          origin: ShadowOrigin;
           created_at: Date;
         }[]
       >`
         select id, new_query, matched_query, served_answer, sim,
-               verdict, judge_source, judge_model, judge_reason, created_at
+               verdict, judge_source, judge_model, judge_reason, origin, created_at
         from semantic_cache_shadow
         where space = ${opts.space} and ${ownedConfigs()} ${filterCond}
         order by sim desc
@@ -328,6 +339,7 @@ export async function listShadowEvents(opts: {
     judgeSource: r.judge_source,
     judgeModel: r.judge_model,
     judgeReason: r.judge_reason,
+    origin: r.origin,
     createdAt: r.created_at.toISOString(),
   }));
 }
@@ -537,6 +549,13 @@ export async function setHumanVerdict(
 
 export type CalibrationReport = CalibrationResult & {
   space: string;
+  // Which provenance the curve covers, and how many judged rows the filter left
+  // out. Both travel on the report for the same reason `targetSource` does: a
+  // recommended τ is not interpretable without knowing which questions produced
+  // it, and "88.3% precision" against engineered near-misses and against real
+  // traffic are different claims.
+  origin: ShadowOrigin | "all";
+  excludedByOrigin: number;
   // Whose precision dial produced this curve. The sweep is per-SPACE (shared by
   // every config on the same embedding model) but the target is per-CONFIG, so
   // the answer to "99% according to whom?" has to travel with the report.
@@ -549,21 +568,37 @@ export type CalibrationReport = CalibrationResult & {
 // config-scoped, so resolving the target deep in the stack would silently mean
 // the Default config's. The route resolves it (scopedAcceptTarget) and the value
 // travels back out on the report so the UI can attribute it.
+//
+// DEFAULTS TO REAL TRAFFIC (0069). The recommendation this produces becomes a
+// serving threshold for real questions, and synthetic probe rows are engineered
+// to sit next to a banked question — mixing them in answers "what would τ have to
+// be if every question were adversarial", which is a bound worth having but is
+// not what a live threshold should be set from. Pass origin: 'probe' or 'all'
+// deliberately to read the bound.
 export async function calibrationCurve(
   space: string,
   targetSource: EffectiveAcceptTarget,
+  opts: { origin?: ShadowOrigin | "all" } = {},
 ): Promise<CalibrationReport> {
+  const origin = opts.origin ?? "traffic";
   const rows = await safe(
     () =>
-      sql<{ sim: number; verdict: "accept" | "reject" }[]>`
-        select sim, verdict from semantic_cache_shadow
+      sql<{ sim: number; verdict: "accept" | "reject"; origin: ShadowOrigin }[]>`
+        select sim, verdict, origin from semantic_cache_shadow
         where space = ${space} and ${ownedConfigs()} and verdict is not null`,
       [],
   );
+  const kept = origin === "all" ? rows : rows.filter((r) => r.origin === origin);
   const result = calibrateFromJudged(
-    rows.map((r) => ({ sim: Number(r.sim), verdict: r.verdict })),
+    kept.map((r) => ({ sim: Number(r.sim), verdict: r.verdict })),
     targetSource.target,
     config.semanticCache.minCalibrationSamples,
   );
-  return { ...result, space, targetSource };
+  return {
+    ...result,
+    space,
+    targetSource,
+    origin,
+    excludedByOrigin: rows.length - kept.length,
+  };
 }

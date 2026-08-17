@@ -15,7 +15,8 @@
     "jobs:smoke": "node --env-file=.env.local --import tsx scripts/jobs-smoke.ts",
     "resume:7b": "node --env-file=.env.local --import tsx scripts/resume-7b.ts",
     "phase8": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/phase8.ts",
-    "f1": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f1-negatives.ts"
+    "f1": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f1-negatives.ts",
+    "f2": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f2-floor.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.97.1",
