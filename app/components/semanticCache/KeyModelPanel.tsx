@@ -287,6 +287,11 @@ export function KeyModelPanel() {
   // re-derives what's displayed and writes nothing; the stored acceptTarget is
   // only moved by the explicit "Set as …'s target" button below it.
   const [targetOverride, setTargetOverride] = useState<number | null>(null);
+  // The id THIS client named for the in-flight sweep, so it can be cancelled
+  // while the request is still open — the sweep is a plain POST, so the id has
+  // to travel outbound (see the route). Null whenever no sweep is running.
+  const [sweepRunId, setSweepRunId] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
 
   // The generate control's range and current position. Capped at the gap (asking
   // for more questions than exist just generates the gap) and at the inline
@@ -357,8 +362,18 @@ export function KeyModelPanel() {
   };
 
   const runSweep = async () => {
+    // On a cold cache this is ~an hour of sequential embedding, so it must be
+    // stoppable. Cancelling keeps every vector already embedded — they're
+    // banked as they go — and returns the models scored so far.
+    const runId = crypto.randomUUID();
+    setSweepRunId(runId);
+    setCancelling(false);
     const d = await post("sweep", "/api/semantic-cache/key-model", {
       action: "sweep",
+      runId,
+    }).finally(() => {
+      setSweepRunId(null);
+      setCancelling(false);
     });
     if (!d) return;
     setSweep(d as unknown as SweepResult);
@@ -366,6 +381,25 @@ export function KeyModelPanel() {
     // position carried over from the last one would silently reinterpret new
     // numbers.
     setTargetOverride(null);
+  };
+
+  // Cooperative: this flips a flag the sweep's loops read between embeddings, so
+  // the run stops at its next checkpoint and RETURNS — the partial leaderboard
+  // arrives through the still-open request. Deliberately not an abort of the
+  // fetch, which would throw that result away.
+  const cancelSweep = async () => {
+    if (!sweepRunId) return;
+    setCancelling(true);
+    try {
+      await apiFetch("/api/eval/cancel", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ runId: sweepRunId }),
+      });
+    } catch {
+      // The run is server-side either way; the button re-enables when it lands.
+      setCancelling(false);
+    }
   };
 
   const generate = async () => {
@@ -709,9 +743,24 @@ export function KeyModelPanel() {
                 ? "Re-run sweep"
                 : "Run sweep"}
           </button>
+          {busy === "sweep" && sweepRunId && (
+            <button
+              type="button"
+              className={BTN}
+              onClick={cancelSweep}
+              disabled={cancelling}
+              title="Stops at the next embedding and returns what's been scored so far. Vectors already bought stay cached, so resuming is cheap."
+            >
+              {cancelling ? "Stopping…" : "Cancel"}
+            </button>
+          )}
           <span className="text-xs text-zinc-400">
-            Embedding-only — no LLM calls, and cached, so re-runs are nearly
-            free.
+            {busy === "sweep"
+              ? // The first run on a cold cache is the expensive one in
+                // WALL-CLOCK, not money, and saying so is what stops it being
+                // killed half-way for a third time.
+                "Sequential over models — the first run on a cold cache takes ~an hour. Cancelling keeps everything embedded so far."
+              : "Embedding-only — no LLM calls, and cached, so re-runs are nearly free."}
           </span>
         </div>
       </div>
@@ -746,6 +795,19 @@ export function KeyModelPanel() {
 
       {sweep && (
         <div className="flex flex-col gap-2">
+          {/* A cancelled sweep's rows are real — each model is scored
+              independently on the same pair set — but the RANKING is over
+              whoever got scored, so it must not read as the whole field. */}
+          {sweep.cancelled && (
+            <p className={NOTE_AMBER}>
+              Sweep cancelled — {sweep.rows.filter((r) => r.calibration !== null).length}{" "}
+              of {sweep.rows.length} models scored. The rows below are
+              comparable with each other, but this is not the full leaderboard.
+              Re-running resumes cheaply: every vector already embedded is
+              cached.
+            </p>
+          )}
+
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
             {sweep.pairs.total} pairs ({sweep.pairs.shadow} shadow /{" "}
             {sweep.pairs.generated} generated · {sweep.pairs.same} same /{" "}

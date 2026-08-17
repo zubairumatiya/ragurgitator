@@ -18,9 +18,16 @@
 // COST IS EMBEDDING-ONLY — no LLM calls, no re-ingestion, no chunks table touched.
 // Every text goes through embedQueryCached, so it's content-addressed, metered, and
 // nearly free on re-runs.
+//
+// CANCELLATION. The full sweep is ~an hour of sequential embedding, so it takes a
+// `shouldStop` flag like every other long job here (never a throw — see
+// cancelRegistry). Stopping keeps everything already banked: embedQueryCached
+// persists each vector as it goes, so a cancelled run still warms the cache and
+// still returns the models it managed to score.
 import { config } from "@/lib/config";
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
+import { NEVER_STOP, type ShouldStop } from "@/lib/http/cancelRegistry";
 import { embedQueryCached } from "@/lib/rag/embedCache";
 import { EMBEDDING_MODELS } from "@/lib/rag/embeddingModels";
 import { availableProviders } from "@/lib/rag/providerAvailability";
@@ -68,6 +75,10 @@ export type LeaderboardRow = {
 };
 
 export type SweepResult = {
+  // True when the run stopped early. The rows it did produce are real results —
+  // every model is scored on the same pair set, independently of the others — so
+  // the table stays readable; it is just shorter than the candidate list.
+  cancelled: boolean;
   target: number; // the precision held equal across models
   // Whose dial that target came from. The sweep is global (one pooled pair set,
   // every space) but the target is a per-config setting, and this page isn't
@@ -147,19 +158,32 @@ export async function pooledPairs(): Promise<SweepPair[]> {
 // nearly free), cosines each pair, then runs the same calibration the shadow
 // judge uses — which is the point: τ is chosen by an identical rule for every
 // model, so the recall numbers are directly comparable.
-async function scoreModel(model: string, pairs: SweepPair[], target: number): Promise<{
+async function scoreModel(
+  model: string,
+  pairs: SweepPair[],
+  target: number,
+  shouldStop: ShouldStop,
+): Promise<{
   threshold: number | null;
   recall: number | null;
   precision: number | null;
   aucValue: number | null;
   calibration: CalibrationResult;
   scored: { sim: number; label: PairLabel }[];
-}> {
+} | null> {
   const texts = [...new Set(pairs.flatMap((p) => [p.textA, p.textB]))];
   const vectors = new Map<string, number[]>();
   // Sequential: a sweep is a background action with no latency budget, and one
   // request at a time is what provider rate limits like.
-  for (const t of texts) vectors.set(t, await embedQueryCached(t, model));
+  for (const t of texts) {
+    // Checked BETWEEN embeddings, so cancelling lands within one provider call
+    // rather than at the end of the model. A half-embedded model can't be
+    // scored — an incomplete text set would silently grade this model on a
+    // different pair set than the others — so it returns null and reports as
+    // unscored. The vectors it did buy are already persisted.
+    if (shouldStop()) return null;
+    vectors.set(t, await embedQueryCached(t, model));
+  }
 
   const scored = pairs.map((p) => ({
     sim: cosine(vectors.get(p.textA)!, vectors.get(p.textB)!),
@@ -196,6 +220,7 @@ async function scoreModel(model: string, pairs: SweepPair[], target: number): Pr
 export async function runKeyModelSweep(
   targetSource: EffectiveAcceptTarget,
   candidates: string[] = [...config.semanticCache.keyModelSweep.candidates],
+  shouldStop: ShouldStop = NEVER_STOP,
 ): Promise<SweepResult> {
   const pairs = await pooledPairs();
   const counts = {
@@ -208,7 +233,33 @@ export async function runKeyModelSweep(
 
   const rows: LeaderboardRow[] = [];
   const availability = await availableProviders();
+  let cancelled = false;
   for (const model of candidates) {
+    // A cancelled sweep still lists the models it never got to, for the same
+    // reason unavailable ones are listed: an absent row reads as a bad score.
+    if (cancelled || shouldStop()) {
+      cancelled = true;
+      const spec = EMBEDDING_MODELS[model];
+      rows.push({
+        model,
+        space: spaceOf(model),
+        dimension: spec?.dimension ?? 0,
+        provider: spec?.provider ?? "unknown",
+        available: false,
+        reason: "not scored — sweep cancelled",
+        threshold: null,
+        recallAtThreshold: null,
+        auc: null,
+        precisionAtThreshold: null,
+        pairsScored: 0,
+        samePairs: counts.same,
+        differentPairs: counts.different,
+        calibration: null,
+        error: null,
+      });
+      continue;
+    }
+
     const spec = EMBEDDING_MODELS[model];
     const base = {
       model,
@@ -240,7 +291,16 @@ export async function runKeyModelSweep(
     }
 
     try {
-      const s = await scoreModel(model, pairs, targetSource.target);
+      const s = await scoreModel(model, pairs, targetSource.target, shouldStop);
+      if (!s) {
+        cancelled = true;
+        rows.push({
+          ...base,
+          available: false,
+          reason: "not scored — sweep cancelled part-way through this model",
+        });
+        continue;
+      }
       rows.push({
         ...base,
         available: true,
@@ -272,6 +332,7 @@ export async function runKeyModelSweep(
   );
 
   return {
+    cancelled,
     target: targetSource.target,
     targetSource,
     minSamples: config.semanticCache.minCalibrationSamples,

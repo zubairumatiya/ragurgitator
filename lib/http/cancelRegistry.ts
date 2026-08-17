@@ -54,6 +54,21 @@ export function registerRun(userId: string): string {
   return runId;
 }
 
+// Register a run under an id the CLIENT chose. The NDJSON path can hand its id
+// back on the wire before any work happens; a plain JSON POST cannot — its
+// response only exists once the work is over — so the long-running ones let the
+// caller name the run up front instead.
+//
+// Refuses an id already in flight (returns false) rather than overwriting it:
+// otherwise a second run could silently take over the first one's cancel
+// channel, or a guessed id could bind a stranger's cancel button to your run.
+// The caller treats false as "no cancel channel", not as a failure to start.
+export function registerRunId(runId: string, userId: string): boolean {
+  if (runs.has(runId)) return false;
+  runs.set(runId, { userId, cancelled: false });
+  return true;
+}
+
 // Drop a finished run. Idempotent — the stream's `finally` is the only caller,
 // but it runs on the error and client-disconnect paths too.
 export function unregisterRun(runId: string): void {

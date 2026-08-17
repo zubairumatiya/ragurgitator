@@ -5,6 +5,7 @@ import {
   NEVER_STOP,
   isCancelled,
   registerRun,
+  registerRunId,
   requestCancel,
   resetRunsForTest,
   unregisterRun,
@@ -75,6 +76,26 @@ test("unregisterRun: a cancelled-then-finished run does not linger as cancelled"
   requestCancel(runId, "user-a");
   unregisterRun(runId);
   assert.equal(isCancelled(runId), false);
+});
+
+test("registerRunId: a client-named run is cancellable like any other", () => {
+  resetRunsForTest();
+  assert.equal(registerRunId("run-1", "user-a"), true);
+  assert.equal(isCancelled("run-1"), false);
+  assert.equal(requestCancel("run-1", "user-a"), true);
+  assert.equal(isCancelled("run-1"), true);
+});
+
+test("registerRunId: an id already in flight is refused, not taken over", () => {
+  resetRunsForTest();
+  registerRunId("run-1", "user-a");
+  // Refusing is what stops a guessed id from binding someone else's Cancel
+  // button to your run — and stops the second registration from resetting the
+  // first one's cancelled flag back to false.
+  assert.equal(registerRunId("run-1", "user-b"), false);
+  requestCancel("run-1", "user-a");
+  assert.equal(registerRunId("run-1", "user-a"), false);
+  assert.equal(isCancelled("run-1"), true);
 });
 
 test("NEVER_STOP: the default for every non-streamed caller says 'keep going'", () => {

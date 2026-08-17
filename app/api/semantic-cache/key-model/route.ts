@@ -20,9 +20,23 @@
 //
 // Config-scoped — but `apply` with scope "all" writes every config, which is how a
 // "global default" is expressed at runtime: the true global is a code constant.
+//
+// `sweep` IS CANCELLABLE, and has to be: a cold cache makes it ~an hour of
+// sequential embedding, and an abandoned one used to hold the process for that
+// whole hour (killing the dev server took SIGKILL). Two independent stop signals,
+// because they cover different accidents:
+//   • request.signal — the tab closed or the client aborted. Nothing is left to
+//     return the partial result to, but the vectors already bought stay banked.
+//   • the cancel registry, under a runId the CLIENT names in the body — an
+//     explicit Cancel while the request is still open, so the partial leaderboard
+//     comes back instead of being discarded. A plain JSON POST can't hand out a
+//     server-chosen id (its response only exists once the work is done), which is
+//     why this direction is inverted from the NDJSON routes'.
 import { z } from "zod";
 
+import { activeUserId } from "@/lib/auth/userScope";
 import { parseBody } from "@/lib/http/body";
+import { registerRunId, isCancelled, unregisterRun } from "@/lib/http/cancelRegistry";
 import { withRequestConfig } from "@/lib/http/configScope";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { getBatchSavings, updateBatchSavings } from "@/lib/rag/batchStore";
@@ -59,6 +73,9 @@ const Body = z.discriminatedUnion("action", [
     // Restrict the sweep to a subset (a re-run of one row). Omitted = the
     // configured candidate list.
     candidates: z.array(z.string().min(1)).min(1).optional(),
+    // The id POST /api/eval/cancel will name to stop this run. Omitted = no
+    // cancel channel; request.signal still applies.
+    runId: z.uuid().optional(),
   }),
   z.object({
     action: z.literal("apply"),
@@ -86,9 +103,23 @@ export async function POST(request: Request) {
   return withRequestConfig(request, async () => {
     try {
       if (data.action === "sweep") {
-        return Response.json(
-          await runKeyModelSweep(await scopedAcceptTarget(), data.candidates),
-        );
+        // A runId already in flight yields no channel rather than stealing the
+        // other run's — registerRunId refuses it, and the signal still stops us.
+        const runId =
+          data.runId && registerRunId(data.runId, activeUserId())
+            ? data.runId
+            : null;
+        try {
+          return Response.json(
+            await runKeyModelSweep(
+              await scopedAcceptTarget(),
+              data.candidates,
+              () => request.signal.aborted || (runId !== null && isCancelled(runId)),
+            ),
+          );
+        } finally {
+          if (runId) unregisterRun(runId);
+        }
       }
 
       if (data.action === "backfill") {
