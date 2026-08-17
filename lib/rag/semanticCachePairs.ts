@@ -21,6 +21,7 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { meteredMessage } from "@/lib/rag/meter";
+import { judgeOne } from "@/lib/rag/semanticCacheCalibration";
 
 export type PairLabel = "same" | "different";
 export type PairDifficulty = "paraphrase" | "hard-negative";
@@ -202,9 +203,14 @@ export async function questionsNeedingPairs(limit = 200): Promise<PairGap[]> {
 // without canonicalizing, one question could store the same text pair twice under
 // both orders and have it counted twice by the sweep. Idempotent via on-conflict,
 // so re-applying a batch is safe.
+//
+// A pair may arrive carrying the verdict a screen already obtained for it (see
+// generatePairs). Storing it here rather than re-judging later is what keeps the
+// F3 audit from paying a second time for a row that has already been ruled on;
+// the columns are 0040's, written exactly as setPairVerdict writes them.
 export async function insertPairs(
   originQuestionId: string,
-  pairs: EvalPair[],
+  pairs: (EvalPair & { verdict?: "accept" | "reject"; judgeModel?: string; judgeReason?: string | null })[],
   generatedBy: string,
 ): Promise<number> {
   let inserted = 0;
@@ -217,10 +223,15 @@ export async function insertPairs(
       : [p.textA, p.textB, ha, hb];
     const done = await sql`
       insert into semantic_cache_pairs
-        (origin_question_id, text_a, text_b, hash_a, hash_b, label, difficulty, generated_by)
+        (origin_question_id, text_a, text_b, hash_a, hash_b, label, difficulty, generated_by,
+         verdict, verdict_source, judge_model, judge_reason, judged_at)
       values
         (${originQuestionId}, ${textA}, ${textB}, ${hashA}, ${hashB},
-         ${p.label}, ${p.difficulty}, ${generatedBy})
+         ${p.label}, ${p.difficulty}, ${generatedBy},
+         ${p.verdict ?? null}, ${p.verdict ? "llm" : null},
+         ${p.verdict ? (p.judgeModel ?? null) : null},
+         ${p.verdict ? (p.judgeReason ?? null) : null},
+         ${p.verdict ? new Date() : null})
       on conflict (origin_question_id, hash_a, hash_b) do nothing
     `;
     inserted += done.count;
@@ -443,7 +454,52 @@ export type PairGenResult = {
   pairsInserted: number;
   skipped: number;
   model: string;
+  // Pairs the screen threw away because the judge contradicted the generator's
+  // own label, and the model that made that call. Reported rather than folded
+  // into `skipped`: a screened-out pair is the gate WORKING, while a skip is a
+  // question that produced nothing — opposite readings of the same number.
+  screenedOut: number;
+  screenModel: string | null;
 };
+
+// SCREEN ONE GENERATED PAIR (F3's fix, applied at generation time).
+//
+// F3 measured the generator at 100% on paraphrases and 80% on HARD NEGATIVES —
+// 15 of 90 "negatives" were paraphrases, and the sweep uses those to punish
+// exactly the models that scored them correctly. Quarantine caught them only
+// after a judge pass and a hand adjudication nobody is obliged to run; this asks
+// the same question at write time instead.
+//
+// Direction matters, and it's the one F3's driver established: the VARIANT is
+// the new question and the ORIGIN is the stored one, which is the direction the
+// cache actually runs in. Same rubric, same judge, no new prompt.
+//
+// FAILS OPEN. An unparseable reply, a judge outage, or an origin question with
+// no stored answer (the rubric asks whether serving THAT ANSWER was right, so
+// there is nothing to ask about) all store the pair unscreened rather than
+// dropping it — a screen that silently empties the pair set on a judge problem
+// would be worse than the mislabelling it exists to catch.
+async function screenPair(
+  origin: string,
+  expectedAnswer: string | null,
+  pair: EvalPair,
+  model: string,
+): Promise<
+  | { keep: true; verdict?: "accept" | "reject"; reason?: string }
+  | { keep: false }
+> {
+  if (expectedAnswer === null) return { keep: true };
+  const variant = pair.textB;
+  try {
+    const { verdict, reason } = await judgeOne(model, variant, origin, expectedAnswer);
+    if (verdict === null) return { keep: true };
+    if (verdict !== expectedVerdict(pair.label)) return { keep: false };
+    return { keep: true, verdict, reason };
+  } catch (err) {
+    console.warn(`[rag:semantic-cache] pair screen failed: ${(err as Error).message}`);
+    return { keep: true };
+  }
+}
 
 // One generation pass in-process, mirroring the shadow judge's shape: a bounded
 // number of SEQUENTIAL LLM calls inside one request, so a caller that omits
@@ -473,16 +529,44 @@ export async function generatePairs(opts: { limit?: number } = {}): Promise<Pair
     const counts = config.semanticCache.keyModelSweep.pairsPerQuestion;
     const limit = Math.min(opts.limit ?? GEN_DEFAULT_LIMIT, GEN_MAX_LIMIT);
     const gaps = await questionsNeedingPairs(limit);
+    // The judge the shadow log's boundary pass uses, which is the model F3
+    // audited this pair set with. Deliberately not a separate setting: a screen
+    // run under a different judge than the audit would disagree with the
+    // quarantine and neither number would mean anything.
+    const screenModel = config.semanticCache.keyModelSweep.screenGeneratedPairs
+      ? config.semanticCache.judgeBoundaryModel
+      : null;
 
     let pairsInserted = 0;
     let skipped = 0;
+    let screenedOut = 0;
     for (const gap of gaps) {
       try {
         const resp = await meteredMessage(
           "cache_pairs",
           pairRequestParams(gap.question, gap.expectedAnswer, counts, model),
         );
-        const pairs = pairsFrom(gap.question, parsePairs(resp));
+        const generated = pairsFrom(gap.question, parsePairs(resp));
+        let pairs: Parameters<typeof insertPairs>[1] = generated;
+        if (screenModel !== null && generated.length > 0) {
+          const kept: Parameters<typeof insertPairs>[1] = [];
+          for (const p of generated) {
+            // Sequential, like the judge's own pass: this runs inside one HTTP
+            // request and a fan-out here would multiply the provider load by
+            // the pairs-per-question count.
+            const out = await screenPair(gap.question, gap.expectedAnswer, p, screenModel);
+            if (!out.keep) {
+              screenedOut++;
+              continue;
+            }
+            kept.push(
+              out.verdict
+                ? { ...p, verdict: out.verdict, judgeModel: screenModel, judgeReason: out.reason ?? null }
+                : p,
+            );
+          }
+          pairs = kept;
+        }
         if (pairs.length === 0) {
           skipped++;
           continue;
@@ -495,7 +579,7 @@ export async function generatePairs(opts: { limit?: number } = {}): Promise<Pair
         skipped++;
       }
     }
-    return { questionsProcessed: gaps.length, pairsInserted, skipped, model };
+    return { questionsProcessed: gaps.length, pairsInserted, skipped, model, screenedOut, screenModel };
   } finally {
     generating = false;
   }

@@ -413,13 +413,24 @@ export function KeyModelPanel() {
     if (d.mode === "batch") {
       setNote(
         d.job
-          ? "Submitted a batch — pairs land when it completes (Batch API panel tracks it)."
+          ? // The batch path is NOT screened — the inline path judges each pair as
+            // it is written, but doing that inside a batch-apply step would mean
+            // thousands of sequential judge calls in one job slice. Batch-generated
+            // pairs are still audited after the fact by `npm run f3`.
+            "Submitted a batch — pairs land when it completes (Batch API panel tracks it). " +
+            "Batch pairs are NOT judge-screened; run the F3 audit over them."
           : String(d.reason ?? "Nothing to generate."),
       );
     } else {
       setNote(
         `Generated ${d.pairsInserted} pair(s) from ${d.questionsProcessed} question(s)` +
-          (Number(d.skipped) > 0 ? `; ${d.skipped} skipped.` : "."),
+          (Number(d.skipped) > 0 ? `; ${d.skipped} skipped` : "") +
+          // The screen is the reason the generator can be trusted at all, so its
+          // count is reported rather than folded into "skipped": a rejected pair
+          // is the gate working, not a question that produced nothing.
+          (Number(d.screenedOut) > 0
+            ? `; ${d.screenedOut} rejected by the judge as mislabelled.`
+            : "."),
       );
       if (d.stats) setPairs(d.stats as PairStats);
     }

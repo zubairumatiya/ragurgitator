@@ -133,9 +133,19 @@ export const config = {
       // Per eval question. Hard negatives are the load-bearing half: random distinct
       // pairs are separated near-perfectly by every model and grade nothing.
       pairsPerQuestion: { paraphrase: 3, hardNegative: 3 },
-      // Cheap model on purpose — writing question VARIANTS is much easier than judging
-      // one, and it's a one-off over the whole bank.
-      generateModel: "claude-haiku-4-5",
+      // Was claude-haiku-4-5 on the theory that writing question VARIANTS is much
+      // easier than judging one. F3 measured that and it isn't true of the half
+      // that matters: haiku scored 100% on paraphrases but only 80% on HARD
+      // NEGATIVES — 15 of 90 were paraphrases wearing a negative's label, and the
+      // sweep punishes exactly the models that score those correctly. Same price
+      // per token as the judge this is screened against, and a one-off over the
+      // whole bank.
+      generateModel: "claude-sonnet-5",
+      // Screen every generated pair through the shadow judge before storing it
+      // (semanticCachePairs.generatePairs). The judge is the same rubric F3
+      // audited with, so this turns the quarantine from a cleanup pass somebody
+      // has to remember to run into a gate. Costs one judge call per pair.
+      screenGeneratedPairs: true,
     },
   },
 } as const;
