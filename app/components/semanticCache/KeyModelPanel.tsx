@@ -618,6 +618,15 @@ export function KeyModelPanel() {
               {pairs.questionsRemaining === 1 ? "" : "s"} with none yet
             </span>
           )}
+          {/* Without this the count above reads as the set the sweep scores, which
+              it is not once any row is quarantined — the audited-wrong rows are
+              still generated, still occupy their origin question, and still count
+              toward "generated"; they are simply no longer scored. */}
+          {pairs && pairs.quarantined > 0 && (
+            <span className="text-amber-600 dark:text-amber-500">
+              · {pairs.quarantined} mislabelled, excluded from the sweep
+            </span>
+          )}
         </div>
 
         {/* How MANY questions the next run covers. Generation is the only paid

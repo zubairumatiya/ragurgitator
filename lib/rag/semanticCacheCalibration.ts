@@ -389,7 +389,14 @@ VERDICT: <accept|reject> — <one short reason>`;
 // One judge call. Returns null verdict when the reply can't be parsed (we then
 // leave the row unjudged rather than guess). Metered like every other Anthropic
 // call so a 100-row pass shows up in spend_totals (see meter.ts).
-async function judgeOne(
+//
+// Exported for F3, which audits semantic_cache_pairs with the SAME rubric rather
+// than a second one: a generated pair is exactly a (new question, stored
+// question, stored answer) triple once the origin question supplies the latter
+// two, so reusing JUDGE_SYSTEM keeps "what a pair label means" and "what a
+// shadow verdict means" the single claim that pooling them in the sweep already
+// assumes. Everything table-bound lives in judgeShadowEvents, not here.
+export async function judgeOne(
   model: string,
   newQuery: string,
   matchedQuery: string,

@@ -228,9 +228,26 @@ export async function insertPairs(
   return inserted;
 }
 
+// The verdict a constructed label predicts: 'same' claims one answer serves both
+// (the judge would accept the match), 'different' claims it does not. This is the
+// single place the two vocabularies are tied together — the pair table's labels
+// and the shadow judge's verdicts — and F3's whole measurement is how often the
+// generator's claim survives contact with a judge.
+export const expectedVerdict = (label: PairLabel): "accept" | "reject" =>
+  label === "same" ? "accept" : "reject";
+
 // The whole generated set, for the sweep. Global (not config-scoped): a pair is
 // a property of two question texts, not of a config, and pooling every label
 // into one set is the point — see the plan doc's "Pooling" section.
+//
+// QUARANTINE (F3). A row whose final verdict CONTRADICTS its constructed label is
+// excluded: the sweep grades candidate models against these labels, so a
+// "hard negative" that is really a paraphrase punishes exactly the models that
+// score it correctly. The filter is deliberately `verdict is null or
+// verdict = expected(label)` and not `verdict = expected(label)` — unjudged rows
+// must still flow through, or the sweep silently empties for any account that has
+// never run F3. Verdicts are dropped rather than relabelled; see the plan doc's
+// "Considered and not doing".
 export async function listPairs(): Promise<EvalPair[]> {
   try {
     const rows = await sql<
@@ -241,6 +258,10 @@ export async function listPairs(): Promise<EvalPair[]> {
       join eval_questions q on q.id = p.origin_question_id
       join documents d on d.id = q.document_id
       where d.user_id = ${activeUserId()}
+        and (
+          p.verdict is null
+          or p.verdict = case when p.label = 'same' then 'accept' else 'reject' end
+        )
     `;
     return rows.map((r) => ({
       textA: r.text_a,
@@ -254,12 +275,122 @@ export async function listPairs(): Promise<EvalPair[]> {
   }
 }
 
+// --- audit read path (F3) ----------------------------------------------------
+
+export type PairForJudging = {
+  id: string;
+  // The ORIGIN question — the one the pair was generated from, whose answer the
+  // cache would be serving. Resolved from eval_questions, NOT from text_a.
+  originText: string;
+  // The generated variant: the paraphrase or hard negative under test.
+  variantText: string;
+  expectedAnswer: string | null;
+  label: PairLabel;
+  difficulty: PairDifficulty;
+  verdict: "accept" | "reject" | null;
+  verdictSource: "llm" | "human" | null;
+  judgeReason: string | null;
+};
+
+// Every pair with its origin/variant roles RESOLVED, for the F3 audit.
+//
+// WHY THIS CANNOT READ text_a AS THE ORIGIN. 0040's column comments say text_a is
+// the origin and text_b the variant, and that was true as written — but insertPairs
+// stores the pair in a CANONICAL orientation (lower sha256 first) so one question
+// can't bank the same text pair under both orders. The flip is content-addressed
+// and therefore effectively random: of the 216 rows in this database, text_a is the
+// origin in 98 and text_b in the other 118. Judging with a fixed (matched = text_a,
+// new = text_b) assignment would hand the judge the variant as the STORED question
+// for more than half the set — a different question than the one the cache actually
+// keys on, with the origin's answer attached to it.
+//
+// eval_questions.question is the authority. The pair is skipped rather than guessed
+// if neither text matches it, which can only happen if a question was edited after
+// its pairs were generated — the hashes would no longer agree either, so there is no
+// safe repair to make here.
+export function variantOf(
+  textA: string,
+  textB: string,
+  originQuestion: string,
+): string | null {
+  if (textA === originQuestion) return textB;
+  if (textB === originQuestion) return textA;
+  return null;
+}
+
+export async function pairsForJudging(): Promise<PairForJudging[]> {
+  const rows = await sql<
+    {
+      id: string;
+      text_a: string;
+      text_b: string;
+      question: string;
+      expected_answer: string | null;
+      label: PairLabel;
+      difficulty: PairDifficulty;
+      verdict: "accept" | "reject" | null;
+      verdict_source: "llm" | "human" | null;
+      judge_reason: string | null;
+    }[]
+  >`
+    select p.id, p.text_a, p.text_b, q.question, q.expected_answer,
+           p.label, p.difficulty, p.verdict, p.verdict_source, p.judge_reason
+    from semantic_cache_pairs p
+    join eval_questions q on q.id = p.origin_question_id
+    join documents d on d.id = q.document_id
+    where d.user_id = ${activeUserId()}
+    order by p.difficulty, p.id
+  `;
+  return rows.flatMap((r) => {
+    const variantText = variantOf(r.text_a, r.text_b, r.question);
+    if (variantText === null) return [];
+    return [
+      {
+        id: r.id,
+        originText: r.question,
+        variantText,
+        expectedAnswer: r.expected_answer,
+        label: r.label,
+        difficulty: r.difficulty,
+        verdict: r.verdict,
+        verdictSource: r.verdict_source,
+        judgeReason: r.judge_reason,
+      },
+    ];
+  });
+}
+
+// Record a verdict. A HUMAN verdict is final and is never overwritten by a later
+// LLM pass — same rule as the shadow log's setHumanVerdict — so an adjudicated
+// row survives a re-judge of the whole table.
+export async function setPairVerdict(
+  id: string,
+  verdict: "accept" | "reject",
+  source: "llm" | "human",
+  judgeModel: string | null,
+  reason: string | null,
+): Promise<void> {
+  await sql`
+    update semantic_cache_pairs
+    set verdict = ${verdict}, verdict_source = ${source},
+        judge_model = ${judgeModel}, judge_reason = ${reason}, judged_at = now()
+    where id = ${id}
+      and (${source} = 'human' or verdict_source is distinct from 'human')
+  `;
+}
+
 export type PairStats = {
   total: number;
   same: number;
   different: number;
   questionsCovered: number;
   questionsRemaining: number;
+  // Rows a verdict contradicts, which listPairs excludes. Counted separately from
+  // `total` rather than deducted from it: the panel offers to GENERATE more pairs,
+  // and a quarantined row still occupies its origin question (so generation will
+  // not top it up) even though the sweep no longer scores it. Reporting one number
+  // would make one of those two readings wrong.
+  quarantined: number;
 };
 
 // Counts for the panel: what exists, and how much of the bank still has no
@@ -271,15 +402,20 @@ export async function pairStats(): Promise<PairStats> {
     different: 0,
     questionsCovered: 0,
     questionsRemaining: 0,
+    quarantined: 0,
   };
   try {
     const [row] = await sql<
-      { total: number; same: number; different: number; covered: number }[]
+      { total: number; same: number; different: number; covered: number; quarantined: number }[]
     >`
       select count(*)::int as total,
              count(*) filter (where p.label = 'same')::int as same,
              count(*) filter (where p.label = 'different')::int as different,
-             count(distinct p.origin_question_id)::int as covered
+             count(distinct p.origin_question_id)::int as covered,
+             count(*) filter (
+               where p.verdict is not null
+                 and p.verdict <> case when p.label = 'same' then 'accept' else 'reject' end
+             )::int as quarantined
       from semantic_cache_pairs p
       join eval_questions q on q.id = p.origin_question_id
       join documents d on d.id = q.document_id
@@ -292,6 +428,7 @@ export async function pairStats(): Promise<PairStats> {
       different: row?.different ?? 0,
       questionsCovered: row?.covered ?? 0,
       questionsRemaining: remaining,
+      quarantined: row?.quarantined ?? 0,
     };
   } catch (err) {
     if (isMissingTable(err)) return empty;
