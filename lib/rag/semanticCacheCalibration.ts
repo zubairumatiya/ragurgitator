@@ -563,6 +563,14 @@ export type CalibrationReport = CalibrationResult & {
   // traffic are different claims.
   origin: ShadowOrigin | "all";
   excludedByOrigin: number;
+  // Judged rows from the F5 sub-floor sample (sim < shadowLogFloor), and whether
+  // this curve counted them. They are excluded by default: they are a ~5% sample
+  // of their band sitting next to a 100% census above it, so a rate computed
+  // across the boundary is a rate over two different sampling regimes. Reported
+  // rather than silently dropped — the whole point of collecting them is that
+  // somebody looks at whether the band below 0.80 has started to matter.
+  subFloorJudged: number;
+  includesSubFloor: boolean;
   // Whose precision dial produced this curve. The sweep is per-SPACE (shared by
   // every config on the same embedding model) but the target is per-CONFIG, so
   // the answer to "99% according to whom?" has to travel with the report.
@@ -585,9 +593,10 @@ export type CalibrationReport = CalibrationResult & {
 export async function calibrationCurve(
   space: string,
   targetSource: EffectiveAcceptTarget,
-  opts: { origin?: ShadowOrigin | "all" } = {},
+  opts: { origin?: ShadowOrigin | "all"; includeSubFloor?: boolean } = {},
 ): Promise<CalibrationReport> {
   const origin = opts.origin ?? "traffic";
+  const includesSubFloor = opts.includeSubFloor ?? false;
   const rows = await safe(
     () =>
       sql<{ sim: number; verdict: "accept" | "reject"; origin: ShadowOrigin }[]>`
@@ -595,7 +604,11 @@ export async function calibrationCurve(
         where space = ${space} and ${ownedConfigs()} and verdict is not null`,
       [],
   );
-  const kept = origin === "all" ? rows : rows.filter((r) => r.origin === origin);
+  const byOrigin = origin === "all" ? rows : rows.filter((r) => r.origin === origin);
+  const isSubFloor = (r: { sim: number }) =>
+    Number(r.sim) < config.semanticCache.shadowLogFloor;
+  const subFloorJudged = byOrigin.filter(isSubFloor).length;
+  const kept = includesSubFloor ? byOrigin : byOrigin.filter((r) => !isSubFloor(r));
   const result = calibrateFromJudged(
     kept.map((r) => ({ sim: Number(r.sim), verdict: r.verdict })),
     targetSource.target,
@@ -606,6 +619,10 @@ export async function calibrationCurve(
     space,
     targetSource,
     origin,
-    excludedByOrigin: rows.length - kept.length,
+    // Counted against the origin filter alone, so this still means "rows another
+    // provenance contributed" and doesn't silently absorb the sub-floor drop.
+    excludedByOrigin: rows.length - byOrigin.length,
+    subFloorJudged,
+    includesSubFloor,
   };
 }

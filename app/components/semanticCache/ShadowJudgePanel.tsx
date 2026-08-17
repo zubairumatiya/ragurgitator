@@ -297,6 +297,17 @@ export function ShadowJudgePanel() {
                   {curve.excludedByOrigin > 0 && (
                     <> · real traffic only ({curve.excludedByOrigin} probe rows excluded)</>
                   )}
+                  {/* The F5 sample of the band below the shadow floor. Shown
+                      because collecting it is only worth anything if someone
+                      notices it growing a servable region; it stays out of the
+                      curve because it's a fraction of its band beside a census. */}
+                  {!curve.includesSubFloor && curve.subFloorJudged > 0 && (
+                    <>
+                      {" "}
+                      · {curve.subFloorJudged} sub-floor sample row
+                      {curve.subFloorJudged === 1 ? "" : "s"} excluded
+                    </>
+                  )}
                 </span>
               )}
             </div>

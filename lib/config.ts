@@ -95,6 +95,15 @@ export const config = {
     // threshold DOWNWARD needs judged examples below today's 0.95, which the serving
     // path would never surface.
     shadowLogFloor: 0.8,
+    // …and a small random sample of the traffic BELOW that floor (F5). The floor
+    // stays at 0.80 because F2 measured that band and found no τ can live there;
+    // this samples it anyway so that if a different corpus, key model or question
+    // mix ever changes that, it shows up in the data instead of staying invisible
+    // by construction. Sampled rows are ordinary 'traffic' rows — they are real
+    // traffic — but they are a 5% sample of their band next to a 100% census
+    // above it, so calibrationCurve leaves them out of the serving curve unless
+    // asked for them. 0 disables sampling.
+    subFloorSampleRate: 0.05,
     // Recommend a threshold this far above the eval-bank distinct-question collision
     // floor, and keep it at least this far below the lowest same-answer pair when a
     // safe band exists.

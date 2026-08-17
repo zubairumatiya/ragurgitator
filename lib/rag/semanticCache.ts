@@ -348,7 +348,21 @@ export async function semanticCacheLookup(
     //
     // Guard-blocked matches are logged too, flagged: the guard trades recall for
     // safety, and the only way to know what that cost is to judge what it rejected.
-    if (match && match.sim >= (shadow?.floor ?? config.semanticCache.shadowLogFloor)) {
+    //
+    // BELOW the floor, a small random sample is logged too (F5). The floor is not
+    // lowered — F2 settled that 0.80 stays — but a band nothing is ever recorded
+    // from cannot be shown to have changed, so a fraction of it is sampled to make
+    // drift visible on a different corpus, key model or question mix. Only on the
+    // live path: a driver passing `shadow` is already choosing its own floor, and
+    // a probe pass runs at floor 0 where "below the floor" means nothing.
+    const floor = shadow?.floor ?? config.semanticCache.shadowLogFloor;
+    const subFloorSample =
+      shadow === undefined &&
+      match !== null &&
+      match.sim < floor &&
+      Math.random() < config.semanticCache.subFloorSampleRate;
+
+    if (match && (match.sim >= floor || subFloorSample)) {
       await detached(() =>
         recordShadow(
           cfg,
