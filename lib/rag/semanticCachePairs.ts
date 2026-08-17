@@ -190,11 +190,18 @@ export async function questionsNeedingPairs(limit = 200): Promise<PairGap[]> {
   }));
 }
 
-// Insert generated pairs. The unique key is (hash_a, hash_b), so the texts are
-// stored in a CANONICAL orientation (lower hash first) — the label is symmetric,
-// so orientation carries no information, and without canonicalizing, the same
-// text pair could be stored twice under both orders and be counted twice by the
-// sweep. Idempotent via on-conflict, so re-applying a batch is safe.
+// Insert generated pairs. The unique key is (origin_question_id, hash_a, hash_b)
+// since 0050 — the conflict target MUST name all three or postgres rejects the
+// statement outright (42P10, "no unique or exclusion constraint matching"), which
+// is what happened between 0050 and this line being updated: every pair insert
+// threw, on the inline path and the batch-apply path alike, and generatePairs
+// counted it as a skip.
+//
+// Within that key the texts are still stored in a CANONICAL orientation (lower
+// hash first) — the label is symmetric, so orientation carries no information, and
+// without canonicalizing, one question could store the same text pair twice under
+// both orders and have it counted twice by the sweep. Idempotent via on-conflict,
+// so re-applying a batch is safe.
 export async function insertPairs(
   originQuestionId: string,
   pairs: EvalPair[],
@@ -214,7 +221,7 @@ export async function insertPairs(
       values
         (${originQuestionId}, ${textA}, ${textB}, ${hashA}, ${hashB},
          ${p.label}, ${p.difficulty}, ${generatedBy})
-      on conflict (hash_a, hash_b) do nothing
+      on conflict (origin_question_id, hash_a, hash_b) do nothing
     `;
     inserted += done.count;
   }
