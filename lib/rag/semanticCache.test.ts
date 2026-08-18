@@ -16,6 +16,7 @@ import {
   collisionFloor,
   cosine,
   entityGuardPasses,
+  entityOrderPasses,
   entityTokens,
   fingerprintFrom,
   isHit,
@@ -760,4 +761,113 @@ test("auc: null when either class is missing", () => {
   assert.equal(auc([]), null);
   assert.equal(auc([{ sim: 0.9, label: "same" }]), null);
   assert.equal(auc([{ sim: 0.9, label: "different" }]), null);
+});
+
+// --- F6: argument order ------------------------------------------------------
+
+test("entityGuardPasses: the reversed comparison F1 measured at 0.9962 is blocked", () => {
+  assert.equal(
+    entityGuardPasses(
+      "In 1938, how many times larger was Japan's population compared to China's?",
+      "In 1938, how many times larger was China's population compared to Japan's?",
+    ),
+    false,
+  );
+});
+
+test("entityGuardPasses: the reversed ratio F3 hit is blocked", () => {
+  assert.equal(
+    entityGuardPasses(
+      "What share of all munitions used by the Allied powers did the United States manufacture?",
+      "What percentage of munitions manufactured by the United States were used by Allied powers?",
+    ),
+    false,
+  );
+});
+
+test("entityOrderPasses: same order under a comparator passes", () => {
+  assert.equal(
+    entityOrderPasses(
+      "how many times larger was Japan's population compared to China's",
+      "Japan's population was how many times larger compared to China's?",
+    ),
+    true,
+  );
+});
+
+test("entityOrderPasses: order alone is not enough — a direction marker is required", () => {
+  // No comparator and no passive agent: word order here carries no relation, so
+  // blocking on it would be pure recall cost.
+  assert.equal(
+    entityOrderPasses(
+      "what did Germany and France sign in 1919",
+      "what did France and Germany sign in 1919",
+    ),
+    true,
+  );
+});
+
+test("entityOrderPasses: one shared entity has no order to reverse", () => {
+  assert.equal(
+    entityOrderPasses(
+      "how much was paid by Germany",
+      "how much was paid by Germany in total",
+    ),
+    true,
+  );
+});
+
+test("entityOrderPasses: an entity only one side mentions does not trigger it", () => {
+  assert.equal(
+    entityOrderPasses(
+      "what share of munitions came from the United States compared to Britain",
+      "what share of munitions came from the United States compared to Britain, per Churchill",
+    ),
+    true,
+  );
+});
+
+test("entityOrderPasses: question openers are not entities", () => {
+  // "What" and "Which" are capitalised by grammar and land first in every
+  // question — reading them as entities would invent order differences.
+  assert.equal(
+    entityOrderPasses(
+      "What was produced by Japan compared to China?",
+      "Which goods were produced by Japan compared to China?",
+    ),
+    true,
+  );
+});
+
+test("entityOrderPasses: symmetric in its arguments", () => {
+  const a = "how many times larger was Japan's population compared to China's";
+  const b = "how many times larger was China's population compared to Japan's";
+  assert.equal(entityOrderPasses(a, b), entityOrderPasses(b, a));
+});
+
+test("entityOrderPasses: a month moving between phrasings is not an order change", () => {
+  // Every false block in the first F6 measurement was this shape: "by" as a
+  // TEMPORAL preposition plus a month that sits at a different point in the
+  // sentence. A date that genuinely differs is a numeral, which the token half
+  // catches; the month itself is never the argument of a comparison.
+  assert.equal(
+    entityOrderPasses(
+      "By the end of October 1916, what was the estimated aggregate figure for Russian military losses?",
+      "What was the approximate combined total of Russian military losses by the end of October 1916?",
+    ),
+    true,
+  );
+});
+
+test("entityOrderPasses: a curly apostrophe possessive is the same entity", () => {
+  // The two reversals that motivated F6 are both possessive ("Japan's"), and a
+  // question typed with a smart quote must not read as a different entity —
+  // that would silently stop the check firing on exactly the case it exists for.
+  assert.equal(
+    entityOrderPasses(
+      "how many times larger was Japan\u2019s population compared to China\u2019s",
+      "how many times larger was China's population compared to Japan's",
+    ),
+    false,
+  );
 });

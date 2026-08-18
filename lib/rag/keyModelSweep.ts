@@ -39,7 +39,12 @@ import {
   spaceOf,
   type CalibrationResult,
 } from "@/lib/rag/semanticCacheCore";
-import { listPairs, type PairDifficulty, type PairLabel } from "@/lib/rag/semanticCachePairs";
+import {
+  listPairs,
+  quarantinedPairs,
+  type PairDifficulty,
+  type PairLabel,
+} from "@/lib/rag/semanticCachePairs";
 
 // A scored pair, source-tagged so the leaderboard can show the split — a row
 // carried entirely by shadow rows means something different from one built on
@@ -50,6 +55,7 @@ export type SweepPair = {
   textB: string;
   label: PairLabel;
   source: "shadow" | "generated";
+  origin?: "traffic" | "probe"; // shadow only
   difficulty: PairDifficulty | null; // generated only
 };
 
@@ -105,8 +111,10 @@ export type SweepResult = {
 // what it rejected would hide exactly the pairs it exists to catch.
 async function shadowPairs(): Promise<SweepPair[]> {
   try {
-    const rows = await sql<{ new_query: string; matched_query: string; verdict: string }[]>`
-      select new_query, matched_query, verdict
+    const rows = await sql<
+      { new_query: string; matched_query: string; verdict: string; origin: string }[]
+    >`
+      select new_query, matched_query, verdict, origin
       from semantic_cache_shadow
       where verdict is not null
         and config_id in (select id from configs where user_id = ${activeUserId()})
@@ -119,6 +127,10 @@ async function shadowPairs(): Promise<SweepPair[]> {
       // labels use — that's what makes the two poolable at all.
       label: r.verdict === "accept" ? ("same" as const) : ("different" as const),
       source: "shadow" as const,
+      // A PROBE row is not traffic — it is a synthetic pair replayed through the
+      // lookup path (0069). pooledPairs needs the distinction to resolve
+      // collisions; nothing downstream of that reads it.
+      origin: r.origin === "probe" ? ("probe" as const) : ("traffic" as const),
       difficulty: null,
     }));
   } catch (err) {
@@ -128,10 +140,32 @@ async function shadowPairs(): Promise<SweepPair[]> {
 }
 
 // The union, deduped on the unordered text pair so a question that appears in
-// both sources is scored once. Shadow wins a collision: it's a verdict on real
-// traffic rather than a synthesized label.
-export async function pooledPairs(): Promise<SweepPair[]> {
-  const [shadow, generated] = await Promise.all([shadowPairs(), listPairs()]);
+// both sources is scored once.
+//
+// COLLISION RULE, and it is load-bearing — see F3. `traffic` shadow still wins:
+// it is a verdict on a question a person actually asked, against a synthesized
+// label. A `probe` shadow row does NOT, because a probe is not independent
+// evidence: F1 and F2 replayed these very pair texts through the lookup path, so
+// 146 of the 147 collisions here are a generated pair meeting ITSELF. Letting the
+// replay win meant the pair table's audited verdict was discarded in favour of
+// the label that replay was carrying — and since F3 wrote its verdicts to the
+// pair table only, the quarantine was inert for every pair that had been probed:
+// 8 rows F3 proved mislabelled re-entered the pool with the disproved label, and
+// the generated set the sweep scored collapsed from 165 to 32.
+//
+// So a probe row that duplicates a generated pair is DROPPED, whether that pair
+// survived the quarantine or was removed by it. `includeQuarantined` (the
+// before/after read) puts the quarantined pairs back in the generated set, which
+// suppresses the same probes for the same reason — the comparison is between two
+// label sets, not between two dedupe rules.
+export async function pooledPairs(
+  opts: { includeQuarantined?: boolean } = {},
+): Promise<SweepPair[]> {
+  const [shadow, generated, quarantined] = await Promise.all([
+    shadowPairs(),
+    listPairs(opts),
+    quarantinedPairs(),
+  ]);
   const byKey = new Map<string, SweepPair>();
   // NUL as the separator, written as an ESCAPE rather than a literal control
   // character: a raw \x00 in the source makes git treat this whole file as
@@ -148,7 +182,18 @@ export async function pooledPairs(): Promise<SweepPair[]> {
       difficulty: p.difficulty,
     });
   }
-  for (const p of shadow) byKey.set(key(p.textA, p.textB), p);
+  // Every pair the generator produced, INCLUDING the quarantined ones — the set a
+  // probe row is not allowed to speak for. Quarantined keys have to be listed
+  // separately because listPairs has already dropped them.
+  const generatedKeys = new Set([
+    ...generated.map((p) => key(p.textA, p.textB)),
+    ...quarantined.map((p) => key(p.textA, p.textB)),
+  ]);
+  for (const p of shadow) {
+    const k = key(p.textA, p.textB);
+    if (p.origin === "probe" && generatedKeys.has(k)) continue;
+    byKey.set(k, p);
+  }
   return [...byKey.values()].filter((p) => p.textA !== p.textB);
 }
 
@@ -221,8 +266,11 @@ export async function runKeyModelSweep(
   targetSource: EffectiveAcceptTarget,
   candidates: string[] = [...config.semanticCache.keyModelSweep.candidates],
   shouldStop: ShouldStop = NEVER_STOP,
+  // `includeQuarantined` is an OFFLINE READ ONLY — the F3 before/after. No route
+  // passes it; see listPairs.
+  opts: { includeQuarantined?: boolean } = {},
 ): Promise<SweepResult> {
-  const pairs = await pooledPairs();
+  const pairs = await pooledPairs(opts);
   const counts = {
     total: pairs.length,
     shadow: pairs.filter((p) => p.source === "shadow").length,

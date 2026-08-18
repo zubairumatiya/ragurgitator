@@ -259,7 +259,15 @@ export const expectedVerdict = (label: PairLabel): "accept" | "reject" =>
 // must still flow through, or the sweep silently empties for any account that has
 // never run F3. Verdicts are dropped rather than relabelled; see the plan doc's
 // "Considered and not doing".
-export async function listPairs(): Promise<EvalPair[]> {
+//
+// `includeQuarantined` lifts the filter, and exists for exactly one caller: the
+// before/after read that asks whether quarantining moved the leaderboard. That
+// question can only be answered by scoring both sets through the same code path,
+// and a driver rebuilding the pair query itself would be measuring its own copy.
+// It is NOT a serving option — nothing that recommends a threshold may use it.
+export async function listPairs(
+  { includeQuarantined = false }: { includeQuarantined?: boolean } = {},
+): Promise<EvalPair[]> {
   try {
     const rows = await sql<
       { text_a: string; text_b: string; label: PairLabel; difficulty: PairDifficulty }[]
@@ -270,7 +278,8 @@ export async function listPairs(): Promise<EvalPair[]> {
       join documents d on d.id = q.document_id
       where d.user_id = ${activeUserId()}
         and (
-          p.verdict is null
+          ${includeQuarantined}
+          or p.verdict is null
           or p.verdict = case when p.label = 'same' then 'accept' else 'reject' end
         )
     `;
@@ -280,6 +289,30 @@ export async function listPairs(): Promise<EvalPair[]> {
       label: r.label,
       difficulty: r.difficulty,
     }));
+  } catch (err) {
+    if (isMissingTable(err)) return [];
+    throw err;
+  }
+}
+
+// The text pairs listPairs QUARANTINES — the other half of the same filter, and
+// the one pooledPairs needs. F1 and F2 pushed most of these same variant texts
+// through the shadow PROBE path, so a quarantined pair exists twice in this
+// database: once here (verdict-bearing, excluded) and once as a probe shadow row
+// carrying the label F3 disproved. Excluding it in one place only means the
+// quarantine removes nothing. Empty when the table is missing, like listPairs.
+export async function quarantinedPairs(): Promise<Array<{ textA: string; textB: string }>> {
+  try {
+    const rows = await sql<{ text_a: string; text_b: string }[]>`
+      select p.text_a, p.text_b
+      from semantic_cache_pairs p
+      join eval_questions q on q.id = p.origin_question_id
+      join documents d on d.id = q.document_id
+      where d.user_id = ${activeUserId()}
+        and p.verdict is not null
+        and p.verdict <> case when p.label = 'same' then 'accept' else 'reject' end
+    `;
+    return rows.map((r) => ({ textA: r.text_a, textB: r.text_b }));
   } catch (err) {
     if (isMissingTable(err)) return [];
     throw err;

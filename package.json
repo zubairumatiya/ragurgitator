@@ -17,7 +17,10 @@
     "phase8": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/phase8.ts",
     "f1": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f1-negatives.ts",
     "f2": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f2-floor.ts",
-    "f3": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f3-pairs.ts"
+    "f3": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f3-pairs.ts",
+    "f3:sweep": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f3-sweep.ts",
+    "f6": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f6-order.ts",
+    "f7": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f7-prior.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.97.1",

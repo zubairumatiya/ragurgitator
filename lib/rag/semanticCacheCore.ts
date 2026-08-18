@@ -147,10 +147,115 @@ export function entityTokens(text: string): Set<string> {
 const mentionedIn = (token: string, text: string): boolean =>
   token.startsWith("a:") && new RegExp(`\\b${token.slice(2)}\\b`, "i").test(text);
 
-// True when two questions carry the SAME entity/number tokens, i.e. nothing
-// lexical says they're about different facts. False on any asymmetric-difference
-// token — the caller must then treat the match as a miss.
+// --- argument order (F6) -----------------------------------------------------
+//
+// THE BLIND SPOT THIS CLOSES. Everything above compares SETS of tokens, so a
+// question whose entities are swapped around a comparison is invisible to it:
+//
+//   "how many times larger was Japan's population compared to China's"
+//   "how many times larger was China's population compared to Japan's"
+//
+// Identical numerals, identical acronyms, identical quoted spans — identical
+// token sets — and different answers. Cosine is blind to it too (0.9962, the
+// highest-similarity false hit in the whole F1 set), so nothing else catches it.
+// F3 then hit the same shape independently on a reversed ratio ("US share of
+// Allied munitions" vs "share of US-made munitions used by the Allies"). Two
+// independent runs, so this is a recurring failure mode rather than one bad row.
+//
+// WHAT IT KEYS ON: the RELATIVE ORDER of the entities the two questions share.
+// Reordering is only meaningful where something directional relates them, so the
+// check requires a direction marker in BOTH texts — a comparator ("compared to",
+// "than", "versus", "per", "out of") or a passive agent ("by"). Without one,
+// word order in a question carries no reliable relation and blocking on it would
+// be pure recall cost.
+//
+// DIRECTION OF ERROR. Like the rest of the guard, a false trigger only ever
+// COSTS A CACHE HIT — never serves a wrong answer — so the check is written to
+// be decisive where it fires rather than maximally clever. Its measured cost on
+// this account's labeled set is in docs/resume-metrics-f6-results.md.
+
+// Proper nouns carry the entities these reversals turn on (Japan, China, Allied,
+// the United States) and none of them are numerals, acronyms or quoted spans, so
+// the order check needs its own extractor. Capitalised, ≥3 letters, optional
+// possessive.
+const PROPER_RE = /\b[A-Z][a-z]{2,}(?:['\u2019]s)?\b/g;
+
+// Question openers and other sentence-initial capitals are capitalised by
+// GRAMMAR, not because they name anything, and they land first in every question
+// — exactly where a spurious order difference would come from.
+const NOT_AN_ENTITY = new Set([
+  "what", "which", "when", "where", "who", "whom", "whose", "why", "how",
+  "the", "this", "that", "these", "those", "there", "their", "they",
+  "does", "did", "was", "were", "are", "can", "could", "should", "would",
+  "for", "and", "but", "not", "with", "from", "into", "about", "after",
+  "before", "during", "please", "tell", "give", "list", "name", "explain",
+  // Calendar words. They are capitalised proper nouns, but they name a TIME
+  // rather than an argument of a comparison, and they move freely between
+  // phrasings of the same question ("By the end of October 1916, what was X" vs
+  // "What was X by the end of October 1916"). Measured, not assumed: every one
+  // of the false blocks in the first F6 run was a month changing position, and
+  // dropping them removed all four while costing none of the wins. A date that
+  // genuinely differs is a NUMERAL, which the token half already catches.
+  "january", "february", "march", "april", "may", "june", "july", "august",
+  "september", "october", "november", "december",
+  "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+]);
+
+// Direction markers: something that RELATES two entities asymmetrically, so that
+// swapping them changes the fact being asked for. "by" is included for the
+// passive agent ("munitions manufactured BY the United States"), which is the
+// form F3's reversal took.
+const DIRECTION_RE =
+  /\b(compared to|compared with|versus|vs\.?|than|relative to|per|out of|by)\b/i;
+
+// Shared entity mentions in order of first appearance, deduped. Deduped because
+// a repeated mention is emphasis, not an extra argument — "Japan ... Japan ...
+// China" relates the same two entities as "Japan ... China".
+function entitySequence(text: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const push = (raw: string) => {
+    const t = raw.toLowerCase().replace(/['\u2019]s$/, "");
+    if (NOT_AN_ENTITY.has(t) || seen.has(t)) return;
+    seen.add(t);
+    out.push(t);
+  };
+  for (const m of text.matchAll(PROPER_RE)) push(m[0]);
+  if (/[a-z]/.test(text)) for (const m of text.matchAll(ACRONYM_RE)) push(m[0]);
+  return out;
+}
+
+// False when the two texts relate the SAME entities in a DIFFERENT order under a
+// direction marker. Needs at least two shared entities: with one there is no
+// order to reverse.
+export function entityOrderPasses(a: string, b: string): boolean {
+  if (!DIRECTION_RE.test(a) || !DIRECTION_RE.test(b)) return true;
+  const sa = entitySequence(a);
+  const sb = entitySequence(b);
+  const shared = new Set(sa.filter((t) => sb.includes(t)));
+  if (shared.size < 2) return true;
+  // Compared on the SHARED entities only. An entity that appears on one side
+  // alone is a set difference, which is the token guard's job and not this
+  // one's — and letting it shift the sequence here would fire on questions that
+  // merely mention something extra.
+  const oa = sa.filter((t) => shared.has(t));
+  const ob = sb.filter((t) => shared.has(t));
+  return oa.join("\u0000") === ob.join("\u0000");
+}
+
+// True when two questions carry the SAME entity/number tokens AND relate them in
+// the same order, i.e. nothing lexical says they're about different facts. False
+// on any asymmetric-difference token — the caller must then treat the match as a
+// miss.
 export function entityGuardPasses(a: string, b: string): boolean {
+  return entityTokensMatch(a, b) && entityOrderPasses(a, b);
+}
+
+// The token half on its own. Exported so the F6 measurement can replay the guard
+// as it behaved BEFORE the order check without reconstructing it from booleans —
+// `passes || !orderPasses` looks like it recovers this and does not, since it
+// reads true when both halves fail.
+export function entityTokensMatch(a: string, b: string): boolean {
   const ta = entityTokens(a);
   const tb = entityTokens(b);
   for (const t of ta) if (!tb.has(t) && !mentionedIn(t, b)) return false;
