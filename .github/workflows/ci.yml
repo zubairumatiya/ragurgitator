@@ -22,14 +22,14 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Ahead of setup-node, which needs pnpm on PATH to locate the store it caches.
       # No version here on purpose: the action reads packageManager from
       # package.json, so the runner and a laptop cannot drift onto different builds.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
           cache: pnpm
@@ -53,6 +53,18 @@ jobs:
         if: '!cancelled()'
         run: npm run lint
 
+      # These are placeholders, not secrets. next build evaluates module scope and
+      # prerenders, so the two db URLs and the Supabase pair have to parse or the
+      # build throws before it compiles anything; nothing here is dialled, because
+      # postgres.js connects lazily and no page fetches at build time. Real values
+      # would buy nothing and would bake into the client bundle, which is why a CI
+      # build is never the artifact that ships.
       - name: Build
         if: '!cancelled()'
+        env:
+          DATABASE_URL: postgres://placeholder:placeholder@localhost:5432/placeholder
+          RAG_APP_DATABASE_URL: postgres://placeholder:placeholder@localhost:5432/placeholder
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: sb_publishable_placeholder
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
         run: npm run build
