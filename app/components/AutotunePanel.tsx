@@ -134,10 +134,11 @@ export function AutotunePanel({
   const [choices, setChoices] = useState<PendingChoice[]>([]);
   const [done, setDone] = useState<DoneStats | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // The "this will take a while" offer, and the confirmation once one is launched.
-  // Autotune is the longest bulk action here, so it is the one most worth handing
-  // to a background job — except in apply='choose' mode, which needs this tab; the
-  // estimate route answers backgroundable: false for it and no offer appears.
+  // The "this will take a while" dialog, and the confirmation once a job is
+  // launched. Autotune is the longest bulk action here, so it is the one most worth
+  // handing to a background job — except in apply='choose' mode, which needs this
+  // tab. That mode still gets the dialog, as a keep-this-tab-open warning carrying
+  // the switch-to-auto-best button the estimate route sends with it.
   const [offer, setOffer] = useState<Estimate | null>(null);
   const [launched, setLaunched] = useState<string | null>(null);
 
@@ -161,8 +162,9 @@ export function AutotunePanel({
   }
 
   // Ask the server how long this looks like taking before spending anything, and
-  // offer the background when it crosses the threshold. Fails open: a broken ETA
-  // runs the sweep the way it has always run rather than standing in the way.
+  // say so when it crosses the threshold — as an offer of the background, or as a
+  // warning that this one holds the tab. Fails open: a broken ETA runs the sweep
+  // the way it has always run rather than standing in the way.
   async function start() {
     try {
       const res = await apiFetch("/api/jobs/estimate", {
@@ -172,7 +174,7 @@ export function AutotunePanel({
       });
       if (res.ok) {
         const estimate = (await res.json()) as Estimate;
-        if (estimate.offerBackground && estimate.backgroundable) {
+        if (estimate.offerBackground && estimate.units != null) {
           setOffer(estimate);
           return;
         }

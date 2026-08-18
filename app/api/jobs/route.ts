@@ -42,7 +42,7 @@ export async function POST(request: Request) {
     // as well as hidden by the estimate route, since the estimate is advisory and
     // this is the door.
     const blocked = await backgroundBlocker(kind);
-    if (blocked) return Response.json({ error: blocked }, { status: 409 });
+    if (blocked) return Response.json({ error: blocked.reason }, { status: 409 });
     // One job of a kind per config at a time. Two concurrent re-scores of the same
     // corpus would interleave their result rows and both freeze a snapshot of a
     // corpus the other was still rewriting — and the user gets two emails saying

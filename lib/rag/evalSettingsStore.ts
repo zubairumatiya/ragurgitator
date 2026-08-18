@@ -114,7 +114,9 @@ function toCriteria(row: CriteriaRow): EvalCriteria {
     autotune: {
       sizeLadder: row.autotune_size_ladder,
       overlapPct: row.autotune_overlap_pct,
-      apply: row.autotune_apply === "auto_best" ? "auto_best" : "choose",
+      // auto_best is the default (0071), so an unrecognised value falls that way
+      // rather than into the mode that cannot run in the background.
+      apply: row.autotune_apply === "choose" ? "choose" : "auto_best",
       search: row.autotune_search === "exhaustive" ? "exhaustive" : "first_success",
       stopEarly: row.autotune_stop_early,
       keepBest: row.autotune_keep_best,

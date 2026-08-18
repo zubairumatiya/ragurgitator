@@ -191,7 +191,7 @@ export function EvalSettings() {
   const [ndcgMin, setNdcgMin] = useState("");
   const [ladder, setLadder] = useState("");
   const [overlap, setOverlap] = useState("");
-  const [apply, setApply] = useState<AutotuneApply>("choose");
+  const [apply, setApply] = useState<AutotuneApply>("auto_best"); // 0071 default
   const [search, setSearch] = useState<AutotuneSearch>("first_success");
   const [stopEarly, setStopEarly] = useState(false);
   const [keepBest, setKeepBest] = useState(false);

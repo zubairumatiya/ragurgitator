@@ -299,6 +299,10 @@ export function BatchRequestsPanel() {
   // then — acked on the server (POST /api/batch/ack) rather than with a local
   // "seen" flag, so it doesn't come back on the next reload. Best-effort: a
   // failed ack leaves the dot up, which is the safe direction.
+  //
+  // The returned ids span BOTH tables, so both lists are patched from the one set.
+  // The poll that follows would re-list them anyway; doing it here is what stops
+  // the dot surviving until that round trip comes back.
   const ackAll = useCallback(async () => {
     try {
       const res = await apiFetch("/api/batch/ack", { method: "POST" });
@@ -306,6 +310,7 @@ export function BatchRequestsPanel() {
       if (!res.ok || !data?.acknowledged?.length) return;
       const acked = new Set(data.acknowledged);
       setJobs((js) => js.map((j) => (acked.has(j.id) ? { ...j, acknowledged: true } : j)));
+      setBgJobs((js) => js.map((j) => (acked.has(j.id) ? { ...j, acknowledged: true } : j)));
     } catch {
       /* leave the badge up — it clears on the next open */
     }
