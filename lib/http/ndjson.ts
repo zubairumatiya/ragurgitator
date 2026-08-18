@@ -41,6 +41,13 @@
 // when the stream ends, minutes away for an ingest. runOutsideDetachedQueue exits
 // it, and it too must live INSIDE the bind.
 //
+// AND SO IS THE KEY-USAGE BUFFER (lib/auth/keyUsageStore.ts), with a sharper
+// failure than either: the handler's buffer drains when the handler returns, which
+// here is immediately, so an inherited one is already spent and every row the
+// producer records lands in an array that will never be drained again. It gets a
+// fresh buffer rather than an exit, because ingest and eval are the heaviest
+// provider callers in the app and they are exactly what the coalescing is for.
+//
 // The consequence to keep in mind: an ingest holds one pooled connection for the
 // entire ingest, not for each query in it.
 //
@@ -60,6 +67,7 @@
 // another consumer.
 import { AsyncResource } from "node:async_hooks";
 
+import { withKeyUsageBuffer } from "@/lib/auth/keyUsageStore";
 import { activeUser, withUser } from "@/lib/auth/userScope";
 import { registerRun, isCancelled, unregisterRun } from "@/lib/http/cancelRegistry";
 import { runOutsideUserTransaction } from "@/lib/db";
@@ -82,7 +90,17 @@ export function ndjsonStream<E>(
   const boundRun = AsyncResource.bind((send: (event: E) => void) =>
     runOutsideDetachedQueue(() =>
       runOutsideUserTransaction(() =>
-        withUser(user, () => run(send, () => isCancelled(runId))),
+        withUser(user, () =>
+          // A FRESH key-usage buffer, for the third time and the third reason. Bind
+          // restores the handler's buffer too, and that one drained the moment the
+          // handler returned its Response — minutes before an ingest makes its
+          // first embedding call — so every row the producer recorded would be
+          // pushed into an array nobody will ever read again. Installing a new one
+          // inside the producer's own scope gives its calls somewhere real to go,
+          // and one insert instead of one per batch. Innermost, so it drains into
+          // the producer's live transaction rather than the committed handler one.
+          withKeyUsageBuffer(() => run(send, () => isCancelled(runId))),
+        ),
       ),
     ),
   );

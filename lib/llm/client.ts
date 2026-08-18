@@ -67,7 +67,9 @@ export function isMissingProviderKey(err: unknown): err is MissingProviderKeyErr
 // what it stored.
 const TTL_MS = 60_000;
 
-const clients = new Map<string, { client: unknown; expiresAt: number }>();
+// `lastFour` rides along because this is the ONLY place in the app that holds a
+// SecretKey at all — see keyLastFourFor below.
+const clients = new Map<string, { client: unknown; expiresAt: number; lastFour: string }>();
 
 async function cached<T>(
   userId: string,
@@ -86,7 +88,7 @@ async function cached<T>(
   // .expose() inline in the constructor argument, per the SecretKey contract —
   // the plaintext never lands in a local binding that a stack frame could retain.
   const client = build(secret.expose());
-  clients.set(cacheKey, { client, expiresAt: now + TTL_MS });
+  clients.set(cacheKey, { client, expiresAt: now + TTL_MS, lastFour: secret.lastFour });
 
   // Opportunistic sweep, same idiom as the DEK cache: without it a long-lived
   // dev server accumulates one entry per user per provider forever.
@@ -95,6 +97,25 @@ async function cached<T>(
   }
 
   return client;
+}
+
+// Which key made the call, for the usage ledger (0072) — the last four characters
+// only, which SecretKey.lastFour exists to hand out.
+//
+// READ OUT OF THE CLIENT CACHE rather than the database on purpose. The recording
+// sites (lib/rag/meter.ts, lib/rag/embeddingProviders.ts, lib/batch/providers.ts)
+// never see a SecretKey, and giving them one would mean a second decrypt and a new
+// .expose() site — the exact thing scripts/guards.ts exists to keep from spreading.
+// This is synchronous, hits no database, and reveals nothing the settings page does
+// not already show.
+//
+// IT CAN MISS. The entry expires 60s after construction, and a slow call can flush
+// its row after that; the ledger records "" and the row is unattributed. That is
+// why 0072's column defaults to '' — an unattributed row is still a real record of
+// a call, and dropping it would be a worse trade than losing four characters.
+export function keyLastFourFor(userId: string, provider: ProviderId): string {
+  const hit = clients.get(`${userId}:${provider}`);
+  return hit && hit.expiresAt > Date.now() ? hit.lastFour : "";
 }
 
 // Drop a user's cached clients immediately. Called when a key is saved or

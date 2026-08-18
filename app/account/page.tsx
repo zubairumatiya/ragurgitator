@@ -9,6 +9,8 @@
 // withPageUser, NOT a bare requireUser(). Both authenticate, but only withPageUser
 // opens the transaction that carries the identity RLS reads (0051), and `sql` throws
 // outside one.
+import Link from "next/link";
+
 import { withPageUser } from "@/lib/auth/dal";
 import {
   listProviderKeys,
@@ -58,9 +60,52 @@ export default async function AccountPage() {
         <h2 className="text-sm font-medium">Provider API keys</h2>
         <p className="mt-1 max-w-prose text-xs text-zinc-500">
           Your keys are encrypted before they are stored, under a key that never leaves Azure Key
-          Vault — a copy of the database on its own reveals nothing. Because of that, we cannot
-          show a key back to you after it is saved: only its last four characters. A key you have
-          lost can be replaced, never recovered.
+          Vault — a stolen copy of the database reveals nothing on its own. Because of that, we
+          cannot show a key back to you after it is saved: only its last four characters. A key you
+          have lost can be replaced, never recovered.
+        </p>
+
+        {/* The limit of the guarantee, stated where the key is typed rather than
+            in a policy page nobody opens. Encryption at rest is the only property
+            a server-side BYOK design can actually offer: the plaintext key must
+            exist in memory to be sent to the provider, so it is reachable by
+            anyone who can deploy code here. Saying so is what turns "trust us"
+            into a decision the user is equipped to make. */}
+        <p className="mt-2 max-w-prose text-xs text-zinc-500">
+          <span className="font-medium text-zinc-600 dark:text-zinc-400">
+            What that does not cover.
+          </span>{" "}
+          To call a provider on your behalf, this server has to decrypt your key in memory and send
+          it onward. Encryption at rest protects your key from a database breach; it cannot protect
+          it from whoever operates the server. That is true of every product that stores an API key
+          for you — it is worth stating rather than leaving you to assume otherwise.
+        </p>
+
+        {/* Detection where prevention is impossible. The link belongs directly
+            under the limit it answers, and the framing has to stay honest: the
+            ledger is written by this same server, so it is one half of a
+            comparison against the provider's records, never a guarantee on its
+            own. Anything warmer than that would be reassurance we cannot back. */}
+        <p className="mt-2 max-w-prose text-xs text-zinc-500">
+          <span className="font-medium text-zinc-600 dark:text-zinc-400">
+            What we can give you instead.
+          </span>{" "}
+          A record of every call this server made with your key —{" "}
+          <Link href="/usage" className="underline underline-offset-2 hover:text-zinc-900 dark:hover:text-zinc-200">
+            API key usage
+          </Link>
+          . It cannot vouch for us, since we are the ones writing it. It is worth having because
+          your provider keeps its own count: if the two disagree, the difference is spending you
+          did not authorize.
+        </p>
+
+        <p className="mt-2 max-w-prose text-xs text-zinc-500">
+          <span className="font-medium text-zinc-600 dark:text-zinc-400">
+            So use a key you can afford to lose.
+          </span>{" "}
+          Create a key for this app alone rather than reusing an existing one, give it a spend limit
+          where the provider offers one, and check the API key usage table frequently to see if it
+          aligns with the provider&rsquo;s own records.
         </p>
 
         <div className="mt-4">

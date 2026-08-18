@@ -9,11 +9,22 @@
 // Adding a provider = one adapter here + a PROVIDERS entry + registry rows. The
 // non-Voyage adapters are inert until a key/weights exist (lazy clients), so this
 // file is safe to ship before any of them is switched on.
+//
+// EVERY REMOTE ADAPTER RECORDS TO THE KEY LEDGER (0072), rejections included. One
+// row per BATCH, not per text: the dispatcher in embeddings.ts already slices
+// inputs into batchLimit-sized calls, so this is one row per actual request and
+// ingest cannot flood the table.
 import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
 
+import {
+  trackKeyUsage,
+  type KeyUsageAmounts,
+  type KeyUsageMeta,
+} from "@/lib/auth/keyUsageStore";
 import { activeUserId } from "@/lib/auth/userScope";
 import { cohereFor, openaiFor, voyageFor } from "@/lib/llm/client";
 import type { EmbeddingModelSpec, EmbeddingProviderId } from "@/lib/rag/embeddingModels";
+import { costEmbed, estimateTokensAll } from "@/lib/rag/pricing";
 
 export type EmbedRole = "document" | "query";
 
@@ -35,11 +46,16 @@ const voyageProvider: EmbeddingProvider = {
   batchLimit: 128,
   async embedBatch(texts, role, spec) {
     const voyageClient = await voyageFor(activeUserId());
-    const response = await voyageClient.embed({
-      input: texts,
-      model: spec.apiModel,
-      inputType: role,
-    });
+    const response = await trackKeyUsage(
+      embedMeta("voyage", spec),
+      () =>
+        voyageClient.embed({
+          input: texts,
+          model: spec.apiModel,
+          inputType: role,
+        }),
+      () => embedAmounts(spec, texts),
+    );
     const data = response.data;
     if (!data || data.length !== texts.length) {
       throw new Error(
@@ -60,17 +76,22 @@ const openaiProvider: EmbeddingProvider = {
   batchLimit: 2048,
   async embedBatch(texts, _role, spec) {
     const openaiClient = await openaiFor(activeUserId());
-    const res = await openaiClient.embeddings.create({
-      model: spec.apiModel,
-      input: texts,
-      // text-embedding-3-* support `dimensions`, but only DOWNWARD: send it just
-      // when the registry asks for less than the model's own native width.
-      // Compared against spec.nativeDimension, not a literal — a hardcoded 3072
-      // (large's native size) sent a pointless dimensions: 1536 to
-      // text-embedding-3-small, and would send an invalid above-native value to
-      // any model registered between its native size and 3072.
-      dimensions: spec.dimension < spec.nativeDimension ? spec.dimension : undefined,
-    });
+    const res = await trackKeyUsage(
+      embedMeta("openai", spec),
+      () =>
+        openaiClient.embeddings.create({
+          model: spec.apiModel,
+          input: texts,
+          // text-embedding-3-* support `dimensions`, but only DOWNWARD: send it just
+          // when the registry asks for less than the model's own native width.
+          // Compared against spec.nativeDimension, not a literal — a hardcoded 3072
+          // (large's native size) sent a pointless dimensions: 1536 to
+          // text-embedding-3-small, and would send an invalid above-native value to
+          // any model registered between its native size and 3072.
+          dimensions: spec.dimension < spec.nativeDimension ? spec.dimension : undefined,
+        }),
+      () => embedAmounts(spec, texts),
+    );
     return [...res.data]
       .sort((a, b) => a.index - b.index)
       .map((d) => d.embedding);
@@ -97,28 +118,33 @@ const cohereProvider: EmbeddingProvider = {
   batchLimit: 96,
   async embedBatch(texts, role, spec) {
     const cohereClient = await cohereFor(activeUserId());
-    const res = await cohereClient.embed({
-      model: spec.apiModel,
-      inputType: role === "query" ? "search_query" : "search_document",
-      texts,
-      embeddingTypes: ["float"],
-      // Pin the width for the models that let us. Without it embed-v4-1024 gets
-      // Cohere's 1536 default back under a registry row that says 1024. Sent for
-      // every v4 row, including the one already at 1536: an explicit value can't
-      // drift when a provider changes its default, and it makes the registry's
-      // `dimension` the single thing that decides the vector width.
-      outputDimension: acceptsOutputDimension(spec.apiModel) ? spec.dimension : undefined,
-      // Explicit rather than inherited from the provider default, because the
-      // two families disagree about how much this matters: v4 takes 128K tokens
-      // and will never hit the cap on our chunk sizes, while the v3 family caps
-      // at 512 (~2,000 characters) and truncates most real chunks. "END" keeps
-      // the head of the chunk — the lead sentences carry the topic, and a
-      // consistent rule beats one that varies with the SDK's default. The
-      // alternative, truncate: "NONE", turns an over-long chunk into a failed
-      // batch mid-ingest; the v3 specs carry a `note` so the picker can warn
-      // about the quality cost instead.
-      truncate: "END",
-    });
+    const res = await trackKeyUsage(
+      embedMeta("cohere", spec),
+      () =>
+        cohereClient.embed({
+          model: spec.apiModel,
+          inputType: role === "query" ? "search_query" : "search_document",
+          texts,
+          embeddingTypes: ["float"],
+          // Pin the width for the models that let us. Without it embed-v4-1024 gets
+          // Cohere's 1536 default back under a registry row that says 1024. Sent for
+          // every v4 row, including the one already at 1536: an explicit value can't
+          // drift when a provider changes its default, and it makes the registry's
+          // `dimension` the single thing that decides the vector width.
+          outputDimension: acceptsOutputDimension(spec.apiModel) ? spec.dimension : undefined,
+          // Explicit rather than inherited from the provider default, because the
+          // two families disagree about how much this matters: v4 takes 128K tokens
+          // and will never hit the cap on our chunk sizes, while the v3 family caps
+          // at 512 (~2,000 characters) and truncates most real chunks. "END" keeps
+          // the head of the chunk — the lead sentences carry the topic, and a
+          // consistent rule beats one that varies with the SDK's default. The
+          // alternative, truncate: "NONE", turns an over-long chunk into a failed
+          // batch mid-ingest; the v3 specs carry a `note` so the picker can warn
+          // about the quality cost instead.
+          truncate: "END",
+        }),
+      () => embedAmounts(spec, texts),
+    );
     const floats = res.embeddings?.float;
     if (!floats || floats.length !== texts.length) {
       throw new Error(
@@ -131,7 +157,12 @@ const cohereProvider: EmbeddingProvider = {
 
 // --- Local (transformers.js, in-process) — lazy pipeline per model, CLS pooling
 // + normalize. mxbai wants a query prefix; bge-m3 does not. Small batches to cap
-// memory. Won't run in a Vercel function (weights too big) — local-only. ------
+// memory. Won't run in a Vercel function (weights too big) — local-only.
+//
+// THE ONE ADAPTER WITH NO LEDGER ROW, and not by oversight: it runs in this
+// process against downloaded weights, holds no credential, and reaches no
+// provider. A row here would put a call in the audit trail that no key paid for
+// and no dashboard could ever corroborate. ------
 const MXBAI_QUERY_PREFIX =
   "Represent this sentence for searching relevant passages: ";
 
@@ -157,6 +188,31 @@ const localProvider: EmbeddingProvider = {
     return output.tolist() as number[][];
   },
 };
+
+// spec.apiModel, not spec.id: the ledger exists to be reconciled against the
+// provider's own dashboard, and the dashboard lists the name that went over the
+// wire. The registry id is this app's vocabulary and nobody else's.
+function embedMeta(
+  provider: "voyage" | "openai" | "cohere",
+  spec: EmbeddingModelSpec,
+): KeyUsageMeta {
+  return { provider, model: spec.apiModel, surface: "embed", kind: "embed" };
+}
+
+// ESTIMATED TOKENS, chars/4, the same basis embedCache already banks embedding
+// spend on (pricing.LEVERS marks it `estimate`). The three embedding APIs each
+// report real usage in a different shape, and mixing measured and estimated
+// counts in one column with no flag would be worse than being uniformly
+// approximate: a reconciliation would not know which rows to trust. Call counts
+// and failures — the parts that actually catch a compromised key — are exact
+// either way.
+//
+// Priced through spec.id because EMBED_RATES is keyed by registry id, not by the
+// wire name that goes in `model`.
+function embedAmounts(spec: EmbeddingModelSpec, texts: string[]): KeyUsageAmounts {
+  const tokens = estimateTokensAll(texts);
+  return { inputTokens: tokens, outputTokens: 0, costUsd: costEmbed(spec.id, tokens) };
+}
 
 export const PROVIDERS: Record<EmbeddingProviderId, EmbeddingProvider> = {
   voyage: voyageProvider,

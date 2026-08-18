@@ -21,11 +21,17 @@
 // The Anthropic ⇄ Chat-Completions translation lives in lib/llm/openaiChat.ts, not
 // here: the batch adapter needs the same pair and has no business importing the
 // spend ledger to get them.
+//
+// TWO LEDGERS, ONE CALL, AND THEY ARE NOT REDUNDANT. recordSpend answers "what
+// does this config cost to run" and only ever sees successes. trackKeyUsage (0072)
+// answers "what did MY KEY do" and must see the rejections too — a burst of 401s
+// spends nothing and is the most interesting thing that can happen to a key.
 import type Anthropic from "@anthropic-ai/sdk";
 
 import { anthropicFor, openaiFor } from "@/lib/llm/client";
 import { llmProviderOf } from "@/lib/llm/llmModels";
 import { toAnthropicMessage, toChatParams } from "@/lib/llm/openaiChat";
+import { trackKeyUsage, type KeyUsageAmounts } from "@/lib/auth/keyUsageStore";
 import { activeUserId } from "@/lib/auth/userScope";
 import { detached } from "@/lib/detached";
 import { costLlm, type Surface } from "@/lib/rag/pricing";
@@ -40,8 +46,8 @@ export async function meteredMessage(
   // defaulting, because the default would be someone else's bill.
   const response =
     llmProviderOf(params.model) === "anthropic"
-      ? await anthropicMessage(params)
-      : await openaiMessage(params);
+      ? await anthropicMessage(surface, params)
+      : await openaiMessage(surface, params);
 
   const u = response.usage;
   if (u) {
@@ -54,16 +60,25 @@ export async function meteredMessage(
   return response;
 }
 
-// --- Anthropic: the native path, unchanged -----------------------------------
+// --- Anthropic: the native path ------------------------------------------------
 
 async function anthropicMessage(
+  surface: Surface,
   params: Anthropic.Messages.MessageCreateParamsNonStreaming,
 ): Promise<Anthropic.Messages.Message> {
   // The user's own key, resolved per call (cached 60s in lib/llm/client.ts).
   // Every generation site in the app funnels through here, so this one line is
   // what makes "whose key paid for this answer" have an answer at all.
+  //
+  // Resolving it stays OUTSIDE the tracked span: a missing key means no call was
+  // made, and a ledger row for it would invent a provider interaction that never
+  // happened. It is also what populates the cache keyLastFourFor reads.
   const client = await anthropicFor(activeUserId());
-  return client.messages.create(params);
+  return trackKeyUsage(
+    { provider: "anthropic", model: params.model, surface, kind: "message" },
+    () => client.messages.create(params),
+    (message) => llmAmounts(params.model, message),
+  );
 }
 
 // --- OpenAI: translate in, call Chat Completions, translate out ---------------
@@ -73,9 +88,32 @@ async function anthropicMessage(
 // there. All that is left here is the call itself.
 
 async function openaiMessage(
+  surface: Surface,
   params: Anthropic.Messages.MessageCreateParamsNonStreaming,
 ): Promise<Anthropic.Messages.Message> {
   const client = await openaiFor(activeUserId());
-  const completion = await client.chat.completions.create(toChatParams(params));
-  return toAnthropicMessage(completion);
+  // The translation is inside the span so both providers can share one usage
+  // reader. That is safe because toAnthropicMessage is total — it warns and zeroes
+  // on missing usage rather than throwing — so nothing but a real provider failure
+  // can land in the catch and be recorded as one.
+  return trackKeyUsage(
+    { provider: "openai", model: params.model, surface, kind: "message" },
+    async () => toAnthropicMessage(await client.chat.completions.create(toChatParams(params))),
+    (message) => llmAmounts(params.model, message),
+  );
+}
+
+// Both paths hand back an Anthropic-shaped message, so the ledger reads its usage
+// the same way and prices it through the same costLlm the spend totals use.
+function llmAmounts(
+  model: string,
+  message: Anthropic.Messages.Message,
+): KeyUsageAmounts {
+  const inTok = message.usage?.input_tokens ?? 0;
+  const outTok = message.usage?.output_tokens ?? 0;
+  return {
+    inputTokens: inTok,
+    outputTokens: outTok,
+    costUsd: costLlm(model, inTok, outTok),
+  };
 }

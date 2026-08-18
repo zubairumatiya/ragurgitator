@@ -20,6 +20,7 @@ import { after } from "next/server";
 
 import { serverSupabase } from "@/lib/auth/supabase";
 import { withUser } from "@/lib/auth/userScope";
+import { withKeyUsageBuffer } from "@/lib/auth/keyUsageStore";
 import { withDetachedQueue } from "@/lib/detached";
 
 // The DTO — deliberately NOT the auth.users row. Supabase's user object carries
@@ -84,7 +85,14 @@ export function unauthorizedJson(): Response {
 // empty queue before touching the pool. Server Actions come through the same door,
 // and after() runs even when the response ends in redirect() or a thrown error, so
 // an action that queues work still flushes it.
+//
+// The key-usage buffer goes INSIDE the detached queue and not the other way round:
+// its drain hands one multi-row insert to that queue, so the queue has to be in
+// scope when the buffer ends. Outside it, the drain would find no queue and write
+// inline on the render path.
 export async function withPageUser<T>(fn: (user: SessionUser) => Promise<T>): Promise<T> {
   const user = await requireUser();
-  return withDetachedQueue(user, after, () => withUser(user, () => fn(user)));
+  return withDetachedQueue(user, after, () =>
+    withKeyUsageBuffer(() => withUser(user, () => fn(user))),
+  );
 }

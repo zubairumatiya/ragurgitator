@@ -21,8 +21,17 @@
 // real billing), so status mapping and result parsing are pulled into pure exported
 // helpers — the parts most likely to be wrong — and unit-tested with canned
 // payloads.
+//
+// EVERY CALL IN THIS FILE IS RECORDED TO THE KEY LEDGER (0072) AT ZERO COST, and
+// the zero is the point rather than a reason to skip it. Submitting, polling,
+// fetching and cancelling spend no tokens, so no other ledger in the app has ever
+// had a reason to see them — which makes them precisely the calls an attacker
+// enumerating a stolen key would produce, and the ones a runaway poller would
+// produce too. The tokens a batch eventually burns are metered where its results
+// are applied; what belongs here is the fact that the key was used at all.
 import type Anthropic from "@anthropic-ai/sdk";
 import { toFile } from "openai";
+import { trackKeyUsage, type KeyUsageKind } from "@/lib/auth/keyUsageStore";
 import { activeUserId } from "@/lib/auth/userScope";
 import { openProviderKey } from "@/lib/auth/providerKeys";
 import { anthropicFor, openaiFor, MissingProviderKeyError } from "@/lib/llm/client";
@@ -61,6 +70,31 @@ export interface ProviderAdapter {
   cancel(providerBatchId: string): Promise<void>;
 }
 
+// One tracked control-plane call. `provider` is the BatchProvider, which happens to
+// name the same three vendors as ProviderId for every batch we can submit — voyage
+// batches are embeddings, the other two are messages — so no translation is needed.
+//
+// The model is only knowable at submit time and only for the providers that carry
+// it: Anthropic and OpenAI put it on each request line, Voyage at batch level.
+// Poll, fetch and cancel address a batch by id and have no model at all, so they
+// record "" rather than guessing one from a job row this file cannot see.
+function tracked<T>(
+  provider: BatchProvider,
+  kind: KeyUsageKind,
+  model: string,
+  call: () => Promise<T>,
+): Promise<T> {
+  return trackKeyUsage({ provider, model, surface: "batch", kind }, call);
+}
+
+// The model on the first request line, for the two providers that put it there. The
+// lines of one batch always share a model — build() puts it there — so the first is
+// the batch's.
+function modelOfFirst(requests: BatchRequest[]): string {
+  const params = requests[0]?.params as { model?: string } | undefined;
+  return params?.model ?? "";
+}
+
 // Anthropic
 
 // Every method resolves the ACTIVE user's key. The batch poller is a
@@ -71,18 +105,22 @@ export interface ProviderAdapter {
 const anthropicAdapter: ProviderAdapter = {
   async submit(requests) {
     const anthropicClient = await anthropicFor(activeUserId());
-    const batch = await anthropicClient.messages.batches.create({
-      requests: requests.map((r) => ({
-        custom_id: r.customId,
-        params: r.params as Anthropic.Messages.MessageCreateParamsNonStreaming,
-      })),
-    });
+    const batch = await tracked("anthropic", "batch_submit", modelOfFirst(requests), () =>
+      anthropicClient.messages.batches.create({
+        requests: requests.map((r) => ({
+          custom_id: r.customId,
+          params: r.params as Anthropic.Messages.MessageCreateParamsNonStreaming,
+        })),
+      }),
+    );
     return { providerBatchId: batch.id, outputFileId: null };
   },
 
   async poll(id) {
     const anthropicClient = await anthropicFor(activeUserId());
-    const b = await anthropicClient.messages.batches.retrieve(id);
+    const b = await tracked("anthropic", "batch_poll", "", () =>
+      anthropicClient.messages.batches.retrieve(id),
+    );
     const c = b.request_counts;
     return {
       status: mapAnthropicStatus(b.processing_status),
@@ -97,7 +135,12 @@ const anthropicAdapter: ProviderAdapter = {
   async results(id) {
     const out: BatchResultRow[] = [];
     const anthropicClient = await anthropicFor(activeUserId());
-    const decoder = await anthropicClient.messages.batches.results(id);
+    // The tracked span covers OPENING the stream, not draining it: the decoder
+    // yields rows lazily, and a parse failure three thousand rows in is our bug,
+    // not a rejected key use.
+    const decoder = await tracked("anthropic", "batch_fetch", "", () =>
+      anthropicClient.messages.batches.results(id),
+    );
     for await (const row of decoder) {
       const res = row.result;
       out.push({
@@ -119,7 +162,9 @@ const anthropicAdapter: ProviderAdapter = {
 
   async cancel(id) {
     const anthropicClient = await anthropicFor(activeUserId());
-    await anthropicClient.messages.batches.cancel(id);
+    await tracked("anthropic", "batch_cancel", "", () =>
+      anthropicClient.messages.batches.cancel(id),
+    );
   },
 };
 
@@ -153,22 +198,31 @@ const openaiAdapter: ProviderAdapter = {
       )
       .join("\n");
 
-    const file = await client.files.create({
-      file: await toFile(Buffer.from(jsonl, "utf8"), "batch.jsonl", { type: "application/jsonl" }),
-      purpose: "batch",
+    // TWO ledger rows, not one. The upload and the create are separate calls to
+    // OpenAI and either can be the one that gets rejected; collapsing them would
+    // make a failed upload look like a failed batch create and send whoever is
+    // reconciling to the wrong place.
+    const model = modelOfFirst(requests);
+    const upload = await toFile(Buffer.from(jsonl, "utf8"), "batch.jsonl", {
+      type: "application/jsonl",
     });
-    const batch = await client.batches.create({
-      input_file_id: file.id,
-      endpoint: OPENAI_BATCH_ENDPOINT,
-      completion_window: OPENAI_COMPLETION_WINDOW,
-    });
+    const file = await tracked("openai", "batch_submit", model, () =>
+      client.files.create({ file: upload, purpose: "batch" }),
+    );
+    const batch = await tracked("openai", "batch_submit", model, () =>
+      client.batches.create({
+        input_file_id: file.id,
+        endpoint: OPENAI_BATCH_ENDPOINT,
+        completion_window: OPENAI_COMPLETION_WINDOW,
+      }),
+    );
     // The output file id doesn't exist yet at create time — poll fills it in.
     return { providerBatchId: batch.id, outputFileId: null };
   },
 
   async poll(id) {
     const client = await openaiFor(activeUserId());
-    const b = await client.batches.retrieve(id);
+    const b = await tracked("openai", "batch_poll", "", () => client.batches.retrieve(id));
     const c = b.request_counts;
     return {
       status: mapOpenAiStatus(b.status),
@@ -184,13 +238,15 @@ const openaiAdapter: ProviderAdapter = {
   async results(_id, outputFileId) {
     if (!outputFileId) throw new Error("OpenAI batch completed without an output file id.");
     const client = await openaiFor(activeUserId());
-    const res = await client.files.content(outputFileId);
+    const res = await tracked("openai", "batch_fetch", "", () =>
+      client.files.content(outputFileId),
+    );
     return parseOpenAiResults(await res.text(), toAnthropicMessage);
   },
 
   async cancel(id) {
     const client = await openaiFor(activeUserId());
-    await client.batches.cancel(id);
+    await tracked("openai", "batch_cancel", "", () => client.batches.cancel(id));
   },
 };
 
@@ -234,32 +290,40 @@ const voyageAdapter: ProviderAdapter = {
     const form = new FormData();
     form.append("purpose", "batch");
     form.append("file", new Blob([jsonl], { type: "application/jsonl" }), "batch.jsonl");
-    const file = await voyageJson<{ id: string }>("/files", { method: "POST", body: form });
+    // Two rows here for the same reason as OpenAI's submit — upload and create are
+    // separate requests and fail separately.
+    const file = await tracked("voyage", "batch_submit", meta.model ?? "", () =>
+      voyageJson<{ id: string }>("/files", { method: "POST", body: form }),
+    );
 
     // 3. Create the batch. Model + embedding params live at the batch level.
     const request_params: Record<string, unknown> = { model: meta.model };
     if (meta.inputType) request_params.input_type = meta.inputType;
     if (meta.outputDimension) request_params.output_dimension = meta.outputDimension;
     if (meta.outputDtype) request_params.output_dtype = meta.outputDtype;
-    const batch = await voyageJson<{ id: string }>("/batches", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        input_file_id: file.id,
-        endpoint: "/v1/embeddings",
-        completion_window: "12h",
-        request_params,
+    const batch = await tracked("voyage", "batch_submit", meta.model ?? "", () =>
+      voyageJson<{ id: string }>("/batches", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          input_file_id: file.id,
+          endpoint: "/v1/embeddings",
+          completion_window: "12h",
+          request_params,
+        }),
       }),
-    });
+    );
     return { providerBatchId: batch.id, outputFileId: null };
   },
 
   async poll(id) {
-    const b = await voyageJson<{
-      status: string;
-      output_file_id?: string | null;
-      request_counts?: { total?: number; completed?: number; failed?: number };
-    }>(`/batches/${id}`, { method: "GET" });
+    const b = await tracked("voyage", "batch_poll", "", () =>
+      voyageJson<{
+        status: string;
+        output_file_id?: string | null;
+        request_counts?: { total?: number; completed?: number; failed?: number };
+      }>(`/batches/${id}`, { method: "GET" }),
+    );
     const rc = b.request_counts ?? {};
     return {
       status: mapVoyageStatus(b.status),
@@ -272,18 +336,26 @@ const voyageAdapter: ProviderAdapter = {
 
   async results(_id, outputFileId) {
     if (!outputFileId) throw new Error("Voyage batch completed without an output file id.");
-    const res = await fetch(`${VOYAGE_BASE}/files/${outputFileId}/content`, {
-      headers: { Authorization: await voyageAuth() },
+    // The status check is INSIDE the span: this is the one call in the file that
+    // does not go through voyageJson, so a 401 becomes an error here or nowhere,
+    // and the ledger would otherwise record a rejected fetch as a successful one.
+    const body = await tracked("voyage", "batch_fetch", "", async () => {
+      const res = await fetch(`${VOYAGE_BASE}/files/${outputFileId}/content`, {
+        headers: { Authorization: await voyageAuth() },
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        throw new Error(`Voyage results fetch → ${res.status}: ${detail.slice(0, 300)}`);
+      }
+      return res.text();
     });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`Voyage results fetch → ${res.status}: ${body.slice(0, 300)}`);
-    }
-    return parseVoyageResults(await res.text());
+    return parseVoyageResults(body);
   },
 
   async cancel(id) {
-    await voyageJson(`/batches/${id}/cancel`, { method: "POST" });
+    await tracked("voyage", "batch_cancel", "", () =>
+      voyageJson(`/batches/${id}/cancel`, { method: "POST" }),
+    );
   },
 };
 

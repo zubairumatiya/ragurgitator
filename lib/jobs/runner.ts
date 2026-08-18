@@ -33,6 +33,11 @@
 // slice that dies mid-flight can leave it a little ahead of what actually
 // committed. The CURSOR is the authority and cannot run ahead; the counter is
 // cosmetic and the next slice's first checkpoint corrects it.
+import {
+  flushKeyUsageEvents,
+  pruneKeyUsage,
+  withKeyUsageBuffer,
+} from "@/lib/auth/keyUsageStore";
 import { withUser, type RequestUser } from "@/lib/auth/userScope";
 import { runOutsideUserTransaction } from "@/lib/db";
 import { postJobTick } from "@/lib/http/jobSecret";
@@ -149,7 +154,7 @@ export async function runSlice(jobId: string): Promise<SliceOutcome> {
     // failJob is not lease-guarded on purpose: this slice may have lost its lease,
     // and a job whose work threw still has to stop being "running".
     const failed = await inOwnScope(owner, () => failJob(jobId, message));
-    if (failed) await notify(owner, failed);
+    if (failed) await finishTail(owner, failed);
     return "failed";
   }
 }
@@ -159,7 +164,7 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
   const step = stepFor(job.kind);
   if (!step) {
     const failed = await inOwnScope(owner, () => failJob(job.id, `No step for kind ${job.kind}.`));
-    if (failed) await notify(owner, failed);
+    if (failed) await finishTail(owner, failed);
     return "failed";
   }
 
@@ -170,7 +175,7 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
     const failed = await inOwnScope(owner, () =>
       failJob(job.id, "The config this job was running on no longer exists."),
     );
-    if (failed) await notify(owner, failed);
+    if (failed) await finishTail(owner, failed);
     return "failed";
   }
 
@@ -257,10 +262,26 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
 
   // THE WORK. Its own transaction, and it must never touch the job row — see the
   // header. `scope` and `cursor` are opaque to this file; only the step knows.
-  const result = await inOwnScope(owner, () =>
-    withConfig(config, () =>
-      step.run(job.scope as never, job.cursor as never, emit, shouldStop),
-    ),
+  //
+  // THE KEY-USAGE BUFFER IS NOT OPTIONAL HERE. This file installs no detached
+  // queue — a job has no response to flush after — so an unbuffered ledger write
+  // (lib/auth/keyUsageStore.ts) runs INLINE, one synchronous INSERT per provider
+  // call, inside the work transaction. A bulk eval run or an ingest makes
+  // thousands of those, which makes the highest-volume path in the app the one
+  // that pays most for telemetry. Buffered, a slice costs one multi-row INSERT.
+  //
+  // It wraps inOwnScope rather than sitting inside it, and the drain opens a scope
+  // of its own, so the rows survive a slice that throws — a burst of failures is
+  // exactly what the ledger exists to show, and rolling it back with the work
+  // would erase it.
+  const result = await withKeyUsageBuffer(
+    () =>
+      inOwnScope(owner, () =>
+        withConfig(config, () =>
+          step.run(job.scope as never, job.cursor as never, emit, shouldStop),
+        ),
+      ),
+    (events) => inOwnScope(owner, () => flushKeyUsageEvents(events)),
   );
   doneUnits = result.doneUnits;
   mustFinish = mustFinish || result.mustFinish === true;
@@ -297,7 +318,7 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
       // A cancelled run still measured something real: the units it did process
       // took as long as they took, which is exactly what the estimate needs.
       await learnTiming(owner, done, config);
-      await notify(owner, done);
+      await finishTail(owner, done);
     }
     return "finished";
   }
@@ -330,7 +351,7 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
   );
   if (done) {
     await learnTiming(owner, done, config);
-    await notify(owner, done);
+    await finishTail(owner, done);
   }
   return "finished";
 }
@@ -351,6 +372,16 @@ async function learnTiming(
   await inOwnScope(owner, () =>
     withConfig(config, () => recordTiming(job.kind, job.doneUnits, elapsed)),
   );
+}
+
+// A job's terminal tail. The mail is the point; the prune rides along because this
+// is the one moment the app knows a heavy producer of ledger rows has just stopped
+// producing them, and it means a user who never opens /usage still gets their
+// retention enforced (lib/auth/keyUsageStore.ts). Neither may fail the job, and
+// neither has anything to say to the other, so they only share a call site.
+async function finishTail(owner: RequestUser, job: BackgroundJob): Promise<void> {
+  await notify(owner, job);
+  await inOwnScope(owner, () => pruneKeyUsage());
 }
 
 // One mail per job, stamped so a later sweep can't send a second.

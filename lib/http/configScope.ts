@@ -18,10 +18,16 @@
 // hand Next's `after` the flush that drains it once the response is out. after() is
 // called BEFORE withUser, so the async context it binds carries no transaction
 // handle — that ordering is load-bearing, not incidental.
+//
+// They own the key-usage buffer too (lib/auth/keyUsageStore.ts), nested INSIDE the
+// detached queue: the buffer's drain hands its one multi-row insert to that queue,
+// so a request's provider calls become a single statement written after the
+// response rather than N statements written during it.
 import { after } from "next/server";
 
 import { requireUserForApi, unauthorizedJson } from "@/lib/auth/dal";
 import { withUser } from "@/lib/auth/userScope";
+import { withKeyUsageBuffer } from "@/lib/auth/keyUsageStore";
 import { withDetachedQueue } from "@/lib/detached";
 import { missingKeyResponse } from "@/lib/http/missingKeyServer";
 import { UnknownConfigError, resolveRequestConfig, withConfig } from "@/lib/rag/activeConfig";
@@ -59,21 +65,23 @@ export async function withRequestConfig<T>(
   if (!user) return unauthorizedJson();
 
   return withDetachedQueue(user, after, () =>
-    withUser(user, async () => {
-      let cfg;
-      try {
-        cfg = await resolveRequestConfig(request);
-      } catch (err) {
-        // 404, not 500 and not 403: a config that doesn't exist and a config
-        // owned by someone else must look identical from outside, or the status
-        // code itself confirms which ids are real.
-        if (err instanceof UnknownConfigError) {
-          return Response.json({ error: "Config not found." }, { status: 404 });
+    withKeyUsageBuffer(() =>
+      withUser(user, async () => {
+        let cfg;
+        try {
+          cfg = await resolveRequestConfig(request);
+        } catch (err) {
+          // 404, not 500 and not 403: a config that doesn't exist and a config
+          // owned by someone else must look identical from outside, or the status
+          // code itself confirms which ids are real.
+          if (err instanceof UnknownConfigError) {
+            return Response.json({ error: "Config not found." }, { status: 404 });
+          }
+          throw err;
         }
-        throw err;
-      }
-      return withConfig(cfg, () => catchingMissingKey(fn));
-    }),
+        return withConfig(cfg, () => catchingMissingKey(fn));
+      }),
+    ),
   );
 }
 
@@ -86,6 +94,6 @@ export async function withRequestUser<T>(fn: () => Promise<T>): Promise<T | Resp
   const user = await requireUserForApi();
   if (!user) return unauthorizedJson();
   return withDetachedQueue(user, after, () =>
-    withUser(user, () => catchingMissingKey(fn)),
+    withKeyUsageBuffer(() => withUser(user, () => catchingMissingKey(fn))),
   );
 }

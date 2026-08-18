@@ -247,6 +247,22 @@ export function Sidebar() {
         </Link>
       </Section>
 
+      {/* Its own section rather than a row under "My cache": this is about the
+          credential, not about anything the app stores for you, and filing it
+          next to a cache would suggest it is one more piece of derived data you
+          can throw away. Single row today, same as above — the header is the
+          slot a future per-key or per-provider view lands in. */}
+      <Section id="usage" title="My usage">
+        <Link
+          href="/usage"
+          title="API key usage — every provider call made with your keys, to check against the provider's own records"
+          aria-current={pathname === "/usage" ? "page" : undefined}
+          className={rowClass(pathname === "/usage")}
+        >
+          <span className="truncate">API key usage</span>
+        </Link>
+      </Section>
+
       <SignOutFooter />
     </aside>
   );
