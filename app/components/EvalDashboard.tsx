@@ -654,7 +654,7 @@ export function EvalDashboard() {
         setNotice(
           final.cancelled
             ? `Cancelled — kept ${final.generated + (final.reused ?? 0)} question(s), ` +
-              `${final.scored} scored.`
+                `${final.scored} scored.`
             : label(final),
         );
       }
@@ -1826,9 +1826,9 @@ const QuestionRow = memo(function QuestionRow({
             />
             {/* The scope is wider than this config, and the copy has to say so. */}
             <span>
-              Also delete from the question cache. It was generated once for this
-              passage and is shared across all your configs, so removing it stops
-              it returning via “Add cached” anywhere.
+              Also delete from the question cache. It was generated once for
+              this passage and is shared across all your configs, so removing it
+              stops it returning via “Add cached” anywhere.
             </span>
           </label>
           <span className="flex items-center gap-2">
@@ -2384,8 +2384,8 @@ function BulkActions({
                   <span>
                     Top up{" "}
                     <span className="text-zinc-400">
-                      (only add what a chunk is missing — chunks already at N get
-                      nothing)
+                      (only add what a chunk is missing — chunks already at N
+                      get nothing)
                     </span>
                   </span>
                 </label>
@@ -2664,39 +2664,29 @@ function MetricTicker({
 }) {
   if (live === null || base === null) return null;
   const delta = live - base;
+  // No unit suffix: the ticker sits against the metric it belongs to, so "pp"
+  // only repeats what the card already says.
   const shown =
     unit === "pp"
-      ? `${Math.abs(delta * 100).toFixed(1)}pp`
+      ? Math.abs(delta * 100).toFixed(1)
       : Math.abs(delta).toFixed(2);
   // Below half a display unit the arrow would point at a change the number
   // can't show — read that as flat rather than as a rounded-away win.
-  const flat = unit === "pp" ? Math.abs(delta) < 0.0005 : Math.abs(delta) < 0.005;
+  const flat =
+    unit === "pp" ? Math.abs(delta) < 0.0005 : Math.abs(delta) < 0.005;
   const baseShown = unit === "pp" ? pct(base) : base.toFixed(2);
   return (
-    <Tooltip
-      align="left"
-      text={
-        `Baseline ${what} ${baseShown} — this config's model and chunk shape with ` +
-        `no per-chunk overrides, over the same ${questions} question${
-          questions === 1 ? "" : "s"
-        }.\n\n` +
-        "The delta is what your overrides and delegates have bought. Both sides " +
-        "are measured over the questions that have a baseline, so this is not " +
-        "always the whole golden set."
-      }
+    <span
+      className={`text-xs font-medium ${
+        flat
+          ? "text-zinc-400"
+          : delta > 0
+            ? "text-green-600 dark:text-green-400"
+            : "text-red-600 dark:text-red-400"
+      }`}
     >
-      <span
-        className={`text-xs font-medium ${
-          flat
-            ? "text-zinc-400"
-            : delta > 0
-              ? "text-green-600 dark:text-green-400"
-              : "text-red-600 dark:text-red-400"
-        }`}
-      >
-        {flat ? "—" : delta > 0 ? `▲ +${shown}` : `▼ −${shown}`}
-      </span>
-    </Tooltip>
+      {flat ? "—" : delta > 0 ? `▲ +${shown}` : `▼ −${shown}`}
+    </span>
   );
 }
 
@@ -3623,7 +3613,11 @@ function ModelTrial({
     let current: CorpusGroup | null = null;
     for (const c of state.ctx.restCorpus) {
       if (!current || current.documentId !== c.documentId) {
-        current = { documentId: c.documentId, fileName: c.fileName, chunks: [] };
+        current = {
+          documentId: c.documentId,
+          fileName: c.fileName,
+          chunks: [],
+        };
         groups.push(current);
       }
       current.chunks.push(c);
