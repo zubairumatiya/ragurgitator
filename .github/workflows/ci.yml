@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A second push to the same PR makes the first run's answer worthless, so cancel it
+# rather than pay for a verdict about a commit nobody will merge. Runs on main are
+# never cancelled: each one is the record of whether that commit is green.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Ahead of setup-node, which needs pnpm on PATH to locate the store it caches.
+      # No version here on purpose: the action reads packageManager from
+      # package.json, so the runner and a laptop cannot drift onto different builds.
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      # Fails when pnpm-lock.yaml and package.json disagree, which is what a
+      # dependency added without committing the lockfile looks like.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Ordered fastest first so an obvious break reports in seconds. Each check
+      # still runs when an earlier one fails: one run should show every problem,
+      # not whichever happened to be scheduled first.
+      - name: Guard
+        run: npm run guard
+
+      - name: Test
+        if: '!cancelled()'
+        run: npm test
+
+      - name: Lint
+        if: '!cancelled()'
+        run: npm run lint
+
+      # These are placeholders, not secrets. next build evaluates module scope and
+      # prerenders, so the two db URLs and the Supabase pair have to parse or the
+      # build throws before it compiles anything; nothing here is dialled, because
+      # postgres.js connects lazily and no page fetches at build time. Real values
+      # would buy nothing and would bake into the client bundle, which is why a CI
+      # build is never the artifact that ships.
+      - name: Build
+        if: '!cancelled()'
+        env:
+          DATABASE_URL: postgres://placeholder:placeholder@localhost:5432/placeholder
+          RAG_APP_DATABASE_URL: postgres://placeholder:placeholder@localhost:5432/placeholder
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: sb_publishable_placeholder
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
+        run: npm run build
