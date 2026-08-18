@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A second push to the same PR makes the first run's answer worthless, so cancel it
+# rather than pay for a verdict about a commit nobody will merge. Runs on main are
+# never cancelled: each one is the record of whether that commit is green.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ahead of setup-node, which needs pnpm on PATH to locate the store it caches.
+      # No version here on purpose: the action reads packageManager from
+      # package.json, so the runner and a laptop cannot drift onto different builds.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      # Fails when pnpm-lock.yaml and package.json disagree, which is what a
+      # dependency added without committing the lockfile looks like.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Ordered fastest first so an obvious break reports in seconds. Each check
+      # still runs when an earlier one fails: one run should show every problem,
+      # not whichever happened to be scheduled first.
+      - name: Guard
+        run: npm run guard
+
+      - name: Test
+        if: '!cancelled()'
+        run: npm test
+
+      - name: Lint
+        if: '!cancelled()'
+        run: npm run lint
+
+      - name: Build
+        if: '!cancelled()'
+        run: npm run build
