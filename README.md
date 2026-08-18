@@ -177,7 +177,7 @@ So, for each new table:
    `exists (select 1 from configs …)` for a `config_id`-bearing one.
 3. Run both checks before and after applying it:
    ```bash
-   npm run rls:check      # every table is reachable to its owner and nobody else
+   npm run rls:check      # every row is reachable to exactly one user and no stranger
    npm run cascade:check  # every table is destroyed by account deletion
    ```
    Each asserts an allowlist rather than printing a report, so a table that
@@ -195,7 +195,7 @@ npm test               # run the test suite
 npm run guard          # multi-tenancy invariants: key handling, scopes, auth gates
 
 npm run vault:check    # Azure Key Vault wrap/unwrap round-trip
-npm run rls:check      # tenant isolation: owner sees all, stranger sees none
+npm run rls:check      # tenant isolation: users partition the rows, stranger sees none
 npm run cascade:check  # deletion contract: keys delete alone, accounts delete all
 
 npm run jobs:smoke     # drive a background job end to end (needs the dev server)
