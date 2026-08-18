@@ -19,7 +19,7 @@
 // Every text goes through embedQueryCached, so it's content-addressed, metered, and
 // nearly free on re-runs.
 //
-// CANCELLATION. The full sweep is ~an hour of sequential embedding, so it takes a
+// CANCELLATION. The full sweep is a long embedding run, so it takes a
 // `shouldStop` flag like every other long job here (never a throw — see
 // cancelRegistry). Stopping keeps everything already banked: embedQueryCached
 // persists each vector as it goes, so a cancelled run still warms the cache and
@@ -28,7 +28,7 @@ import { config } from "@/lib/config";
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { NEVER_STOP, type ShouldStop } from "@/lib/http/cancelRegistry";
-import { embedQueryCached } from "@/lib/rag/embedCache";
+import { embedQueriesCached } from "@/lib/rag/embedCache";
 import { EMBEDDING_MODELS } from "@/lib/rag/embeddingModels";
 import { availableProviders } from "@/lib/rag/providerAvailability";
 import type { EffectiveAcceptTarget } from "@/lib/rag/semanticCache";
@@ -218,16 +218,30 @@ async function scoreModel(
 } | null> {
   const texts = [...new Set(pairs.flatMap((p) => [p.textA, p.textB]))];
   const vectors = new Map<string, number[]>();
-  // Sequential: a sweep is a background action with no latency budget, and one
-  // request at a time is what provider rate limits like.
-  for (const t of texts) {
-    // Checked BETWEEN embeddings, so cancelling lands within one provider call
-    // rather than at the end of the model. A half-embedded model can't be
-    // scored — an incomplete text set would silently grade this model on a
-    // different pair set than the others — so it returns null and reports as
-    // unscored. The vectors it did buy are already persisted.
+  // ONE ROUND TRIP PER SLICE, not per text. This was a sequential per-text loop
+  // through embedQueryCached, defended as being gentle on provider rate limits —
+  // but that was never where the time went, and adding concurrency around it
+  // changed nothing measurable: every store call in a request scope shares ONE
+  // transaction on ONE connection (lib/db.ts), so the cache reads serialize
+  // whatever the caller does. 324 texts cost 324 round trips at ~0.3s each.
+  //
+  // embedQueriesCached collapses a slice into one cache read, one batched
+  // provider call for the misses, one write and one metering call.
+  //
+  // SLICED rather than one call for the whole set, because `shouldStop` can only
+  // be checked between calls: a single bulk call would make the sweep
+  // uncancellable for the length of a model. A slice is the cancellation
+  // granularity, and it is also the unit a failure loses.
+  const slice = config.semanticCache.keyModelSweep.embedSliceSize;
+  for (let i = 0; i < texts.length; i += slice) {
+    // A half-embedded model can't be scored — an incomplete text set would
+    // silently grade this model on a different pair set than the others — so it
+    // returns null and reports as unscored. The vectors it did buy are already
+    // persisted.
     if (shouldStop()) return null;
-    vectors.set(t, await embedQueryCached(t, model));
+    for (const [t, vec] of await embedQueriesCached(texts.slice(i, i + slice), model)) {
+      vectors.set(t, vec);
+    }
   }
 
   const scored = pairs.map((p) => ({

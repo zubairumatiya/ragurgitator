@@ -155,6 +155,20 @@ export const config = {
       // audited with, so this turns the quarantine from a cleanup pass somebody
       // has to remember to run into a gate. Costs one judge call per pair.
       screenGeneratedPairs: true,
+      // How many texts one model's scoring pass embeds PER CALL. The pass used
+      // to embed one text at a time, to be gentle on provider rate limits —
+      // which is the provider's business to enforce, not ours, and was not where
+      // the time went anyway: warm, the loop was ~300 sequential round trips to
+      // `embedding_cache` on the single connection a request scope holds.
+      // Batching them is what made it fast; adding CONCURRENCY instead measured
+      // at no improvement at all, because the shared transaction serializes the
+      // reads however wide the caller goes.
+      //
+      // The size is a cancellation dial: `shouldStop` is checked between slices,
+      // so this is how late a cancel can land, and how much work one failure
+      // throws away. 128 is Voyage's own per-request cap, so a slice is a single
+      // provider call for the models this sweep is mostly made of.
+      embedSliceSize: 128,
     },
   },
 } as const;

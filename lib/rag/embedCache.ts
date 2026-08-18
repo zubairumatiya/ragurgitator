@@ -32,7 +32,7 @@ import { createHash } from "node:crypto";
 import { activeUserId } from "@/lib/auth/userScope";
 import { isolated, sql } from "@/lib/db";
 import { detached } from "@/lib/detached";
-import { embedQuery, embedTexts } from "@/lib/rag/embeddings";
+import { embedQueries, embedQuery, embedTexts } from "@/lib/rag/embeddings";
 import { costEmbed, estimateTokens, estimateTokensAll } from "@/lib/rag/pricing";
 import { recordSaving, recordSpend } from "@/lib/rag/savingsStore";
 
@@ -297,6 +297,46 @@ export async function cachedQueryVectors(
   // question dirty for re-scoring, which embeds it on the paid path and meters
   // it there — so a hit avoided nothing that would otherwise have been bought.
   return out;
+}
+
+// Embed MANY query strings under `model`, cached through both layers — the
+// query-role twin of embedDocsCached, and the bulk form of embedQueryCached.
+//
+// WHY IT EXISTS. embedQueryCached is one text per call: one `readPersisted`
+// round trip, one provider call on a miss, one `writePersisted`, one metering
+// write. A caller with 300 texts (the key-model sweep) therefore pays 300 of
+// each — and since every store call inside a request scope shares ONE
+// transaction on ONE connection (lib/db.ts), those round trips are strictly
+// sequential no matter how much concurrency the caller wraps around them. That
+// is the actual cost of a warm sweep: not the provider, the round trips.
+//
+// This collapses them: one read for the whole set, one batched embed of just the
+// misses (chunked by the provider's own cap inside embedQueries), one write, one
+// metering call. Same cost math and the same `embed_cache` lever as the per-text
+// path — the saving is priced off the hit list either way, just banked once
+// instead of per text.
+export async function embedQueriesCached(
+  texts: string[],
+  model: string,
+): Promise<Map<string, number[]>> {
+  const unique = uniq(texts);
+  const l1hits = unique.filter((t) => memory.has(memKey(model, "query", t)));
+  const notInMemory = unique.filter((t) => !memory.has(memKey(model, "query", t)));
+  const persisted = await readPersisted(model, "query", notInMemory);
+  for (const [t, vec] of persisted) memory.set(memKey(model, "query", t), vec);
+
+  const missing = notInMemory.filter((t) => !persisted.has(t));
+  if (missing.length > 0) {
+    const vecs = await embedQueries(missing, model);
+    missing.forEach((t, i) => memory.set(memKey(model, "query", t), vecs[i]));
+    await writePersisted(
+      model,
+      "query",
+      missing.map((t, i) => ({ text: t, vector: vecs[i] })),
+    );
+  }
+  await meterEmbeds(model, [...l1hits, ...persisted.keys()], missing);
+  return new Map(unique.map((t) => [t, memory.get(memKey(model, "query", t))!]));
 }
 
 // Embed one query string under `model`, cached through both layers.

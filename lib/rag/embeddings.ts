@@ -65,3 +65,12 @@ export async function embedQuery(text: string, model?: string): Promise<number[]
   const [vector] = await embed([text], "query", model);
   return vector;
 }
+
+// Many queries in one pass, batched by the provider's cap like embedTexts. The
+// QUERY role is the whole point: the key-model sweep scores hundreds of question
+// texts, and embedding them one call at a time — through embedQuery — asks a
+// provider that accepts 128 inputs per request for 128 requests.
+export function embedQueries(texts: string[], model?: string): Promise<number[][]> {
+  if (texts.length === 0) return Promise.resolve([]);
+  return embed(texts, "query", model);
+}
