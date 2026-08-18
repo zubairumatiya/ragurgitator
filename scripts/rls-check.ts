@@ -1,5 +1,13 @@
 // Proves that 0051's policies are actually load-bearing, by trying to read data as
-// `rag_app` under three identities: the real owner, a stranger, and nobody.
+// `rag_app` under three identities: every real user, a stranger, and nobody.
+//
+// The per-table assertion is a partition: every user's view summed together must
+// equal what admin sees. A policy that is too tight leaves rows no user can read
+// (sum below the total), and one that is too loose shows a row to two users (sum
+// above it). Summing rather than comparing one user against the global count is
+// what makes this survive a second account — the old check asserted that the
+// first user saw every row in the database, which stopped being true the moment
+// anyone else signed up.
 //
 // A script rather than a one-off, because the failure mode it guards is silent in
 // both directions. A policy that is too tight makes a feature return empty rather
@@ -54,13 +62,16 @@ async function countAs(userId: string | null, table: string): Promise<number | s
 }
 
 async function main() {
-  const [{ id: owner }] = await admin<{ id: string }[]>`
-    select id from user_profiles order by created_at limit 1`;
-  console.log(`owner   = ${owner}`);
+  // Every user, because the check below is a sum over all of them; ordered so the
+  // first row is the same "owner" the script has always reported.
+  const users = await admin<{ id: string }[]>`
+    select id from user_profiles order by created_at`;
+  if (!users.length) throw new Error("No user_profiles rows — nothing to check.");
+  console.log(`users   = ${users.length} (owner ${users[0].id})`);
   console.log(`stranger= ${STRANGER}\n`);
 
-  console.log("table                          admin   owner  stranger  no-identity");
-  console.log("-".repeat(74));
+  console.log("table                          admin      per-user  stranger  no-identity");
+  console.log("-".repeat(80));
 
   let failures = 0;
   const adminCount = async (table: string) => {
@@ -71,30 +82,43 @@ async function main() {
   };
 
   for (const table of PROBES) {
-    // Bracket the owner's read with two admin reads rather than comparing
+    // Bracket the per-user sweep with two admin reads rather than comparing
     // against one. This script is meant to be run against a LIVE app, and
     // embedding_cache / savings_totals / spend_totals get written on almost any
     // activity — so a single before-count races every page load and reports a
     // failure that is really just a row arriving mid-check. What we actually
-    // need to know is that the owner sees everything, not that the table stopped
-    // changing, so any count within the window the table moved through passes.
+    // need to know is that the users between them see everything, not that the
+    // table stopped changing, so any total the table moved through passes.
     const before = await adminCount(table);
-    const asOwner = await countAs(owner, table);
+    const perUser: (number | string)[] = [];
+    for (const u of users) perUser.push(await countAs(u.id, table));
     const after = await adminCount(table);
     const asStranger = await countAs(STRANGER, table);
     const asNobody = await countAs(null, table);
 
     const lo = Math.min(before, after);
     const hi = Math.max(before, after);
-    const ownerOk = typeof asOwner === "number" && asOwner >= lo && asOwner <= hi;
-    const bad = !ownerOk || asStranger !== 0 || asNobody !== 0;
+    const errored = perUser.some((n) => typeof n !== "number");
+    const sum = errored ? NaN : (perUser as number[]).reduce((a, b) => a + b, 0);
+    const sumOk = !errored && sum >= lo && sum <= hi;
+    const bad = !sumOk || asStranger !== 0 || asNobody !== 0;
     if (bad) failures++;
     const total = before === after ? String(before) : `${lo}-${hi}`;
+    // Show the addends, not just the sum: on a failure the per-user split is the
+    // first thing worth seeing, and with a handful of accounts it stays readable.
+    const split = perUser.join("+");
     console.log(
-      `${table.padEnd(30)} ${total.padStart(7)}  ` +
-        `${String(asOwner).padStart(6)}  ${String(asStranger).padStart(8)}  ` +
-        `${String(asNobody).padStart(11)}${bad ? "   <-- UNEXPECTED" : ""}`,
+      `${table.padEnd(30)} ${total.padStart(7)}  ${split.padStart(12)}  ` +
+        `${String(asStranger).padStart(8)}  ${String(asNobody).padStart(11)}` +
+        (bad ? "   <-- UNEXPECTED" : ""),
     );
+    if (!sumOk && !errored) {
+      console.log(
+        sum < lo
+          ? `  <-- ${lo - sum} row(s) no user can read — a policy here is too tight.`
+          : `  <-- ${sum - hi} row(s) read by more than one user — a policy here is too loose.`,
+      );
+    }
   }
 
   // A table with no policy is invisible to rag_app. That is correct for the four
