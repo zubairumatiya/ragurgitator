@@ -10,12 +10,14 @@
 // labels are ANSWER-LEVEL by construction, and a divergence would silently poison
 // the pooled pair set with question-level labels.
 //
-// NOT SCREENED, unlike the inline path. generatePairs judges every pair against
-// the shadow rubric before storing it (F3 measured the generator at 80% on hard
-// negatives); doing the same here would mean one sequential judge call per pair
-// inside a batch-apply step — thousands of them for a whole-bank run, in a job
-// slice that is not built for it. Pairs from this path therefore still need the
-// F3 audit (`npm run f3 -- judge`), and the panel says so when it submits.
+// SCREENED BY A SECOND BATCH, not in-line. generatePairs judges every pair
+// against the shadow rubric before storing it (F3 measured the generator at 80%
+// on hard negatives); doing the same inside this apply() would mean one
+// sequential judge call per pair — thousands of them for a whole-bank run, in a
+// job slice that is not built for it. So apply() CHAINS a cache_pair_screen
+// batch instead: same rubric, same judge model, same −50%, on the provider's
+// clock. A contradicted pair is quarantined rather than dropped (the row already
+// exists by then); see lib/batch/jobs/pairScreen.ts.
 //
 // apply is IDEMPOTENT: inserts go through insertPairs, whose canonical
 // (hash_a, hash_b) unique key + on-conflict-do-nothing makes a re-poll or retry a
@@ -93,5 +95,13 @@ export const pairGenerationHandler: JobHandler = {
     }
     await bankLlmBatchSaving(results);
     return applied;
+  },
+
+  // Screen what we just wrote. The scope is deliberately EMPTY rather than the
+  // ids from this batch: the screen's build selects every unjudged pair, so one
+  // chained run also picks up anything an earlier unscreened batch left behind.
+  // Nothing to screen returns null from its build and no job row is created.
+  async chain(_input, applied) {
+    return applied > 0 ? { kind: "cache_pair_screen", scope: {} } : null;
   },
 };

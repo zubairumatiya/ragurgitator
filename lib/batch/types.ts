@@ -18,6 +18,7 @@ export const JOB_KINDS = [
   "cluster_labeling",
   "ingest_embedding",
   "cache_pair_generation",
+  "cache_pair_screen",
 ] as const;
 export type JobKind = (typeof JOB_KINDS)[number];
 
@@ -27,6 +28,7 @@ export const JOB_LABELS: Record<JobKind, string> = {
   cluster_labeling: "Cluster labeling",
   ingest_embedding: "Ingest / re-embedding",
   cache_pair_generation: "Cache-key eval pairs",
+  cache_pair_screen: "Cache-key pair screen",
 };
 
 // The two "settings" the user groups jobs into: the embedding leg is just
@@ -83,6 +85,11 @@ export const DEFAULT_BATCH_SAVINGS: BatchSavings = {
     cluster_labeling: "standard",
     ingest_embedding: "standard",
     cache_pair_generation: "standard",
+    // CHAINED, never chosen. The screen has no synchronous twin to prefer — it is
+    // submitted by cache_pair_generation's chain hook (and by the panel's own
+    // button), so this entry exists only to keep the map total. EvalSettings
+    // hides it for the same reason.
+    cache_pair_screen: "batch",
   },
   semanticCache: { serve: false, threshold: null, keyModel: null, acceptTarget: null },
 };
@@ -171,6 +178,10 @@ export function coerceBatchSavings(raw: unknown): BatchSavings {
       cluster_labeling: resolve("cluster_labeling"),
       ingest_embedding: resolve("ingest_embedding"),
       cache_pair_generation: resolve("cache_pair_generation"),
+      // Not resolved: nothing reads a preference for the chained screen, and a
+      // legacy blob's llm-leg "standard" would otherwise read back as a choice
+      // the UI never offered and no launch point honours.
+      cache_pair_screen: "batch",
     },
     // Absent (old rows) or non-boolean → the safe default (don't serve).
     semanticCache: {

@@ -15,12 +15,13 @@ import {
   createBatchJob,
   failStaleSubmittingJobs,
   getBatchJob,
+  hasOpenJobOfKind,
   listActiveJobs,
   listBatchJobs,
   updateBatchJob,
 } from "@/lib/rag/batchStore";
 import { adapterFor, type SubmitMeta } from "@/lib/batch/providers";
-import { handlerFor } from "@/lib/batch/jobs/registry";
+import { handlerFor, type JobHandler } from "@/lib/batch/jobs/registry";
 import { sendCompletionEmail } from "@/lib/batch/notify";
 import type { BatchJob, BatchProvider, BatchRequest, JobKind } from "@/lib/batch/types";
 
@@ -122,10 +123,49 @@ async function applyJob(job: BatchJob): Promise<BatchJob> {
         appliedCount: applied,
         appliedAt: new Date(),
       })) ?? job;
+    // The follow-on batch, if this kind wants one (cache_pair_generation →
+    // cache_pair_screen). AFTER the status write, so a chain that throws can
+    // never un-apply results that are already in the tables, and best-effort for
+    // the same reason: an unscreened pair set is recoverable by hand, a batch
+    // marked failed after its rows landed is not.
+    const chain = () => chainFrom(updated, handler);
+    await (resolved ? withConfig(resolved, chain) : chain());
     return maybeNotify(updated);
   } catch (e) {
     const failed = (await updateBatchJob(job.id, { status: "failed", error: msg(e) })) ?? job;
     return maybeNotify(failed);
+  }
+}
+
+// Submit the batch a finished job asks to follow it with.
+//
+// GUARDED AGAINST DOUBLE SUBMISSION. applyJob can legitimately run twice — two
+// overlapping polls, or a re-poll of a completed row — and the handlers are
+// idempotent, but a second SUBMIT is not: the chained build reads rows the first
+// chained batch has not come back to write yet, so it would find the same work
+// and pay for it again. So a SINGLETON kind with an open job is skipped — the
+// same guard POST /api/batch/submit applies to a hand-launched one.
+async function chainFrom(job: BatchJob, handler: JobHandler): Promise<void> {
+  if (!handler.chain) return;
+  try {
+    const next = await handler.chain(job.input, job.appliedCount);
+    if (!next) return;
+    const nextHandler = handlerFor(next.kind);
+    if (!nextHandler) return;
+    if (nextHandler.singleton && (await hasOpenJobOfKind(next.kind))) return;
+    const built = await nextHandler.build(next.scope);
+    if (!built || built.requests.length === 0) return;
+    await submitBatch({
+      kind: next.kind,
+      provider: built.provider,
+      configId: job.configId,
+      configLabel: job.configLabel,
+      requests: built.requests,
+      input: built.input,
+      submitMeta: built.submitMeta,
+    });
+  } catch (e) {
+    console.warn(`[batch:orchestrator] chain from ${job.id} failed: ${msg(e)}`);
   }
 }
 

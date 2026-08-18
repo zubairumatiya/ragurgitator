@@ -24,6 +24,7 @@ test("legOfKind: only ingest_embedding is the embedding leg", () => {
     "ndcg_ranking",
     "cluster_labeling",
     "cache_pair_generation",
+    "cache_pair_screen",
   ] as const) {
     assert.equal(legOfKind(k), "llm");
   }
@@ -37,6 +38,7 @@ test("effectiveChoice: each job stands alone — one choice never moves another"
       cluster_labeling: "batch",
       ingest_embedding: "standard",
       cache_pair_generation: "standard",
+      cache_pair_screen: "batch",
     },
     semanticCache: { serve: false, threshold: null, keyModel: null, acceptTarget: null },
   };
@@ -173,6 +175,9 @@ test("coerceBatchSavings migrates legacy mode:'bulk' — the leg wins, dead jobs
     cluster_labeling: "batch",
     ingest_embedding: "standard", // from the embedding leg, as before
     cache_pair_generation: "batch", // added later; resolves through the llm leg
+    // Chained-only: never resolved from a legacy map, because nothing reads a
+    // preference for it and the UI offers no row to change it.
+    cache_pair_screen: "batch",
   });
 });
 
@@ -193,6 +198,7 @@ test("coerceBatchSavings migrates legacy mode:'individual' — the jobs map wins
     cluster_labeling: "batch",
     ingest_embedding: "standard", // NOT the stale 'batch' leg
     cache_pair_generation: "batch", // no entry in either map → the llm leg
+    cache_pair_screen: "batch", // chained-only, pinned
   });
 });
 
@@ -213,6 +219,7 @@ test("coerceBatchSavings migrates the legs+overrides shape — override, else le
     cluster_labeling: "standard",
     ingest_embedding: "batch", // the embedding leg
     cache_pair_generation: "standard", // the llm leg
+    cache_pair_screen: "batch", // chained-only: the leg does NOT reach it
   });
 });
 

@@ -282,6 +282,24 @@ export async function listActiveJobs(): Promise<BatchJob[]> {
   return rows.map(toJob);
 }
 
+// Is a job of this KIND already open anywhere in this user's account?
+//
+// Backs the singleton guard on both submission paths (the chain hook and
+// POST /api/batch/submit), and it is deliberately account-wide
+// rather than per-config like inFlightForConfig: the chained screen selects its
+// work by USER (an eval pair is a property of two question texts, not of a
+// config), so two configs finishing a generation batch at the same time would
+// otherwise each submit a screen for the same rows and pay twice. Includes
+// `submitting` — a row mid-submit is a batch about to exist.
+export async function hasOpenJobOfKind(kind: JobKind): Promise<boolean> {
+  const [row] = await sql<{ n: number }[]>`
+    select count(*)::int as n from batch_jobs
+    where kind = ${kind} and status not in ${TERMINAL}
+      and user_id = ${activeUserId()}
+  `;
+  return (row?.n ?? 0) > 0;
+}
+
 // Non-terminal jobs for one config — backs the "a batch is in flight; this
 // change may be overwritten when it completes" warning. Optionally filtered to
 // specific kinds (e.g. only ingest_embedding before a re-embed).

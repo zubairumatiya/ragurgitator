@@ -404,6 +404,68 @@ export async function pairsForJudging(): Promise<PairForJudging[]> {
   });
 }
 
+// Pairs that have never been judged, for the BATCH SCREEN (lib/batch/jobs/
+// pairScreen.ts) — the batch path's answer to the inline path's screenPair.
+//
+// Two filters beyond "verdict is null", and both mirror screenPair's fail-open
+// rules rather than inventing new ones:
+//   • the origin question must have a stored answer — the rubric asks whether
+//     serving THAT ANSWER was right, so there is nothing to ask about without it;
+//   • the pair's roles must resolve against eval_questions.question (variantOf),
+//     because text_a is not reliably the origin.
+// A row either filter drops stays unjudged and unscreened, which is where it
+// already was: the screen adds verdicts, it never invents one.
+// The stored answer is non-null by construction here (the query requires it), and
+// the return type says so — the batch screen puts it straight into a judge prompt.
+export type PairToScreen = PairForJudging & { expectedAnswer: string };
+
+export async function unscreenedPairs(limit = 5000): Promise<PairToScreen[]> {
+  try {
+    const rows = await sql<
+      {
+        id: string;
+        text_a: string;
+        text_b: string;
+        question: string;
+        expected_answer: string;
+        label: PairLabel;
+        difficulty: PairDifficulty;
+      }[]
+    >`
+      select p.id, p.text_a, p.text_b, q.question, q.expected_answer,
+             p.label, p.difficulty
+      from semantic_cache_pairs p
+      join eval_questions q on q.id = p.origin_question_id
+      join documents d on d.id = q.document_id
+      where d.user_id = ${activeUserId()}
+        and p.verdict is null
+        and q.expected_answer is not null
+      order by p.id
+      limit ${limit}
+    `;
+    return rows.flatMap((r) => {
+      const variantText = variantOf(r.text_a, r.text_b, r.question);
+      if (variantText === null) return [];
+      return [
+        {
+          id: r.id,
+          originText: r.question,
+          variantText,
+          expectedAnswer: r.expected_answer,
+          label: r.label,
+          difficulty: r.difficulty,
+          verdict: null,
+          verdictSource: null,
+          judgeReason: null,
+        },
+      ];
+    });
+  } catch (err) {
+    if (isMissingTable(err)) return [];
+    throw err;
+  }
+}
+
 // Record a verdict. A HUMAN verdict is final and is never overwritten by a later
 // LLM pass — same rule as the shadow log's setHumanVerdict — so an adjudicated
 // row survives a re-judge of the whole table.
@@ -435,6 +497,10 @@ export type PairStats = {
   // not top it up) even though the sweep no longer scores it. Reporting one number
   // would make one of those two readings wrong.
   quarantined: number;
+  // Pairs no judge has ruled on — what a screen batch would cover. Inline-
+  // generated pairs are screened at write time, so this counts what the BATCH
+  // generator wrote (plus anything generated before the screen existed).
+  unjudged: number;
 };
 
 // Counts for the panel: what exists, and how much of the bank still has no
@@ -447,10 +513,18 @@ export async function pairStats(): Promise<PairStats> {
     questionsCovered: 0,
     questionsRemaining: 0,
     quarantined: 0,
+    unjudged: 0,
   };
   try {
     const [row] = await sql<
-      { total: number; same: number; different: number; covered: number; quarantined: number }[]
+      {
+        total: number;
+        same: number;
+        different: number;
+        covered: number;
+        quarantined: number;
+        unjudged: number;
+      }[]
     >`
       select count(*)::int as total,
              count(*) filter (where p.label = 'same')::int as same,
@@ -459,7 +533,8 @@ export async function pairStats(): Promise<PairStats> {
              count(*) filter (
                where p.verdict is not null
                  and p.verdict <> case when p.label = 'same' then 'accept' else 'reject' end
-             )::int as quarantined
+             )::int as quarantined,
+             count(*) filter (where p.verdict is null)::int as unjudged
       from semantic_cache_pairs p
       join eval_questions q on q.id = p.origin_question_id
       join documents d on d.id = q.document_id
@@ -473,6 +548,7 @@ export async function pairStats(): Promise<PairStats> {
       questionsCovered: row?.covered ?? 0,
       questionsRemaining: remaining,
       quarantined: row?.quarantined ?? 0,
+      unjudged: row?.unjudged ?? 0,
     };
   } catch (err) {
     if (isMissingTable(err)) return empty;

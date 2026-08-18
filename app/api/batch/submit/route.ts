@@ -15,6 +15,7 @@ import { withRequestConfig } from "@/lib/http/configScope";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { getConfig } from "@/lib/rag/configStore";
 import { handlerFor } from "@/lib/batch/jobs/registry";
+import { hasOpenJobOfKind } from "@/lib/rag/batchStore";
 import { submitBatch } from "@/lib/batch/orchestrator";
 
 const Body = z.object({
@@ -24,6 +25,7 @@ const Body = z.object({
     "cluster_labeling",
     "ingest_embedding",
     "cache_pair_generation",
+    "cache_pair_screen",
   ]),
   scope: z.record(z.string(), z.unknown()).optional(),
 });
@@ -40,6 +42,14 @@ export async function POST(request: Request) {
         { error: `Batch submission for ${kind} is coming soon.` },
         { status: 501 },
       );
+    }
+
+    // A singleton kind's build picks its own work out of the database, so a
+    // second submission while the first is still open would re-do — and re-pay
+    // for — the same rows. 200 with a reason rather than an error: nothing is
+    // wrong, the work is already under way.
+    if (handler.singleton && (await hasOpenJobOfKind(kind))) {
+      return Response.json({ job: null, reason: "One of these is already running — wait for it to land." });
     }
 
     const configId = activeConfig().id;

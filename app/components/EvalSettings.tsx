@@ -71,6 +71,12 @@ const BATCH_OPTION_LABELS: Partial<Record<JobKind, string>> = {
 // Shown disabled rather than hidden so the roster of jobs stays honest.
 const UNIMPLEMENTED_KINDS = new Set<JobKind>(["ndcg_ranking"]);
 
+// Not a choice, so not a row. cache_pair_screen is submitted by
+// cache_pair_generation's chain hook once the pairs land (and by the pair
+// panel's own button) — there is no synchronous alternative to prefer, so a
+// standard/batch toggle for it would be a control that does nothing.
+const CHAINED_KINDS = new Set<JobKind>(["cache_pair_screen"]);
+
 // "" / invalid => null (the metric falls back to the config's top_k, A1).
 function parseKOrNull(s: string): number | null {
   const t = s.trim();
@@ -1454,9 +1460,9 @@ export function EvalSettings() {
             <p className="mb-1 mt-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
               Batch API
             </p>
-            {/* One row per job — there are only four, so any grouping above them
-                is a layer to reason through for nothing. */}
-            {JOB_KINDS.map((kind) => (
+            {/* One row per job the user actually picks — there are only four, so
+                any grouping above them is a layer to reason through for nothing. */}
+            {JOB_KINDS.filter((kind) => !CHAINED_KINDS.has(kind)).map((kind) => (
               <ChoiceRow
                 key={kind}
                 label={JOB_LABELS[kind]}

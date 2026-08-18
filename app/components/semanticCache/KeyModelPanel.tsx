@@ -274,7 +274,7 @@ export function KeyModelPanel() {
     fallbackThreshold: number;
   } | null>(null);
   const [busy, setBusy] = useState<
-    null | "sweep" | "pairs" | "apply" | "backfill" | "target"
+    null | "sweep" | "pairs" | "screen" | "apply" | "backfill" | "target"
   >(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -413,12 +413,13 @@ export function KeyModelPanel() {
     if (d.mode === "batch") {
       setNote(
         d.job
-          ? // The batch path is NOT screened — the inline path judges each pair as
-            // it is written, but doing that inside a batch-apply step would mean
-            // thousands of sequential judge calls in one job slice. Batch-generated
-            // pairs are still audited after the fact by `npm run f3`.
-            "Submitted a batch — pairs land when it completes (Batch API panel tracks it). " +
-            "Batch pairs are NOT judge-screened; run the F3 audit over them."
+          ? // The batch path screens with a SECOND batch rather than in-line —
+            // thousands of sequential judge calls inside one apply step is what
+            // batching exists to avoid. It is chained automatically, so the only
+            // thing the user has to know is that the verdicts arrive later.
+            "Submitted a batch — pairs land when it completes (Batch API panel tracks it), " +
+            "and a judge screen is submitted automatically once they do. " +
+            "Mislabelled pairs are quarantined when its verdicts arrive."
           : String(d.reason ?? "Nothing to generate."),
       );
     } else {
@@ -434,6 +435,24 @@ export function KeyModelPanel() {
       );
       if (d.stats) setPairs(d.stats as PairStats);
     }
+    load();
+  };
+
+  // Screen the pairs no judge has ruled on — the batch generator's output, and
+  // anything generated before the screen existed. A second batch rather than an
+  // inline pass for the reason the generation leg is batched at all: one judge
+  // call per pair, at −50%, off the request's clock. Verdicts land on a later
+  // poll; a contradicted pair is then quarantined rather than deleted, because
+  // by this point the row exists.
+  const screen = async () => {
+    const d = await post("screen", "/api/batch/submit", { kind: "cache_pair_screen" });
+    if (!d) return;
+    setNote(
+      d.job
+        ? "Submitted a judge screen — verdicts land when it completes (Batch API panel tracks it). " +
+          "Pairs the judge contradicts are quarantined then."
+        : String(d.reason ?? "Nothing to screen."),
+    );
     load();
   };
 
@@ -672,6 +691,12 @@ export function KeyModelPanel() {
               · {pairs.quarantined} mislabelled, excluded from the sweep
             </span>
           )}
+          {/* Unjudged is not "unlabelled" — these rows carry the generator's own
+              label and the sweep scores them. It is the count of labels nothing
+              has checked, which is exactly what the screen buys down. */}
+          {pairs && pairs.unjudged > 0 && (
+            <span className="text-zinc-400">· {pairs.unjudged} unscreened</span>
+          )}
         </div>
 
         {/* How MANY questions the next run covers. Generation is the only paid
@@ -739,6 +764,28 @@ export function KeyModelPanel() {
             Every eval question already has pairs — add eval questions to grow
             the set.
           </p>
+        )}
+
+        {/* Only offered when there is something to screen. Batch-generated pairs
+            chain their own screen on apply, so a non-zero count here means a run
+            that predates the chain — or one whose screen has not come back yet. */}
+        {pairs !== null && pairs.unjudged > 0 && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <span className="text-xs text-zinc-500 dark:text-zinc-400">
+              <span className="font-semibold tabular-nums text-zinc-800 dark:text-zinc-100">
+                {pairs.unjudged}
+              </span>{" "}
+              pair{pairs.unjudged === 1 ? "" : "s"} no judge has checked
+            </span>
+            <button
+              type="button"
+              className={BTN}
+              onClick={screen}
+              disabled={busy !== null}
+            >
+              {busy === "screen" ? "Submitting…" : "Screen pairs (batch)"}
+            </button>
+          </div>
         )}
 
         <div className="flex flex-wrap items-center gap-2 border-t border-zinc-100 pt-2 dark:border-zinc-800">

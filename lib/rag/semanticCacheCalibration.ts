@@ -10,6 +10,8 @@
 //      sweep.
 //
 // Best-effort against missing tables (42P01), like the rest of the cache.
+import type Anthropic from "@anthropic-ai/sdk";
+
 import { config } from "@/lib/config";
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
@@ -396,13 +398,20 @@ VERDICT: <accept|reject> — <one short reason>`;
 // two, so reusing JUDGE_SYSTEM keeps "what a pair label means" and "what a
 // shadow verdict means" the single claim that pooling them in the sweep already
 // assumes. Everything table-bound lives in judgeShadowEvents, not here.
-export async function judgeOne(
+// The request params for ONE judge call, and the parse of its reply. Split out of
+// judgeOne for the same reason pairRequestParams is split out of generatePairs:
+// the batch screen (lib/batch/jobs/pairScreen.ts) rebuilds these requests without
+// a live call and reads the bodies back hours later. A second copy of the rubric
+// or of the verdict regex would let the batch path drift from the inline one —
+// which is exactly what "a pair label and a shadow verdict mean the same thing"
+// rests on.
+export function judgeRequestParams(
   model: string,
   newQuery: string,
   matchedQuery: string,
   servedAnswer: string,
-): Promise<{ verdict: "accept" | "reject" | null; reason: string }> {
-  const resp = await meteredMessage("judge", {
+): Anthropic.Messages.MessageCreateParamsNonStreaming {
+  return {
     model,
     max_tokens: 200,
     system: JUDGE_SYSTEM,
@@ -415,13 +424,34 @@ export async function judgeOne(
           `<stored_answer>\n${servedAnswer}\n</stored_answer>`,
       },
     ],
-  });
-  const block = resp.content.find((b) => b.type === "text");
-  const text = block && block.type === "text" ? block.text : "";
+  };
+}
+
+// Parse a judge reply — an inline Message or a batch result body. No verdict in
+// the text returns null, and every caller leaves the row unjudged rather than
+// guessing.
+export function parseJudgeReply(message: {
+  content: Array<{ type: string; text?: string }>;
+}): { verdict: "accept" | "reject" | null; reason: string } {
+  const block = message.content.find((b) => b.type === "text");
+  const text = typeof block?.text === "string" ? block.text : "";
   const m = /verdict:\s*(accept|reject)/i.exec(text);
   const verdict = m ? (m[1].toLowerCase() as "accept" | "reject") : null;
   const reason = text.replace(/^[\s\S]*?verdict:\s*(accept|reject)\s*[—-]?\s*/i, "").trim();
   return { verdict, reason: (reason || text.trim()).slice(0, 500) };
+}
+
+export async function judgeOne(
+  model: string,
+  newQuery: string,
+  matchedQuery: string,
+  servedAnswer: string,
+): Promise<{ verdict: "accept" | "reject" | null; reason: string }> {
+  const resp = await meteredMessage(
+    "judge",
+    judgeRequestParams(model, newQuery, matchedQuery, servedAnswer),
+  );
+  return parseJudgeReply(resp);
 }
 
 export type JudgeRunResult = {
