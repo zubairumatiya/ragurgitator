@@ -33,25 +33,19 @@ export async function POST(request: Request) {
 
   return withRequestConfig(request, async () => {
     const step = stepFor(kind);
-    // Not wired for the background yet: answer honestly rather than 501-ing, so the
-    // dashboard can still show "this will take a while" and simply not offer the
-    // background for it.
+    // Not wired for the background at all: there is no plan() to count units with,
+    // so there is no honest number to show either. The dashboard starts the run.
     if (!step) {
       return Response.json({ kind, backgroundable: false, units: null, seconds: null });
     }
     // Wired, but refused under the current settings (autotune's apply='choose').
-    // Answered the same way an unwired kind is: the dashboard still shows "this
-    // will take a while", it just does not offer a background that would not work.
+    // Estimated ANYWAY, and deliberately: a run that has to hold this tab open for
+    // half an hour is the one the user most needs warned about, and hiding the
+    // number because the background is unavailable warns them least when it
+    // matters most. The dialog shows a keep-this-tab-open warning instead of an
+    // offer — plus the blocker's `fix`, when the setting that refused is one the
+    // user can change from here.
     const blocked = await backgroundBlocker(kind);
-    if (blocked) {
-      return Response.json({
-        kind,
-        backgroundable: false,
-        blockedReason: blocked,
-        units: null,
-        seconds: null,
-      });
-    }
     const { totalUnits } = await step.plan((body.data.scope ?? {}) as never);
     const eta = await estimate(kind, totalUnits);
     const threshold = backgroundThresholdSeconds();
@@ -68,9 +62,11 @@ export async function POST(request: Request) {
       samples: eta.samples,
       thresholdSeconds: threshold,
       // The two things the offer depends on, answered by the server so the client
-      // does not have to know either rule.
+      // does not have to know either rule. Over the threshold and NOT
+      // backgroundable is the warn-only case, not silence.
       offerBackground: eta.seconds > threshold,
-      backgroundable: true,
+      backgroundable: blocked === null,
+      blocked,
       // Whether we can actually keep the "we'll email you" half of the promise.
       emailConfigured: emailConfigured(),
       email: user?.email ?? null,

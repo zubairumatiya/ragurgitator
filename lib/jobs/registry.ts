@@ -51,16 +51,41 @@ export function isWired(kind: JobKind): boolean {
 // autotune's apply='choose' is the only case: its whole point is a panel that
 // collects a per-chunk decision from the event stream, and in background mode
 // nothing is reading that stream. A job would run, find several passing families
-// per chunk, apply none of them, and email the user that it succeeded. Persisting
-// pending choices to a table is the eventual answer; refusing by name is the
-// honest v1.
-export async function backgroundBlocker(kind: JobKind): Promise<string | null> {
+// per chunk, apply none of them, and email the user that it succeeded.
+//
+// It carries a `fix` because this blocker is a SETTING, not a limitation: the user
+// can have the background run by giving up the per-chunk choice, and making them
+// leave the dialog to find that switch in Eval Settings is a worse version of the
+// same decision. Persisting pending choices to a table remains the answer that
+// would remove the trade-off entirely.
+export type BackgroundBlock = {
+  reason: string;
+  // A settings change that would unblock this kind, offered as a button in the
+  // dialog. `fix` absent = nothing the user can do from here.
+  fix?: {
+    // Handled by name in BackgroundOfferDialog, which owns the PATCH. An id rather
+    // than a patch body so the server is not shipping the client a request to
+    // send back to the server.
+    id: "autotune_auto_best";
+    label: string;
+    note: string;
+  };
+};
+
+export async function backgroundBlocker(kind: JobKind): Promise<BackgroundBlock | null> {
   if (kind !== "autotune") return null;
   const criteria = await getActiveCriteria();
   if (criteria.autotune.apply !== "choose") return null;
-  return (
-    "Autotune can't run in the background while Apply is set to “you choose”: " +
-    "picking between fixes needs this tab open. Switch it to auto-apply the best, " +
-    "or run it here."
-  );
+  return {
+    reason:
+      "Autotune can't run in the background while Apply is set to \u201cyou choose\u201d: " +
+      "picking between fixes needs this tab open.",
+    fix: {
+      id: "autotune_auto_best",
+      label: "Switch to auto-best & run in the background",
+      note:
+        "Switches Apply to auto-best for this config \u2014 the highest-scoring passing " +
+        "fix is applied automatically, with no pause to choose.",
+    },
+  };
 }

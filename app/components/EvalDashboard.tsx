@@ -697,8 +697,12 @@ export function EvalDashboard() {
     );
 
   // Ask the server how long a bulk action looks like taking, and whether that is
-  // long enough to offer the background instead. Returns true when the offer was
-  // shown, i.e. the caller must NOT also start the run.
+  // long enough to stop and say so. Returns true when the dialog was shown, i.e.
+  // the caller must NOT also start the run.
+  //
+  // A long action that CANNOT go to the background still opens the dialog — as a
+  // keep-this-tab-open warning rather than an offer. Bailing on !backgroundable
+  // was the old behaviour and it warned least in the case that needed it most.
   //
   // Fails open: an estimate that errors or times out just runs the action the way
   // it always ran. A broken ETA must not stand between a user and their button.
@@ -715,7 +719,7 @@ export function EvalDashboard() {
       });
       if (!res.ok) return false;
       const estimate = (await res.json()) as Estimate;
-      if (!estimate.offerBackground || !estimate.backgroundable) return false;
+      if (!estimate.offerBackground || estimate.units == null) return false;
       setOffer({ estimate, scope, runHere });
       return true;
     } catch {
