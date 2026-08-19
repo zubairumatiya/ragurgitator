@@ -42,6 +42,10 @@ const EXPECTED_UNREACHABLE: Record<string, string> = {
   topic_specimens: "sub-topics branch, no ownership path yet",
   topic_centroids: "sub-topics branch, no ownership path yet",
   chunk_topics: "sub-topics branch, content-addressed by text_hash",
+  // The migrator's ledger — schema history, not anyone's data. It must SURVIVE
+  // account deletion, so having no path to an owner is the point rather than an
+  // oversight.
+  schema_migrations: "migration ledger, owned by no user by design",
 };
 
 // The contract from open question #4, named explicitly. These must reach an

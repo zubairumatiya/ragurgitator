@@ -126,7 +126,18 @@ async function main() {
   // A table with no policy is invisible to rag_app. That is correct for the four
   // orphaned topic tables (see 0051 §4) and a bug for anything else, so the list
   // is asserted rather than merely printed.
-  const EXPECTED_POLICYLESS = ["chunk_topics", "topic_centroids", "topic_specimens", "topics"];
+  const EXPECTED_POLICYLESS = [
+    "chunk_topics",
+    "topic_centroids",
+    "topic_specimens",
+    "topics",
+    // The migrator's own ledger (scripts/migrate.ts). Not application data, and
+    // never read through rag_app — only by the privileged role that runs
+    // migrations. It is policy-less on purpose; `ensure_rls` switched RLS on for
+    // it the moment it was created, which is the correct outcome for a table the
+    // app has no business reading.
+    "schema_migrations",
+  ];
   const policyless = await admin<{ relname: string }[]>`
     select c.relname from pg_class c
     join pg_namespace n on n.oid = c.relnamespace

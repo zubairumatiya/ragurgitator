@@ -13,9 +13,14 @@
 // baselined first (--baseline), recording every file as applied without running
 // it. Fresh databases need nothing.
 //
-//   npm run migrate                  # apply what's missing
-//   npm run migrate -- --baseline    # record all as applied, run none
-//   MIGRATE_BOOTSTRAP=test/sql       # apply these files first (test auth shim)
+//   npm run migrate                            # apply what's missing
+//   npm run migrate -- --baseline              # record all as applied, run none
+//   npm run migrate -- --baseline-through 0072 # record up to 0072, leave the rest pending
+//   MIGRATE_BOOTSTRAP=test/sql                 # apply these files first (test auth shim)
+//
+// --baseline-through is the one to use on a database that was migrated by hand:
+// a bare --baseline would also record the migrations that have NOT been applied
+// there, which is a ledger that lies in the most expensive direction.
 //
 // Runs as the privileged role: migrations create roles, schemas and event
 // triggers, none of which rag_app may do.
@@ -30,6 +35,22 @@ const url = process.env.DATABASE_URL;
 if (!url) throw new Error("DATABASE_URL must be set.");
 
 const baseline = process.argv.includes("--baseline");
+
+// --baseline-through <n>: record every migration up to and including <n>, and
+// leave the rest pending so a normal run applies them. <n> matches on the
+// leading number, so "0072" and "0072_provider_key_usage.sql" both work.
+const throughIndex = process.argv.indexOf("--baseline-through");
+const throughArg =
+  throughIndex >= 0
+    ? (process.argv[throughIndex + 1] ??
+      (() => {
+        throw new Error("--baseline-through needs a migration to stop at, e.g. 0072");
+      })())
+    : undefined;
+if (throughArg !== undefined && Number.isNaN(Number.parseInt(throughArg, 10))) {
+  throw new Error(`--baseline-through: '${throughArg}' does not start with a migration number.`);
+}
+const throughNumber = throughArg === undefined ? undefined : Number.parseInt(throughArg, 10);
 const bootstrapDir = process.env.MIGRATE_BOOTSTRAP;
 
 const sql = postgres(url, { prepare: false, ssl: sslFor(url), max: 1 });
@@ -78,7 +99,7 @@ async function main() {
   //
   // So the ledger being empty is only believed when the database is too. The
   // deliberate path is --baseline, which records without running.
-  if (done.size === 0 && !baseline) {
+  if (done.size === 0 && !baseline && throughNumber === undefined) {
     const [{ n }] = await sql<{ n: number }[]>`
       select count(*)::int as n
       from information_schema.tables
@@ -99,11 +120,19 @@ async function main() {
   const files = ordered("migrations");
   const pending = files.filter((f) => !done.has(f));
 
-  if (baseline) {
-    for (const filename of pending) {
+  if (baseline || throughNumber !== undefined) {
+    const toRecord =
+      throughNumber === undefined
+        ? pending
+        : pending.filter((f) => Number.parseInt(f, 10) <= throughNumber);
+    for (const filename of toRecord) {
       await sql`insert into schema_migrations (filename) values (${filename})`;
     }
-    console.log(`baselined ${pending.length} migration(s) as already applied; ran none`);
+    const rest = pending.length - toRecord.length;
+    console.log(
+      `baselined ${toRecord.length} migration(s) as already applied; ran none` +
+        (rest > 0 ? `\n${rest} still pending — run \`npm run migrate\` to apply them` : ""),
+    );
     return;
   }
 
