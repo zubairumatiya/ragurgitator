@@ -38,6 +38,8 @@ import { writeFileSync } from "node:fs";
 
 import postgres from "postgres";
 
+import { sslFor } from "../lib/dbSsl";
+
 import { config as appConfig } from "../lib/config";
 import {
   priorCurve,
@@ -49,7 +51,7 @@ import {
 import { spaceOf } from "../lib/rag/semanticCacheCore";
 import { inScope, loadOwner, type Owner } from "./lib/followup";
 
-const sql = postgres(process.env.DATABASE_URL!, { prepare: false, ssl: "require", max: 2 });
+const sql = postgres(process.env.DATABASE_URL!, { prepare: false, ssl: sslFor(process.env.DATABASE_URL!), max: 2 });
 
 const OUT = "docs/resume-metrics-f7-results.md";
 const FLOOR = appConfig.semanticCache.shadowLogFloor;

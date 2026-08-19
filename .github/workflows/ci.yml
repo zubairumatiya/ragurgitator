@@ -68,3 +68,67 @@ jobs:
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: sb_publishable_placeholder
           NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
         run: npm run build
+
+  # A SECOND JOB, not more steps on the first. These need a database, so they
+  # fail for reasons the hermetic checks never can — a job boundary is what keeps
+  # "the schema is broken" distinguishable from "the lint is unhappy" at a glance,
+  # and lets the two run in parallel.
+  #
+  # NO SECRETS, deliberately. Nothing here can reach the live Supabase project,
+  # which is what makes the tier safe to run on every pull request from anyone.
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        # Version-matched to the live project (PostgreSQL 17.6, pgvector 0.8.0).
+        # The migrations declare exactly two extensions, pgcrypto and vector, and
+        # this image carries both.
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: rag_test
+        ports:
+          - 5432:5432
+        # Without the health check the job races initdb: the container answers
+        # once, restarts internally to apply config, and the first connection
+        # dies mid-handshake.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/rag_test
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/rag_test
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # The replay IS the first test. A migration that cannot be applied to an
+      # empty database fails here, before anything else runs — which is how the
+      # two backfill defects and the missing RLS enablement were found.
+      #
+      # MIGRATE_BOOTSTRAP puts the auth.users shim on ahead of 0001: Supabase
+      # provides that schema, a bare Postgres does not, and four migrations
+      # reach for it.
+      - name: Replay migrations
+        env:
+          MIGRATE_BOOTSTRAP: test/sql
+        run: npm run migrate
+
+      - name: Integration tests
+        if: '!cancelled()'
+        run: npm run itest

@@ -29,6 +29,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import postgres from "postgres";
 
+import { sslFor } from "./dbSsl";
+
 type Sql = ReturnType<typeof postgres>;
 
 const url = process.env.DATABASE_URL;
@@ -56,7 +58,7 @@ export const privilegedSql =
   globalThis.__ragSqlPrivileged ??
   postgres(url, {
     prepare: false,
-    ssl: "require",
+    ssl: sslFor(url),
     // Only the three cross-tenant callers use this, and none of them is on a
     // request path, so it does not need request-shaped headroom.
     max: 5,
@@ -66,7 +68,7 @@ const appPool =
   globalThis.__ragSqlApp ??
   postgres(appUrl, {
     prepare: false,
-    ssl: "require",
+    ssl: sslFor(appUrl),
     // Higher than postgres.js's default 10 because connections are now held for
     // the length of a scope rather than a query, and page renders open several
     // sibling scopes (layout, page and leaves each call withPageUser).

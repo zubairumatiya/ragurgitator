@@ -57,7 +57,15 @@ alter table chunks_voyage_4_lite_1024
 
 -- --- backfill -------------------------------------------------------------
 -- 1. One corpus holding every existing document.
-insert into corpora (name) values ('Default corpus');
+--
+-- CONDITIONAL ON THERE BEING DOCUMENTS, like the configs backfill below it. A
+-- corpus "holding every existing document" is meaningless when there are none,
+-- and on a fresh database the unconditional form left an empty, config-less
+-- corpus behind — which then had no owner to take in 0049 and stopped the
+-- schema replaying from scratch at all (docs/integration-tests-plan.md). The
+-- live project had documents here, so this changes nothing that happened there.
+insert into corpora (name)
+  select 'Default corpus' where exists (select 1 from documents);
 
 insert into corpus_documents (corpus_id, document_id)
   select (select id from corpora order by created_at limit 1), id

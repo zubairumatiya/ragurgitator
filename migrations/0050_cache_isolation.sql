@@ -29,13 +29,27 @@ alter table semantic_cache_thresholds
 alter table embedding_cache
   add column user_id uuid references user_profiles(id) on delete cascade;
 
+-- The orphan check is conditional on there being data, for the reason spelled
+-- out in 0049's backfill: an empty database has nothing to assign, so demanding
+-- an owner there rejects a case this migration handles fine. Real data is still
+-- never given a fabricated owner.
 do $$
-declare owner_id uuid;
+declare
+  owner_id uuid;
+  orphans  bigint;
 begin
   select id into owner_id from user_profiles order by created_at limit 1;
+
+  select (select count(*) from semantic_cache_thresholds where user_id is null)
+       + (select count(*) from embedding_cache            where user_id is null)
+    into orphans;
+
   if owner_id is null then
-    raise exception
-      'No user_profiles row to own existing data. Sign up the first account before applying 0050.';
+    if orphans > 0 then
+      raise exception
+        'No user_profiles row to own existing data. Sign up the first account before applying 0050.';
+    end if;
+    return;
   end if;
 
   update semantic_cache_thresholds set user_id = owner_id where user_id is null;

@@ -23,6 +23,8 @@
 // are L1/L2 hits.
 import postgres from "postgres";
 
+import { sslFor } from "../lib/dbSsl";
+
 import { sql } from "../lib/db";
 import { activeUserId } from "../lib/auth/userScope";
 import { activeConfig } from "../lib/rag/activeConfig";
@@ -30,7 +32,7 @@ import { embedQueryCached } from "../lib/rag/embedCache";
 import { bestMatch, type CacheEntry } from "../lib/rag/semanticCacheCore";
 import { inScope, loadOwner, type Owner } from "./lib/followup";
 
-const raw = postgres(process.env.DATABASE_URL!, { prepare: false, ssl: "require", max: 2 });
+const raw = postgres(process.env.DATABASE_URL!, { prepare: false, ssl: sslFor(process.env.DATABASE_URL!), max: 2 });
 
 const SAMPLE = Number(process.env.EQUIV_SAMPLE ?? 20);
 // Floating-point slack. The two paths sum the SAME float4 values in different

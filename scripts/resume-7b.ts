@@ -25,9 +25,11 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
 import postgres from "postgres";
 
+import { sslFor } from "../lib/dbSsl";
+
 import { signJobTick } from "../lib/http/jobSecret";
 
-const sql = postgres(process.env.DATABASE_URL!, { prepare: false, ssl: "require", max: 2 });
+const sql = postgres(process.env.DATABASE_URL!, { prepare: false, ssl: sslFor(process.env.DATABASE_URL!), max: 2 });
 const BASE = process.env.JOBS_BASE_URL ?? "http://localhost:3002";
 const CONFIG_ID = process.env.SCRIPT_CONFIG_ID ?? "45b73063-403e-4a44-8d6e-b9eacf7e316a";
 

@@ -21,13 +21,15 @@
 //   Usage: node --env-file=.env.local --import tsx scripts/cascade-check.ts
 import postgres from "postgres";
 
+import { sslFor } from "../lib/dbSsl";
+
 const adminUrl = process.env.DATABASE_URL;
 if (!adminUrl) throw new Error("DATABASE_URL must be set.");
 
 // Reads pg_catalog and counts rows; never writes. The privileged role is right
 // here for the same reason migrations use it — RLS would hide exactly the
 // orphaned rows this is looking for.
-const sql = postgres(adminUrl, { prepare: false, ssl: "require" });
+const sql = postgres(adminUrl, { prepare: false, ssl: sslFor(adminUrl) });
 
 // Tables that legitimately survive account deletion, with the reason. Asserted
 // rather than printed, so a new unreachable table is a failure and not a line of

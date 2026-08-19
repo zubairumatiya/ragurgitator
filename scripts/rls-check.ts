@@ -20,14 +20,16 @@
 //   Usage: node --env-file=.env.local --import tsx scripts/rls-check.ts
 import postgres from "postgres";
 
+import { sslFor } from "../lib/dbSsl";
+
 const appUrl = process.env.RAG_APP_DATABASE_URL;
 const adminUrl = process.env.DATABASE_URL;
 if (!appUrl || !adminUrl) {
   throw new Error("Both DATABASE_URL and RAG_APP_DATABASE_URL must be set.");
 }
 
-const admin = postgres(adminUrl, { prepare: false, ssl: "require" });
-const app = postgres(appUrl, { prepare: false, ssl: "require", max: 3 });
+const admin = postgres(adminUrl, { prepare: false, ssl: sslFor(adminUrl) });
+const app = postgres(appUrl, { prepare: false, ssl: sslFor(appUrl), max: 3 });
 
 const STRANGER = "00000000-0000-0000-0000-0000000000ff";
 
