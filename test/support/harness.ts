@@ -17,50 +17,11 @@ import { sslFor } from "../../lib/dbSsl";
 
 type Sql = ReturnType<typeof postgres>;
 
-const APP_ROLE_PASSWORD = "rag_app_test";
-
-export function testDatabaseUrl(): string {
-  const url = process.env.TEST_DATABASE_URL;
-  if (!url) {
-    throw new Error(
-      "TEST_DATABASE_URL is not set. Start a throwaway database with " +
-        "`npm run itest:up`, which prints the URL to export.",
-    );
-  }
-  assertLocal(url);
-  return url;
-}
-
-// The whole safety story. `sslFor` already decides TLS from the hostname, so
-// reusing it here means one definition of "local" rather than two that can drift.
-export function assertLocal(url: string) {
-  if (sslFor(url) !== false) {
-    throw new Error(
-      `Refusing to run integration tests against a non-local database: ${redact(url)}. ` +
-        "This tier truncates tables and deletes users.",
-    );
-  }
-}
-
-function redact(url: string): string {
-  try {
-    const u = new URL(url);
-    u.password = "***";
-    return u.toString();
-  } catch {
-    return "<unparseable url>";
-  }
-}
-
-// The `rag_app` connection, derived from the admin one. 0051 creates the role
-// without a password on purpose (a migration is committed, a password is not),
-// so the harness sets one and builds the URL from it — see ensureAppRole.
-export function appDatabaseUrl(): string {
-  const u = new URL(testDatabaseUrl());
-  u.username = "rag_app";
-  u.password = APP_ROLE_PASSWORD;
-  return u.toString();
-}
+// The URL helpers and the local-only check live in dbUrls.ts so the env.ts
+// preload can reach them without importing `node:test`. Re-exported here so
+// tests keep a single import site.
+export { appDatabaseUrl, assertLocal, testDatabaseUrl } from "./dbUrls";
+import { APP_ROLE_PASSWORD, appDatabaseUrl, testDatabaseUrl } from "./dbUrls";
 
 export function adminClient(): Sql {
   const url = testDatabaseUrl();

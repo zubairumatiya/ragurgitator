@@ -23,7 +23,7 @@
     "f7": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f7-prior.ts",
     "cache:equiv": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/cache-probe-equiv.ts",
     "migrate": "node --import tsx scripts/migrate.ts",
-    "itest": "node --import tsx --test --test-concurrency=1 \"test/integration/**/*.itest.ts\"",
+    "itest": "node --conditions=react-server --import tsx --import ./test/support/env.ts --test --test-concurrency=1 \"test/integration/**/*.itest.ts\"",
     "itest:up": "node --import tsx scripts/itest-up.ts",
     "itest:down": "docker rm -f rag-itest"
   },
