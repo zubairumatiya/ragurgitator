@@ -40,17 +40,38 @@ alter table documents add column user_id uuid references user_profiles(id) on de
 alter table batch_jobs add column user_id uuid references user_profiles(id) on delete cascade;
 
 -- --- backfill ---------------------------------------------------------------
--- The first owner, by signup order. Single-tenant today (1 profile, 2 corpora,
--- 2 configs, 3 documents), so this is unambiguous. Fails loudly on a database
--- with no profile at all, which is the correct outcome: NOT NULL below could not
--- be satisfied anyway, and silently creating an owner here would be worse.
+-- The first owner, by signup order. Single-tenant when this was written
+-- (1 profile, 2 corpora, 2 configs, 3 documents), so this is unambiguous. Fails
+-- loudly when there is data to own but no profile to own it: NOT NULL below
+-- could not be satisfied anyway, and silently creating an owner would be worse.
+--
+-- THE ORPHAN CHECK IS CONDITIONAL ON THERE BEING DATA. On an empty database
+-- there is nothing to assign, the updates are no-ops and NOT NULL is trivially
+-- satisfiable — so demanding a profile there rejects a database this migration
+-- can in fact handle. That distinction only came up when the schema was first
+-- replayed from scratch (docs/integration-tests-plan.md); against the live
+-- project, which had both rows and a profile, the two conditions were the same
+-- thing. The safety property is unchanged: real data is never given a
+-- fabricated owner.
 do $$
-declare owner_id uuid;
+declare
+  owner_id uuid;
+  orphans  bigint;
 begin
   select id into owner_id from user_profiles order by created_at limit 1;
+
+  select (select count(*) from corpora   where user_id is null)
+       + (select count(*) from configs   where user_id is null)
+       + (select count(*) from documents where user_id is null)
+    into orphans;
+
   if owner_id is null then
-    raise exception
-      'No user_profiles row to own existing data. Sign up the first account before applying 0049.';
+    if orphans > 0 then
+      raise exception
+        'No user_profiles row to own existing data. Sign up the first account before applying 0049.';
+    end if;
+    -- Empty database: nothing to backfill, and the columns below lock cleanly.
+    return;
   end if;
 
   update corpora    set user_id = owner_id where user_id is null;

@@ -35,6 +35,8 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
 import postgres from "postgres";
 
+import { sslFor } from "../lib/dbSsl";
+
 import { withUser } from "../lib/auth/userScope";
 import { config as appConfig } from "../lib/config";
 import { resolveConfig, withConfig } from "../lib/rag/activeConfig";
@@ -46,7 +48,7 @@ import {
 } from "../lib/rag/semanticCacheCalibration";
 import { spaceOf } from "../lib/rag/semanticCacheCore";
 
-const sql = postgres(process.env.DATABASE_URL!, { prepare: false, ssl: "require", max: 2 });
+const sql = postgres(process.env.DATABASE_URL!, { prepare: false, ssl: sslFor(process.env.DATABASE_URL!), max: 2 });
 const CONFIG_ID = process.env.SCRIPT_CONFIG_ID ?? "45b73063-403e-4a44-8d6e-b9eacf7e316a";
 
 const F1_PROBES = "docs/resume-metrics-f1-probes.json";

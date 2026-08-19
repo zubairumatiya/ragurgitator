@@ -21,13 +21,15 @@
 //   Usage: node --env-file=.env.local --import tsx scripts/cascade-check.ts
 import postgres from "postgres";
 
+import { sslFor } from "../lib/dbSsl";
+
 const adminUrl = process.env.DATABASE_URL;
 if (!adminUrl) throw new Error("DATABASE_URL must be set.");
 
 // Reads pg_catalog and counts rows; never writes. The privileged role is right
 // here for the same reason migrations use it — RLS would hide exactly the
 // orphaned rows this is looking for.
-const sql = postgres(adminUrl, { prepare: false, ssl: "require" });
+const sql = postgres(adminUrl, { prepare: false, ssl: sslFor(adminUrl) });
 
 // Tables that legitimately survive account deletion, with the reason. Asserted
 // rather than printed, so a new unreachable table is a failure and not a line of
@@ -40,6 +42,10 @@ const EXPECTED_UNREACHABLE: Record<string, string> = {
   topic_specimens: "sub-topics branch, no ownership path yet",
   topic_centroids: "sub-topics branch, no ownership path yet",
   chunk_topics: "sub-topics branch, content-addressed by text_hash",
+  // The migrator's ledger — schema history, not anyone's data. It must SURVIVE
+  // account deletion, so having no path to an owner is the point rather than an
+  // oversight.
+  schema_migrations: "migration ledger, owned by no user by design",
 };
 
 // The contract from open question #4, named explicitly. These must reach an

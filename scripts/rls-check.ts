@@ -20,14 +20,16 @@
 //   Usage: node --env-file=.env.local --import tsx scripts/rls-check.ts
 import postgres from "postgres";
 
+import { sslFor } from "../lib/dbSsl";
+
 const appUrl = process.env.RAG_APP_DATABASE_URL;
 const adminUrl = process.env.DATABASE_URL;
 if (!appUrl || !adminUrl) {
   throw new Error("Both DATABASE_URL and RAG_APP_DATABASE_URL must be set.");
 }
 
-const admin = postgres(adminUrl, { prepare: false, ssl: "require" });
-const app = postgres(appUrl, { prepare: false, ssl: "require", max: 3 });
+const admin = postgres(adminUrl, { prepare: false, ssl: sslFor(adminUrl) });
+const app = postgres(appUrl, { prepare: false, ssl: sslFor(appUrl), max: 3 });
 
 const STRANGER = "00000000-0000-0000-0000-0000000000ff";
 
@@ -124,7 +126,18 @@ async function main() {
   // A table with no policy is invisible to rag_app. That is correct for the four
   // orphaned topic tables (see 0051 §4) and a bug for anything else, so the list
   // is asserted rather than merely printed.
-  const EXPECTED_POLICYLESS = ["chunk_topics", "topic_centroids", "topic_specimens", "topics"];
+  const EXPECTED_POLICYLESS = [
+    "chunk_topics",
+    "topic_centroids",
+    "topic_specimens",
+    "topics",
+    // The migrator's own ledger (scripts/migrate.ts). Not application data, and
+    // never read through rag_app — only by the privileged role that runs
+    // migrations. It is policy-less on purpose; `ensure_rls` switched RLS on for
+    // it the moment it was created, which is the correct outcome for a table the
+    // app has no business reading.
+    "schema_migrations",
+  ];
   const policyless = await admin<{ relname: string }[]>`
     select c.relname from pg_class c
     join pg_namespace n on n.oid = c.relnamespace

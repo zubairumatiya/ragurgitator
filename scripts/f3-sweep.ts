@@ -37,12 +37,14 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 import postgres from "postgres";
 
+import { sslFor } from "../lib/dbSsl";
+
 import { config as appConfig } from "../lib/config";
 import { runKeyModelSweep, type LeaderboardRow, type SweepResult } from "../lib/rag/keyModelSweep";
 import { scopedAcceptTarget } from "../lib/rag/semanticCache";
 import { inScope, loadOwner, type Owner } from "./lib/followup";
 
-const sql = postgres(process.env.DATABASE_URL!, { prepare: false, ssl: "require", max: 2 });
+const sql = postgres(process.env.DATABASE_URL!, { prepare: false, ssl: sslFor(process.env.DATABASE_URL!), max: 2 });
 
 let owner: Owner;
 

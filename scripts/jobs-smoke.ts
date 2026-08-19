@@ -34,9 +34,11 @@
 // SERVER's environment to force several slices out of a short job.
 import postgres from "postgres";
 
+import { sslFor } from "../lib/dbSsl";
+
 import { signJobTick } from "../lib/http/jobSecret";
 
-const sql = postgres(process.env.DATABASE_URL!, { prepare: false, ssl: "require", max: 2 });
+const sql = postgres(process.env.DATABASE_URL!, { prepare: false, ssl: sslFor(process.env.DATABASE_URL!), max: 2 });
 const BASE = process.env.JOBS_BASE_URL ?? "http://localhost:3002";
 
 // The owner is DERIVED FROM THE CONFIG when one is named, not chosen separately.

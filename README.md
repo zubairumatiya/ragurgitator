@@ -183,6 +183,10 @@ So, for each new table:
    Each asserts an allowlist rather than printing a report, so a table that
    forgot step 1 or step 2 fails by name without either script knowing about it
    in advance.
+4. Make sure it **replays onto an empty database**, which CI now checks on every
+   push (see "Integration tests" below). The trap is a backfill: a statement
+   written against the live database's contents may assume rows that a fresh one
+   does not have. Guard it (`where exists …`) rather than assuming.
 
 ## Scripts
 
@@ -197,6 +201,11 @@ npm run guard          # multi-tenancy invariants: key handling, scopes, auth ga
 npm run vault:check    # Azure Key Vault wrap/unwrap round-trip
 npm run rls:check      # tenant isolation: users partition the rows, stranger sees none
 npm run cascade:check  # deletion contract: keys delete alone, accounts delete all
+
+npm run migrate        # apply migrations/ in order, once each (ledger: schema_migrations)
+npm run itest:up       # throwaway Postgres in Docker, schema replayed into it
+npm run itest          # integration tests against it
+npm run itest:down     # destroy the container
 
 npm run jobs:smoke     # drive a background job end to end (needs the dev server)
 ```
@@ -238,3 +247,41 @@ transaction carrying the user identity; and every exported API handler is behind
 the authentication boundary — checked **per method**, because a file-level sweep
 passes while a `DELETE` sharing a file with a gated `GET` stays open, which is
 exactly how ten handlers were missed once already.
+
+## Integration tests
+
+`npm test` is hermetic — pure functions, no database, ~1s. The properties that
+have actually broken here are not that shape: a policy that lets the wrong rows
+through, a jsonb column that stores a string, a transaction that dies mid-flight.
+Those need a real Postgres, so there is a second tier.
+
+```bash
+npm run itest:up                  # container + schema, prints the URL to export
+export TEST_DATABASE_URL=postgres://postgres:postgres@localhost:55432/rag_test
+npm run itest
+npm run itest:down
+```
+
+It builds a **throwaway** database — `pgvector/pgvector:pg17`, version-matched to
+the live project — by replaying `migrations/` from empty. CI runs the same thing
+in a service container with no secrets, so nothing in this tier can reach the
+live project. The harness refuses any `TEST_DATABASE_URL` that is not local,
+because the tests truncate tables and delete users.
+
+Two things a bare Postgres does not have, which the replay supplies:
+
+- **`auth.users`** — Supabase owns that schema and four migrations reach into it.
+  `test/sql/00_auth_shim.sql` creates the two columns they use, so 0046's trigger
+  and the ownership cascade are exercised for real rather than stubbed.
+- **RLS actually switched on** — see `0073`. Supabase enables row-level security
+  on new tables by default and `0051` inherited that, so the policies alone were
+  never enough to make a rebuilt database enforce anything.
+
+Tests live in `test/integration/*.itest.ts` — a different extension from
+`*.test.ts` on purpose, so `npm test` stays fast and database-free. They run
+serially (`--test-concurrency=1`): there is one database, so files cannot
+interleave.
+
+`rls:check` and `cascade:check` still exist and still point at the live project.
+They are the pre/post-migration ritual; the integration tier is the version that
+runs on every pull request and can seed the cases production cannot.
