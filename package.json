@@ -20,7 +20,8 @@
     "f3": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f3-pairs.ts",
     "f3:sweep": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f3-sweep.ts",
     "f6": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f6-order.ts",
-    "f7": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f7-prior.ts"
+    "f7": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f7-prior.ts",
+    "cache:equiv": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/cache-probe-equiv.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.97.1",

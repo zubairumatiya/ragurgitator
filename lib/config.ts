@@ -66,15 +66,9 @@ export const config = {
     // answer. Phase 2 calibration lowers it per space only where the eval bank proves
     // it safe, and only for the account that ran it (0050).
     defaultThreshold: 0.95,
-    // Safety cap on cached queries scored (in JS) per lookup, newest first. Raised
-    // from 500 when the cache moved from per-config to per-user (0058): rows once
-    // split across N configs now pool into one bucket.
-    //
-    // Not raised further without measuring. query_vector is real[], which postgres.js
-    // decodes TEXT-encoded, so at 1024 dims a 2,000-row candidate set is tens of MB
-    // pulled per lookup on the answer hot path. If this ever needs to be large, the
-    // fix is pushing the narrowing into SQL (pgvector), not a bigger number here.
-    maxCandidates: 1000,
+    // (maxCandidates is gone. It capped how many rows a lookup pulled to score in
+    // JS; the probe now ranks in SQL and returns one row, so there is no set to
+    // bound — the fix its own comment recommended. docs/egress-reduction-plan.md.)
     // Volume pruning. Replaces the eager fingerprint GC, which became a data-loss bug
     // under user scoping: a user now holds SEVERAL live fingerprints at once (one per
     // document set × saver-mode combination), so "delete this user's rows under any

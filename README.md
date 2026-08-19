@@ -201,6 +201,30 @@ npm run cascade:check  # deletion contract: keys delete alone, accounts delete a
 npm run jobs:smoke     # drive a background job end to end (needs the dev server)
 ```
 
+### `EMBED_DISK_CACHE` — stop the sweeps re-downloading vectors
+
+Set it to a directory and the embedding cache gains a third layer, on disk,
+between its in-process map and the `embedding_cache` table:
+
+```bash
+EMBED_DISK_CACHE=data/vector-cache npm run f3:sweep
+```
+
+Every sweep is a fresh process, so the in-memory layer starts empty and each run
+pulls the same vectors over the network again — Postgres ships `real[]` as text,
+about 11.8 KB per 1024-dim vector, so a full pass is ~196 MB. With this set, the
+second run reads them from local float32 files instead (~4 KB each, no parsing).
+
+Leave it UNSET everywhere else, and it is unset by default: entries are
+content-addressed and immutable, so the files never need invalidating, but they
+are a plain unencrypted pool of one account's paid-for embeddings sitting outside
+RLS. Fine on your own machine, wrong anywhere shared, and useless on Vercel,
+whose filesystem is wiped on every cold start. `data/` is already gitignored.
+
+Deleting the directory is always a safe reset — the database stays the source of
+truth, and a file whose header disagrees with its bytes is refused rather than
+repaired.
+
 `guard` is pure static analysis — no database, no network, no env — so it is safe
 to run anywhere. The last three talk to live services and read `.env.local`:
 `rls:check` needs both connection strings, `cascade:check` needs `DATABASE_URL`

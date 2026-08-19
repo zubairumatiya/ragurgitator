@@ -27,11 +27,9 @@ import { costLlm, estimateTokens, estimateTokensAll } from "@/lib/rag/pricing";
 import { recordSaving } from "@/lib/rag/savingsStore";
 import {
   answerFingerprint,
-  bestMatch,
   entityGuardPasses,
   isHit,
   spaceOf,
-  type CacheEntry,
 } from "@/lib/rag/semanticCacheCore";
 import type { RetrievedChunk } from "@/types/rag";
 
@@ -306,24 +304,42 @@ export async function semanticCacheLookup(
 
   try {
     const fingerprint = await currentFingerprint(cfg);
-    const rows = await sql<
-      { query_text: string; query_vector: number[]; result: CachedResult }[]
-    >`
-      select query_text, query_vector, result
+    // THE NEAREST MATCH IS CHOSEN IN SQL, and only that one row crosses the wire.
+    // It used to pull the whole candidate set (up to 1,000 rows) and cosine it in
+    // JS: query_vector is real[], which postgres.js decodes TEXT-encoded at ~11.8
+    // KB per 1024-dim vector, so a probe shipped ~5.1 MB — on EVERY question, and
+    // growing, since every question banks a row the next one then downloads.
+    // Quadratic egress on the serving hot path (docs/egress-reduction-plan.md).
+    //
+    // Behaviour is unchanged, not merely close:
+    //   • Not an approximation. semantic_cache carries btree indexes only — no
+    //     HNSW — so `<=>` scans exactly the rows bestMatch scanned. Nothing here
+    //     became ANN.
+    //   • `1 - (v <=> q)` IS cosine similarity, the same quantity cosine() gives.
+    //   • THE SECONDARY SORT IS LOAD-BEARING. Rows arrived created_at desc and
+    //     bestMatch keeps the FIRST of equal sims, so the newest entry won a tie;
+    //     without `created_at desc` here a tie would break arbitrarily.
+    // scripts/cache-probe-equiv.ts holds the old JS path and replays real
+    // questions through both, which is what makes those claims checkable.
+    //
+    // The ::vector casts are exact — pgvector's vector is float4, the same
+    // storage real[] already uses.
+    const [row] = await sql<{ query_text: string; result: CachedResult; sim: number }[]>`
+      select query_text, result, 1 - (query_vector::vector <=> ${vector}::real[]::vector) as sim
       from semantic_cache
       where user_id = ${activeUserId()}
         and embedding_model = ${keyModel}
         and llm_model = ${cfg.llmModel}
         and fingerprint = ${fingerprint}
-      order by created_at desc
-      limit ${config.semanticCache.maxCandidates}
+      order by query_vector::vector <=> ${vector}::real[]::vector asc, created_at desc
+      limit 1
     `;
-    if (rows.length === 0) return miss;
-
-    const entries: CacheEntry<{ text: string; result: CachedResult }>[] = rows.map(
-      (r) => ({ vector: r.query_vector, value: { text: r.query_text, result: r.result } }),
-    );
-    const match = bestMatch(vector, entries);
+    // Shaped like bestMatch's return so every branch below reads unchanged; the
+    // sim is now Postgres's rather than JS's, and `null` means no candidates.
+    const match = row
+      ? { value: { text: row.query_text, result: row.result }, sim: Number(row.sim) }
+      : null;
+    if (match === null) return miss;
     // Keyed by the KEY model's space, not the retrieval model's: the cosine
     // being thresholded was computed in the key model's space, and scores aren't
     // comparable across spaces. `source` rides along into the logs — when a hit
@@ -337,9 +353,7 @@ export async function semanticCacheLookup(
     // where cosine can't tell "2023 revenue" from "2024 revenue". Evaluated
     // before the hit decision, and recorded either way — see below.
     const guardBlocked =
-      config.semanticCache.entityGuard.enabled &&
-      match !== null &&
-      !entityGuardPasses(question, match.value.text);
+      config.semanticCache.entityGuard.enabled && !entityGuardPasses(question, match.value.text);
 
     // Shadow-log the nearest match for threshold calibration. Recorded whenever it
     // clears the low shadowLogFloor, INDEPENDENT of the serving threshold and the
@@ -358,11 +372,10 @@ export async function semanticCacheLookup(
     const floor = shadow?.floor ?? config.semanticCache.shadowLogFloor;
     const subFloorSample =
       shadow === undefined &&
-      match !== null &&
       match.sim < floor &&
       Math.random() < config.semanticCache.subFloorSampleRate;
 
-    if (match && (match.sim >= floor || subFloorSample)) {
+    if (match.sim >= floor || subFloorSample) {
       await detached(() =>
         recordShadow(
           cfg,
@@ -382,7 +395,7 @@ export async function semanticCacheLookup(
     // wouldn't have cleared the threshold anyway is an ordinary miss, and gets
     // the ordinary miss log below — the guard flag still rides into the shadow
     // row above, so a later sweep at a lower τ can still see it was blocked.
-    if (match && guardBlocked && isHit(match.sim, threshold)) {
+    if (guardBlocked && isHit(match.sim, threshold)) {
       console.log(
         `[rag:semantic-cache] guard-blocked sim=${match.sim.toFixed(4)} ≥ ${threshold} (${source}) — ` +
           `entity/number mismatch, reporting a miss. new="${truncate(question)}" ` +
@@ -391,7 +404,7 @@ export async function semanticCacheLookup(
       return miss;
     }
 
-    if (match && isHit(match.sim, threshold)) {
+    if (isHit(match.sim, threshold)) {
       if (serve) {
         console.log(
           `[rag:semantic-cache] HIT sim=${match.sim.toFixed(4)} ≥ ${threshold} (${source}) — ` +
@@ -423,11 +436,9 @@ export async function semanticCacheLookup(
       return miss;
     }
 
-    if (match) {
-      console.log(
-        `[rag:semantic-cache] miss (nearest sim=${match.sim.toFixed(4)} < ${threshold} (${source})) for "${truncate(question)}"`,
-      );
-    }
+    console.log(
+      `[rag:semantic-cache] miss (nearest sim=${match.sim.toFixed(4)} < ${threshold} (${source})) for "${truncate(question)}"`,
+    );
     return miss;
   } catch (err) {
     if (isMissingTable(err)) return miss;

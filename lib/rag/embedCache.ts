@@ -108,32 +108,77 @@ const hashText = (text: string): string =>
 const isMissingTable = (err: unknown): boolean =>
   (err as { code?: string }).code === "42P01";
 
+// The optional on-disk layer (lib/rag/embedDiskCache.ts) sits between L1 and L2,
+// and ONLY when EMBED_DISK_CACHE names a directory. Imported dynamically for two
+// reasons: a deployment then never loads a module that touches node:fs, and the
+// feature costs an unconfigured process nothing but this one env read.
+//
+// Cached rather than re-imported per call — this is on the ingest path, which
+// calls readPersisted in a loop.
+type DiskCache = typeof import("@/lib/rag/embedDiskCache");
+let diskModule: Promise<DiskCache> | null = null;
+const disk = (): Promise<DiskCache> | null => {
+  if (!process.env.EMBED_DISK_CACHE) return null;
+  diskModule ??= import("@/lib/rag/embedDiskCache");
+  return diskModule;
+};
+
 // Batched L2 read: vectors for the given texts that are already persisted,
 // keyed back by text. Missing-table → empty (memory-only degradation).
+//
+// With the disk layer enabled the order is disk → database → write the database's
+// answers back to disk, so a repeat run of the same sweep reads nothing over the
+// network. The database remains the source of truth: disk can only ever ANSWER a
+// hash, never assert that one is absent.
 async function readPersisted(
   model: string,
   kind: InputKind,
   texts: string[],
 ): Promise<Map<string, number[]>> {
   if (texts.length === 0) return new Map();
+  const userId = activeUserId();
   const hashes = texts.map(hashText);
+  const out = new Map<string, number[]>();
+
+  const diskCache = disk();
+  const fromDisk = diskCache
+    ? (await diskCache).readDisk(userId, model, kind, hashes)
+    : new Map<string, number[]>();
+
+  const wanted: string[] = [];
+  texts.forEach((t, i) => {
+    const vec = fromDisk.get(hashes[i]);
+    if (vec) out.set(t, vec);
+    else wanted.push(hashes[i]);
+  });
+  if (wanted.length === 0) return out;
+
   try {
     const rows = await sql<{ text_hash: string; embedding: number[] }[]>`
       select text_hash, embedding
       from embedding_cache
-      where user_id = ${activeUserId()}
+      where user_id = ${userId}
         and model = ${model} and input_kind = ${kind}
-        and text_hash = any(${hashes})
+        and text_hash = any(${wanted})
     `;
     const byHash = new Map(rows.map((r) => [r.text_hash, r.embedding]));
-    const out = new Map<string, number[]>();
     texts.forEach((t, i) => {
       const vec = byHash.get(hashes[i]);
       if (vec) out.set(t, vec);
     });
+    if (diskCache && rows.length > 0) {
+      (await diskCache).appendDisk(
+        userId,
+        model,
+        kind,
+        rows.map((r) => ({ hash: r.text_hash, vector: r.embedding })),
+      );
+    }
     return out;
   } catch (err) {
-    if (isMissingTable(err)) return new Map();
+    // A missing table degrades to whatever disk already had, which is nothing
+    // when the layer is off — the pre-existing memory-only behaviour.
+    if (isMissingTable(err)) return out;
     throw err;
   }
 }
@@ -162,6 +207,17 @@ async function writePersisted(
   entries: { text: string; vector: number[] }[],
 ): Promise<void> {
   const userId = activeUserId();
+  // A freshly bought vector goes to disk too, when the layer is on. Without this
+  // the first run after an embed still pays to read back what it just wrote.
+  const diskCache = disk();
+  if (diskCache) {
+    (await diskCache).appendDisk(
+      userId,
+      model,
+      kind,
+      entries.map(({ text, vector }) => ({ hash: hashText(text), vector })),
+    );
+  }
   for (let i = 0; i < entries.length; i += WRITE_BATCH) {
     const rows = entries.slice(i, i + WRITE_BATCH).map(({ text, vector }) => ({
       user_id: userId,
