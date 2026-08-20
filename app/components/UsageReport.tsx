@@ -14,6 +14,7 @@
 import type {
   KeyUsageDay,
   KeyUsageReport,
+  KeyUsageWindow,
   KeyUsageRow,
   KeyUsageTotal,
 } from "@/lib/auth/keyUsageStore";
@@ -74,7 +75,7 @@ export function UsageReport({ report }: { report: KeyUsageReport }) {
       </section>
 
       <Totals totals={report.totals} />
-      <DailyStrip days={report.days} />
+      <DailyStrip days={report.days} axis={report.window} />
       <Rows report={report} />
     </div>
   );
@@ -151,21 +152,35 @@ function Totals({ totals }: { totals: KeyUsageTotal[] }) {
 // tooltip rather than the height: a day of cheap-model traffic and a day of one
 // expensive call are equally interesting here, and only the former is a signal
 // about how the key is being used.
-function DailyStrip({ days }: { days: KeyUsageDay[] }) {
+//
+// THE AXIS IS THE FULL WINDOW, always. It used to span only the first to the last
+// day that had calls, which is fine at 30 days of traffic and degenerates badly
+// below that: an account with calls on a single day got ONE bar, and one bar with
+// flex-1 is a full-width, full-height grey slab with the same date printed at both
+// ends. That reads as a broken component, not as "you used this once". A fixed
+// 30-day axis makes the same data read as one day's activity in a quiet month.
+//
+// The bounds come from the server (report.window) rather than from Date.now()
+// here, which react-hooks/purity forbids during render.
+// `axis`, not `window`: this is a "use client" module, where a parameter named
+// `window` shadows the browser global for the whole function body.
+function DailyStrip({ days, axis }: { days: KeyUsageDay[]; axis: KeyUsageWindow }) {
   if (days.length === 0) return null;
 
-  // Gaps are filled between the first and last day that HAVE rows, so a quiet
-  // day reads as a quiet day rather than being silently closed up. Bounded by
-  // the data instead of by "today" on purpose — a Date.now() read during render
-  // is exactly what react-hooks/purity forbids, and the window is already stated
-  // in the heading.
-  const filled = fillDays(days);
+  const filled = fillDays(days, axis);
   const peak = Math.max(...filled.map((d) => d.calls), 1);
 
   return (
     <section className="flex flex-col gap-2">
       <SectionHeading>Calls per day</SectionHeading>
       <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
+        {/* The scale, stated. Without it a bar's height is only meaningful
+            relative to the other bars, and on a quiet window that is no
+            information at all — one call and four hundred both draw a full-height
+            bar. */}
+        <div className="mb-1 text-[11px] text-zinc-400">
+          peak {peak} call{peak === 1 ? "" : "s"}/day
+        </div>
         <div className="flex h-24 items-end gap-1">
           {filled.map((d) => {
             const height = d.calls === 0 ? 0 : Math.max(2, (d.calls / peak) * 100);
@@ -176,7 +191,7 @@ function DailyStrip({ days }: { days: KeyUsageDay[] }) {
                 title={`${d.day} — ${d.calls} call${d.calls === 1 ? "" : "s"}, ${
                   d.failures
                 } rejected, ${fmtUsd(d.costUsd)}`}
-                className="flex flex-1 flex-col justify-end"
+                className="flex min-w-px flex-1 flex-col justify-end"
                 style={{ height: "100%" }}
               >
                 {d.calls === 0 ? (
@@ -207,11 +222,21 @@ function DailyStrip({ days }: { days: KeyUsageDay[] }) {
   );
 }
 
-function fillDays(days: KeyUsageDay[]): KeyUsageDay[] {
+// Every day in the window gets a slot, with or without calls — see the note on
+// DailyStrip for why the data's own extent is the wrong axis. Days outside the
+// window are still emitted rather than dropped: `days` comes from the same
+// filtered query, so a row outside these bounds would mean the two disagreed, and
+// silently hiding it would hide the disagreement too.
+function fillDays(days: KeyUsageDay[], axis: KeyUsageWindow): KeyUsageDay[] {
   const byDay = new Map(days.map((d) => [d.day, d]));
   const out: KeyUsageDay[] = [];
-  const cursor = new Date(`${days[0].day}T00:00:00Z`);
-  const last = new Date(`${days[days.length - 1].day}T00:00:00Z`);
+
+  const start = days.length > 0 && days[0].day < axis.start ? days[0].day : axis.start;
+  const end =
+    days.length > 0 && days[days.length - 1].day > axis.end ? days[days.length - 1].day : axis.end;
+
+  const cursor = new Date(`${start}T00:00:00Z`);
+  const last = new Date(`${end}T00:00:00Z`);
   while (cursor <= last) {
     const day = cursor.toISOString().slice(0, 10);
     out.push(byDay.get(day) ?? { day, calls: 0, failures: 0, costUsd: 0 });

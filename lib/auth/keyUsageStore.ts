@@ -293,6 +293,16 @@ export type KeyUsageDay = {
   costUsd: number;
 };
 
+// The window the three queries actually ran over, as UTC dates. The daily chart
+// needs these to draw a fixed 30-day axis: it cannot derive them from `days`,
+// because `days` only contains the days that HAVE calls, and it must not derive
+// them from Date.now() during render (react-hooks/purity). Sent from here, where
+// the same `since` that bounded the SQL is already in hand.
+export type KeyUsageWindow = {
+  start: string; // YYYY-MM-DD, UTC — inclusive
+  end: string; // YYYY-MM-DD, UTC — inclusive
+};
+
 export type KeyUsageRow = {
   id: string;
   at: number;
@@ -314,6 +324,7 @@ export type KeyUsageRow = {
 
 export type KeyUsageReport = {
   windowDays: number;
+  window: KeyUsageWindow;
   totals: KeyUsageTotal[];
   days: KeyUsageDay[];
   rows: KeyUsageRow[];
@@ -330,8 +341,11 @@ export type KeyUsageReport = {
 const WINDOW_DAYS = 30;
 const ROW_LIMIT = 500;
 
-const EMPTY: KeyUsageReport = {
+// A function, not a const. The window dates have to be computed per call — a
+// module-level literal would pin them to whenever the process booted.
+const emptyReport = (): KeyUsageReport => ({
   windowDays: WINDOW_DAYS,
+  window: windowFor(new Date()),
   totals: [],
   days: [],
   rows: [],
@@ -340,7 +354,18 @@ const EMPTY: KeyUsageReport = {
   totalCostUsd: 0,
   rowsShown: 0,
   hasData: false,
-};
+});
+
+const utcDay = (date: Date): string => date.toISOString().slice(0, 10);
+
+// Inclusive of both ends: `since` is the same instant the queries filter on, and
+// `now` is today, so the axis covers exactly the days a call could land in.
+function windowFor(now: Date): KeyUsageWindow {
+  return {
+    start: utcDay(new Date(now.getTime() - WINDOW_DAYS * 24 * 60 * 60 * 1000)),
+    end: utcDay(now),
+  };
+}
 
 const providerLabel = (p: ProviderId): string => PROVIDER_META[p]?.label ?? p;
 
@@ -350,7 +375,8 @@ const providerLabel = (p: ProviderId): string => PROVIDER_META[p]?.label ?? p;
 // (user_id, created_at desc) serves all three.
 export async function getKeyUsageReport(): Promise<KeyUsageReport> {
   try {
-    const since = new Date(Date.now() - WINDOW_DAYS * 24 * 60 * 60 * 1000);
+    const now = new Date();
+    const since = new Date(now.getTime() - WINDOW_DAYS * 24 * 60 * 60 * 1000);
     const userId = activeUserId();
 
     const totals = await sql<
@@ -446,6 +472,7 @@ export async function getKeyUsageReport(): Promise<KeyUsageReport> {
 
     const report: KeyUsageReport = {
       windowDays: WINDOW_DAYS,
+      window: windowFor(now),
       totals: totals.map((t) => ({
         provider: t.provider,
         providerLabel: providerLabel(t.provider),
@@ -502,7 +529,7 @@ export async function getKeyUsageReport(): Promise<KeyUsageReport> {
     }
     return report;
   } catch (err) {
-    if (isMissingTable(err)) return EMPTY;
+    if (isMissingTable(err)) return emptyReport();
     throw err;
   }
 }
