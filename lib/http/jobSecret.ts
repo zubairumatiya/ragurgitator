@@ -99,6 +99,7 @@ export async function postJobTick(jobId: string): Promise<boolean> {
       headers: {
         "content-type": "application/json",
         [JOB_SIGNATURE_HEADER]: signJobTick(jobId),
+        ...protectionBypass(),
       },
       body: JSON.stringify({ jobId }),
     });
@@ -107,6 +108,25 @@ export async function postJobTick(jobId: string): Promise<boolean> {
     console.warn(`[jobs] tick for ${jobId} failed to send: ${String(e)}`);
     return false;
   }
+}
+
+// DEPLOYMENT PROTECTION, and why this chain would otherwise die silently in
+// production. The project has Vercel Authentication on with deploymentType
+// `all_except_custom_domains`, and VERCEL_URL below is the DEPLOYMENT url, not
+// the custom domain — so the self-fetch above is an ordinary outside request
+// that gets answered with an SSO login page instead of the handler. Slice 1
+// runs, slice 2 never lands, and the only symptom is jobs that stop advancing
+// until the janitor sweep notices.
+//
+// The bypass secret is what Vercel provides for exactly this. It only exists
+// once "Protection Bypass for Automation" is enabled in the project's
+// Deployment Protection settings, which injects VERCEL_AUTOMATION_BYPASS_SECRET
+// into the build. Absent (locally, or before that switch is thrown) this
+// contributes no header at all rather than an empty one, since a blank value
+// would be a bypass attempt that fails rather than a request that never tried.
+function protectionBypass(): Record<string, string> {
+  const secret = process.env.VERCEL_AUTOMATION_BYPASS_SECRET?.trim();
+  return secret ? { "x-vercel-protection-bypass": secret } : {};
 }
 
 // A slice has to address the deployment it is running in, and there is no request
