@@ -1,4 +1,5 @@
-// Account Server Actions — save / delete a provider key, delete the account.
+// Account Server Actions — save / delete a provider key, change the password,
+// delete the account.
 //
 // Server Actions rather than Route Handlers for the same reason as the auth forms:
 // the API key is posted as FormData and never held in React state, so it exists on
@@ -22,6 +23,8 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 
 import { requireUser, withPageUser } from "@/lib/auth/dal";
+import { allIssues, NewPassword } from "@/lib/auth/passwordPolicy";
+import { revokeOtherSessions } from "@/lib/auth/sessions";
 import { serverSupabase } from "@/lib/auth/supabase";
 import { deleteProviderKey, isProviderId, saveProviderKey } from "@/lib/auth/providerKeys";
 import { invalidateProviderClients } from "@/lib/llm/client";
@@ -250,6 +253,74 @@ async function isConnectedClient(clientId: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+export type PasswordFormState = {
+  error?: string;
+  saved?: boolean;
+};
+
+// Change the password from inside a live session.
+//
+// THE CURRENT PASSWORD IS RE-ENTERED, and that is the entire security value of
+// this action. updateUser() on its own would accept the session as sufficient
+// proof — which means a stolen cookie, or an unattended laptop, could set a new
+// password and lock the real owner out of an account holding their provider keys.
+// Requiring the old one makes the session a necessary condition rather than a
+// sufficient one.
+//
+// The reset flow (setNewPassword in app/auth/actions.ts) has no such field because
+// the user there cannot supply it; a verified mail round trip is what stands in for
+// it, and the recovery-intent cookie is what proves the round trip happened.
+//
+// Bare requireUser(), not withPageUser: nothing here touches `sql`, so there is no
+// reason to open the RLS transaction.
+export async function changePassword(
+  _prev: PasswordFormState,
+  formData: FormData,
+): Promise<PasswordFormState> {
+  const current = formData.get("current")?.toString() ?? "";
+  const parsed = NewPassword.safeParse(formData.get("next"));
+  if (!current) {
+    return { error: "Enter your current password." };
+  }
+  if (!parsed.success) {
+    return { error: allIssues(parsed.error) };
+  }
+
+  const user = await requireUser();
+  const supabase = await serverSupabase();
+
+  // Verifying by signing in again is the only check available: Supabase exposes
+  // no "is this the password" call, and the hash is not ours to read. It rotates
+  // the session cookie for this same user, which is harmless — the user is
+  // already signed in as exactly this account.
+  const { error: wrongPassword } = await supabase.auth.signInWithPassword({
+    email: user.email,
+    password: current,
+  });
+  if (wrongPassword) {
+    // Generic on purpose. The address is already known to whoever is sitting
+    // here, so the only thing a more specific message could add is a hint about
+    // the stored password's shape.
+    return { error: "That password is incorrect." };
+  }
+
+  // Caught here rather than left to Supabase, whose message for this is about
+  // the new password being unusable rather than being the same one.
+  if (current === parsed.data) {
+    return { error: "That's already your password. Choose a different one." };
+  }
+
+  const { error } = await supabase.auth.updateUser({ password: parsed.data });
+  if (error) {
+    return { error: error.message };
+  }
+
+  await revokeOtherSessions(supabase);
+
+  revalidatePath("/account");
+  return { saved: true };
 }
 
 // ACCOUNT DELETION

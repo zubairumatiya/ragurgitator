@@ -24,6 +24,7 @@ import { mcpServerUrl } from "@/lib/mcp/metadata";
 import { listGrants as listWriteGrants } from "@/lib/mcp/writeGrant";
 import { type WriteGrant, grantIsLive } from "@/lib/mcp/writeGrantPolicy";
 import { BackToConfigs } from "@/app/components/BackToConfigs";
+import { ChangePasswordForm } from "@/app/components/ChangePasswordForm";
 import { DeleteAccountForm } from "@/app/components/DeleteAccountForm";
 import { McpConnectionCard, type McpGrantDto } from "@/app/components/McpConnectionCard";
 import { ProviderKeyRow } from "@/app/components/ProviderKeyRow";
@@ -138,6 +139,22 @@ export default async function AccountPage() {
           live: isLiveNow(grant),
         }))}
       />
+
+      <section className="mt-12">
+        <h2 className="text-sm font-medium">Password</h2>
+        <p className="mt-1 max-w-prose text-xs text-zinc-500">
+          Changing it signs out every other device. This one stays signed in. If you can&rsquo;t
+          remember your current password,{" "}
+          <Link
+            href="/auth/forgot-password"
+            className="underline underline-offset-2 hover:text-zinc-900 dark:hover:text-zinc-200"
+          >
+            reset it by email
+          </Link>{" "}
+          instead.
+        </p>
+        <ChangePasswordForm />
+      </section>
 
       <section className="mt-12 rounded border border-red-200 p-4 dark:border-red-900/50">
         <h2 className="text-sm font-medium text-red-700 dark:text-red-400">Delete account</h2>
