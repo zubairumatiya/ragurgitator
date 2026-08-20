@@ -8,6 +8,8 @@
 // actually sees when it embeds that chunk.
 import { AutoTokenizer } from "@huggingface/transformers";
 
+import "@/lib/rag/transformersCache";
+
 import { activeConfig } from "@/lib/rag/activeConfig";
 import type { Chunk, SourceDocument } from "@/types/rag";
 

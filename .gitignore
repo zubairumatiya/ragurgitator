@@ -32,6 +32,9 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# ...except the template, which holds no values and is the only thing telling a
+# fresh clone (or a Vercel deploy) which variables have to exist.
+!.env.example
 
 # vercel
 .vercel

@@ -12,24 +12,38 @@
 // per-key charge; operations bill per 10k.
 //
 // AUTH: one machine identity serves every user — entirely separate from how users
-// authenticate to the app. DefaultAzureCredential walks a chain and resolves it
-// differently per environment, which is why no code here branches on deployment:
+// authenticate to the app. Two environments, and they need DIFFERENT credentials:
 //
-//   local   the developer's `az login` session (needs Key Vault Crypto Officer)
-//   Vercel  OIDC federation — a short-lived token per invocation exchanged for an
-//           access token, via AZURE_TENANT_ID + AZURE_CLIENT_ID, NO client secret
+//   local   DefaultAzureCredential, which finds the developer's `az login`
+//           session (needs Key Vault Crypto Officer on the vault)
+//   Vercel  ClientAssertionCredential — OIDC federation, a short-lived token per
+//           invocation exchanged for an access token via AZURE_TENANT_ID +
+//           AZURE_CLIENT_ID, NO client secret
 //
-// Managed identity is deliberately not in that list: it only exists on Azure
-// compute, not on Vercel. The federated path is the better outcome anyway — no
-// long-lived secret to leak or rotate, so the DB and the vault stay two genuinely
+// THE BRANCH IS NOT OPTIONAL, which is worth stating because it looks like it
+// should be. DefaultAzureCredential does have a workload-identity step, but it
+// reads the token from the file named by AZURE_FEDERATED_TOKEN_FILE — the
+// Kubernetes/AKS convention. Vercel hands its token to the invocation instead,
+// and nothing in the default chain looks there, so on Vercel the chain simply
+// runs out of options and every unwrap fails. Deleting the branch would fail
+// nowhere in local testing and everywhere in production.
+//
+// Managed identity is deliberately absent: it only exists on Azure compute, not
+// on Vercel. The federated path is the better outcome anyway — no long-lived
+// secret to leak or rotate, so the DB and the vault stay two genuinely
 // independent compromises.
 //
 // AUDIT: Key Vault diagnostic logging is NOT on by default. Enable diagnostic
 // settings to Azure Monitor to get the unwrap trail this design is partly paying for.
 import { createHash } from "node:crypto";
 
-import { DefaultAzureCredential } from "@azure/identity";
+import {
+  ClientAssertionCredential,
+  DefaultAzureCredential,
+  type TokenCredential,
+} from "@azure/identity";
 import { CryptographyClient, KeyClient, type KeyWrapAlgorithm } from "@azure/keyvault-keys";
+import { getVercelOidcToken } from "@vercel/oidc";
 
 import type { KeyWrapper } from "./envelope";
 
@@ -53,9 +67,28 @@ function requireEnv(name: string): string {
 // key is actually used — with the message above — rather than crashing the whole
 // server at boot. Same rationale as the lazy openaiClient()/cohereClient() in
 // lib/llm/client.ts.
-let _credential: DefaultAzureCredential | undefined;
-function credential(): DefaultAzureCredential {
-  return (_credential ??= new DefaultAzureCredential());
+let _credential: TokenCredential | undefined;
+function credential(): TokenCredential {
+  return (_credential ??= process.env.VERCEL
+    ? // getVercelOidcToken is called per token acquisition, not once here: it
+      // reads the token Vercel attached to THIS invocation, and Vercel rotates
+      // that roughly every 90 minutes, so caching one assertion would start
+      // failing the moment the first copy expired.
+      //
+      // Imported from @vercel/oidc, not @vercel/functions/oidc — the latter is
+      // a deprecated re-export of exactly this function.
+      //
+      // Called with NO `audience` option, and that is load-bearing: it defaults
+      // to https://vercel.com/<team>, which is what the `vercel-production`
+      // federated credential on the Azure side is registered to accept. Azure
+      // recommends api://AzureADTokenExchange instead, but the two have to be
+      // changed together or every unwrap fails with an audience mismatch.
+      new ClientAssertionCredential(
+        requireEnv("AZURE_TENANT_ID"),
+        requireEnv("AZURE_CLIENT_ID"),
+        getVercelOidcToken,
+      )
+    : new DefaultAzureCredential());
 }
 
 // The CURRENT key version, resolved once per process. Only wrap() needs it —

@@ -31,6 +31,11 @@ import postgres from "postgres";
 
 import { sslFor } from "./dbSsl";
 
+// Seconds a free connection may sit in the pool before it is closed. Short
+// enough that an idle instance stops hoarding a share of the database's 60
+// connections, long enough that ordinary click-to-click browsing reuses one.
+const IDLE_TIMEOUT_S = 30;
+
 type Sql = ReturnType<typeof postgres>;
 
 const url = process.env.DATABASE_URL;
@@ -61,7 +66,8 @@ export const privilegedSql =
     ssl: sslFor(url),
     // Only the three cross-tenant callers use this, and none of them is on a
     // request path, so it does not need request-shaped headroom.
-    max: 5,
+    max: 2,
+    idle_timeout: IDLE_TIMEOUT_S,
   });
 
 const appPool =
@@ -69,10 +75,35 @@ const appPool =
   postgres(appUrl, {
     prepare: false,
     ssl: sslFor(appUrl),
-    // Higher than postgres.js's default 10 because connections are now held for
-    // the length of a scope rather than a query, and page renders open several
-    // sibling scopes (layout, page and leaves each call withPageUser).
-    max: 15,
+    // SIZED FOR SERVERLESS, where this number is per INSTANCE and Vercel runs
+    // several at once. The shared ceiling is the database's 60 connections (~44
+    // free), and because a scope pins one connection for its whole life, that
+    // ceiling is also the hard limit on simultaneous in-flight requests — no
+    // pool size changes it. What this number decides is how many instances fit
+    // underneath it: at 15 only two or three do, at 5 about six.
+    //
+    // Low enough to hurt only a burst of self-inflicted parallel work (a bulk
+    // eval), which queues rather than fails. Page renders open several sibling
+    // scopes — layout, page and leaves each call withPageUser — so this is the
+    // floor, not a target.
+    max: 5,
+    // GIVES CONNECTIONS BACK, which nothing else here does. Both reaping
+    // mechanisms used to be off — max_lifetime explicitly below, idle_timeout by
+    // postgres.js defaulting it to null — so an instance that once served a
+    // burst held those connections until it died. Four idle instances could
+    // between them hold every connection the database has while serving nothing.
+    //
+    // Safe in the way max_lifetime is not, and the difference is structural, not
+    // a matter of picking a longer duration. The idle timer is armed only when a
+    // connection is moved into the `open` (free) queue and is cancelled on every
+    // move into `reserved`/`busy`/`full` — see move() in postgres.js's index.js.
+    // A scope's connection is `reserved` for the whole transaction, so the timer
+    // is not running during a 30-second answer or a four-minute slice. It can
+    // only ever close a connection with nothing on it.
+    //
+    // The cost is a reconnect handshake when traffic resumes after a quiet
+    // spell, once, for tens of milliseconds.
+    idle_timeout: IDLE_TIMEOUT_S,
     // DISABLED DELIBERATELY, and this one is load-bearing. postgres.js defaults
     // max_lifetime to `60 * (30 + Math.random() * 30)` seconds — a per-connection
     // random draw between 30 and 60 minutes — and on expiry it calls end() on the
@@ -89,9 +120,9 @@ const appPool =
     // "Just keep operations short" is not the fix: the timer starts at CONNECT, so
     // the budget a run gets is 30-60 minutes minus however old its pooled
     // connection already was. There is no duration that is safe by construction.
-    // Recycling still happens through idle_timeout; what is given up is the
-    // periodic reaping of connections that are busy, which is precisely the case
-    // where reaping is destructive here.
+    // Recycling happens through idle_timeout above instead; what is given up is
+    // the periodic reaping of connections that are BUSY, which is precisely the
+    // case where reaping is destructive here.
     //
     // Per-slice commits (lib/jobs/stream.ts) make an individual transaction short
     // enough that this should never fire anyway. That is an argument for the bound

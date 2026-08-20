@@ -99,6 +99,7 @@ export async function postJobTick(jobId: string): Promise<boolean> {
       headers: {
         "content-type": "application/json",
         [JOB_SIGNATURE_HEADER]: signJobTick(jobId),
+        ...protectionBypass(),
       },
       body: JSON.stringify({ jobId }),
     });
@@ -109,13 +110,54 @@ export async function postJobTick(jobId: string): Promise<boolean> {
   }
 }
 
-// A slice has to address the deployment it is running in, and there is no request
-// object at hand when the chain fires. VERCEL_URL is per-deployment, which is what
-// we want: a chain should stay inside the deployment that started it rather than
-// hop to whatever production is by the time slice 9 runs.
+// DEPLOYMENT PROTECTION. The project runs Vercel Authentication with
+// deploymentType `all_except_custom_domains`, so a request to a *.vercel.app
+// deployment url is answered with a login page rather than the handler — and a
+// tick is an ordinary outside request, however much it looks internal. Slice 1
+// would run, slice 2 would never land, and the only symptom is a job that stops
+// advancing until the janitor sweep notices.
+//
+// Production sidesteps this by addressing the custom domain (see jobsBaseUrl).
+// This header is what carries PREVIEW deployments, which have no exempt domain
+// of their own, and it is the fallback if that lookup ever returns nothing.
+//
+// The secret exists only once "Protection Bypass for Automation" is enabled in
+// the project's Deployment Protection settings, which injects
+// VERCEL_AUTOMATION_BYPASS_SECRET into the build. Absent — locally, or before
+// that switch is thrown — this contributes no header at all rather than an empty
+// one, since a blank value is a bypass attempt that fails rather than a request
+// that never tried.
+function protectionBypass(): Record<string, string> {
+  const secret = process.env.VERCEL_AUTOMATION_BYPASS_SECRET?.trim();
+  return secret ? { "x-vercel-protection-bypass": secret } : {};
+}
+
+// A slice has to address the app it is running in, and there is no request object
+// at hand when the chain fires.
+//
+// IN PRODUCTION, THE CUSTOM DOMAIN. VERCEL_PROJECT_PRODUCTION_URL is the shortest
+// production custom domain (ragurgitator.com), which is the one address exempt
+// from this project's Vercel Authentication. The obvious-looking choice, VERCEL_URL,
+// is the per-deployment *.vercel.app address, and Vercel's own reference says it
+// "cannot be used in conjunction with Standard Deployment Protection" — behind the
+// wall, a tick is answered with a login page instead of the handler.
+//
+// What that gives up: a chain no longer stays inside the deployment that started
+// it, so a mid-job deploy moves slice 9 onto the new build. That is the better
+// trade here. Slices checkpoint to the database rather than to memory, so the new
+// build resumes from the same row, and the deployment being superseded is a worse
+// host for the rest of the job than current production is.
+//
+// EVERYWHERE ELSE, THE DEPLOYMENT. VERCEL_PROJECT_PRODUCTION_URL is set on preview
+// deployments too, so using it unconditionally would have a preview's job quietly
+// run its remaining slices on production. Preview stays on VERCEL_URL, where the
+// bypass header above is what gets it past the wall.
 export function jobsBaseUrl(): string {
   const explicit = process.env.JOBS_BASE_URL?.trim();
   if (explicit) return explicit.replace(/\/$/, "");
+  if (process.env.VERCEL_ENV === "production" && process.env.VERCEL_PROJECT_PRODUCTION_URL) {
+    return `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`;
+  }
   if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
   const site = process.env.NEXT_PUBLIC_SITE_URL?.trim();
   if (site) return site.replace(/\/$/, "");
