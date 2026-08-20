@@ -14,12 +14,7 @@ import { useActionState, useEffect, useRef } from "react";
 
 import { deleteKey, saveKey, type KeyFormState } from "@/app/account/actions";
 import type { ProviderKeyDto } from "@/lib/auth/providerKeys";
-
-const FIELD =
-  "w-full rounded border border-zinc-300 bg-transparent px-2 py-1.5 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700 dark:focus:border-zinc-500";
-
-const BUTTON =
-  "cursor-pointer rounded bg-zinc-900 px-3 py-1.5 text-sm font-medium text-zinc-50 hover:bg-zinc-700 disabled:cursor-default disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300";
+import { BUTTON, FIELD } from "@/app/components/formStyles";
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, {

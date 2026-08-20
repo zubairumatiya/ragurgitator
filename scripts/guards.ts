@@ -102,8 +102,9 @@ function sweepExpose() {
 // withUser() scope": requireUser() authenticates but does NOT open a scope.
 const SCOPE_EXEMPT: Record<string, string> = {
   "app/api/auth/me/route.ts": "pure Supabase session read, no store call",
-  "app/auth/actions.ts": "sign in / sign up / sign out, no store call",
+  "app/auth/actions.ts": "sign in / up / out and password reset — Supabase Auth only, no store call",
   "app/auth/callback/route.ts": "verifyOtp only, runs before a profile exists",
+  "app/auth/reset/page.tsx": "session + recovery-cookie check only, no store call",
   "app/oauth/consent/page.tsx": "OAuth consent — Supabase Auth only, no store call",
   "app/api/oauth/decision/route.ts": "OAuth approve / deny — Supabase Auth only, no store call",
 };

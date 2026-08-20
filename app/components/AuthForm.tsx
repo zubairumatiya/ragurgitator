@@ -13,6 +13,8 @@ import Link from "next/link";
 import { useActionState } from "react";
 
 import type { AuthState } from "@/app/auth/actions";
+import { PASSWORD_HINT } from "@/lib/auth/passwordPolicy";
+import { BUTTON, FIELD } from "@/app/components/formStyles";
 
 type Mode = "signin" | "signup";
 
@@ -28,6 +30,10 @@ const COPY = {
     // Sign-in must not advertise the rules — they describe the shape of stored
     // passwords, and older accounts may predate them anyway.
     passwordHint: null,
+    // The way out for someone who cannot get past this form. Only sign-in has
+    // one: on the signup form "forgot your password?" is a question about an
+    // account that does not exist yet.
+    recovery: { href: "/auth/forgot-password", label: "Forgot your password?" },
   },
   signup: {
     title: "Create an account",
@@ -37,14 +43,13 @@ const COPY = {
     altHref: "/login",
     altLabel: "Sign in",
     autoComplete: "new-password",
-    // Stated up front rather than discovered by rejection. Mirrors NewPassword
-    // in app/auth/actions.ts — keep the two in sync.
-    passwordHint: "At least 8 characters, including a letter and a number.",
+    // Stated up front rather than discovered by rejection. Imported from where
+    // the rules themselves live, so the two cannot drift.
+    passwordHint: PASSWORD_HINT,
+    recovery: null,
   },
 } as const;
 
-const FIELD =
-  "w-full rounded border border-zinc-300 bg-transparent px-2 py-1.5 text-sm outline-none focus:border-zinc-500 dark:border-zinc-700 dark:focus:border-zinc-500";
 
 export function AuthForm({
   mode,
@@ -137,14 +142,23 @@ export function AuthForm({
           </p>
         ) : null}
 
-        <button
-          type="submit"
-          disabled={pending}
-          className="mt-1 cursor-pointer rounded bg-zinc-900 px-3 py-1.5 text-sm font-medium text-zinc-50 hover:bg-zinc-700 disabled:cursor-default disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
-        >
+        <button type="submit" disabled={pending} className={`mt-1 ${BUTTON}`}>
           {pending ? copy.pending : copy.submit}
         </button>
       </form>
+
+      {/* Below the form, not beside the password label: it is an escape hatch,
+          not part of filling this form in. */}
+      {copy.recovery ? (
+        <p className="mt-3 text-xs text-zinc-500">
+          <Link
+            href={copy.recovery.href}
+            className="text-zinc-600 underline decoration-dotted underline-offset-2 dark:text-zinc-400"
+          >
+            {copy.recovery.label}
+          </Link>
+        </p>
+      ) : null}
 
       <p className="mt-6 text-xs text-zinc-500">
         {copy.altPrompt}{" "}
