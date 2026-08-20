@@ -18,12 +18,18 @@ export function Tooltip({
   text,
   align = "center",
   className = "",
+  delay = "short",
   describedById,
   children,
 }: {
   text: string;
   align?: "center" | "left" | "right";
   className?: string;
+  // "short" (150ms) is right for a lone trigger, where an instant bubble on every
+  // incidental mouse-over is noise. "instant" is for a ROW of adjacent triggers
+  // you sweep across — chart bars, a heatmap — where the delay reads as lag and
+  // the flicker it exists to prevent is the interaction you actually want.
+  delay?: "short" | "instant";
   // Set by a trigger that points aria-describedby at the bubble, so the text is
   // announced rather than left to a hover a screen reader never performs.
   describedById?: string;
@@ -34,7 +40,9 @@ export function Tooltip({
       {children}
       <span
         id={describedById}
-        className={`pointer-events-none absolute top-full z-30 mt-1 w-max max-w-72 whitespace-pre-line rounded-md border border-zinc-200 bg-white px-2.5 py-1.5 text-left text-xs font-normal normal-case tracking-normal text-zinc-700 opacity-0 shadow-lg transition-opacity duration-100 group-hover:opacity-100 group-hover:delay-150 group-focus-within:opacity-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 ${
+        className={`pointer-events-none absolute top-full z-30 mt-1 w-max max-w-72 whitespace-pre-line rounded-md border border-zinc-200 bg-white px-2.5 py-1.5 text-left text-xs font-normal normal-case tracking-normal text-zinc-700 opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 ${
+          delay === "instant" ? "duration-0" : "duration-100 group-hover:delay-150"
+        } ${
           align === "center"
             ? "left-1/2 -translate-x-1/2"
             : align === "right"

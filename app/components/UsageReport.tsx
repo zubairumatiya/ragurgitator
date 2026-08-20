@@ -18,6 +18,7 @@ import type {
   KeyUsageRow,
   KeyUsageTotal,
 } from "@/lib/auth/keyUsageStore";
+import { Tooltip } from "@/app/components/Tooltip";
 
 // Fractions of a cent are normal at this scale — a per-call ledger is mostly
 // made of them, and rounding them to $0.00 would make the rows look free. Same
@@ -164,6 +165,9 @@ function Totals({ totals }: { totals: KeyUsageTotal[] }) {
 // here, which react-hooks/purity forbids during render.
 // `axis`, not `window`: this is a "use client" module, where a parameter named
 // `window` shadows the browser global for the whole function body.
+// How many bars at each end grow their bubble inward instead of centring it.
+const EDGE_BARS = 4;
+
 function DailyStrip({ days, axis }: { days: KeyUsageDay[]; axis: KeyUsageWindow }) {
   if (days.length === 0) return null;
 
@@ -178,44 +182,75 @@ function DailyStrip({ days, axis }: { days: KeyUsageDay[]; axis: KeyUsageWindow 
             relative to the other bars, and on a quiet window that is no
             information at all — one call and four hundred both draw a full-height
             bar. */}
-        <div className="mb-1 text-[11px] text-zinc-400">
-          peak {peak} call{peak === 1 ? "" : "s"}/day
+        <div className="mb-1 flex justify-between text-[11px] text-zinc-400">
+          <span>
+            peak {peak} call{peak === 1 ? "" : "s"}/day
+          </span>
+          {/* SAY WHICH CLOCK. These are UTC buckets — deliberately, see the file
+              header — and an evening's calls west of Greenwich land on the NEXT
+              UTC day. Unlabelled, that reads as the chart being a day out rather
+              than as the chart using the same day boundary the provider
+              dashboards it exists to be compared against use. The row table below
+              has always said "times in UTC"; the chart said nothing. */}
+          <span>UTC days</span>
         </div>
-        <div className="flex h-24 items-end gap-1">
-          {filled.map((d) => {
+        {/* role="img" with one summary label, rather than a per-bar announcement.
+            The bars carried `title`, which some screen readers read and others
+            ignore, and 31 of them is a worse experience than one sentence — the
+            same figures are in the "Every call" table below for anyone who needs
+            them row by row. */}
+        <div
+          role="img"
+          aria-label={`Calls per UTC day from ${filled[0].day} to ${
+            filled[filled.length - 1].day
+          }. Peak ${peak} call${peak === 1 ? "" : "s"} in a day.`}
+          className="flex h-24 items-end gap-1"
+        >
+          {filled.map((d, i) => {
             const height = d.calls === 0 ? 0 : Math.max(2, (d.calls / peak) * 100);
             const failedShare = d.calls === 0 ? 0 : (d.failures / d.calls) * 100;
             return (
-              <div
+              <Tooltip
                 key={d.day}
-                title={`${d.day} — ${d.calls} call${d.calls === 1 ? "" : "s"}, ${
-                  d.failures
-                } rejected, ${fmtUsd(d.costUsd)}`}
-                className="flex min-w-px flex-1 flex-col justify-end"
-                style={{ height: "100%" }}
+                // Multi-line: Tooltip renders whitespace-pre-line, and a bubble
+                // you read mid-sweep should not need parsing.
+                text={
+                  `${d.day} (UTC)\n` +
+                  `${d.calls} call${d.calls === 1 ? "" : "s"}` +
+                  (d.failures > 0 ? ` · ${d.failures} rejected` : "") +
+                  `\n${fmtUsd(d.costUsd)}`
+                }
+                // Bars near either end would push a centred bubble outside the
+                // card, so the outermost few grow inward instead.
+                align={i < EDGE_BARS ? "left" : i >= filled.length - EDGE_BARS ? "right" : "center"}
+                // No open delay: you sweep along this strip reading days off it,
+                // and 150ms per bar reads as the chart lagging behind the cursor.
+                delay="instant"
+                className="h-full min-w-px flex-1 flex-col justify-end"
               >
                 {d.calls === 0 ? (
                   // A day with no calls still needs to occupy its slot, or the
-                  // strip stops being a time axis.
-                  <div className="h-px w-full bg-zinc-200 dark:bg-zinc-800" />
+                  // strip stops being a time axis. Spans, not divs: Tooltip's
+                  // wrapper is a <span>, and a <div> inside it is invalid HTML.
+                  <span className="h-px w-full bg-zinc-200 dark:bg-zinc-800" />
                 ) : (
-                  <div
-                    className="flex w-full flex-col justify-end overflow-hidden rounded-sm bg-zinc-300 dark:bg-zinc-700"
+                  <span
+                    className="flex w-full flex-col justify-end overflow-hidden rounded-sm bg-zinc-300 transition-colors group-hover:bg-zinc-400 dark:bg-zinc-700 dark:group-hover:bg-zinc-500"
                     style={{ height: `${height}%` }}
                   >
-                    <div
+                    <span
                       className="w-full bg-red-500/70 dark:bg-red-500/60"
                       style={{ height: `${failedShare}%` }}
                     />
-                  </div>
+                  </span>
                 )}
-              </div>
+              </Tooltip>
             );
           })}
         </div>
         <div className="mt-2 flex justify-between text-[11px] text-zinc-400">
           <span>{filled[0].day}</span>
-          <span>{filled[filled.length - 1].day}</span>
+          <span>{filled[filled.length - 1].day} (UTC)</span>
         </div>
       </div>
     </section>
