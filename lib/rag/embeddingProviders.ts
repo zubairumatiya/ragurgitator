@@ -16,6 +16,8 @@
 // ingest cannot flood the table.
 import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
 
+import "@/lib/rag/transformersCache";
+
 import {
   trackKeyUsage,
   type KeyUsageAmounts,

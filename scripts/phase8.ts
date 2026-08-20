@@ -47,8 +47,11 @@ import { spaceOf } from "../lib/rag/semanticCacheCore";
 const sql = postgres(process.env.DATABASE_URL!, { prepare: false, ssl: sslFor(process.env.DATABASE_URL!), max: 2 });
 const CONFIG_ID = process.env.SCRIPT_CONFIG_ID ?? "45b73063-403e-4a44-8d6e-b9eacf7e316a";
 
-const QUESTIONS = "docs/resume-metrics-8-questions.json";
-const PROGRESS = "docs/resume-metrics-8-progress.json";
+// Overridable so a later phase can re-run the same steps over a different
+// question set without touching Phase 8's files, which are the only record of
+// what was asked on 2026-08-16.
+const QUESTIONS = process.env.PHASE_QUESTIONS ?? "docs/resume-metrics-8-questions.json";
+const PROGRESS = process.env.PHASE_PROGRESS ?? "docs/resume-metrics-8-progress.json";
 
 // Step 1 and 2 must ask the SAME questions or the cascade's saving is confounded
 // with question difficulty. 40 is the plan's number.
@@ -176,7 +179,11 @@ async function setCascade(on: boolean): Promise<void> {
 }
 
 async function setServe(serve: boolean, threshold: number | null): Promise<void> {
-  await withUser(USER, () => updateBatchSavings(CONFIG_ID, { semanticCache: { serve, threshold } }));
+  // null means INHERIT the config's threshold, not "clear it". updateBatchSavings
+  // drops undefined keys but writes an explicit null, so passing the null through
+  // would wipe the live tuned threshold on every cascade/baseline step.
+  await withUser(USER, () =>
+    updateBatchSavings(CONFIG_ID, { semanticCache: { serve, threshold: threshold ?? undefined } }));
 }
 
 // --- question sets ---------------------------------------------------------
