@@ -15,6 +15,7 @@ import { useActionState, useEffect, useRef } from "react";
 import { deleteKey, saveKey, type KeyFormState } from "@/app/account/actions";
 import type { ProviderKeyDto } from "@/lib/auth/providerKeys";
 import { BUTTON, FIELD } from "@/app/components/formStyles";
+import { StatusPill } from "@/app/components/SectionCard";
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, {
@@ -53,15 +54,16 @@ export function ProviderKeyRow({
 
   return (
     <div className="border-t border-zinc-200 py-4 dark:border-zinc-800">
-      <div className="flex items-baseline justify-between gap-3">
+      <div className="flex items-start justify-between gap-3">
         <div>
           <h3 className="text-sm font-medium">{label}</h3>
           <p className="text-xs text-zinc-500">{role}</p>
         </div>
 
-        {saved ? null : (
-          <span className="shrink-0 text-xs text-zinc-400 dark:text-zinc-600">Not set</span>
-        )}
+        {/* Both states get a pill. Only "Not set" used to be marked, which meant
+            the presence of a key was signalled by the ABSENCE of a label — the
+            one arrangement in which a row you skim past reads as configured. */}
+        <StatusPill tone={saved ? "positive" : "neutral"}>{saved ? "Set" : "Not set"}</StatusPill>
       </div>
 
       {saved ? (

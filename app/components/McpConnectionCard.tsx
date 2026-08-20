@@ -15,6 +15,11 @@
 // insecure origins and can be permission-denied, so the write is wrapped and a
 // failure leaves the snippet visible and selectable — the copy button is a
 // convenience over text already on screen, never the only way to get it.
+//
+// THE SNIPPET IS COLLAPSED. It is a one-time setup step, and left open it took
+// more vertical space than the connected-agent list it sat above — so the thing
+// you check occasionally outranked the thing you check repeatedly. <details>
+// rather than useState so it costs no hydration and stays keyboard-operable.
 "use client";
 
 import { useActionState, useEffect, useState } from "react";
@@ -26,12 +31,25 @@ import {
   type McpFormState,
   type McpWriteFormState,
 } from "@/app/account/actions";
-
-const BUTTON =
-  "cursor-pointer rounded bg-zinc-900 px-3 py-1.5 text-sm font-medium text-zinc-50 hover:bg-zinc-700 disabled:cursor-default disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300";
+import { BUTTON } from "@/app/components/formStyles";
+import { SectionCard, SectionIntro, StatusPill, SubHeading } from "@/app/components/SectionCard";
 
 const LINK_BUTTON =
   "cursor-pointer text-xs text-red-600 underline decoration-dotted underline-offset-2 disabled:opacity-50 dark:text-red-400";
+
+// The full explanation, behind the heading's "?". What stays on screen is the one
+// sentence that changes what the user does; this is the part they read once.
+const ABOUT =
+  "An AI agent — Claude Code, Claude Desktop, Cursor — can read your configs " +
+  "directly over MCP: settings, documents, overrides, costs and evaluation " +
+  "scores.\n\n" +
+  "NO KEY IS EVER PASTED ANYWHERE. Connecting signs you into this app in a " +
+  "browser and asks for your approval; the agent's credential is minted after " +
+  "you click Approve, so there is never a secret sitting in a config file to " +
+  "leak.\n\n" +
+  "Agents get READ access to configuration only — never your documents. Write " +
+  "access is separate, granted one approval at a time, and lapses within the " +
+  "hour; anything currently holding it is listed under Write access below.";
 
 export type McpGrantDto = {
   clientId: string;
@@ -80,43 +98,43 @@ export function McpConnectionCard({
   );
 
   return (
-    <section className="mt-12">
-      <h2 className="text-sm font-medium">MCP access</h2>
-      <p className="mt-1 max-w-prose text-xs text-zinc-500">
-        Let an AI agent — Claude Code, Claude Desktop, Cursor — read your
-        configs directly: settings, documents, overrides, costs and evaluation
-        scores. Connecting signs you into this app and asks for your approval,
-        so no key is ever pasted anywhere. Agents can read configuration only:
-        never your documents, and nothing they can change.
-      </p>
+    <SectionCard
+      title="MCP access"
+      info={ABOUT}
+      action={<StatusPill tone={enabled ? "positive" : "neutral"}>{enabled ? "On" : "Off"}</StatusPill>}
+    >
+      <SectionIntro>
+        Let an AI agent — Claude Code, Claude Desktop, Cursor — read your configs directly. Agents
+        can read configuration only: never your documents, and nothing they can change.
+      </SectionIntro>
 
+      {/* Auto-submits on toggle: a checkbox paired with its own Save button asks
+          the user to confirm a switch they have already flipped, and leaves the
+          control lying about the server's state until they do. The button is gone
+          rather than kept as a no-JS fallback — the clipboard copy and the
+          collapsed snippet beside it never worked without JS either, so pretending
+          this one control did would be the misleading half-measure. */}
       <form action={toggleAction} className="mt-4 flex items-center gap-2">
         <input
           type="checkbox"
           id="mcpEnabled"
           name="mcpEnabled"
           defaultChecked={enabled}
+          // NOT disabled while saving. A disabled input is left out of FormData,
+          // so the pending state would submit the toggle without the field it
+          // exists to carry.
+          onChange={(event) => event.currentTarget.form?.requestSubmit()}
           className="size-4 cursor-pointer accent-zinc-900 dark:accent-zinc-100"
         />
         <label htmlFor="mcpEnabled" className="cursor-pointer text-sm">
           Allow agents to connect
         </label>
-        <button type="submit" disabled={toggling} className={`${BUTTON} ml-2`}>
-          {toggling ? "Saving…" : "Save"}
-        </button>
+        {toggling ? <span className="text-xs text-zinc-500">Saving…</span> : null}
       </form>
 
       {toggleState.error ? (
         <p role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">
           {toggleState.error}
-        </p>
-      ) : null}
-      {toggleState.saved ? (
-        <p
-          role="status"
-          className="mt-2 text-xs text-zinc-600 dark:text-zinc-400"
-        >
-          Saved.
         </p>
       ) : null}
 
@@ -131,7 +149,7 @@ export function McpConnectionCard({
           Turn this on to get the configuration snippet for your agent.
         </p>
       )}
-    </section>
+    </SectionCard>
   );
 }
 
@@ -159,24 +177,30 @@ function Snippet({ snippet }: { snippet: string }) {
   }
 
   return (
-    <div className="mt-6">
-      <div className="flex items-center justify-between">
-        <h3 className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-          Add this to your agent
-        </h3>
-        <button type="button" onClick={copy} className={BUTTON}>
+    <details className="group mt-6 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+      {/* list-none alone leaves the disclosure triangle in Safari, which still
+          draws it via ::-webkit-details-marker — the "show config" hint below is
+          the affordance, and two of them side by side is one too many. */}
+      <summary className="cursor-pointer list-none text-xs font-medium uppercase tracking-wide text-zinc-500 hover:text-zinc-700 [&::-webkit-details-marker]:hidden dark:hover:text-zinc-300">
+        Add this to your agent
+        <span aria-hidden className="ml-1 font-sans normal-case group-open:hidden">
+          — show config
+        </span>
+      </summary>
+
+      <div className="mt-3 flex items-center justify-between">
+        <p className="text-xs text-zinc-500">
+          In Claude Code this goes in a <code>.mcp.json</code> file at the root of your project;
+          restart Claude Code, then run <code>/mcp</code> to authenticate.
+        </p>
+        <button type="button" onClick={copy} className={`${BUTTON} ml-3 shrink-0`}>
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
       <pre className="mt-2 overflow-x-auto rounded border border-zinc-200 p-3 text-xs dark:border-zinc-800">
         <code>{snippet}</code>
       </pre>
-      <p className="mt-2 text-xs text-zinc-500">
-        In Claude Code this goes in <code>.mcp.json</code> file at the root of
-        your project; restart claude code then run <code>/mcp</code> to
-        authenticate.{" "}
-      </p>
-    </div>
+    </details>
   );
 }
 
@@ -189,9 +213,7 @@ function ConnectedClients({
 }) {
   return (
     <div className="mt-8">
-      <h3 className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-        Connected agents
-      </h3>
+      <SubHeading>Connected agents</SubHeading>
 
       {grantsError ? (
         <p role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">
@@ -225,7 +247,7 @@ function WriteGrants({ grants }: { grants: McpWriteGrantDto[] }) {
 
   return (
     <div className="mt-8">
-      <h3 className="text-xs font-medium uppercase tracking-wide text-zinc-500">Write access</h3>
+      <SubHeading>Write access</SubHeading>
       <div className="mt-2">
         {grants.map((grant) => (
           <WriteGrantRow key={grant.clientId} grant={grant} />
