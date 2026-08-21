@@ -106,7 +106,13 @@ import {
   type AutotuneStopReason,
   type PendingSnapshot,
 } from "@/lib/rag/autotune";
-import { insertAutotuneRun, type AutotuneOutcome } from "@/lib/rag/autotuneStore";
+import {
+  insertAutotuneRun,
+  type AutotuneOutcome,
+  type HoldoutQuestionOutcome,
+} from "@/lib/rag/autotuneStore";
+import { type Split, splitRatesFor } from "@/lib/rag/evalRates";
+import { type HoldoutMode, holdoutSplitKey } from "@/lib/rag/holdout";
 import {
   scoreQuestions,
   screenAffectedQuestions,
@@ -161,6 +167,36 @@ type FrozenBaseline = {
   ndcg: number | null;
 };
 
+// The frozen "before" side of one HELD-OUT question — the complement of
+// FrozenBaseline. No `metrics` and no `chunkId`: a held-out question was not
+// targeted for anything and belongs to no chunk the run was working on. It is
+// measured on all three metrics or none.
+type FrozenHoldout = {
+  hit: boolean | null;
+  rank: number | null;
+  rr: number | null;
+  ndcg: number | null;
+};
+
+// WHAT THE RUN FREEZES ABOUT THE QUESTIONS IT MAY NOT SEE (0074).
+//
+// `rows` is the membership AND the identity: holdout_split_key is a hash of its
+// keys, and every later comparison between two runs turns on that key. It has to
+// be frozen because membership is destructive — syncHoldout deletes and redraws
+// on a settings save, so by the time this run closes its books the set it was
+// tested against may no longer exist anywhere else.
+//
+// `before` carries BOTH sides' rates, not just the holdout's. The train rate
+// cannot be reconstructed from `baselines`: those cover only the questions the
+// run TARGETED (the failing ones), while the train rate is over every question a
+// human has not ignored. Recompute it later and it is the rate after tuning,
+// which is the one number it must not be.
+type HoldoutFreeze = {
+  dials: { mode: HoldoutMode; size: number; seed: number } | null;
+  before: Split;
+  rows: Record<string, FrozenHoldout>;
+};
+
 export type AutotuneScope = Record<string, never>;
 
 export type AutotuneCursor = {
@@ -169,6 +205,12 @@ export type AutotuneCursor = {
   startState: string;
   startOverrides: Record<string, string>; // chunk id → override fingerprint at run start
   baselines: Record<string, FrozenBaseline>; // question id → frozen before-values
+  // The held-out set as it stood when the plan was frozen, or null when the
+  // config has no holdout. Frozen in the same place and for the same reason as
+  // `baselines`: freezePlan runs AFTER settle, so these before-values are read
+  // off a corpus that has been made clean. Captured in freshCursor they would be
+  // stale, exactly as the plan and the baselines would be.
+  holdoutFreeze: HoldoutFreeze | null;
   // Frozen, ordered worst-chunk-first — but NOT necessarily at t=0. Null means
   // `settle` has not finished yet and there is nothing honest to freeze: a plan
   // derived from a stale corpus is an empty one, which is the bug this file's
@@ -317,6 +359,7 @@ async function freshCursor(): Promise<AutotuneCursor> {
     startState,
     startOverrides: Object.fromEntries(await overrideFingerprints()),
     baselines: {},
+    holdoutFreeze: null,
     plan: null,
     covered: [],
     failed: [],
@@ -352,10 +395,41 @@ async function freezePlan(c: AutotuneCursor): Promise<AutotuneCursor> {
     ...c,
     phase: "search",
     baselines,
+    holdoutFreeze: freezeHoldout(prepared.summary, prepared.prep.criteria),
     plan: prepared.orderedChunks.map(([chunkId, ts]) => ({
       chunkId,
       questionIds: ts.map((t) => t.questionId),
     })),
+  };
+}
+
+// The complementary snapshot: the questions this run is FORBIDDEN to see, with
+// their before-values and the rates of both sides.
+//
+// Free, in the sense that costs anything: every value here is read off the
+// getSummary() prepareAutotune has already done. No extra scoring, no extra
+// model call — which is what makes recording it unconditional rather than a
+// setting.
+//
+// Null when nothing is held out, so the run's holdout columns stay null. That
+// reads the same in the database as "this run predates the recording", and it
+// has to: both are cases where there is no measurement, and inventing a zero for
+// either would be the assertion 0074 exists to avoid.
+function freezeHoldout(summary: EvalSummary, criteria: EvalCriteria): HoldoutFreeze | null {
+  const held = summary.questions.filter((q) => q.heldOut);
+  if (held.length === 0) return null;
+  const rows: Record<string, FrozenHoldout> = {};
+  for (const q of held) {
+    rows[q.questionId] = { hit: q.hit, rank: q.foundRank, rr: q.rr, ndcg: q.ndcg };
+  }
+  const dials = criteria.autotune.holdout;
+  return {
+    // Recorded for display only. Two runs with identical dials can have
+    // different test sets (the draw tops up), which is why the key and not this
+    // triple is what decides comparability.
+    dials: { mode: dials.mode, size: dials.size, seed: dials.seed },
+    before: splitRatesFor(summary.questions, new Set(Object.keys(rows))),
+    rows,
   };
 }
 
@@ -823,6 +897,18 @@ async function runOutcomes(c: AutotuneCursor, emit: Emit) {
 
   const targeted = Object.keys(c.baselines).length;
   const crit = prepared.ok ? prepared.prep : null;
+
+  // The held-out side, read off the SAME closing summary as everything above.
+  //
+  // THIS IS ONLY SOUND BECAUSE HELD-OUT QUESTIONS ARE STILL SCORED.
+  // latestResultsForScreening and questionsNeedingScoring (evalStore.ts) select
+  // every labeled question under the config with no ignore filter — the holdout
+  // is excluded from RATES and from TARGETING, never from SCORING. So these
+  // after-values are genuine post-run retrieval and not the before-values coming
+  // back around. If that ever changes, this feature reports zero deltas rather
+  // than failing, which is the worst way for it to break: whoever touches those
+  // queries needs to know this reads them.
+  const holdout = c.holdoutFreeze === null ? null : holdoutCapture(c.holdoutFreeze, summary, afterByQ);
   await insertAutotuneRun(
     c.runId,
     {
@@ -842,6 +928,7 @@ async function runOutcomes(c: AutotuneCursor, emit: Emit) {
       chunksSearched: c.covered.length,
       chunksFailed: c.failed.length,
       tailStatus: c.tailStatus,
+      holdout,
     },
     outcomes,
   );
@@ -856,6 +943,46 @@ async function runOutcomes(c: AutotuneCursor, emit: Emit) {
     done: false,
     doneUnits: c.covered.length,
     mustFinish: true,
+  };
+}
+
+// Close the books on the held-out set: the frozen before-values, the after-values
+// off the closing summary, and both sides' rates at both ends.
+//
+// Membership comes from the FREEZE, never from the summary's live `heldOut`
+// flags — the draw can be redrawn from Settings while a run is in flight, and a
+// before over one test set minus an after over another is not a delta. See
+// splitRatesFor.
+function holdoutCapture(
+  freeze: HoldoutFreeze,
+  summary: Pick<EvalSummary, "questions">,
+  afterByQ: Map<string, QuestionDetail>,
+): NonNullable<Parameters<typeof insertAutotuneRun>[1]["holdout"]> {
+  const members = new Set(Object.keys(freeze.rows));
+  const rows: HoldoutQuestionOutcome[] = Object.entries(freeze.rows).map(([questionId, b]) => {
+    // A question that has vanished from the summary (deleted mid-run, or its
+    // label moved off this config) keeps its before-values and gets null afters.
+    // Dropping the row instead would change the split key the aggregates were
+    // computed under, and quietly make this run incomparable to its siblings.
+    const a = afterByQ.get(questionId) ?? null;
+    return {
+      questionId,
+      beforeHit: b.hit,
+      beforeRank: b.rank,
+      beforeRr: b.rr,
+      beforeNdcg: b.ndcg,
+      afterHit: a?.hit ?? null,
+      afterRank: a?.foundRank ?? null,
+      afterRr: a?.rr ?? null,
+      afterNdcg: a?.ndcg ?? null,
+    };
+  });
+  return {
+    dials: freeze.dials,
+    splitKey: holdoutSplitKey([...members]),
+    before: freeze.before,
+    after: splitRatesFor(summary.questions, members),
+    rows,
   };
 }
 

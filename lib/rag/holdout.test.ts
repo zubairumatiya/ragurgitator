@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import {
   type HoldoutCandidate,
   type HoldoutSettings,
+  holdoutSplitKey,
   holdoutTarget,
   selectHoldout,
 } from "./holdout";
@@ -112,4 +113,52 @@ test("shrinking the holdout drops members but keeps the rest stable", () => {
 test("a target beyond the pool takes everything and stops", () => {
   const candidates = pool({ easy: 3, medium: 2 });
   assert.equal(selectHoldout(candidates, 999, 7).length, 5);
+});
+
+// --- the split's identity (0074) --------------------------------------------
+//
+// This is the primitive the whole per-run reconciliation turns on: two runs'
+// deltas may be stacked in one column iff their keys match. Both properties
+// below are real risks rather than theoretical ones — the ids come out of a
+// database in whatever order it likes, and selectHoldout TOPS UP as questions
+// arrive, so "same dials, same set" is simply false.
+
+test("the split key ignores row order", () => {
+  const ids = ["c", "a", "b"];
+  assert.equal(holdoutSplitKey(ids), holdoutSplitKey(["a", "b", "c"]));
+  assert.equal(holdoutSplitKey(ids), holdoutSplitKey([...ids].reverse()));
+});
+
+test("the split key does not mutate its argument", () => {
+  const ids = ["c", "a", "b"];
+  holdoutSplitKey(ids);
+  assert.deepEqual(ids, ["c", "a", "b"]);
+});
+
+test("one added member changes the split key", () => {
+  const base = ["a", "b", "c"];
+  assert.notEqual(holdoutSplitKey(base), holdoutSplitKey([...base, "d"]));
+  assert.notEqual(holdoutSplitKey(base), holdoutSplitKey(["a", "b"]));
+});
+
+// The reason the key exists at all: identical dials over a grown question set
+// produce a DIFFERENT test set, so the (mode, size, seed) triple cannot decide
+// comparability and the UI must not use it for that.
+test("the same dials over a grown pool yield a different key", () => {
+  const small = pool({ easy: 8, hard: 4 });
+  const first = selectHoldout(small, holdoutTarget(small.length, SETTINGS), SETTINGS.seed);
+
+  const grown = pool({ easy: 20, hard: 12 });
+  const second = selectHoldout(
+    grown,
+    holdoutTarget(grown.length, SETTINGS),
+    SETTINGS.seed,
+    new Set(first),
+  );
+
+  assert.ok(second.length > first.length, "the top-up should have added members");
+  assert.notEqual(holdoutSplitKey(first), holdoutSplitKey(second));
+  // …and the top-up really is a superset, so the key change is growth and not a
+  // reshuffle. That is the property the key has to be able to distinguish from.
+  for (const id of first) assert.ok(second.includes(id), `${id} was reassigned out of the holdout`);
 });
