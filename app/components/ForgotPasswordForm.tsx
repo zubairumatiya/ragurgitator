@@ -12,6 +12,7 @@ import { useActionState } from "react";
 
 import { requestPasswordReset } from "@/app/auth/actions";
 import { BUTTON, FIELD } from "@/app/components/formStyles";
+import { Wordmark } from "@/app/components/Logo";
 
 export function ForgotPasswordForm({ initialError }: { initialError?: string }) {
   // Seeded from ?error= — /auth/callback can only talk to a page by redirecting
@@ -23,6 +24,7 @@ export function ForgotPasswordForm({ initialError }: { initialError?: string }) 
 
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-sm flex-col justify-center px-6">
+      <Wordmark size={46} textClassName="text-xl" className="mb-7" />
       <h1 className="mb-1 text-lg font-medium">Reset your password</h1>
       <p className="mb-6 text-xs text-zinc-500">
         We&rsquo;ll email you a link that lets you set a new one.

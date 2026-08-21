@@ -8,6 +8,8 @@
 // leak exactly what the server worked to hide.
 import Link from "next/link";
 
+import { Wordmark } from "@/app/components/Logo";
+
 export const metadata = { title: "Check your email" };
 
 export default async function CheckEmailPage({
@@ -20,6 +22,7 @@ export default async function CheckEmailPage({
 
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-sm flex-col justify-center px-6">
+      <Wordmark size={46} textClassName="text-xl" className="mb-7" />
       <h1 className="mb-1 text-lg font-medium">Check your email</h1>
 
       <p className="mb-4 text-sm text-zinc-600 dark:text-zinc-400">

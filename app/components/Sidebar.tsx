@@ -15,6 +15,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { signOut } from "@/app/auth/actions";
+import { Logo, Wordmark } from "@/app/components/Logo";
 import { apiFetch } from "@/lib/http/client";
 import type { ConfigSummary } from "@/lib/rag/configStore";
 import type { CorpusSummary } from "@/lib/rag/corpusStore";
@@ -132,7 +133,12 @@ export function Sidebar() {
 
   if (!open) {
     return (
-      <aside className="sticky top-0 flex h-screen w-11 shrink-0 flex-col items-center border-r border-zinc-200 bg-zinc-50 py-3 dark:border-zinc-800 dark:bg-zinc-950">
+      <aside className="sticky top-0 flex h-screen w-11 shrink-0 flex-col items-center gap-3 border-r border-zinc-200 bg-zinc-50 py-3 dark:border-zinc-800 dark:bg-zinc-950">
+        {/* Collapsed, the rail is the only chrome left, so the mark carries the
+            branding on its own — and doubles as the way home. */}
+        <Link href="/" title="Ragurgitator" className="rounded-md p-1 hover:bg-zinc-100 dark:hover:bg-zinc-900">
+          <Logo size={20} />
+        </Link>
         <button
           type="button"
           onClick={toggle}
@@ -150,7 +156,10 @@ export function Sidebar() {
 
   return (
     <aside className="sticky top-0 flex h-screen w-60 shrink-0 flex-col gap-3 overflow-y-auto border-r border-zinc-200 bg-zinc-50 px-3 py-3 dark:border-zinc-800 dark:bg-zinc-950">
-      <div className="flex justify-end">
+      <div className="flex items-center justify-between">
+        <Link href="/" title="Ragurgitator" className="-mx-1 rounded-md px-1 py-0.5 hover:bg-zinc-100 dark:hover:bg-zinc-900">
+          <Wordmark size={18} />
+        </Link>
         <button
           type="button"
           onClick={toggle}

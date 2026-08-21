@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="Ragurgitator app tile">
+  <title>Ragurgitator — bowl1</title>
+  <defs><clipPath id="clip-bowl1"><rect width="200" height="200" rx="46"/></clipPath></defs>
+  <rect width="200" height="200" rx="46" fill="#F2543D"/>
+  <g clip-path="url(#clip-bowl1)">
+  <g transform="translate(-16.8 -15.7) scale(1.1)"><path d="M72 124.8 Q 118.3 137.6 158 176" stroke="#14161B" stroke-width="30" stroke-linecap="round" fill="none"/>
+  <rect x="46" y="44" width="32" height="132" rx="16" fill="#14161B"/>
+  <circle cx="114" cy="80" r="54" fill="#14161B"/>
+  <path d="M 82.5 74 L 174.4 27.5 A 80 80 0 0 1 174.4 132.5 Z" fill="#F2543D"/>
+  <path d="M 155 44.5 L 153 60.9 L 140 50.6 Z M 136.9 51.8 L 134.5 65.2 L 123.4 57.3 Z M 118.9 59.2 L 116 69.5 L 106.9 64.1 Z M 145.5 110.1 L 145.3 95.1 L 132.2 102.5 Z M 127.5 99.8 L 126.5 87.7 L 115.6 92.9 Z M 109.5 89.5 L 107.6 80.4 L 98.9 83.4 Z" fill="#14161B"/></g>
+  </g>
+</svg>

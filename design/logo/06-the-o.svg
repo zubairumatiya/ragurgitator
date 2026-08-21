@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="Ragurgitator round toothed mouth">
+  <title>Ragurgitator — the O</title>
+  <circle cx="100" cy="104" r="80" fill="#14161B"/>
+  <circle cx="100" cy="104" r="59.2" fill="#F2543D"/>
+  <path d="M 50.9 71 L 59.7 79.6 L 68.6 53.8 Z M 71 52.4 L 79.9 70.8 L 88.8 45.9 Z M 91.1 45.5 L 100 70.8 L 108.9 45.5 Z M 111.2 45.9 L 120.1 70.8 L 129 52.4 Z M 131.4 53.8 L 140.3 79.6 L 149.1 71 Z M 60.9 148.5 L 69.8 134.2 L 78.7 159.2 Z M 81.1 160.1 L 89.9 138.1 L 98.8 163.2 Z M 101.2 163.2 L 110.1 138.1 L 118.9 160.1 Z M 121.3 159.2 L 130.2 134.2 L 139.1 148.5 Z" fill="#14161B"/>
+  <rect x="148" y="26" width="20" height="16" rx="5.6" transform="rotate(-14 158 34)" fill="#F2543D"/>
+  <rect x="178" y="10" width="14" height="11" rx="3.9" transform="rotate(18 185 15.5)" fill="#F2543D"/>
+</svg>

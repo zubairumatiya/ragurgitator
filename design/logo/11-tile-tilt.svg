@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="Ragurgitator app tile">
+  <title>Ragurgitator — tilt</title>
+  <defs><clipPath id="clip-tilt"><rect width="200" height="200" rx="46"/></clipPath></defs>
+  <rect width="200" height="200" rx="46" fill="#F2543D"/>
+  <g clip-path="url(#clip-tilt)">
+  <g transform="rotate(-11 100 100) translate(-1.2 4) scale(0.93)"><path d="M72 113.8 Q 111.8 127.9 152 170" stroke="#14161B" stroke-width="30" stroke-linecap="round" fill="none"/>
+  <rect x="46" y="44" width="32" height="126" rx="16" fill="#14161B"/>
+  <circle cx="108" cy="74" r="48" fill="#14161B"/>
+  <path d="M 77 74 L 158.5 19.9 A 74 74 0 0 1 158.5 128.1 Z" fill="#F2543D"/>
+  <path d="M 141.5 38.5 Q 146.8 65 127.2 46.3 Z M 125.5 47.3 Q 128.9 68.7 112.6 54.4 Z M 109.5 56.1 Q 111 72.4 98.1 62.4 Z M 133.5 105.1 Q 137.8 81.2 119.9 97.6 Z M 117.5 96.3 Q 120 77.5 105.3 89.6 Z M 101.5 87.5 Q 102.1 73.7 90.8 81.6 Z" fill="#14161B"/></g>
+  </g>
+</svg>
