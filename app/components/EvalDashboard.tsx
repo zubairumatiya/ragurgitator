@@ -12,6 +12,7 @@
 "use client";
 
 import {
+  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -30,6 +31,11 @@ import {
   type ApiErrorBody,
 } from "@/app/components/MissingKeyNotice";
 import { failsBar } from "@/lib/rag/evalBar";
+import { splitRates } from "@/lib/rag/evalRates";
+import type {
+  HoldoutRunQuestion,
+  HoldoutRunSummary,
+} from "@/lib/rag/autotuneStore";
 import type {
   ChunkOverrideInfo,
   ChunkRef,
@@ -1214,6 +1220,19 @@ export function EvalDashboard() {
             <Stat label="Scored" value={String(summary.scored)} />
             <Stat label="Hits" value={String(summary.hits)} />
           </div>
+
+          {/* Directly under the headline, because it is the caveat ON the
+              headline: those rates are over questions autotune is allowed to
+              optimise against. Absent entirely for a config that has never held
+              anything out — nothing to say, so nothing rendered. */}
+          {(summary.holdoutRuns > 0 || summary.questions.some((q) => q.heldOut)) && (
+            <HoldoutSection
+              questions={summary.questions}
+              recallK={summary.recallK}
+              mrrK={summary.mrrK}
+              ndcgK={summary.ndcgK}
+            />
+          )}
 
           {/* Disappears the moment any question exists, added by hand or
               generated. The two cases read differently: with chunks below, the
@@ -2663,8 +2682,11 @@ function MetricTicker({
   live: number | null;
   base: number | null;
   unit: "pp" | "score";
-  questions: number; // the comparable subset both sides are measured over
-  what: string; // metric name, for the tooltip sentence
+  // Both optional: the ticker draws the delta and nothing else, and the holdout
+  // section reuses it for cells that have no "comparable subset" of their own to
+  // name (a run's before→after is over one frozen set by construction).
+  questions?: number; // the comparable subset both sides are measured over
+  what?: string; // metric name, for the tooltip sentence
 }) {
   if (live === null || base === null) return null;
   const delta = live - base;
@@ -5074,5 +5096,405 @@ function PoolTooltip({
         </span>
       </span>
     </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// HELD-OUT SET (0074 / docs/holdout-metrics-plan.md)
+//
+// The holdout has existed since 0061, but only its MEMBERSHIP was ever visible:
+// Settings said "held N of M" and /eval put a blue chip on each drawn question.
+// The number the holdout exists to produce — the train-vs-holdout delta — was
+// computed nowhere in the app, which is why docs/resume-metrics-results.md had to
+// be derived by hand from per-question rows and frozen into a JSON snapshot.
+//
+// ONE RULE GOVERNS EVERY SURFACE BELOW. A holdout number means nothing without
+// three things attached: the split it was drawn from, the train delta beside it,
+// and whether those questions had ever been tuned on before. A bare holdout rate
+// invites exactly the misreading resume-metrics-results.md warns about —
+// presenting optimization capability as generalization — so nothing here renders
+// one alone.
+//
+// Collapsed by default, and absent entirely for a config that has never used a
+// holdout: it is a section about a measurement, and a config that has not taken
+// it should see nothing rather than a table of dashes.
+
+// Both sides at one moment, plus their difference. `n` is the SCORED count on
+// each side, which is what the rates are actually over — not the membership.
+type SplitView = {
+  train: { n: number; recall: number | null; mrr: number | null; ndcg: number | null };
+  holdout: { n: number; recall: number | null; mrr: number | null; ndcg: number | null };
+};
+
+// A held-out question's movement, as one of three buckets.
+//
+// RANK, not the three metrics separately. A question can gain nDCG while losing
+// its rank-1, and a per-metric tally would then report it in two buckets at once
+// — so the bucket is defined on where the ground truth actually landed, which is
+// also the thing "which held-out questions still miss" is asking about. A miss
+// (no rank) sorts as worse than any rank, so found→lost is a regression and
+// lost→found is an improvement.
+function holdoutMovement(q: {
+  beforeRank: number | null;
+  afterRank: number | null;
+}): "improved" | "regressed" | "unchanged" {
+  const before = q.beforeRank ?? Infinity;
+  const after = q.afterRank ?? Infinity;
+  if (after < before) return "improved";
+  if (after > before) return "regressed";
+  return "unchanged";
+}
+
+function HoldoutSection({
+  questions,
+  recallK,
+  mrrK,
+  ndcgK,
+}: {
+  questions: QuestionDetail[];
+  recallK: number;
+  mrrK: number;
+  ndcgK: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const [runs, setRuns] = useState<HoldoutRunSummary[] | null>(null);
+  const [runsError, setRunsError] = useState<string | null>(null);
+
+  // Today's split, straight off the rows the dashboard already has — no request,
+  // and no second implementation of the rate rules (lib/rag/evalRates.ts owns
+  // them, and the server's headline numbers come from the same function).
+  const live = useMemo<SplitView>(() => splitRates(questions), [questions]);
+  const heldNow = useMemo(() => questions.filter((q) => q.heldOut).length, [questions]);
+
+  // The history is fetched on first open, not on mount. It grows with the run
+  // count and this section is collapsed by default, so a page load must not pay
+  // for it — the same argument that keeps it off /api/eval.
+  useEffect(() => {
+    if (!open || runs !== null) return;
+    let alive = true;
+    apiFetch("/api/eval/autotune/holdout")
+      .then((res) => res.json())
+      .then((data: { runs?: HoldoutRunSummary[]; error?: string }) => {
+        if (!alive) return;
+        if (data.error) setRunsError(data.error);
+        setRuns(data.runs ?? []);
+      })
+      .catch(() => {
+        if (alive) {
+          setRunsError("Could not load the run history.");
+          setRuns([]);
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open, runs]);
+
+  return (
+    <section className="flex flex-col gap-2">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex cursor-pointer items-center gap-2 self-start text-sm font-medium uppercase tracking-wide text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200"
+      >
+        <span className="text-zinc-400">{open ? "▾" : "▸"}</span>
+        Held-out set
+        {/* The collapsed line has to be worth not opening: the split's size and
+            the one comparison the section exists for. */}
+        <span className="text-xs font-normal normal-case tracking-normal text-zinc-400">
+          {heldNow > 0
+            ? `${heldNow} of ${questions.length} · train ${pct(live.train.recall)} / holdout ${pct(live.holdout.recall)} recall`
+            : "off · past runs only"}
+        </span>
+      </button>
+
+      {open && (
+        <div className="flex flex-col gap-5 rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
+          {/* --- part 1: the live split --- */}
+          <div className="flex flex-col gap-2">
+            <h3 className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+              Now
+            </h3>
+            {heldNow === 0 ? (
+              // Not a table of dashes. There is no measurement, so the only
+              // useful thing to say is what taking one would buy.
+              <p className="max-w-2xl text-sm text-zinc-600 dark:text-zinc-400">
+                No questions are held out under this config, so every rate above is
+                measured on questions autotune is allowed to optimise against — it
+                shows what tuning can do, not whether it generalises. Turn a holdout
+                on in Settings → Autotune to withhold a stratified, seeded slice from
+                targeting and get the two numbers side by side.
+              </p>
+            ) : (
+              <>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-xs uppercase tracking-wide text-zinc-500">
+                        <th className="py-1 pr-6 font-medium">Set</th>
+                        <th className="py-1 pr-6 font-medium">Scored</th>
+                        <th className="py-1 pr-6 font-medium">Recall@{recallK}</th>
+                        <th className="py-1 pr-6 font-medium">MRR@{mrrK}</th>
+                        <th className="py-1 font-medium">nDCG@{ndcgK}</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                      <tr>
+                        <td className="py-1.5 pr-6 text-zinc-500">Train</td>
+                        <td className="py-1.5 pr-6 tabular-nums text-zinc-500">{live.train.n}</td>
+                        <td className="py-1.5 pr-6 tabular-nums">{pct(live.train.recall)}</td>
+                        <td className="py-1.5 pr-6 tabular-nums">{fmtScore(live.train.mrr)}</td>
+                        <td className="py-1.5 tabular-nums">{fmtScore(live.train.ndcg)}</td>
+                      </tr>
+                      <tr>
+                        <td className="py-1.5 pr-6 text-zinc-500">Held out</td>
+                        <td className="py-1.5 pr-6 tabular-nums text-zinc-500">{live.holdout.n}</td>
+                        <td className="py-1.5 pr-6 tabular-nums">{pct(live.holdout.recall)}</td>
+                        <td className="py-1.5 pr-6 tabular-nums">{fmtScore(live.holdout.mrr)}</td>
+                        <td className="py-1.5 tabular-nums">{fmtScore(live.holdout.ndcg)}</td>
+                      </tr>
+                      {/* Δ is holdout − train, so a negative number is the gap
+                          the holdout exists to expose. Same ticker, and so the
+                          same pp-vs-score convention, as the headline cards. */}
+                      <tr>
+                        <td className="py-1.5 pr-6 text-zinc-500">Δ</td>
+                        <td className="py-1.5 pr-6" />
+                        <td className="py-1.5 pr-6">
+                          <MetricTicker live={live.holdout.recall} base={live.train.recall} unit="pp" />
+                        </td>
+                        <td className="py-1.5 pr-6">
+                          <MetricTicker live={live.holdout.mrr} base={live.train.mrr} unit="score" />
+                        </td>
+                        <td className="py-1.5">
+                          <MetricTicker live={live.holdout.ndcg} base={live.train.ndcg} unit="score" />
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p className="max-w-2xl text-xs text-zinc-500">
+                  Held-out questions are scored like every other question; they are
+                  excluded from the rates above the fold and from autotune targeting.
+                  A gap here is the tuning fitting the questions it can see.
+                </p>
+              </>
+            )}
+          </div>
+
+          {/* --- part 2: per-run history, reconciled --- */}
+          <div className="flex flex-col gap-2">
+            <h3 className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+              Per run
+            </h3>
+            {runsError && <p className="text-sm text-red-600 dark:text-red-400">{runsError}</p>}
+            {runs === null ? (
+              <p className="text-sm text-zinc-500">Loading…</p>
+            ) : runs.length === 0 ? (
+              <p className="max-w-2xl text-sm text-zinc-600 dark:text-zinc-400">
+                No autotune run has recorded a held-out set yet. Runs from before
+                this was recorded are left out rather than shown blank — they do not
+                know what their test set was, and an empty row would read as a
+                measurement that came back zero.
+              </p>
+            ) : (
+              <HoldoutRunTable runs={runs} />
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+// The reconciliation. Three rules do all of it, and they are the point of the
+// whole section:
+//
+//   1. GROUP BY SPLIT KEY, NOT BY DATE. Consecutive runs tested on the same
+//      questions sit in one block; a key change draws a labelled seam. This is
+//      the honest answer to "several runs, different holdouts" — not a merged
+//      average, but a visible break, because deltas over different test sets are
+//      measurements of different things.
+//   2. CONTAMINATED RUNS ARE BADGED, NOT HIDDEN. The run still happened and its
+//      train delta is still real; what it no longer is, is generalization.
+//   3. A HOLDOUT Δ NEVER RENDERS WITHOUT ITS TRAIN Δ IN THE SAME ROW. The split
+//      result — recall transfers, rank-1 doesn't — is only legible as a
+//      comparison, so the two columns are adjacent and neither is optional.
+function HoldoutRunTable({ runs }: { runs: HoldoutRunSummary[] }) {
+  const [openRun, setOpenRun] = useState<string | null>(null);
+  return (
+    <div className="overflow-x-auto">
+      <table className="min-w-full text-sm">
+        <thead>
+          <tr className="text-left text-xs uppercase tracking-wide text-zinc-500">
+            <th className="py-1 pr-6 font-medium">Run</th>
+            <th className="py-1 pr-6 font-medium">Split</th>
+            <th className="py-1 pr-6 font-medium">Train / held</th>
+            <th className="py-1 pr-6 font-medium">Train Δ</th>
+            <th className="py-1 font-medium">Held-out Δ</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+          {runs.map((r, i) => {
+            const seam = i > 0 && runs[i - 1].splitKey !== r.splitKey;
+            const expanded = openRun === r.runId;
+            return (
+              <Fragment key={r.runId}>
+                {seam && (
+                  <tr>
+                    <td colSpan={5} className="py-2">
+                      <span className="flex items-center gap-2 text-xs text-amber-700 dark:text-amber-500">
+                        <span aria-hidden>⌁</span>
+                        different test set — these deltas are not comparable to the
+                        block above
+                      </span>
+                    </td>
+                  </tr>
+                )}
+                <tr
+                  className="cursor-pointer align-top hover:bg-zinc-50 dark:hover:bg-zinc-900"
+                  onClick={() => setOpenRun(expanded ? null : r.runId)}
+                >
+                  <td className="py-1.5 pr-6 whitespace-nowrap text-zinc-500">
+                    <span className="mr-1 text-zinc-400">{expanded ? "▾" : "▸"}</span>
+                    {new Date(r.createdAt).toLocaleString()}
+                  </td>
+                  <td className="py-1.5 pr-6 whitespace-nowrap">
+                    <span className="font-mono text-xs">{r.splitKey ?? "—"}</span>
+                    {r.dials && (
+                      <span className="ml-1.5 text-xs text-zinc-400">
+                        {r.dials.mode === "pct" ? `${r.dials.size}%` : `${r.dials.size}q`}/s
+                        {r.dials.seed}
+                      </span>
+                    )}
+                    {r.contaminated && <ContaminatedChip />}
+                  </td>
+                  <td className="py-1.5 pr-6 tabular-nums whitespace-nowrap text-zinc-500">
+                    {r.train.n} / {r.holdout.n}
+                  </td>
+                  <td className="py-1.5 pr-6 whitespace-nowrap">
+                    <RunDelta side={r.train} />
+                  </td>
+                  <td className="py-1.5 whitespace-nowrap font-medium">
+                    <RunDelta side={r.holdout} />
+                  </td>
+                </tr>
+                {expanded && (
+                  <tr>
+                    <td colSpan={5} className="pb-3">
+                      <HoldoutRunDetail runId={r.runId} />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// One side's before→after on all three metrics, in one cell. Recall leads
+// because it is the metric the split result is usually about; MRR and nDCG
+// follow so a run that moved rank without moving recall is still visible.
+function RunDelta({ side }: { side: HoldoutRunSummary["train"] }) {
+  return (
+    <span className="flex items-center gap-2">
+      <MetricTicker live={side.recall.after} base={side.recall.before} unit="pp" />
+      <MetricTicker live={side.mrr.after} base={side.mrr.before} unit="score" />
+      <MetricTicker live={side.ndcg.after} base={side.ndcg.before} unit="score" />
+    </span>
+  );
+}
+
+// The one-way door, made visible. Once an earlier run of this config has tuned on
+// a question that a later run held out, that later run's holdout delta measures
+// optimization on questions the tuner has already seen — and nothing done
+// afterwards restores the property. Recorded on the run row (0074), so this is a
+// fact about the run rather than something a reader has to remember.
+function ContaminatedChip() {
+  return (
+    <Tooltip text="Some of this run's held-out questions were targeted by an earlier run of this config — most often because the holdout was folded back in. This delta measures optimization, not generalization.">
+      <span className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-800 dark:bg-amber-950 dark:text-amber-400">
+        tuned on before
+      </span>
+    </Tooltip>
+  );
+}
+
+// The rows behind the headline: how the held-out questions moved, and which ones
+// still miss. Fetched when the run is expanded — a config with twenty runs would
+// otherwise ship every run's per-question rows to render a collapsed table.
+function HoldoutRunDetail({ runId }: { runId: string }) {
+  const [rows, setRows] = useState<HoldoutRunQuestion[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    apiFetch(`/api/eval/autotune/holdout/${runId}`)
+      .then((res) => res.json())
+      .then((data: { questions?: HoldoutRunQuestion[]; error?: string }) => {
+        if (!alive) return;
+        if (data.error) setError(data.error);
+        setRows(data.questions ?? []);
+      })
+      .catch(() => {
+        if (alive) {
+          setError("Could not load this run's held-out questions.");
+          setRows([]);
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [runId]);
+
+  if (error) return <p className="text-sm text-red-600 dark:text-red-400">{error}</p>;
+  if (rows === null) return <p className="text-sm text-zinc-500">Loading…</p>;
+  if (rows.length === 0) {
+    return <p className="text-sm text-zinc-500">No per-question rows for this run.</p>;
+  }
+
+  const counts = { improved: 0, regressed: 0, unchanged: 0 };
+  for (const q of rows) counts[holdoutMovement(q)] += 1;
+  // "Still misses" is the after side only. A question that missed before and
+  // misses now is the same failure; one that started as a hit and lost it is
+  // already counted as a regression above, and belongs in this list too — the
+  // list is about the state the run left behind, not about how it got there.
+  const missing = rows.filter((q) => q.afterHit !== true);
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg bg-zinc-50 p-3 dark:bg-zinc-900">
+      <p className="text-sm">
+        <span className="text-green-700 dark:text-green-400">{counts.improved} improved</span>
+        {" · "}
+        <span className="text-red-700 dark:text-red-400">{counts.regressed} regressed</span>
+        {" · "}
+        <span className="text-zinc-500">{counts.unchanged} unchanged</span>
+        <span className="text-zinc-400"> (by the ground truth&rsquo;s rank)</span>
+      </p>
+      {missing.length === 0 ? (
+        <p className="text-xs text-zinc-500">Every held-out question was a hit after this run.</p>
+      ) : (
+        <>
+          <p className="text-xs uppercase tracking-wide text-zinc-500">
+            Still missing ({missing.length})
+          </p>
+          <ul className="flex flex-col gap-1">
+            {missing.slice(0, 20).map((q) => (
+              <li key={q.questionId} className="flex items-baseline gap-2 text-xs">
+                <span className="shrink-0 font-mono text-zinc-400">
+                  {q.beforeRank ?? "—"}→{q.afterRank ?? "—"}
+                </span>
+                <span className="truncate text-zinc-600 dark:text-zinc-400">{q.question}</span>
+              </li>
+            ))}
+          </ul>
+          {missing.length > 20 && (
+            <p className="text-xs text-zinc-400">and {missing.length - 20} more</p>
+          )}
+        </>
+      )}
+    </div>
   );
 }

@@ -14,9 +14,11 @@
 import type {
   KeyUsageDay,
   KeyUsageReport,
+  KeyUsageWindow,
   KeyUsageRow,
   KeyUsageTotal,
 } from "@/lib/auth/keyUsageStore";
+import { Tooltip } from "@/app/components/Tooltip";
 
 // Fractions of a cent are normal at this scale — a per-call ledger is mostly
 // made of them, and rounding them to $0.00 would make the rows look free. Same
@@ -74,7 +76,7 @@ export function UsageReport({ report }: { report: KeyUsageReport }) {
       </section>
 
       <Totals totals={report.totals} />
-      <DailyStrip days={report.days} />
+      <DailyStrip days={report.days} axis={report.window} />
       <Rows report={report} />
     </div>
   );
@@ -151,67 +153,125 @@ function Totals({ totals }: { totals: KeyUsageTotal[] }) {
 // tooltip rather than the height: a day of cheap-model traffic and a day of one
 // expensive call are equally interesting here, and only the former is a signal
 // about how the key is being used.
-function DailyStrip({ days }: { days: KeyUsageDay[] }) {
+//
+// THE AXIS IS THE FULL WINDOW, always. It used to span only the first to the last
+// day that had calls, which is fine at 30 days of traffic and degenerates badly
+// below that: an account with calls on a single day got ONE bar, and one bar with
+// flex-1 is a full-width, full-height grey slab with the same date printed at both
+// ends. That reads as a broken component, not as "you used this once". A fixed
+// 30-day axis makes the same data read as one day's activity in a quiet month.
+//
+// The bounds come from the server (report.window) rather than from Date.now()
+// here, which react-hooks/purity forbids during render.
+// `axis`, not `window`: this is a "use client" module, where a parameter named
+// `window` shadows the browser global for the whole function body.
+// How many bars at each end grow their bubble inward instead of centring it.
+const EDGE_BARS = 4;
+
+function DailyStrip({ days, axis }: { days: KeyUsageDay[]; axis: KeyUsageWindow }) {
   if (days.length === 0) return null;
 
-  // Gaps are filled between the first and last day that HAVE rows, so a quiet
-  // day reads as a quiet day rather than being silently closed up. Bounded by
-  // the data instead of by "today" on purpose — a Date.now() read during render
-  // is exactly what react-hooks/purity forbids, and the window is already stated
-  // in the heading.
-  const filled = fillDays(days);
+  const filled = fillDays(days, axis);
   const peak = Math.max(...filled.map((d) => d.calls), 1);
 
   return (
     <section className="flex flex-col gap-2">
       <SectionHeading>Calls per day</SectionHeading>
       <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
-        <div className="flex h-24 items-end gap-1">
-          {filled.map((d) => {
+        {/* The scale, stated. Without it a bar's height is only meaningful
+            relative to the other bars, and on a quiet window that is no
+            information at all — one call and four hundred both draw a full-height
+            bar. */}
+        <div className="mb-1 flex justify-between text-[11px] text-zinc-400">
+          <span>
+            peak {peak} call{peak === 1 ? "" : "s"}/day
+          </span>
+          {/* SAY WHICH CLOCK. These are UTC buckets — deliberately, see the file
+              header — and an evening's calls west of Greenwich land on the NEXT
+              UTC day. Unlabelled, that reads as the chart being a day out rather
+              than as the chart using the same day boundary the provider
+              dashboards it exists to be compared against use. The row table below
+              has always said "times in UTC"; the chart said nothing. */}
+          <span>UTC days</span>
+        </div>
+        {/* role="img" with one summary label, rather than a per-bar announcement.
+            The bars carried `title`, which some screen readers read and others
+            ignore, and 31 of them is a worse experience than one sentence — the
+            same figures are in the "Every call" table below for anyone who needs
+            them row by row. */}
+        <div
+          role="img"
+          aria-label={`Calls per UTC day from ${filled[0].day} to ${
+            filled[filled.length - 1].day
+          }. Peak ${peak} call${peak === 1 ? "" : "s"} in a day.`}
+          className="flex h-24 items-end gap-1"
+        >
+          {filled.map((d, i) => {
             const height = d.calls === 0 ? 0 : Math.max(2, (d.calls / peak) * 100);
             const failedShare = d.calls === 0 ? 0 : (d.failures / d.calls) * 100;
             return (
-              <div
+              <Tooltip
                 key={d.day}
-                title={`${d.day} — ${d.calls} call${d.calls === 1 ? "" : "s"}, ${
-                  d.failures
-                } rejected, ${fmtUsd(d.costUsd)}`}
-                className="flex flex-1 flex-col justify-end"
-                style={{ height: "100%" }}
+                // Multi-line: Tooltip renders whitespace-pre-line, and a bubble
+                // you read mid-sweep should not need parsing.
+                text={
+                  `${d.day} (UTC)\n` +
+                  `${d.calls} call${d.calls === 1 ? "" : "s"}` +
+                  (d.failures > 0 ? ` · ${d.failures} rejected` : "") +
+                  `\n${fmtUsd(d.costUsd)}`
+                }
+                // Bars near either end would push a centred bubble outside the
+                // card, so the outermost few grow inward instead.
+                align={i < EDGE_BARS ? "left" : i >= filled.length - EDGE_BARS ? "right" : "center"}
+                // No open delay: you sweep along this strip reading days off it,
+                // and 150ms per bar reads as the chart lagging behind the cursor.
+                delay="instant"
+                className="h-full min-w-px flex-1 flex-col justify-end"
               >
                 {d.calls === 0 ? (
                   // A day with no calls still needs to occupy its slot, or the
-                  // strip stops being a time axis.
-                  <div className="h-px w-full bg-zinc-200 dark:bg-zinc-800" />
+                  // strip stops being a time axis. Spans, not divs: Tooltip's
+                  // wrapper is a <span>, and a <div> inside it is invalid HTML.
+                  <span className="h-px w-full bg-zinc-200 dark:bg-zinc-800" />
                 ) : (
-                  <div
-                    className="flex w-full flex-col justify-end overflow-hidden rounded-sm bg-zinc-300 dark:bg-zinc-700"
+                  <span
+                    className="flex w-full flex-col justify-end overflow-hidden rounded-sm bg-zinc-300 transition-colors group-hover:bg-zinc-400 dark:bg-zinc-700 dark:group-hover:bg-zinc-500"
                     style={{ height: `${height}%` }}
                   >
-                    <div
+                    <span
                       className="w-full bg-red-500/70 dark:bg-red-500/60"
                       style={{ height: `${failedShare}%` }}
                     />
-                  </div>
+                  </span>
                 )}
-              </div>
+              </Tooltip>
             );
           })}
         </div>
         <div className="mt-2 flex justify-between text-[11px] text-zinc-400">
           <span>{filled[0].day}</span>
-          <span>{filled[filled.length - 1].day}</span>
+          <span>{filled[filled.length - 1].day} (UTC)</span>
         </div>
       </div>
     </section>
   );
 }
 
-function fillDays(days: KeyUsageDay[]): KeyUsageDay[] {
+// Every day in the window gets a slot, with or without calls — see the note on
+// DailyStrip for why the data's own extent is the wrong axis. Days outside the
+// window are still emitted rather than dropped: `days` comes from the same
+// filtered query, so a row outside these bounds would mean the two disagreed, and
+// silently hiding it would hide the disagreement too.
+function fillDays(days: KeyUsageDay[], axis: KeyUsageWindow): KeyUsageDay[] {
   const byDay = new Map(days.map((d) => [d.day, d]));
   const out: KeyUsageDay[] = [];
-  const cursor = new Date(`${days[0].day}T00:00:00Z`);
-  const last = new Date(`${days[days.length - 1].day}T00:00:00Z`);
+
+  const start = days.length > 0 && days[0].day < axis.start ? days[0].day : axis.start;
+  const end =
+    days.length > 0 && days[days.length - 1].day > axis.end ? days[days.length - 1].day : axis.end;
+
+  const cursor = new Date(`${start}T00:00:00Z`);
+  const last = new Date(`${end}T00:00:00Z`);
   while (cursor <= last) {
     const day = cursor.toISOString().slice(0, 10);
     out.push(byDay.get(day) ?? { day, calls: 0, failures: 0, costUsd: 0 });

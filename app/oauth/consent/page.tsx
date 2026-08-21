@@ -39,6 +39,7 @@ import { redirect } from "next/navigation";
 
 import { getSessionUser } from "@/lib/auth/dal";
 import { serverSupabase } from "@/lib/auth/supabase";
+import { Wordmark } from "@/app/components/Logo";
 
 export const metadata = { title: "Authorize access" };
 
@@ -219,6 +220,9 @@ function redirectHost(uri: string): { host: string; isLoopback: boolean } {
 function Shell({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="mx-auto flex w-full max-w-md flex-col px-6 py-16">
+      {/* This page is reached from a third-party client, so it has to say whose
+          account is about to be handed out before it says what is being asked. */}
+      <Wordmark size={26} className="mb-7" />
       <h1 className="text-lg font-medium">{title}</h1>
       {children}
     </div>

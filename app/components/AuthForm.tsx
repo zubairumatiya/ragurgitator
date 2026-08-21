@@ -13,6 +13,7 @@ import Link from "next/link";
 import { useActionState } from "react";
 
 import type { AuthState } from "@/app/auth/actions";
+import { Wordmark } from "@/app/components/Logo";
 import { PASSWORD_HINT } from "@/lib/auth/passwordPolicy";
 import { BUTTON, FIELD } from "@/app/components/formStyles";
 
@@ -27,6 +28,9 @@ const COPY = {
     altHref: "/signup",
     altLabel: "Sign up",
     autoComplete: "current-password",
+    // Nothing under the heading on sign-in: the wordmark above has already said
+    // where you are, and a returning user does not need to be sold the app.
+    blurb: null,
     // Sign-in must not advertise the rules — they describe the shape of stored
     // passwords, and older accounts may predate them anyway.
     passwordHint: null,
@@ -43,6 +47,7 @@ const COPY = {
     altHref: "/login",
     altLabel: "Sign in",
     autoComplete: "new-password",
+    blurb: "You'll add your own provider API keys after signing in.",
     // Stated up front rather than discovered by rejection. Imported from where
     // the rules themselves live, so the two cannot drift.
     passwordHint: PASSWORD_HINT,
@@ -76,18 +81,15 @@ export function AuthForm({
 
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-sm flex-col justify-center px-6">
-      <h1 className="mb-1 text-lg font-medium">{copy.title}</h1>
+      <Wordmark size={46} textClassName="text-xl" className="mb-7" />
+      <h1 className={`text-sm font-medium ${copy.blurb ? "mb-1" : "mb-6"}`}>{copy.title}</h1>
 
       {initialNotice ? (
         <p role="status" className="mb-3 text-sm text-zinc-600 dark:text-zinc-400">
           {initialNotice}
         </p>
       ) : null}
-      <p className="mb-6 text-xs text-zinc-500">
-        {mode === "signup"
-          ? "You'll add your own provider API keys after signing in."
-          : "Ragurgitator"}
-      </p>
+      {copy.blurb ? <p className="mb-6 text-xs text-zinc-500">{copy.blurb}</p> : null}
 
       <form action={formAction} className="flex flex-col gap-3">
         {/* Carried through the form so the server action can bounce the user

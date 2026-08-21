@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 250 200" role="img" aria-label="Ragurgitator creature mark">
+  <title>Ragurgitator — creature R</title>
+  <path d="M72 113.8 Q 111.8 127.9 152 170" stroke="#14161B" stroke-width="30" stroke-linecap="round" fill="none"/>
+  <rect x="46" y="44" width="32" height="126" rx="16" fill="#14161B"/>
+  <path d="M 144.2 42.5 L 144.2 105.5 L 80 74 Z" fill="#F2543D"/>
+  <path d="M 144.2 42.5 A 48 48 0 1 0 144.2 105.5 L 80 74 Z" fill="#14161B"/>
+  <path d="M 144.3 42.5 L 143.5 57.2 L 131.3 48.8 Z M 128.2 50.4 L 126.9 62.4 L 116.6 56.1 Z M 112.2 58.2 L 110.3 67.5 L 101.8 63.3 Z M 136.2 101.6 L 135.2 88.2 L 124 95.6 Z M 120.2 93.7 L 118.6 83.1 L 109.2 88.3 Z M 104.1 85.8 L 102 77.9 L 94.4 81.1 Z" fill="#14161B"/>
+  <rect x="163" y="57" width="21" height="17" rx="5.9" transform="rotate(-12 173.5 65.5)" fill="#F2543D"/>
+  <rect x="192" y="40" width="16" height="13" rx="4.5" transform="rotate(17 200 46.5)" fill="#F2543D"/>
+  <rect x="216" y="26" width="11" height="9" rx="3.1" transform="rotate(-23 221.5 30.5)" fill="#F2543D"/>
+</svg>

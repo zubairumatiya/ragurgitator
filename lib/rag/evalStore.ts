@@ -9,6 +9,7 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { sql, toJsonb } from "@/lib/db";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";
 import { reciprocalRank, ndcg } from "@/lib/rag/evalMetrics";
+import { reduceRates } from "@/lib/rag/evalRates";
 import {
   effectiveK,
   getActiveCriteria,
@@ -235,6 +236,13 @@ export type EvalSummary = {
   perDocument: DocumentBreakdown[];
   questions: QuestionDetail[];
   runs: RunSnapshot[];
+  // How many autotune runs of this config recorded a held-out set (0074). The
+  // gate for the /eval "Held-out set" section, which must not appear at all for a
+  // config that has never taken the measurement — and must appear for one whose
+  // holdout is off NOW but has history worth reconciling. A count rather than a
+  // boolean because it is free either way and "0 of them" is a more useful thing
+  // for a caller to be able to say.
+  holdoutRuns: number;
   // pendingScoring: questions never scored or edited since last score — the
   // work "Score pending" would do, so the UI can disable the button when
   // there's nothing pending. pendingChunks: chunks below the per-chunk question
@@ -2360,49 +2368,19 @@ async function baselineDetailRows(table: string): Promise<EvalDetailRow[]> {
 // the baseline aggregate CANNOT drift: the ticker is a subtraction between the
 // two, and a rate computed two slightly different ways would show a delta that
 // is an artefact of the arithmetic rather than of any tuning.
-function reduceMetrics(
-  questions: QuestionDetail[],
-  editStaleIds: Set<string>,
-): {
-  scoredRows: QuestionDetail[];
-  hits: number;
-  recall: number | null;
-  mrr: number | null;
-  ndcg: number | null;
-  ndcgCovered: number;
-} {
-  // Scored rows count toward recall — including retrieval-stale ones (badged,
-  // approximate until the next run). Unscored and edit-stale are pending, and
-  // ignored questions are excluded from every rate (§7) — they still render.
-  const scoredRows = questions.filter(
-    (q) => q.hit !== null && !editStaleIds.has(q.questionId) && !q.ignored,
-  );
-  const hits = scoredRows.filter((q) => q.hit === true).length;
-
-  // MRR@mrr_k over the same scored set, from the per-question rr (single-relevant)
-  // — no extra retrieval, so already-scored questions are covered retroactively.
-  const mrr =
-    scoredRows.length > 0
-      ? scoredRows.reduce((sum, q) => sum + (q.rr ?? 0), 0) / scoredRows.length
-      : null;
-
-  // Mean graded nDCG over exactly the questions that have one (ranked + freshly
-  // scored, not ignored). ndcgCovered is that set's size — the dashboard's 5/n.
-  const graded = questions
-    .filter((q) => !q.ignored)
-    .map((q) => q.ndcg)
-    .filter((v): v is number => v !== null);
-  const ndcg =
-    graded.length > 0 ? graded.reduce((sum, v) => sum + v, 0) / graded.length : null;
-
-  return {
-    scoredRows,
-    hits,
-    recall: scoredRows.length > 0 ? hits / scoredRows.length : null,
-    mrr,
-    ndcg,
-    ndcgCovered: graded.length,
-  };
+//
+// The arithmetic itself is lib/rag/evalRates.ts, which imports nothing, so the
+// client can compute the live train/holdout split off the rows it already has
+// without a second copy of these rules. This wrapper survives because getSummary
+// destructures its result and because `rated` — the headline partition — is a
+// choice worth naming at the one call site that is not making a split.
+//
+// editStaleIds is gone from the signature: it was always exactly the set of rows
+// whose own `editStale` flag is true (mapQuestionDetails builds both in the same
+// pass), and a set threaded alongside the rows it describes is one more thing two
+// call sites can get out of step.
+function reduceMetrics(questions: QuestionDetail[]) {
+  return reduceRates(questions, "rated");
 }
 
 // ONE CHUNK's questions, in the exact shape getSummary would give them.
@@ -2528,6 +2506,7 @@ export async function getSummary(): Promise<EvalSummary> {
     perDocument: [],
     questions: [],
     runs: [],
+    holdoutRuns: 0,
     pendingChunks: 0,
     pendingScoring: 0,
     retrievalStale: 0,
@@ -2554,6 +2533,7 @@ export async function getSummary(): Promise<EvalSummary> {
     overrides,
     retrievalChangedAt,
     changeLog,
+    holdoutRunRows,
   ] = await Promise.all([
     sql<
       {
@@ -2678,6 +2658,14 @@ export async function getSummary(): Promise<EvalSummary> {
     listChunkOverrideInfo(table),
     getRetrievalChangedAt(),
     listRetrievalChanges(),
+    // One indexed count over a table with a handful of rows per config. It rides
+    // this Promise.all rather than becoming a request of its own because it is
+    // the GATE for the holdout section: a fetch to decide whether to render a
+    // collapsed section is a fetch on every page load for every config.
+    sql<{ n: number }[]>`
+      select count(*)::int as n from autotune_runs
+      where config_id = ${activeConfig().id} and holdout_n is not null
+    `,
   ]);
 
   // Each question's official (is_truth) ideal ranking, if any — what its graded
@@ -2698,7 +2686,7 @@ export async function getSummary(): Promise<EvalSummary> {
   });
 
   const { scoredRows, hits, recall, mrr, ndcg: ndcgValue, ndcgCovered } =
-    reduceMetrics(questions, editStaleIds);
+    reduceMetrics(questions);
 
   // What the per-chunk tuning has bought. Only when overrides exist: without
   // them live IS baseline and the delta is zero by construction, so the one
@@ -2709,7 +2697,7 @@ export async function getSummary(): Promise<EvalSummary> {
     // currentState 'baseline' is the fingerprint these rows were genuinely
     // scored under, so none is mislabelled stale; retrievalChangedAt is not
     // consulted for them for the same reason.
-    const { questions: baseQuestions, editStaleIds: baseStale } = mapQuestionDetails(
+    const { questions: baseQuestions } = mapQuestionDetails(
       baseRows,
       {
         currentState: "baseline",
@@ -2724,16 +2712,13 @@ export async function getSummary(): Promise<EvalSummary> {
     // live and what counts on the baseline. A delta between differently sized
     // question sets is meaningless, and the UI reports this size.
     const baseCountable = new Set(
-      reduceMetrics(baseQuestions, baseStale).scoredRows.map((q) => q.questionId),
+      reduceMetrics(baseQuestions).scoredRows.map((q) => q.questionId),
     );
     const liveSubset = scoredRows.filter((q) => baseCountable.has(q.questionId));
     const subsetIds = new Set(liveSubset.map((q) => q.questionId));
     if (subsetIds.size > 0) {
-      const base = reduceMetrics(
-        baseQuestions.filter((q) => subsetIds.has(q.questionId)),
-        baseStale,
-      );
-      const live = reduceMetrics(liveSubset, editStaleIds);
+      const base = reduceMetrics(baseQuestions.filter((q) => subsetIds.has(q.questionId)));
+      const live = reduceMetrics(liveSubset);
       baseline = {
         questions: subsetIds.size,
         recall: base.recall,
@@ -2844,6 +2829,7 @@ export async function getSummary(): Promise<EvalSummary> {
       ndcg: r.ndcg,
       createdAt: r.created_at.getTime(),
     })),
+    holdoutRuns: holdoutRunRows[0]?.n ?? 0,
     pendingChunks: pendingChunkRows[0]?.n ?? 0,
     pendingScoring,
     retrievalStale,

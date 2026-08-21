@@ -2,6 +2,10 @@
 // given the config's labeled questions and its holdout settings, decide which
 // question ids form the test set. No DB, no server-only import, so the decisions
 // that make the generalization number defensible are testable on their own.
+// (node:crypto, for the split key at the bottom, is the one builtin — it keeps
+// the file node-testable but does mean this module is not for a browser bundle.
+// The client half of the holdout UI reads lib/rag/evalRates.ts, which imports
+// nothing at all, for exactly that reason.)
 //
 // Two properties do the work:
 //
@@ -14,6 +18,8 @@
 // inflating the generalization delta. Sampling within each difficulty band means
 // the two sets are comparable by construction, so the train→holdout gap reads as
 // overfitting rather than as an artefact of the draw.
+
+import { createHash } from "node:crypto";
 
 export type HoldoutMode = "pct" | "count";
 
@@ -142,4 +148,21 @@ export function selectHoldout(
     picked.push(...order.slice(0, per.get(band) ?? 0));
   }
   return picked;
+}
+
+// The split's IDENTITY: sha256 over the held-out ids, sorted ascending, first 12
+// hex. Two runs share a key iff they were tested on exactly the same questions.
+//
+// This is what makes two runs' holdout deltas comparable or not, and the dials
+// cannot answer it. `selectHoldout` tops up as questions arrive, so the same
+// (mode, size, seed) over a grown question set is a DIFFERENT test set — stacking
+// those two deltas in one column would be comparing measurements of different
+// things while showing the reader identical settings. So the key is computed from
+// what was actually held, never from what was asked for.
+//
+// Sorted, so the row order the ids arrived in cannot change the key; 12 hex (48
+// bits) because this is a human-readable equality tag shown in a table, not a
+// security primitive.
+export function holdoutSplitKey(questionIds: readonly string[]): string {
+  return createHash("sha256").update([...questionIds].sort().join("\n")).digest("hex").slice(0, 12);
 }
