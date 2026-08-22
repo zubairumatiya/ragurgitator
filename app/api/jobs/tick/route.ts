@@ -15,6 +15,8 @@
 import { after } from "next/server";
 
 import { withJobSecret } from "@/lib/http/jobSecret";
+import { demoEnabled } from "@/lib/demo/config";
+import { runDemoHousekeeping } from "@/lib/demo/housekeeping";
 import { runSlice, sweepStalledJobsAcrossUsers } from "@/lib/jobs/runner";
 
 // Vercel kills a function at this many seconds (Hobby's ceiling; Pro allows more).
@@ -49,6 +51,21 @@ export async function POST(request: Request) {
 export async function GET(request: Request) {
   return withJobSecret(request, null, async () => {
     const nudged = await sweepStalledJobsAcrossUsers();
-    return Response.json({ nudged });
+    // THE DEMO'S HOUSEKEEPING RIDES ALONG, rather than taking a cron slot of its
+    // own: Vercel's Hobby plan allows few of them, and both jobs want exactly
+    // the same schedule and the same boundary. Guests are normally reaped at
+    // provisioning time (which is what makes a two-hour TTL mean two hours);
+    // this covers the quiet day where nobody arrives, and carries the HNSW
+    // reindex, which nothing else can do (lib/demo/housekeeping.ts).
+    //
+    // Best-effort by construction — a failure here must not stop the janitor
+    // sweep that is this route's actual job.
+    const demo = demoEnabled()
+      ? await runDemoHousekeeping().catch((e) => {
+          console.warn(`[demo] housekeeping failed: ${String(e)}`);
+          return null;
+        })
+      : null;
+    return Response.json({ nudged, demo });
   });
 }

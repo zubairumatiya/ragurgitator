@@ -26,6 +26,8 @@ import {
 } from "@/lib/rag/modelAppraisal";
 import { availableProviders } from "@/lib/rag/providerAvailability";
 import { listReplays } from "@/lib/rag/replayStore";
+import { DEMO_ACTIONS } from "@/lib/demo/policy";
+import { isGuest } from "@/lib/demo/guest";
 
 export const dynamic = "force-dynamic";
 
@@ -44,17 +46,26 @@ export default async function AppraiseModelsPage() {
   // listReplays is the slow one on a cold fingerprint (~8s, dominated by pulling
   // vectors out of embedding_cache) and ~0.4s once cached in replay_metrics.
   // loading.tsx covers the cold case — see AppraiseLoading.
-  const [rateCard, llmRateCard, replays, comparisons, embedTokens] = await withPageUser(
+  const [guest, rateCard, llmRateCard, replays, comparisons, embedTokens] = await withPageUser(
     async () => {
       // Both cards' "available?" columns come from the SAME availability lookup —
       // one query answers for embedding and LLM providers alike (see the
       // structural ProviderAvailability type), so adding the second card cost no
       // extra round trip.
       const availability = await availableProviders();
+      // THE REPLAY IS THE THIRD VECTOR-SHIPPING SITE (docs/guest-demo-plan.md),
+      // and the only one that is a PAGE RENDER rather than an action — a guest
+      // reaching this tab would pull the whole corpus's cached vectors back out
+      // of the database just by clicking a link. So it is skipped rather than
+      // gated: assertDemoAllows() throws, and an error page is a worse answer
+      // than the table saying why it is empty. Everything else here is a rate
+      // card and stays live.
+      const guest = await isGuest();
       return Promise.all([
+        guest,
         listModelRateCard(availability),
         listLlmRateCard(availability),
-        listReplays(),
+        guest ? [] : listReplays(),
         listConfigComparisons(),
         meteredEmbedTokens(),
       ]);
@@ -79,7 +90,11 @@ export default async function AppraiseModelsPage() {
             (which measures embedding quality only) stays adjacent to the card it
             actually corresponds to. */}
         <LlmRateCard rows={llmRateCard} />
-        <ModelReplayTable reports={replays} comparisons={comparisons} />
+        <ModelReplayTable
+          reports={replays}
+          comparisons={comparisons}
+          emptyNote={guest ? DEMO_ACTIONS.appraise : undefined}
+        />
       </main>
     </div>
   );

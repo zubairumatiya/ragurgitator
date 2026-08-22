@@ -21,6 +21,7 @@ import {
   type TrialVariation,
 } from "@/lib/rag/eval";
 import { deleteModelTrial } from "@/lib/rag/evalStore";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 // Registry membership only — a SCHEMA question, and the one a 400 is right for.
 // Whether the user holds that provider's key is a per-user, async, DB-backed
@@ -99,6 +100,7 @@ export async function POST(
   const { poolChunkIds, save } = body.data;
 
   return withRequestConfig(request, async () => {
+    await assertDemoAllows("rescore");
     try {
       const out = await runModelTrial(chunkId, toVariation(body.data), poolChunkIds, save);
       if (!out) {

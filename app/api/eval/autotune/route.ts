@@ -18,10 +18,12 @@ import { autotuneStep, STREAM_BUDGET_MS } from "@/lib/jobs/steps/autotune";
 import type { StopReason, StopSignal } from "@/lib/jobs/types";
 import type { AutotuneEvent } from "@/lib/rag/autotune";
 import { getSummary } from "@/lib/rag/evalStore";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 export async function POST(request: Request) {
-  return withRequestConfig(request, async () =>
-    ndjsonStream<AutotuneEvent>(async (send, shouldStop) => {
+  return withRequestConfig(request, async () => {
+    await assertDemoAllows("autotune");
+    return ndjsonStream<AutotuneEvent>(async (send, shouldStop) => {
       const t0 = performance.now();
       // The soft deadline this driver imposes on itself. A background job gets one
       // from its slice; this run's transaction is open for its entire length, so
@@ -59,6 +61,6 @@ export async function POST(request: Request) {
       } catch (err) {
         send(streamError(err, "Autotune failed."));
       }
-    }),
-  );
+    });
+  });
 }

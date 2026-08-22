@@ -13,6 +13,15 @@ import { activeJobsForConfig, listJobs } from "@/lib/jobs/store";
 import { backgroundBlocker, isWired } from "@/lib/jobs/registry";
 import { JOB_KINDS, JOB_LABELS, type JobKind } from "@/lib/jobs/types";
 import { activeConfig } from "@/lib/rag/activeConfig";
+import { assertDemoAllows, type DemoAction } from "@/lib/demo/policy";
+
+// Which sentence a guest sees per job kind. Exhaustive by type, so a fourth kind
+// cannot be added without deciding whether the demo may run it.
+const DEMO_ACTION_FOR_JOB: Record<JobKind, DemoAction> = {
+  rescore: "rescore",
+  bulk_ndcg: "rescore",
+  autotune: "autotune",
+};
 
 export async function GET() {
   return withRequestUser(async () => Response.json({ jobs: await listJobs() }));
@@ -31,6 +40,11 @@ export async function POST(request: Request) {
   const kind = body.data.kind as JobKind;
 
   return withRequestConfig(request, async () => {
+    // THE ONE GATE THAT COVERS THREE LEVERS. Every background job is one of the
+    // long bulk actions — re-score, bulk nDCG, autotune — and each has an NDJSON
+    // twin that is gated at its own route. This is the other door into the same
+    // work, and it would be the one nobody remembered.
+    await assertDemoAllows(DEMO_ACTION_FOR_JOB[kind]);
     if (!isWired(kind)) {
       return Response.json(
         { error: `${JOB_LABELS[kind]} cannot run in the background yet.` },

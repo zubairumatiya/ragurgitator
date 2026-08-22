@@ -137,6 +137,12 @@ async function main() {
     // it the moment it was created, which is the correct outcome for a table the
     // app has no business reading.
     "schema_migrations",
+    // The guest demo's provisioning ledger (0075). Deny-all to rag_app is the
+    // intended posture, not an oversight: it holds salted IP hashes for the
+    // per-address rate limit and is read and written only through privilegedSql,
+    // deliberately unlinked from the guests it minted so the reaper cannot reset
+    // the limit. cascade-check.ts names it unreachable for the same reason.
+    "demo_provisions",
   ];
   const policyless = await admin<{ relname: string }[]>`
     select c.relname from pg_class c

@@ -285,3 +285,74 @@ interleave.
 `rls:check` and `cascade:check` still exist and still point at the live project.
 They are the pre/post-migration ritual; the integration tier is the version that
 runs on every pull request and can seed the cases production cannot.
+
+## The guest demo
+
+`/demo` gives a visitor with no account and no API keys a private, disposable
+copy of a seed workspace. It is **off unless configured** — leave the four env
+vars in `.env.example` unset and `/demo` 404s while nothing else changes.
+
+The idea in one sentence: **a guest is just another `user_id` that gets deleted a
+couple of hours later.** Every row already belongs to a user and RLS already
+enforces it, so the demo needed no second data path — only an identity, a clone,
+and a reaper. Not one policy in `0051` changes.
+
+### Setting it up
+
+1. **Create the seed account** through the ordinary signup flow, add your own
+   Voyage key, and build the workspace you want visitors to land in: one corpus,
+   a handful of documents, a config or two, and a trimmed question bank. Keep it
+   small — the clone duplicates rows, and **chunk count is the dominant
+   per-guest cost** (~8 MB for 12 documents / 464 chunks). Its user id goes in
+   `DEMO_SEED_USER_ID`.
+2. **Pre-warm the answers.** Ask the seed account the questions you want the demo
+   to answer well. Each one banks a `semantic_cache` row, the clone copies them,
+   and a guest asking a paraphrase gets a real answer for $0 — which is also the
+   app's headline feature demonstrating itself. Those banked questions become the
+   suggestion chips on the guest's chat page.
+3. **Set the env vars** (see `.env.example`): `DEMO_VOYAGE_KEY`,
+   `DEMO_SEED_USER_ID`, `SUPABASE_SECRET_KEY`, `DEMO_IP_SALT`, plus any caps you
+   want to move.
+4. **Cap the Voyage key** at the provider — spend limit and rate limit. It is a
+   public spending endpoint, and rotating it is a one-variable change.
+
+Re-seeding later is an operator action with no deploy: sign in as the seed
+account, change something, and every guest minted afterwards inherits it.
+
+### What a guest cannot do
+
+Anything that spends money or ships vectors: ingest, re-chunk, autotune, generate
+questions, re-score, cluster, batch, the sweeps, and the model replay. The list
+lives in `lib/demo/policy.ts` with the sentence each one shows, and
+`npm run guard` sweep 5 asserts that every route named there actually calls the
+gate — so a new spending route that skips it fails by name.
+
+Live retrieval is deliberately NOT gated. It ranks in SQL and returns chunk text,
+so a guest asking questions all afternoon costs ~25 KB each. That is the demo.
+
+### Where the money and the disk stop
+
+- **Per-IP provisioning limit** and a **live-guest ceiling**, both checked before
+  anything is created (`lib/demo/rateLimit.ts`, `lib/demo/config.ts`). The first
+  also protects the 50,000 MAU allowance: every guest burns one, and deleting the
+  account does not give it back.
+- **Per-guest embedding budget**, measured off the `provider_key_usage` ledger
+  and enforced at the one dispatcher every embedding goes through.
+- **The reaper** runs on every provision (cheap, self-limiting, and what makes a
+  two-hour TTL mean two hours) with the daily cron as the backstop.
+
+One piece of maintenance has no other home: **pgvector 0.8 does not reclaim HNSW
+space on delete**, so churning guests through `chunks_*` grows the index
+monotonically and the reaper cannot undo it. `lib/demo/housekeeping.ts` reindexes
+concurrently on the daily cron. Check the index size before trusting that
+unattended for a week.
+
+### The one credential this adds
+
+`SUPABASE_SECRET_KEY`. Account deletion deliberately avoids a service-role key
+("a permanent god-mode credential in the env"), and the demo is the case that
+needs one: only `auth.admin.createUser({ email_confirm: true })` mints a usable
+account without sending mail, and Supabase's built-in mailer is capped at two
+sends an hour — which would cap the demo at two visitors an hour. It is read by
+`lib/demo/admin.ts` and nowhere else, that module exports only "create a guest",
+and without the variable the whole feature is off.

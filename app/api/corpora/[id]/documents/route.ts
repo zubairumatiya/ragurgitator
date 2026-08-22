@@ -17,6 +17,7 @@ import { loadDocument, type LoadInput } from "@/lib/rag/loader";
 import { addDocsToCorpus, type IngestEvent } from "@/lib/rag/pipeline";
 import type { SourceDocument } from "@/types/rag";
 import { withRequestUser } from "@/lib/http/configScope";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 function formatMB(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -27,6 +28,7 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   return withRequestUser(async () => {
+    await assertDemoAllows("ingest");
     const { id } = await params;
     const corpus = await getCorpus(id);
     if (!corpus) return Response.json({ error: "Corpus not found." }, { status: 404 });

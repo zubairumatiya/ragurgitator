@@ -1,16 +1,18 @@
-// Five greppable invariants, none of which a typecheck, a unit test or a page that
+// Six greppable invariants, none of which a typecheck, a unit test or a page that
 // renders one account's data can see. The first three have each already been
 // violated once; the fourth guards a column that fails silently; the fifth guards
 // a package whose mere presence in the module graph broke every background job in
-// production.
+// production; the sixth stands between an unauthenticated endpoint and someone
+// else's provider bill.
 //
 //   1. .expose() appears only where a provider client is constructed.
 //   2. Every app entry point that touches the store enters a request scope.
 //   3. Every API handler is behind the authentication boundary — per METHOD.
 //   4. Every read of eval_results has a view on is_baseline (0057).
 //   5. @huggingface/transformers is never imported for its VALUE at module scope.
+//   6. Every route that spends or ships vectors calls the guest-demo gate.
 //
-// WHY GREP AND NOT THE TYPE SYSTEM. All four are properties of where a call (or a
+// WHY GREP AND NOT THE TYPE SYSTEM. All six are properties of where a call (or a
 // column) APPEARS, not of what it returns, so no signature could encode them. The
 // mitigation for grep's bluntness is that every sweep asserts an allowlist: a new
 // violation fails by name, and a deliberate exception has to be added here with a
@@ -104,7 +106,13 @@ function sweepExpose() {
 // This sweep is how the account page was found throwing "sql used outside a
 // withUser() scope": requireUser() authenticates but does NOT open a scope.
 const SCOPE_EXEMPT: Record<string, string> = {
-  "app/api/auth/me/route.ts": "pure Supabase session read, no store call",
+  // app/api/auth/me/route.ts used to be here ("pure Supabase session read, no
+  // store call"). It reads guestStatus() now, which is a store call, so it
+  // enters a scope like everything else and no longer needs the exemption.
+  "app/api/demo/start/route.ts":
+    "guest provisioning — deliberately cross-tenant (privilegedSql), and the one " +
+    "scoped call it makes (sealing the Voyage key) opens the guest's own scope inside " +
+    "provisionGuest rather than wrapping a handler that has no session to scope to",
   "app/auth/actions.ts": "sign in / up / out and password reset — Supabase Auth only, no store call",
   "app/auth/callback/route.ts": "verifyOtp only, runs before a profile exists",
   "app/auth/reset/page.tsx": "session + recovery-cookie check only, no store call",
@@ -188,6 +196,14 @@ const HANDLER_EXEMPT: Record<string, string> = {
   "app/api/mcp-discovery/authorization-server/route.ts:GET":
     "unauthenticated OAuth discovery — RFC 8414 pass-through for pre-9728 clients",
   "app/api/mcp-discovery/authorization-server/route.ts:OPTIONS": "CORS preflight for the above",
+  // THE GUEST DEMO'S FRONT DOOR. Unauthenticated by definition — its whole
+  // purpose is to serve someone who has no account — so no session gate can
+  // apply. What stands in its place is a pair of caps checked before anything is
+  // created: a per-address provisioning limit and a live-guest ceiling
+  // (lib/demo/rateLimit.ts, lib/demo/config.ts). Listed here so that trade is on
+  // the record rather than looking like a route somebody forgot.
+  "app/api/demo/start/route.ts:POST":
+    "unauthenticated by definition — rate-limited per IP and capped on live guests instead",
 };
 
 function sweepApiGates() {
@@ -270,7 +286,6 @@ function sweepBaselineReads() {
   console.log(`   ${reads} eval_results read(s) across ${files.length} files, all accounted for`);
 }
 
-
 // 5. The transformers barrel
 //
 // @huggingface/transformers' Node entry does a static, top-level
@@ -340,16 +355,77 @@ function sweepTransformersBarrel() {
   }
 }
 
+// 6. Every spending route is behind the demo gate
+//
+// A guest's workspace is provisioned by an UNAUTHENTICATED endpoint and holds
+// the operator's Voyage key. The only thing between that and a stranger running
+// autotune on someone else's money is assertDemoAllows() being present at each
+// entry point — and "present at each entry point" is exactly the property that
+// erodes one new route at a time.
+//
+// THE LIST IS THE SPEC, not a snapshot: a route named here that loses its gate
+// fails by name. It cannot catch the opposite mistake — a NEW spending route
+// that nobody adds here — which is why the list is grouped by what it protects
+// rather than alphabetised, so an omission reads as a gap in a category.
+const DEMO_GATED: Record<string, string> = {
+  // spends the shared embedding key
+  "app/api/ingest/route.ts": "upload + ingest",
+  "app/api/ingest/library/route.ts": "ingest from the document library",
+  "app/api/corpora/[id]/documents/route.ts": "adding a document ingests it",
+  "app/api/configs/[id]/populate/route.ts": "populates a config's chunks",
+  "app/api/configs/[id]/reconfigure/route.ts": "re-chunks, i.e. re-embeds the corpus",
+  "app/api/eval/autotune/route.ts": "re-embeds every chunk it tries",
+  "app/api/eval/autotune/apply/route.ts": "applies an autotune result, re-embedding",
+  "app/api/semantic-cache/key-model/route.ts": "re-embeds the question bank per model",
+  "app/api/semantic-cache/pairs/route.ts": "generates + embeds calibration pairs",
+  // spends an answer-model key the demo does not carry
+  "app/api/eval/questions/generate/route.ts": "question generation",
+  "app/api/eval/bulk-generate/route.ts": "bulk question generation",
+  "app/api/eval/bulk-llm-ndcg/route.ts": "LLM ranking",
+  "app/api/eval/questions/[id]/explain/route.ts": "LLM explanation",
+  "app/api/semantic-cache/shadow/judge/route.ts": "LLM judge",
+  "app/api/clusters/[id]/label/route.ts": "LLM cluster labels",
+  // ships VECTORS to the app server — cheap in dollars, ruinous in egress
+  "app/api/clusters/run/route.ts": "clusterStore pulls every chunk embedding",
+  "app/api/eval/rescore/route.ts": "chunkEmbeddings() pulls vectors",
+  "app/api/eval/process/route.ts": "chunkEmbeddings() pulls vectors",
+  "app/api/eval/bulk-ndcg/route.ts": "chunkEmbeddings() pulls vectors",
+  "app/api/eval/chunks/[chunkId]/try-model/route.ts": "embeds a chunk under another model",
+  // spends later, when the workspace no longer exists
+  "app/api/batch/submit/route.ts": "provider batch submission",
+  // the other door into three of the above
+  "app/api/jobs/route.ts": "background launch of rescore / bulk_ndcg / autotune",
+};
+
+function sweepDemoGates() {
+  console.log("\n6. spending routes behind the demo gate\n");
+  for (const [path, why] of Object.entries(DEMO_GATED)) {
+    let source: string;
+    try {
+      source = read(join(ROOT, path));
+    } catch {
+      fail(`${path} — named in DEMO_GATED but the file does not exist`);
+      continue;
+    }
+    if (!/assertDemoAllows\(/.test(source)) {
+      fail(`${path} — spends or ships vectors (${why}) but never calls assertDemoAllows()`);
+    }
+  }
+  console.log(`   ${Object.keys(DEMO_GATED).length} routes named, all gated`);
+}
+
 sweepExpose();
 sweepScopes();
 sweepApiGates();
 sweepBaselineReads();
 sweepTransformersBarrel();
+sweepDemoGates();
 
 console.log(
   failures === 0
     ? "\nOK — keys stay wrapped, scopes are entered, every handler is gated, " +
-        "baseline rows stay out of live reads, the transformers barrel is unimported."
+        "baseline rows stay out of live reads, no guest can spend, and the "
+        + "transformers barrel is unimported."
     : `\nFAILED — ${failures} violation(s).`,
 );
 if (failures) process.exitCode = 1;

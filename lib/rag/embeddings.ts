@@ -7,6 +7,7 @@
 // `embed()` is a PROVIDER DISPATCHER: it resolves the model's spec from the registry,
 // picks the matching adapter, and batches by that provider's cap. Adapters return
 // normalized vectors, so downstream cosine reduces to a dot product.
+import { assertDemoEmbedBudget } from "@/lib/demo/budget";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { modelSpec } from "@/lib/rag/embeddingModels";
 import { PROVIDERS, type EmbedRole } from "@/lib/rag/embeddingProviders";
@@ -25,6 +26,11 @@ async function embed(
 ): Promise<number[][]> {
   const spec = modelSpec(model);
   const provider = PROVIDERS[spec.provider];
+
+  // THE DEMO'S SPEND CEILING, at the one place every embedding goes through.
+  // No-op for a real account; for a guest it is the difference between a
+  // bounded bill and a small one (lib/demo/budget.ts).
+  await assertDemoEmbedBudget();
 
   const t0 = performance.now();
   const totalBatches = Math.ceil(texts.length / provider.batchLimit);

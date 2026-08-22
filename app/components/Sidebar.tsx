@@ -84,7 +84,13 @@ const rowClass = (active: boolean) =>
     : "flex items-baseline justify-between gap-2 rounded-md px-2 py-1 text-sm text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100";
 
 // Routes that render without the app frame (login/signup/auth callback).
-const AUTH_PREFIXES = ["/login", "/signup", "/auth"];
+//
+// /demo belongs here for exactly the reason the others do: it is a signed-out
+// landing page, and framing it with a sidebar offering "My corpora", "My cache"
+// and a Sign out link tells a first-time visitor the app is already theirs and
+// empty. The same list lives in proxy.ts's PUBLIC_PREFIXES — one decides what a
+// visitor may reach, this one decides what it looks like when they do.
+const AUTH_PREFIXES = ["/login", "/signup", "/auth", "/demo"];
 
 export function Sidebar() {
   const pathname = usePathname();

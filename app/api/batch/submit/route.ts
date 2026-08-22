@@ -17,6 +17,7 @@ import { getConfig } from "@/lib/rag/configStore";
 import { handlerFor } from "@/lib/batch/jobs/registry";
 import { hasOpenJobOfKind } from "@/lib/rag/batchStore";
 import { submitBatch } from "@/lib/batch/orchestrator";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 const Body = z.object({
   kind: z.enum([
@@ -35,6 +36,7 @@ export async function POST(request: Request) {
   if (body.response) return body.response;
 
   return withRequestConfig(request, async () => {
+    await assertDemoAllows("batch");
     const { kind, scope } = body.data;
     const handler = handlerFor(kind);
     if (!handler) {

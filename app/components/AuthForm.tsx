@@ -62,6 +62,7 @@ export function AuthForm({
   next,
   initialError,
   initialNotice,
+  demoAvailable,
 }: {
   mode: Mode;
   action: (prev: AuthState, formData: FormData) => Promise<AuthState>;
@@ -73,6 +74,10 @@ export function AuthForm({
   // "your account was deleted". Kept OUT of action state: it describes how the
   // user arrived, not what the last submit did, so it must not survive one.
   initialNotice?: string;
+  // Whether this deployment has the guest demo configured. Passed in rather than
+  // read here because the flags are server-side env and this is a Client
+  // Component; a page that cannot offer a demo renders nothing about one.
+  demoAvailable?: boolean;
 }) {
   const [state, formAction, pending] = useActionState(action, {
     error: initialError,
@@ -162,7 +167,34 @@ export function AuthForm({
         </p>
       ) : null}
 
-      <p className="mt-6 text-xs text-zinc-500">
+      {/* THE SECOND DOOR, and it has to look like one. This started as a dotted
+          underline at the bottom of the form, which is the right prominence for
+          an afterthought and the wrong one for the entire reason the demo
+          exists: a visitor who followed a link, hit a login wall, and would
+          otherwise leave.
+
+          OUTLINED, NOT FILLED. The submit button above is the solid one, and two
+          solid buttons of equal weight ask the reader to make a decision they
+          did not come here to make. The border carries the mark's accent so it
+          reads as the product's own invitation rather than a second-tier
+          alternative — and the LABEL stays in the ordinary text colour, because
+          #f2543d on white is around 3.3:1 and does not clear WCAG AA for text
+          this size. Border colour is decoration; label colour is not. */}
+      {demoAvailable ? (
+        <div className="mt-6 flex flex-col gap-1.5">
+          <Link
+            href="/demo"
+            className="rounded border border-brand px-3 py-1.5 text-center text-sm font-medium text-zinc-900 transition-colors hover:bg-brand/10 dark:text-zinc-100"
+          >
+            Try the demo
+          </Link>
+          <p className="text-center text-xs text-zinc-500">
+            No account, no API keys — a private copy of a real corpus.
+          </p>
+        </div>
+      ) : null}
+
+      <p className="mt-4 text-xs text-zinc-500">
         {copy.altPrompt}{" "}
         <Link
           href={copy.altHref}

@@ -17,6 +17,7 @@ import {
   judgeShadowEvents,
   setHumanVerdict,
 } from "@/lib/rag/semanticCacheCalibration";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 const Body = z.discriminatedUnion("mode", [
   z.object({
@@ -41,6 +42,7 @@ export async function POST(request: Request) {
   const body = parsed.data;
 
   return withRequestUser(async () => {
+    await assertDemoAllows("generate");
     try {
       if (body.mode === "human") {
         await setHumanVerdict(body.id, body.verdict);

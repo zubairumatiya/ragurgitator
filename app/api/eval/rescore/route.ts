@@ -17,6 +17,7 @@ import { runStepStreamed } from "@/lib/jobs/stream";
 import { rescoreStep } from "@/lib/jobs/steps/rescore";
 import type { EvalEvent } from "@/lib/rag/eval";
 import { getSummary } from "@/lib/rag/evalStore";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 export async function POST(request: Request) {
   // Optional body { documentIds } (or legacy { documentId }) — the bulk-actions
@@ -31,8 +32,9 @@ export async function POST(request: Request) {
       ? [raw.documentId]
       : undefined;
 
-  return withRequestConfig(request, async () =>
-    ndjsonStream<EvalEvent>(async (send, shouldStop) => {
+  return withRequestConfig(request, async () => {
+    await assertDemoAllows("rescore");
+    return ndjsonStream<EvalEvent>(async (send, shouldStop) => {
       try {
         const run = await runStepStreamed(
           "rescore",
@@ -56,6 +58,6 @@ export async function POST(request: Request) {
       } catch (err) {
         send(streamError(err, "Re-scoring failed."));
       }
-    }),
-  );
+    });
+  });
 }

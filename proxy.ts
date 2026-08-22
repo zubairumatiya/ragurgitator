@@ -26,7 +26,14 @@ import { proxySupabase } from "@/lib/auth/supabase";
 // agent's discovery request is answered with a 307 to the login page and the
 // flow dies at step one. It exposes only two public URLs (this server's identity
 // and Supabase's issuer), which is exactly what RFC 9728 intends to be public.
-const PUBLIC_PREFIXES = ["/login", "/signup", "/auth", "/.well-known"];
+//
+// /demo is the guest demo's front door (docs/guest-demo-plan.md). It is public
+// for the same structural reason /login is: its entire purpose is to serve a
+// visitor who has no session, so requiring one would be circular. It reads env
+// flags and renders — no store call, no user data — and the write it leads to
+// (POST /api/demo/start) does its own rate limiting rather than relying on this
+// file, which is not an authorization boundary.
+const PUBLIC_PREFIXES = ["/login", "/signup", "/auth", "/.well-known", "/demo"];
 
 const isPublic = (path: string) => PUBLIC_PREFIXES.some((p) => path.startsWith(p));
 

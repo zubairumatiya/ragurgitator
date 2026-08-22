@@ -157,14 +157,22 @@ describe("account deletion", () => {
 
   it("no public table is unreachable from an owner", async () => {
     // The catalog half, ported from the script. Its allowlist named the four
-    // sub-topics tables, which have no migration and so do not exist here —
-    // making this assertion unconditional, and the allowlist unnecessary.
+    // sub-topics tables, which have no migration and so do not exist here — so
+    // the only exclusions this needs are the two tables that are SUPPOSED to
+    // outlive every account.
+    //
+    // demo_provisions (0075) holds a salted IP hash and a timestamp for the
+    // guest demo's rate limit. It is deliberately not linked to the guest it
+    // created: if deleting the guest erased the record that an address minted
+    // one, the limit would reset itself every time the reaper ran — which is
+    // exactly the window an abuser would aim for. There is no personal data in
+    // it for account deletion to be failing to collect.
     const orphans = await sql<{ relname: string }[]>`
       select c.relname
       from pg_class c
       join pg_namespace n on n.oid = c.relnamespace
       where n.nspname = 'public' and c.relkind = 'r'
-        and c.relname <> 'schema_migrations'
+        and c.relname not in ('schema_migrations', 'demo_provisions')
         and not exists (
           select 1 from pg_constraint fk
           where fk.contype = 'f' and fk.conrelid = c.oid and fk.confdeltype = 'c'

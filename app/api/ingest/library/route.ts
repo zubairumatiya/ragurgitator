@@ -10,6 +10,7 @@ import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
 import { ndjsonStream } from "@/lib/http/ndjson";
 import { embedDocumentsById, type IngestEvent } from "@/lib/rag/pipeline";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 const Body = z.object({
   documentIds: z
@@ -21,13 +22,14 @@ export async function POST(request: Request) {
   const body = await parseBody(request, Body);
   if (body.response) return body.response;
 
-  return withRequestConfig(request, async () =>
-    ndjsonStream<IngestEvent>(async (send) => {
+  return withRequestConfig(request, async () => {
+    await assertDemoAllows("ingest");
+    return ndjsonStream<IngestEvent>(async (send) => {
       try {
         await embedDocumentsById(body.data.documentIds, send);
       } catch (err) {
         send(streamError(err, "Library ingest failed."));
       }
-    }),
-  );
+    });
+  });
 }
