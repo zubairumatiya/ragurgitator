@@ -20,9 +20,9 @@ on:
       verb:
         description: Which jobs-smoke verb to run
         required: true
-        default: launch
+        default: background
         type: choice
-        options: [launch, sweep, autotune, abandon]
+        options: [background, launch, sweep, autotune, abandon]
 
 permissions:
   contents: read
@@ -31,8 +31,11 @@ jobs:
   jobs-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # A named environment so the write-capable secrets live behind a review gate
-    # rather than being readable by every workflow in the repo.
+    # A named environment SCOPES the secrets: only a job that declares this
+    # environment can read them, so the rest of the repo's workflows cannot. That
+    # is all it does here — there are no protection rules on it, so a dispatch
+    # runs immediately. Add required reviewers on the environment if you want the
+    # approval step; do not assume one exists because the environment does.
     environment: production
 
     steps:
@@ -48,9 +51,11 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      # SMOKE_ALLOW_WRITES is the script's own second lock: the verbs that mutate
-      # the live ledger refuse to run without it, so an accidental dispatch reads
-      # rather than writes.
+      # SMOKE_ALLOW_WRITES is the script's own second lock: the verbs that SPEND
+      # (background, launch, autotune, abandon) refuse to run without it, so an accidental
+      # dispatch reads rather than writes. `cancel` and `sweep` stay ungated on
+      # purpose — they are the recovery tools, and locking those locks the wrong
+      # thing.
       - name: Drive a real job
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -58,4 +63,11 @@ jobs:
           JOBS_BASE_URL: ${{ github.event.inputs.base_url }}
           SCRIPT_CONFIG_ID: ${{ secrets.SMOKE_CONFIG_ID }}
           SMOKE_ALLOW_WRITES: "1"
+          # Only needed against a PROTECTED preview, where Vercel's wall answers
+          # before the app does. Harmless (and unset) against production.
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          # Not the runner's budget — that is read from the SERVER's environment
+          # (lib/jobs/runner.ts). This only bounds how long the harness waits
+          # before calling a job hung.
+          SMOKE_TIMEOUT_MS: "600000"
         run: node --import tsx scripts/jobs-smoke.ts ${{ github.event.inputs.verb }}
