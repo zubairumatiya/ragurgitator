@@ -12,15 +12,17 @@ import { streamError } from "@/lib/http/missingKeyServer";
 import { scorePendingQuestions, type EvalEvent } from "@/lib/rag/eval";
 import { ndjsonStream } from "@/lib/http/ndjson";
 import { withRequestConfig } from "@/lib/http/configScope";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 export async function POST(request: Request) {
-  return withRequestConfig(request, async () =>
-    ndjsonStream<EvalEvent>(async (send, shouldStop) => {
+  return withRequestConfig(request, async () => {
+    await assertDemoAllows("rescore");
+    return ndjsonStream<EvalEvent>(async (send, shouldStop) => {
       try {
         await scorePendingQuestions(send, shouldStop);
       } catch (err) {
         send(streamError(err, "Scoring failed."));
       }
-    }),
-  );
+    });
+  });
 }

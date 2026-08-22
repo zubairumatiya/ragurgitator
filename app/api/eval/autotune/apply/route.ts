@@ -7,11 +7,13 @@
 // regressed — same promote→persist→confirm path the engine uses (§5.3).
 import { applyAutotuneCandidate, type CandidateFamily } from "@/lib/rag/autotune";
 import { withRequestConfig } from "@/lib/http/configScope";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 const FAMILIES: readonly CandidateFamily[] = ["size", "model", "size+model"];
 
 export async function POST(request: Request) {
   return withRequestConfig(request, async () => {
+    await assertDemoAllows("autotune");
     const body = (await request.json().catch(() => null)) as {
       chunkId?: string;
       family?: string;

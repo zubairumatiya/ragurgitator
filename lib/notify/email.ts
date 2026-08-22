@@ -47,10 +47,29 @@ function overrideRecipient(): string | null {
 
 export type Mail = { to: string | null; subject: string; html: string };
 
+// GUEST ADDRESSES NEVER GET MAIL.
+//
+// A demo guest is a real account with a real address (lib/demo/admin.ts), which
+// is what lets every other path treat them as an ordinary user. The address is
+// `guest-<uuid>@demo.invalid` — `.invalid` is reserved by RFC 2606 and can never
+// resolve — so a completion email aimed at one is a guaranteed hard bounce, and
+// enough hard bounces is a damaged sender reputation for the Resend account that
+// real users' password resets depend on.
+//
+// CHECKED ON THE ADDRESS, NOT ON is_guest, which is where the plan started. The
+// domain is a property of the string in hand: it needs no query, works outside a
+// request scope (the job runner mails from a sessionless tick), and cannot be
+// wrong about a user whose profile row was just reaped out from under it.
+const isUndeliverable = (to: string) => to.trim().toLowerCase().endsWith("@demo.invalid");
+
 // Returns whether a mail actually went out. Callers use that to decide whether to
 // stamp their `email_sent` flag, so a false must never be a silent success.
 export async function sendMail(mail: Mail): Promise<boolean> {
   const c = client();
+  // BEFORE the dev override, deliberately: the override exists to point mail at
+  // one mailbox while testing, and redirecting a guest's notification into a real
+  // inbox is exactly the send this is suppressing, not an exception to it.
+  if (mail.to && isUndeliverable(mail.to)) return false;
   const to = overrideRecipient() ?? mail.to;
   if (!c || !to) return false;
   try {

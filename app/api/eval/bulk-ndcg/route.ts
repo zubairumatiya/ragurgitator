@@ -19,6 +19,7 @@ import { runStepStreamed } from "@/lib/jobs/stream";
 import { bulkNdcgStep } from "@/lib/jobs/steps/bulkNdcg";
 import type { EvalEvent } from "@/lib/rag/eval";
 import { getSummary } from "@/lib/rag/evalStore";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 const Body = z.object({
   // Bulk-actions document scope: grade only these documents' questions
@@ -36,8 +37,9 @@ export async function POST(request: Request) {
   if (body.response) return body.response;
   const { documentIds, rebuild } = body.data;
 
-  return withRequestConfig(request, async () =>
-    ndjsonStream<EvalEvent>(async (send, shouldStop) => {
+  return withRequestConfig(request, async () => {
+    await assertDemoAllows("rescore");
+    return ndjsonStream<EvalEvent>(async (send, shouldStop) => {
       try {
         const run = await runStepStreamed(
           "bulk_ndcg",
@@ -64,6 +66,6 @@ export async function POST(request: Request) {
       } catch (err) {
         send(streamError(err, "Bulk nDCG grading failed."));
       }
-    }),
-  );
+    });
+  });
 }

@@ -11,6 +11,9 @@
 import { z } from "zod";
 import { parseBody, requiredTrimmedString } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
+import { isGuest } from "@/lib/demo/guest";
+import { DEMO_BLOCKED } from "@/lib/demo/policy";
+import { isMissingProviderKey } from "@/lib/llm/client";
 import { ask } from "@/lib/rag/pipeline";
 import { documentFileNames } from "@/lib/rag/vectorStore";
 
@@ -30,6 +33,30 @@ export async function POST(request: Request) {
       );
       return Response.json({ ...result, documents });
     } catch (err) {
+      // A MISSING ANSWER-MODEL KEY IS THE DEMO'S NORMAL MISS, not a failure.
+      //
+      // A guest holds a Voyage key and nothing else, so a question the semantic
+      // cache cannot answer reaches generation and throws here. The default
+      // wording — "add a key on the Account page" — is a dead end for someone
+      // with no account, so say what actually happened and point them back at
+      // the questions that do work.
+      if (isMissingProviderKey(err)) {
+        if (await isGuest()) {
+          return Response.json(
+            {
+              error:
+                "The demo has no answer-model key, so it can only serve questions it " +
+                "already has a banked answer for. Try one of the suggestions — or " +
+                "rephrase; the cache matches on meaning, not wording.",
+              code: DEMO_BLOCKED,
+            },
+            { status: 400 },
+          );
+        }
+        // Rethrown rather than 500'd: catchingMissingKey turns it into the 400
+        // that names the provider and carries the code the client keys off.
+        throw err;
+      }
       const message = err instanceof Error ? err.message : "Chat failed.";
       return Response.json({ error: message }, { status: 500 });
     }

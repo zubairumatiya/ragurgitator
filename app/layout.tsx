@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { DemoBanner } from "@/app/components/DemoBanner";
 import { Sidebar } from "@/app/components/Sidebar";
 import "./globals.css";
 
@@ -54,7 +55,13 @@ export default function RootLayout({
             DB-free (it also wraps build-time statics like the 404 page). */}
         <div className="flex min-h-screen">
           <Sidebar />
-          <div className="flex min-w-0 flex-1 flex-col">{children}</div>
+          <div className="flex min-w-0 flex-1 flex-col">
+            {/* Renders nothing for a real account — it is a Client Component
+                for the same reason the sidebar is, so this layout stays DB-free
+                (docs/guest-demo-plan.md). */}
+            <DemoBanner />
+            {children}
+          </div>
         </div>
       </body>
     </html>

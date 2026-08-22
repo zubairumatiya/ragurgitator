@@ -12,6 +12,7 @@ import { ingest, type IngestEvent } from "@/lib/rag/pipeline";
 import type { LoadInput } from "@/lib/rag/loader";
 import { ndjsonStream } from "@/lib/http/ndjson";
 import { withRequestConfig } from "@/lib/http/configScope";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 function formatMB(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -62,13 +63,17 @@ export async function POST(request: Request) {
   // Stream progress as NDJSON so the client's progress bar advances in real time.
   // Enter the config scope here so it's active when ndjsonStream captures the
   // async context for the deferred stream producer (see lib/http/ndjson.ts).
-  return withRequestConfig(request, async () =>
-    ndjsonStream<IngestEvent>(async (send) => {
+  return withRequestConfig(request, async () => {
+    // BEFORE the stream opens, not inside the producer: a guest gets a plain 403
+    // with the reason (catchingMissingKey turns the throw into one), rather than
+    // a 200 whose first NDJSON line is an error the progress bar has to unpick.
+    await assertDemoAllows("ingest");
+    return ndjsonStream<IngestEvent>(async (send) => {
       try {
         await ingest(inputs, send);
       } catch (err) {
         send(streamError(err, "Ingestion failed."));
       }
-    }),
-  );
+    });
+  });
 }

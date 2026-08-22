@@ -50,18 +50,24 @@ function priceLabel(model: string): string {
 export function ModelReplayTable({
   reports,
   comparisons,
+  // Replaces the "generate some questions" empty state when the table is empty
+  // for a reason other than having no data — currently only the demo, where the
+  // replay is not run at all because it pulls every cached vector back out of
+  // the database. Without this the demo would tell a visitor to go and label
+  // questions, which is both wrong and something they cannot do.
+  emptyNote,
 }: {
   reports: ReplayReport[];
   comparisons: ConfigComparison[];
+  emptyNote?: string;
 }) {
   if (reports.length === 0) {
     return (
       <section className="flex flex-col gap-3">
         <Heading />
         <div className="rounded-lg border border-dashed border-zinc-300 p-6 text-center text-sm text-zinc-500 dark:border-zinc-700">
-          No config has labelled eval questions yet. Generate questions and label
-          them on a config&apos;s Eval tab — every model with cached vectors is
-          then scored here for free.
+          {emptyNote ??
+            "No config has labelled eval questions yet. Generate questions and label them on a config's Eval tab — every model with cached vectors is then scored here for free."}
         </div>
       </section>
     );

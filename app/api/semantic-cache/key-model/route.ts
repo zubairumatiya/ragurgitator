@@ -49,6 +49,7 @@ import {
   scopedAcceptTarget,
   uncalibratedKeyModelSpace,
 } from "@/lib/rag/semanticCache";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 const msg = (err: unknown, fallback: string) =>
   err instanceof Error ? err.message : fallback;
@@ -101,6 +102,7 @@ export async function POST(request: Request) {
   const data = body.data;
 
   return withRequestConfig(request, async () => {
+    await assertDemoAllows("sweep");
     try {
       if (data.action === "sweep") {
         // A runId already in flight yields no channel rather than stealing the

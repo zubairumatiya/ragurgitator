@@ -3,11 +3,18 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  /* The mark's one accent, lifted out of the SVGs so CSS can reach it. Until
+     now it existed only as a literal in app/icon.svg and design/logo/*.svg;
+     anything on a page that wants to look like the logo had to copy the hex.
+     Change it here and in design/logo/gen-app-assets.mjs together — the assets
+     are generated, not hand-edited. */
+  --brand: #f2543d;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-brand: var(--brand);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }

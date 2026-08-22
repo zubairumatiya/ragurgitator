@@ -46,6 +46,13 @@ const EXPECTED_UNREACHABLE: Record<string, string> = {
   // account deletion, so having no path to an owner is the point rather than an
   // oversight.
   schema_migrations: "migration ledger, owned by no user by design",
+  // The guest demo's per-IP counter (0075). Deliberately NOT linked to the guest
+  // it created: if deleting the guest erased the record that an address minted
+  // one, the rate limit would reset itself every time the reaper ran — which is
+  // precisely the window an abuser would aim for. It holds a salted hash and a
+  // timestamp, so there is no personal data for account deletion to be failing
+  // to collect.
+  demo_provisions: "guest-demo rate limit; must survive the guest it rate-limited",
 };
 
 // The contract from open question #4, named explicitly. These must reach an

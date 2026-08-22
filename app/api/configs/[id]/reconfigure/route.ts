@@ -19,6 +19,7 @@ import { ndjsonStream } from "@/lib/http/ndjson";
 import { resolveConfig } from "@/lib/rag/activeConfig";
 import type { IngestEvent } from "@/lib/rag/pipeline";
 import { reconfigureConfig, reconfigureDocument } from "@/lib/rag/reconfigure";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 const Body = z
   .object({
@@ -52,6 +53,7 @@ export async function POST(
   // one. ndjsonStream re-enters the user scope for its producer, so the
   // re-embedding work below still sees it.
   return withRequestUser(async () => {
+    await assertDemoAllows("reconfigure");
     const cfg = await resolveConfig(id);
     if (!cfg) return Response.json({ error: "Config not found." }, { status: 404 });
 

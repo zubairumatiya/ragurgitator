@@ -15,6 +15,7 @@ import { withRequestConfig } from "@/lib/http/configScope";
 import { ndjsonStream } from "@/lib/http/ndjson";
 import type { EvalEvent } from "@/lib/rag/eval";
 import { bulkBuildLlmRankings } from "@/lib/rag/ranking";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 const Body = z.object({
   // Bulk-actions document scope: rank only these documents' questions
@@ -29,13 +30,14 @@ export async function POST(request: Request) {
   if (body.response) return body.response;
   const { documentIds } = body.data;
 
-  return withRequestConfig(request, async () =>
-    ndjsonStream<EvalEvent>(async (send, shouldStop) => {
+  return withRequestConfig(request, async () => {
+    await assertDemoAllows("generate");
+    return ndjsonStream<EvalEvent>(async (send, shouldStop) => {
       try {
         await bulkBuildLlmRankings(send, documentIds, shouldStop);
       } catch (err) {
         send(streamError(err, "Bulk LLM nDCG ranking failed."));
       }
-    }),
-  );
+    });
+  });
 }
