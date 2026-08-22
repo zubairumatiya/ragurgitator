@@ -391,6 +391,7 @@ const DEMO_GATED: Record<string, string> = {
   "app/api/eval/process/route.ts": "chunkEmbeddings() pulls vectors",
   "app/api/eval/bulk-ndcg/route.ts": "chunkEmbeddings() pulls vectors",
   "app/api/eval/chunks/[chunkId]/try-model/route.ts": "embeds a chunk under another model",
+  "app/api/eval/chunks/[chunkId]/override/route.ts": "re-embeds a chunk, then rescores it",
   // spends later, when the workspace no longer exists
   "app/api/batch/submit/route.ts": "provider batch submission",
   // the other door into three of the above

@@ -27,9 +27,10 @@
 //
 // CONTAINMENT, since the credential exists now:
 //
-//   • It is read only by this module, and this module exports exactly two calls
-//     — create a guest, delete guests. Nothing here can read another user's
-//     data, because nothing here queries.
+//   • It is read only by this module, and this module exports exactly three calls
+//     — create a guest, delete guests, and mint the one snapshot account an
+//     operator publishes into. Nothing here can read another user's data,
+//     because nothing here queries.
 //   • It is server-only and never NEXT_PUBLIC_.
 //   • Absent it, demoEnabled() is false and the whole feature 404s, so a
 //     deployment that does not run the demo does not hold the key.
@@ -99,4 +100,33 @@ export async function createGuestAuthUser(): Promise<GuestCredentials> {
   // so there is nothing to self-heal and no window in which a guest exists
   // without a profile.
   return { id: data.user.id, email, password };
+}
+
+// THE SNAPSHOT ACCOUNT — minted once, by an operator, from
+// scripts/demo-snapshot.ts. Not a guest: no `guest: true`, no expiry, and it
+// keeps whatever real address is given so the ordinary password-reset mail can
+// reach it. That address is the only way back into it, which is why it must not
+// be an @demo.invalid one.
+//
+// Same `email_confirm` as a guest, for a different reason: the confirmation mail
+// is not rate-limiting anything here, but an account that cannot sign in until
+// someone clicks a link is a half-provisioned account, and a publish target that
+// exists but is unusable is exactly the state this script should not create.
+//
+// It holds NO provider key. Guests get the Voyage key sealed per guest
+// (lib/demo/provision.ts) and publishing spends nothing, so the snapshot account
+// is a workspace with no credential attached to it — which is the reason it can
+// be a permanent, unattended account at all.
+export async function createSnapshotAccount(email: string, password: string): Promise<string> {
+  const { data, error } = await adminClient().auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+  });
+  if (error || !data.user) {
+    throw new Error(
+      `demo: could not create the snapshot account — ${error?.message ?? "no user returned"}`,
+    );
+  }
+  return data.user.id;
 }

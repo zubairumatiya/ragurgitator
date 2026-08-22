@@ -145,20 +145,100 @@ export type CloneSummary = {
   cachedAnswers: number;
 };
 
+// THE PUBLISH OPTIONS — used by scripts/demo-snapshot.ts, never by a guest.
+//
+// A guest clone is the whole seed account copied into an empty destination. A
+// SNAPSHOT is one config published into an account that already holds the last
+// build (docs/demo-snapshot-plan.md). Both are the same copy; these two flags are
+// the entire difference, which is why publishing did not need its own copier.
+export type CloneOptions = {
+  // Publish exactly this config, and ONLY the documents that have chunks in it.
+  //
+  // The filter is not tidiness. `documents` is copied by OWNER, so without it an
+  // un-ingested PDF sitting in the master's library is indistinguishable from
+  // corpus content and lands in every guest's User tab.
+  onlyConfigId?: string;
+  // Wipe the destination's workspace first, IN THE SAME TRANSACTION, so that
+  // re-publishing replaces the last build rather than stacking a second copy
+  // beside it — and so a publish that throws leaves the previous build serving.
+  replaceDestination?: boolean;
+};
+
 // Copy the seed account's workspace into `guestId`, in ONE transaction.
 //
 // It is fast — no vector math, no provider calls (the Voyage key is sealed by
 // the caller, before this runs) — so it is inline in the provisioning request
 // rather than a background job. If that ever stops being true, the sliced-jobs
 // machinery is already there.
-export async function cloneSeedWorkspace(seedId: string, guestId: string): Promise<CloneSummary> {
+export async function cloneSeedWorkspace(
+  seedId: string,
+  guestId: string,
+  opts: CloneOptions = {},
+): Promise<CloneSummary> {
   return privilegedSql.begin(async (tx) => {
     const ids = [seedId, guestId];
+    const only = opts.onlyConfigId ?? null;
+
+    // --- 0. republish: clear the destination's previous build ----------------
+    //
+    // EXPLICIT, not left to a cascade from `configs`. semantic_cache.config_id is
+    // ON DELETE **SET NULL** where every other child of `configs` cascades, so
+    // dropping the configs alone would leave the last build's answers behind as
+    // rows with a null config: invisible, un-fingerprintable, copied into no
+    // guest, and ~350 more of them per publish forever. The rest of the list is
+    // this function's own write set — documents cascade to chunks, embeddings and
+    // the question bank; configs cascade to everything keyed by tab.
+    if (opts.replaceDestination) {
+      await tx`delete from semantic_cache where user_id = ${guestId}`;
+      await tx`delete from semantic_cache_thresholds where user_id = ${guestId}`;
+      await tx`delete from documents where user_id = ${guestId}`;
+      await tx`delete from configs where user_id = ${guestId}`;
+      await tx`delete from corpora where user_id = ${guestId}`;
+    }
+
+    // Which documents are IN the published config, resolved through its CHUNK
+    // table rather than document_embeddings: an ingest row can outlive its
+    // vectors (a cleared or failed run), and a document with no chunks is a name
+    // in the library that answers nothing.
+    let docSelect = `select id from documents where user_id = $1`;
+    if (only) {
+      const [cfg] = await tx<{ base_model: string }[]>`
+        select base_model from configs where id = ${only} and user_id = ${seedId}
+      `;
+      if (!cfg) throw new Error(`demo clone: config ${only} is not owned by ${seedId}`);
+      const table = chunksTable(cfg.base_model, modelDimension(cfg.base_model));
+      docSelect = `select distinct document_id from "${table}" where config_id = $1`;
+    }
 
     // --- 1. the id maps ------------------------------------------------------
-    await buildMap(tx, "_map_corpus", `select id from corpora where user_id = $1`, [seedId]);
-    await buildMap(tx, "_map_doc", `select id from documents where user_id = $1`, [seedId]);
-    await buildMap(tx, "_map_config", `select id from configs where user_id = $1`, [seedId]);
+    // The corpus map follows the published config rather than the owner, so one
+    // tab cannot drag the master's other corpora across. `configs.corpus_id` is
+    // nullable, so this map is routinely empty on both paths.
+    await buildMap(
+      tx,
+      "_map_corpus",
+      only
+        ? `select id from corpora where user_id = $1
+             and id = (select corpus_id from configs where id = $2)`
+        : `select id from corpora where user_id = $1`,
+      only ? [seedId, only] : [seedId],
+    );
+    // Its ONE parameter is the config when filtering and the owner when not —
+    // Postgres refuses a statement carrying a parameter it never references
+    // ("could not determine data type of parameter $1"), so the pair travels
+    // together rather than a fixed [seedId, only] with one half unused.
+    await buildMap(tx, "_map_doc", docSelect, only ? [only] : [seedId]);
+    const mappedConfigs = await buildMap(
+      tx,
+      "_map_config",
+      only
+        ? `select id from configs where user_id = $1 and id = $2`
+        : `select id from configs where user_id = $1`,
+      only ? [seedId, only] : [seedId],
+    );
+    if (only && mappedConfigs !== 1) {
+      throw new Error(`demo clone: config ${only} is not owned by ${seedId}`);
+    }
     await buildMap(
       tx,
       "_map_de",
@@ -230,8 +310,11 @@ export async function cloneSeedWorkspace(seedId: string, guestId: string): Promi
     // base_model rather than hardcoded: the demo is Voyage-only today, and a
     // seed that gains a second ingestable model should clone rather than
     // silently arrive with an empty tab.
+    // Read through the config map, not by owner: a publish of one tab must consult
+    // that tab's model, or a master account holding a second ingestable model
+    // would send the snapshot walking a chunk table it copies nothing from.
     const models = await tx<{ base_model: string }[]>`
-      select distinct base_model from configs where user_id = ${seedId}
+      select distinct s.base_model from configs s join _map_config m on m.old_id = s.id
     `;
     const tables = new Set<string>();
     for (const { base_model } of models) {

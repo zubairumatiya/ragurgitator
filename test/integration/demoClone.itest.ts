@@ -273,3 +273,112 @@ describe("cloneSeedWorkspace", () => {
     );
   });
 });
+
+// THE PUBLISH OPTIONS — the snapshot path (docs/demo-snapshot-plan.md), which is
+// the same copy with two flags on it. Both flags fail SILENTLY in the same way
+// the clone does: an unfiltered publish looks like a working demo that happens to
+// show visitors the master's scratch tabs, and an appending republish looks like
+// a working demo carrying two of everything until the storage cap bites.
+describe("cloneSeedWorkspace publish options", () => {
+  // A second tab with its own ingested document, plus a document sitting in the
+  // library with no vectors anywhere — the two shapes the filter has to drop, and
+  // the second is the one a copy-by-owner cannot tell from corpus content.
+  async function widenTheMaster() {
+    const [other] = await admin<{ id: string }[]>`
+      insert into documents (file_name, content_hash, content, user_id)
+      values ('b.txt', ${sha256("b")}, 'other body', ${seed.id}) returning id`;
+    const [orphan] = await admin<{ id: string }[]>`
+      insert into documents (file_name, content_hash, content, user_id)
+      values ('never-ingested.pdf', ${sha256("c")}, 'off topic', ${seed.id}) returning id`;
+    const [cfg] = await admin<{ id: string }[]>`
+      insert into configs (user_id, base_model, chunk_size, chunk_overlap, top_k, llm_model, tab_order)
+      values (${seed.id}, ${KEY_MODEL}, 500, 50, 5, 'test-llm', 1) returning id`;
+    const [run] = await admin<{ id: string }[]>`
+      insert into document_embeddings
+        (document_id, model, dimension, chunk_size, chunk_overlap, chunk_count, config_id)
+      values (${other.id}, ${KEY_MODEL}, ${DIM}, 500, 50, 1, ${cfg.id}) returning id`;
+    await admin.unsafe(
+      `insert into "${CHUNKS}" (document_id, document_embedding_id, position, text, embedding, config_id)
+       values ($1, $2, 0, 'other chunk', $3, $4)`,
+      [other.id, run.id, CHUNK_VECTOR, cfg.id],
+    );
+    await admin`
+      insert into eval_questions (document_id, question) values (${other.id}, 'other?')`;
+    return { otherConfigId: cfg.id, orphanId: orphan.id };
+  }
+
+  it("publishes one config and only the documents with chunks in it", async () => {
+    await widenTheMaster();
+
+    const summary = await cloneSeedWorkspace(seed.id, guest.id, { onlyConfigId: seedConfigId });
+
+    assert.equal(summary.configs, 1, "the other tab came along");
+    assert.equal(summary.documents, 1, "a document outside the published config came along");
+    assert.equal(summary.chunks, 2);
+    assert.equal(summary.questions, 1, "the other tab's question bank came along");
+
+    const names = await admin<{ file_name: string }[]>`
+      select file_name from documents where user_id = ${guest.id}`;
+    assert.deepEqual(
+      names.map((r) => r.file_name),
+      ["a.txt"],
+      "the guest's library is not exactly the published corpus",
+    );
+
+    // The banked answer belongs to the published config, so it must survive the
+    // filter — and reach through the fingerprint rewrite, which now runs over a
+    // document set narrower than the master's.
+    await seedEmbedding(guest.id, "the banked question");
+    const probe = await inScope(guest, summary.configId, () =>
+      semanticCacheLookup("the banked question", { serve: true, threshold: 0.95, keyModel: null }),
+    );
+    assert.equal(probe.hit, true, "a filtered publish lost its answer key");
+  });
+
+  it("refuses a config the master does not own", async () => {
+    const stranger = await createUser(admin);
+    const [theirs] = await admin<{ id: string }[]>`
+      insert into configs (user_id, base_model, chunk_size, chunk_overlap, top_k, llm_model)
+      values (${stranger.id}, ${KEY_MODEL}, 500, 50, 5, 'test-llm') returning id`;
+
+    await assert.rejects(
+      () => cloneSeedWorkspace(seed.id, guest.id, { onlyConfigId: theirs.id }),
+      /is not owned by/,
+    );
+  });
+
+  it("republishes in place instead of stacking a second copy", async () => {
+    const first = await cloneSeedWorkspace(seed.id, guest.id, {
+      onlyConfigId: seedConfigId,
+      replaceDestination: true,
+    });
+    const second = await cloneSeedWorkspace(seed.id, guest.id, {
+      onlyConfigId: seedConfigId,
+      replaceDestination: true,
+    });
+    assert.deepEqual({ ...second, configId: null }, { ...first, configId: null });
+
+    const [counts] = await admin<{ configs: number; documents: number; cached: number }[]>`
+      select (select count(*) from configs where user_id = ${guest.id})::int as configs,
+             (select count(*) from documents where user_id = ${guest.id})::int as documents,
+             (select count(*) from semantic_cache where user_id = ${guest.id})::int as cached`;
+    assert.deepEqual(counts, { configs: 1, documents: 1, cached: 1 });
+
+    // semantic_cache.config_id is ON DELETE SET NULL where every other child of
+    // `configs` cascades, so a republish that only dropped the configs would leave
+    // the previous build's answers behind as unreachable, un-fingerprintable rows
+    // — invisible to every count above except this one.
+    const [{ n: orphans }] = await admin<{ n: number }[]>`
+      select count(*)::int as n from semantic_cache
+       where user_id = ${guest.id} and config_id is null`;
+    assert.equal(orphans, 0, "the previous build left orphaned cache rows behind");
+
+    // And the surviving copy is reachable: the rewrite ran against the rows that
+    // exist now, not the ones the first publish minted.
+    await seedEmbedding(guest.id, "the banked question");
+    const probe = await inScope(guest, second.configId, () =>
+      semanticCacheLookup("the banked question", { serve: true, threshold: 0.95, keyModel: null }),
+    );
+    assert.equal(probe.hit, true, "the republished answer key is unreachable");
+  });
+});

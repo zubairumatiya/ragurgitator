@@ -54,6 +54,10 @@ export const DEMO_ACTIONS = {
     "Re-scoring pulls every chunk vector back out of the database — cheap in " +
     "dollars, expensive in bandwidth — so it's off in the demo. The scores " +
     "shown are real.",
+  override:
+    "Per-chunk overrides re-embed the chunk and re-score the questions hanging " +
+    "off it — a small version of the two things the demo doesn't pay for. The " +
+    "override panel still shows you what a real one did.",
   cluster:
     "Clustering downloads every chunk vector to fit centroids, so it's off in " +
     "the demo. Sign up with your own keys to run it on your corpus.",
