@@ -69,6 +69,14 @@ jobs:
           NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
         run: npm run build
 
+      # AFTER the build, because it reads the build's own output. `next build`
+      # succeeding says nothing about what @vercel/nft put in the Lambda, and the
+      # gap between those two is where every background job spent weeks 500ing on
+      # a missing libonnxruntime.so.1. See docs/serverless-bundle-fix-plan.md.
+      - name: Trace guard
+        if: '!cancelled()'
+        run: npm run guard:trace
+
   # A SECOND JOB, not more steps on the first. These need a database, so they
   # fail for reasons the hermetic checks never can — a job boundary is what keeps
   # "the schema is broken" distinguishable from "the lint is unhappy" at a glance,

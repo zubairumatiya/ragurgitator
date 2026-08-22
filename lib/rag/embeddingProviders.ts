@@ -14,9 +14,7 @@
 // row per BATCH, not per text: the dispatcher in embeddings.ts already slices
 // inputs into batchLimit-sized calls, so this is one row per actual request and
 // ingest cannot flood the table.
-import { pipeline, type FeatureExtractionPipeline } from "@huggingface/transformers";
-
-import "@/lib/rag/transformersCache";
+import type { FeatureExtractionPipeline } from "@huggingface/transformers";
 
 import {
   trackKeyUsage,
@@ -27,6 +25,7 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { cohereFor, openaiFor, voyageFor } from "@/lib/llm/client";
 import type { EmbeddingModelSpec, EmbeddingProviderId } from "@/lib/rag/embeddingModels";
 import { costEmbed, estimateTokensAll } from "@/lib/rag/pricing";
+import { applyWritableCacheDir } from "@/lib/rag/transformersCache";
 
 export type EmbedRole = "document" | "query";
 
@@ -169,10 +168,30 @@ const MXBAI_QUERY_PREFIX =
   "Represent this sentence for searching relevant passages: ";
 
 const localPipelines = new Map<string, Promise<FeatureExtractionPipeline>>();
+
+// DYNAMIC IMPORT, and the FeatureExtractionPipeline import above is type-only —
+// together that is what keeps @huggingface/transformers, onnxruntime-node and
+// sharp out of the serverless bundle entirely (docs/serverless-bundle-fix-plan.md).
+// A static import here would load a 26 MB native runtime into every route that
+// can reach the dispatcher, on a deployment that is gated out of ever running it.
+//
+// This function is unreachable unless LOCAL_EMBEDDINGS is set (see
+// providerAvailability.ts), so on Vercel the import never fires; on a laptop it
+// behaves exactly as before.
+//
+// The cacheDir has to be set on the SAME module instance the model loads
+// against, and before it loads — hence one import, then applyWritableCacheDir on
+// its own `env`, then pipeline().
+async function loadPipeline(apiModel: string): Promise<FeatureExtractionPipeline> {
+  const { env, pipeline } = await import("@huggingface/transformers");
+  applyWritableCacheDir(env);
+  return pipeline("feature-extraction", apiModel);
+}
+
 function getLocalPipeline(apiModel: string): Promise<FeatureExtractionPipeline> {
   let p = localPipelines.get(apiModel);
   if (!p) {
-    p = pipeline("feature-extraction", apiModel);
+    p = loadPipeline(apiModel);
     localPipelines.set(apiModel, p);
   }
   return p;

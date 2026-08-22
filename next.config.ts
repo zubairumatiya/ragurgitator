@@ -6,6 +6,33 @@ const nextConfig: NextConfig = {
   // bypasses bundling so Node resolves the working CJS entry instead.
   serverExternalPackages: ["voyageai"],
 
+  // KEEP THE LOCAL-EMBEDDINGS STACK OUT OF THE LAMBDA ENTIRELY.
+  //
+  // @huggingface/transformers is reachable from one place: the dynamic import in
+  // embeddingProviders.ts' local adapter, which is gated behind LOCAL_EMBEDDINGS
+  // and therefore never fires on a deployment (the weights are far too big for a
+  // function — see embeddingModels.unavailableReason). @vercel/nft traces
+  // `import()` all the same, so without this the trace still carries the
+  // transformers dist plus its two native dependencies, onnxruntime-node
+  // (~720 MB across platforms) and sharp, on every route that can reach the
+  // embedding dispatcher.
+  //
+  // This is what makes the Phase 5 trace guard's deny-list meaningful, and what
+  // replaced the outputFileTracingIncludes hotfix that shipped the ONNX binary
+  // rather than removing the need for it. See docs/serverless-bundle-fix-plan.md.
+  //
+  // Excluding sharp is safe because transformers is its only consumer here: it is
+  // not a direct dependency, and Vercel optimizes images at the edge rather than
+  // in the function.
+  outputFileTracingExcludes: {
+    "/**": [
+      "node_modules/.pnpm/@huggingface+transformers@*/**",
+      "node_modules/.pnpm/onnxruntime-*/**",
+      "node_modules/.pnpm/sharp@*/**",
+      "node_modules/.pnpm/@img+sharp-*/**",
+    ],
+  },
+
   // OAuth discovery for the MCP server. RFC 9728 fixes these paths under
   // /.well-known, and a client fetches them before it holds any credential — they are
   // not ours to choose or to move.

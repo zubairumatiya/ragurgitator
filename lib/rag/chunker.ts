@@ -4,33 +4,14 @@
 // at the chunk level, so chunk size is a retrieval-quality knob (see config).
 //
 // Sizing is measured in tokens of the embedding model's own tokenizer
-// (voyageai/<model> on the HF Hub), so a chunk's length matches what Voyage
-// actually sees when it embeds that chunk.
-import { AutoTokenizer } from "@huggingface/transformers";
-
-import "@/lib/rag/transformersCache";
-
+// (voyageai/<model> on the HF Hub, fetched and cached by tokenizerLoader), so a
+// chunk's length matches what Voyage actually sees when it embeds that chunk.
+//
+// `encode` returns an Encoding, not a bare id array — hence the `.ids` at each
+// of the three call sites below.
 import { activeConfig } from "@/lib/rag/activeConfig";
+import { loadTokenizer, type Tokenizer } from "@/lib/rag/tokenizerLoader";
 import type { Chunk, SourceDocument } from "@/types/rag";
-
-// Cached per model on first use, then reused: different configs can use different
-// embedding models, so we can't share one tokenizer. from_pretrained fetches the
-// tokenizer from the HF Hub and caches it on disk.
-const tokenizerCache = new Map<
-  string,
-  ReturnType<typeof AutoTokenizer.from_pretrained>
->();
-
-function getTokenizer(model: string) {
-  let promise = tokenizerCache.get(model);
-  if (!promise) {
-    promise = AutoTokenizer.from_pretrained(`voyageai/${model}`);
-    tokenizerCache.set(model, promise);
-  }
-  return promise;
-}
-
-type Tokenizer = Awaited<ReturnType<typeof getTokenizer>>;
 
 // The windowing core, shared by document chunking and the eval re-chunk sandbox
 // so both produce identical pieces. Slides a `size`-token window by `size -
@@ -71,9 +52,9 @@ export async function splitText(
   size: number,
   overlap: number,
 ): Promise<string[]> {
-  const tokenizer = await getTokenizer(activeConfig().embeddingModel);
+  const tokenizer = await loadTokenizer(activeConfig().embeddingModel);
   // Special tokens belong at the document boundary, not at every chunk seam.
-  const tokenIds = tokenizer.encode(text, { add_special_tokens: false });
+  const { ids: tokenIds } = tokenizer.encode(text, { add_special_tokens: false });
   return decodeWindows(tokenizer, tokenIds, size, overlap);
 }
 
@@ -89,8 +70,8 @@ export async function splitText(
 export async function tokenizeWithOffsets(
   text: string,
 ): Promise<{ tokenCount: number; offsets: number[] }> {
-  const tokenizer = await getTokenizer(activeConfig().embeddingModel);
-  const ids = tokenizer.encode(text, { add_special_tokens: false });
+  const tokenizer = await loadTokenizer(activeConfig().embeddingModel);
+  const { ids } = tokenizer.encode(text, { add_special_tokens: false });
 
   const offsets = [0];
   let acc = 0;
@@ -131,9 +112,9 @@ export async function chunkDocument(
   params?: ChunkParams,
 ): Promise<Chunk[]> {
   const t0 = performance.now();
-  const tokenizer = await getTokenizer(params?.embeddingModel ?? activeConfig().embeddingModel);
+  const tokenizer = await loadTokenizer(params?.embeddingModel ?? activeConfig().embeddingModel);
   // Special tokens belong at the document boundary, not at every chunk seam.
-  const tokenIds = tokenizer.encode(doc.text, { add_special_tokens: false });
+  const { ids: tokenIds } = tokenizer.encode(doc.text, { add_special_tokens: false });
 
   const { chunkSize, chunkOverlap } = params ?? activeConfig();
   const chunks: Chunk[] = decodeWindows(
