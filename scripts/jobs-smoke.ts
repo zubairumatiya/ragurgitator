@@ -8,7 +8,7 @@
 //   npm run jobs:smoke -- watch <jobId>         poll the row until it finishes
 //   npm run jobs:smoke -- cancel <jobId>
 //   npm run jobs:smoke -- sweep                 janitor: revive every stalled job
-//   npm run jobs:smoke -- background [docId]    prove the background path and ASSERT
+//   npm run jobs:smoke -- background [docId|all] prove the background path and ASSERT
 //   npm run jobs:smoke -- autotune              run a sliced autotune and ASSERT
 //   npm run jobs:smoke -- abandon               manufacture a stale corpus (§D.1)
 //   npm run jobs:smoke                          list the ten newest jobs
@@ -560,19 +560,34 @@ async function main() {
         "runs two real rescore jobs against the deployment.",
       );
       const cfg = await config(user.id);
-      const docId =
-        arg ??
-        process.env.SMOKE_DOCUMENT_ID ??
-        (await smallestLabeledDocument(cfg.id));
-      const total = await labeledQuestionCount(cfg.id, [docId]);
-      const scope = { documentIds: [docId] };
+      // `background all` scopes to the WHOLE config instead of one document.
+      //
+      // It exists for the deployment whose slice budget you cannot lower. On a
+      // preview you set JOBS_SLICE_BUDGET_MS small and a 60-question document
+      // chains happily; production runs the real 240s budget, where the same
+      // document finishes inside one slice and the chain and cancel assertions
+      // go INCONCLUSIVE. Scoping wider is the way to cross a slice boundary you
+      // are not allowed to move — and it tests the deployment as it actually
+      // runs rather than as a test flag configured it.
+      const whole = (arg ?? process.env.SMOKE_SCOPE) === "all";
+      const docId = whole
+        ? null
+        : (arg ??
+          process.env.SMOKE_DOCUMENT_ID ??
+          (await smallestLabeledDocument(cfg.id)));
+      const total = await labeledQuestionCount(cfg.id, docId ? [docId] : null);
+      const scope = docId ? { documentIds: [docId] } : {};
       const timeout = Number(process.env.SMOKE_TIMEOUT_MS ?? 600_000);
 
       console.log(`config:   ${cfg.label}`);
-      console.log(`document: ${docId} — ${total} labeled question(s)`);
+      console.log(
+        docId
+          ? `document: ${docId} — ${total} labeled question(s)`
+          : `scope:    whole config — ${total} labeled question(s)`,
+      );
       console.log(`base:     ${BASE}\n`);
       if (total === 0)
-        throw new Error("That document has no labeled questions to score.");
+        throw new Error("Nothing labeled in that scope to score.");
 
       let ok = true;
 
