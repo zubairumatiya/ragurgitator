@@ -27,6 +27,7 @@ import { getActiveBatchSavings } from "@/lib/rag/batchStore";
 import { isBatchEnabled } from "@/lib/batch/types";
 import { handlerFor } from "@/lib/batch/jobs/registry";
 import { submitBatch } from "@/lib/batch/orchestrator";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 const DIFFICULTIES = ["easy", "medium", "hard"] as const satisfies readonly Difficulty[];
 
@@ -89,8 +90,9 @@ export async function POST(request: Request) {
     );
   }
 
-  return withRequestConfig(request, async () =>
-    ndjsonStream<EvalEvent>(async (send, shouldStop) => {
+  return withRequestConfig(request, async () => {
+    await assertDemoAllows("generate");
+    return ndjsonStream<EvalEvent>(async (send, shouldStop) => {
       try {
         if (body.data.cachedOnly) {
           await bulkAddCachedQuestions(send, documentIds, shouldStop);
@@ -139,6 +141,6 @@ export async function POST(request: Request) {
       } catch (err) {
         send(streamError(err, "Bulk generation failed."));
       }
-    }),
-  );
+    });
+  });
 }

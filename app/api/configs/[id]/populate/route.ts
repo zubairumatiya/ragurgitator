@@ -15,12 +15,14 @@ import { ndjsonStream } from "@/lib/http/ndjson";
 import { resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { embedCorpora, embedExistingCorpus, type IngestEvent } from "@/lib/rag/pipeline";
 import { withRequestUser } from "@/lib/http/configScope";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   return withRequestUser(async () => {
+    await assertDemoAllows("ingest");
     const { id } = await params;
     const cfg = await resolveConfig(id);
     if (!cfg) return Response.json({ error: "Config not found." }, { status: 404 });

@@ -11,9 +11,11 @@ import { ChatWindow } from "@/app/components/ChatWindow";
 import { DocumentList } from "@/app/components/DocumentList";
 import { FileUpload } from "@/app/components/FileUpload";
 import { withPageUser } from "@/lib/auth/dal";
+import { isGuest } from "@/lib/demo/guest";
 import { llmProviderFor } from "@/lib/llm/llmModels";
 import { getConfig } from "@/lib/rag/configStore";
 import { availableProviders } from "@/lib/rag/providerAvailability";
+import { bankedQuestions } from "@/lib/rag/semanticCache";
 
 export default async function WorkbenchPage({
   params,
@@ -21,15 +23,31 @@ export default async function WorkbenchPage({
   params: Promise<{ configId: string }>;
 }) {
   const { configId } = await params;
-  const { provider, hasLlmKey } = await withPageUser(async () => {
-    const [config, available] = await Promise.all([getConfig(configId), availableProviders()]);
+  const { provider, hasLlmKey, suggestions } = await withPageUser(async () => {
+    const [config, available, guest] = await Promise.all([
+      getConfig(configId),
+      availableProviders(),
+      isGuest(),
+    ]);
     // An unrecognised model id (llmProviderFor → null) means we cannot say which
     // key it needs, so we don't gate: better to let the request run and surface
     // the provider's own error than to disable the button on a guess. The
     // layout 404s a missing config, so `config` is only null in the sliver
     // before that lands.
     const provider = config ? llmProviderFor(config.llmModel) : null;
-    return { provider, hasLlmKey: provider === null || available.has(provider) };
+    // A GUEST HAS NO ANSWER-MODEL KEY AND MUST STILL BE ABLE TO ASK. Gating the
+    // box on `available.has(provider)` would disable the one thing the demo
+    // exists to show — and it would be wrong, because a cache hit skips
+    // generation entirely, so the key it is checking for is not needed for the
+    // question they are about to ask. The miss path is handled in the chat
+    // route, which words it as "no answer key in the demo — try one of these"
+    // rather than as a link to /account they cannot use.
+    const hasLlmKey = guest || provider === null || available.has(provider);
+    // Only the demo gets chips. A real account's own questions are already in
+    // their history, and offering a signed-in user their own cached queries as
+    // "suggestions" would read as the app running out of ideas.
+    const suggestions = guest ? await bankedQuestions() : [];
+    return { provider, hasLlmKey, suggestions };
   });
 
   return (
@@ -55,7 +73,7 @@ export default async function WorkbenchPage({
         <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
           2. Ask
         </h2>
-        <ChatWindow hasLlmKey={hasLlmKey} provider={provider} />
+        <ChatWindow hasLlmKey={hasLlmKey} provider={provider} suggestions={suggestions} />
       </section>
     </>
   );

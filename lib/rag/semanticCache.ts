@@ -206,6 +206,43 @@ export async function scopedAcceptTarget(): Promise<EffectiveAcceptTarget> {
   };
 }
 
+// QUESTIONS THIS CONFIG ALREADY HAS A BANKED ANSWER FOR — the demo's suggestion
+// chips (docs/guest-demo-plan.md, Phase 2).
+//
+// KEYED EXACTLY AS THE LOOKUP IS, which is the whole point: same user, same key
+// model, same llm_model, same fingerprint. A chip built from a looser filter
+// would offer questions whose rows the probe cannot reach, and the one thing a
+// suggestion must not do is miss.
+//
+// It returns query_text and nothing else — no vectors, no results — so a full
+// set of chips is a couple of hundred bytes. Ordered by hit_count so the
+// questions other visitors found worth asking come first, then newest.
+export async function bankedQuestions(limit = 6): Promise<string[]> {
+  const cfg = activeConfig();
+  const savings = await getBatchSavings(cfg.id);
+  const keyModel = resolveKeyModel(savings.semanticCache.keyModel);
+  try {
+    const rows = await sql<{ query_text: string }[]>`
+      select query_text
+        from semantic_cache
+       where user_id = ${activeUserId()}
+         and config_id = ${cfg.id}
+         and embedding_model = ${keyModel}
+         and llm_model = ${cfg.llmModel}
+         and fingerprint = ${await currentFingerprint(cfg)}
+       order by hit_count desc, created_at desc
+       limit ${limit}
+    `;
+    return rows.map((r) => r.query_text);
+  } catch (err) {
+    // Before the migration, or on a config whose chunks table does not exist
+    // yet: no chips is a correct answer, and a suggestion list must never be
+    // the thing that fails a page render.
+    if (isMissingTable(err)) return [];
+    throw err;
+  }
+}
+
 // Where an effective threshold came from — surfaced to the UI so a number is
 // never shown without saying which layer set it.
 export type ThresholdSource = "config" | "calibrated" | "default";

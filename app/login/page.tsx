@@ -3,6 +3,7 @@
 // has a session.
 import { signIn } from "@/app/auth/actions";
 import { AuthForm } from "@/app/components/AuthForm";
+import { demoEnabled } from "@/lib/demo/config";
 
 export const metadata = { title: "Sign in" };
 
@@ -22,6 +23,7 @@ export default async function LoginPage({
       // Set by deleteAccount() on its way out, so the last thing a departing
       // user sees confirms the deletion actually happened.
       initialNotice={deleted ? "Your account and all of its keys have been deleted." : undefined}
+      demoAvailable={demoEnabled()}
     />
   );
 }

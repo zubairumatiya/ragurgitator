@@ -29,6 +29,7 @@ import { requireUserForApi, unauthorizedJson } from "@/lib/auth/dal";
 import { withUser } from "@/lib/auth/userScope";
 import { withKeyUsageBuffer } from "@/lib/auth/keyUsageStore";
 import { withDetachedQueue } from "@/lib/detached";
+import { DEMO_BLOCKED, isDemoBlocked } from "@/lib/demo/policy";
 import { missingKeyResponse } from "@/lib/http/missingKeyServer";
 import { UnknownConfigError, resolveRequestConfig, withConfig } from "@/lib/rag/activeConfig";
 
@@ -44,10 +45,22 @@ import { UnknownConfigError, resolveRequestConfig, withConfig } from "@/lib/rag/
 // identical behaviour. Sharing rather than copying is the point: two copies is how
 // the "one place it cannot be forgotten" claim above stops being true. Nothing but
 // a scope wrapper should be calling it.
+// A GUEST HITTING A BLOCKED ACTION belongs here for the third time the same
+// reason does: it is a whole class of "the request is fine, the caller may not
+// have it" that would otherwise be handled one route at a time and missed in the
+// routes nobody thought about. 403 with the policy's own sentence, so the client
+// shows why rather than "request failed".
+//
+// It is caught here rather than inside each NDJSON producer because the gate
+// runs BEFORE ndjsonStream returns — the throw is still inside `fn`, so one
+// catch covers the plain routes and the streaming ones alike.
 export async function catchingMissingKey<T>(fn: () => Promise<T>): Promise<T | Response> {
   try {
     return await fn();
   } catch (err) {
+    if (isDemoBlocked(err)) {
+      return Response.json({ error: err.message, code: DEMO_BLOCKED }, { status: 403 });
+    }
     const response = missingKeyResponse(err);
     if (response) return response;
     throw err;

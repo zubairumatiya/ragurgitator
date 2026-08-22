@@ -159,13 +159,18 @@ describe("RLS", () => {
     // this is the check that a new migration did not ship half of the pair.
     //
     // The live database also holds four policy-less tables from the sub-topics
-    // branch (0051 §4) — they have no migration, so they do not exist here, and
-    // this assertion is therefore unconditional rather than allowlisted.
+    // branch (0051 §4) — they have no migration, so they do not exist here.
+    //
+    // demo_provisions (0075) is the one deliberate exception, and it is deny-all
+    // ON PURPOSE: it is read and written only through privilegedSql, holds no
+    // tenant's data (a salted IP hash and a timestamp), and there is no user it
+    // could be scoped to — the visitor it rate-limits has no account yet. A
+    // policy would have to invent an owner in order to grant one.
     const policyless = await admin<{ relname: string }[]>`
       select c.relname from pg_class c
       join pg_namespace n on n.oid = c.relnamespace
       where n.nspname = 'public' and c.relkind = 'r'
-        and c.relname <> 'schema_migrations'
+        and c.relname not in ('schema_migrations', 'demo_provisions')
         and not exists (select 1 from pg_policy p where p.polrelid = c.oid)
       order by 1`;
     assert.deepEqual(

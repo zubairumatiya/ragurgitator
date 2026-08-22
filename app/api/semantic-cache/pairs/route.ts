@@ -29,6 +29,7 @@ import {
 import { handlerFor } from "@/lib/batch/jobs/registry";
 import { submitBatch } from "@/lib/batch/orchestrator";
 import { isBatchEnabled } from "@/lib/batch/types";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 const msg = (err: unknown, fallback: string) =>
   err instanceof Error ? err.message : fallback;
@@ -54,6 +55,7 @@ export async function POST(request: Request) {
   if (body.response) return body.response;
 
   return withRequestConfig(request, async () => {
+    await assertDemoAllows("sweep");
     const configId = activeConfig().id;
     try {
       const savings = await getBatchSavings(configId);

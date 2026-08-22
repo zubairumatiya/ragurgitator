@@ -6,6 +6,7 @@
 // lean. `params` is a Promise in this Next.js version — await it.
 import { withRequestConfig } from "@/lib/http/configScope";
 import { getQuestionExplain } from "@/lib/rag/evalStore";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 export async function GET(
   request: Request,
@@ -16,6 +17,7 @@ export async function GET(
   // (0022 fingerprint) — the baseline row's top-k while a delegate is active.
   const state = new URL(request.url).searchParams.get("state") ?? undefined;
   return withRequestConfig(request, async () => {
+    await assertDemoAllows("generate");
     try {
       const explain = await getQuestionExplain(id, state);
       return Response.json(explain);

@@ -24,9 +24,17 @@ type ChatResponse =
 export function ChatWindow({
   hasLlmKey = true,
   provider = null,
+  suggestions = [],
 }: {
   hasLlmKey?: boolean;
   provider?: string | null;
+  // Questions this workspace already has a banked answer for. Only the demo
+  // passes any (docs/guest-demo-plan.md): a guest holds an embedding key but no
+  // answer-model key, so the semantic cache is the difference between a chat box
+  // that works and one that apologises. Offering the questions it can actually
+  // answer turns that constraint into the app's headline feature being
+  // demonstrated rather than a limitation being worked around.
+  suggestions?: string[];
 }) {
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [input, setInput] = useState("");
@@ -43,7 +51,12 @@ export function ChatWindow({
     e.preventDefault();
     const form = new FormData(e.currentTarget);
     const raw = form.get("question");
-    const question = typeof raw === "string" ? raw.trim() : "";
+    await send(typeof raw === "string" ? raw.trim() : "");
+  }
+
+  // The submit path, extracted so a suggestion chip is the same act as typing
+  // the question and pressing Ask — not a second, subtly different one.
+  async function send(question: string) {
     if (!question || loading || !hasLlmKey) return;
 
     const next: DisplayMessage[] = [
@@ -98,6 +111,29 @@ export function ChatWindow({
   return (
     <div className="flex flex-col gap-4 rounded-lg border border-zinc-200 dark:border-zinc-800 p-4">
       <MessageList messages={messages} />
+
+      {/* Above the input, not below it: they are a prompt to act, and a guest
+          who has to scroll past the box to find them has already been asked to
+          think of a question themselves. Hidden once the conversation starts —
+          by then the user knows what the box is for. */}
+      {suggestions.length > 0 && messages.length === 0 ? (
+        <div className="flex flex-col gap-2">
+          <p className="text-xs text-zinc-500">Try one of these — each has a banked answer:</p>
+          <div className="flex flex-wrap gap-2">
+            {suggestions.map((q) => (
+              <button
+                key={q}
+                type="button"
+                disabled={loading}
+                onClick={() => void send(q)}
+                className="cursor-pointer rounded-full border border-zinc-300 px-3 py-1 text-xs text-zinc-700 hover:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:border-zinc-500"
+              >
+                {q}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       <form onSubmit={handleSubmit} className="flex gap-2">
         <input

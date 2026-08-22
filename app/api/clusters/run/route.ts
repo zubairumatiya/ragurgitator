@@ -10,6 +10,7 @@ import { parseBody } from "@/lib/http/body";
 import { ndjsonStream } from "@/lib/http/ndjson";
 import { withRequestConfig } from "@/lib/http/configScope";
 import { corpusSize, runClustering, type ClusterEvent } from "@/lib/rag/clusterStore";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 const Body = z.object({
   k: z
@@ -25,6 +26,7 @@ export async function POST(request: Request) {
   const { k } = body.data;
 
   return withRequestConfig(request, async () => {
+    await assertDemoAllows("cluster");
     // The chunk-count-dependent bound can't live in the schema; check it here so a
     // too-large k is a clean 400 rather than a stream error.
     const size = await corpusSize();

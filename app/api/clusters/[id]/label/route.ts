@@ -20,6 +20,7 @@ import { getActiveBatchSavings } from "@/lib/rag/batchStore";
 import { isBatchEnabled } from "@/lib/batch/types";
 import { handlerFor } from "@/lib/batch/jobs/registry";
 import { submitBatch } from "@/lib/batch/orchestrator";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 export async function POST(
   request: Request,
@@ -27,6 +28,7 @@ export async function POST(
 ) {
   const { id } = await params;
   return withRequestConfig(request, async () => {
+    await assertDemoAllows("cluster");
     try {
       const buckets = await representativeChunksForRun(id);
       if (buckets.length === 0) {

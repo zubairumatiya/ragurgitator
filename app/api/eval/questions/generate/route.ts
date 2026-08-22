@@ -9,6 +9,7 @@ import { z } from "zod";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
 import { generateQuestionForChunk, type Difficulty } from "@/lib/rag/eval";
+import { assertDemoAllows } from "@/lib/demo/policy";
 
 // `satisfies` rejects any entry that isn't a real Difficulty while keeping the
 // literal tuple type that z.enum needs. (It can't catch a *missing* level —
@@ -27,6 +28,7 @@ export async function POST(request: Request) {
   if (body.response) return body.response;
 
   return withRequestConfig(request, async () => {
+    await assertDemoAllows("generate");
     try {
       const result = await generateQuestionForChunk(body.data.chunkId, body.data.difficulty);
       if (result === "not-found") {
