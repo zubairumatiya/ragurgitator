@@ -30,7 +30,12 @@ permissions:
 jobs:
   jobs-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Sized for the widest scope this can be dispatched with, not the narrowest.
+    # `background all` over a few hundred questions takes several of production's
+    # real 240s slices -- that is the point of it -- and a job killed by the
+    # runner's clock reports as a failure of the deployment rather than of the
+    # budget it was given.
+    timeout-minutes: 45
     # A named environment SCOPES the secrets: only a job that declares this
     # environment can read them, so the rest of the repo's workflows cannot. That
     # is all it does here — there are no protection rules on it, so a dispatch
@@ -68,6 +73,8 @@ jobs:
           VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
           # Not the runner's budget — that is read from the SERVER's environment
           # (lib/jobs/runner.ts). This only bounds how long the harness waits
-          # before calling a job hung.
-          SMOKE_TIMEOUT_MS: "600000"
+          # before calling a job hung, and must stay under timeout-minutes above
+          # so a slow run fails with the harness's own verdict rather than as a
+          # bare cancelled step.
+          SMOKE_TIMEOUT_MS: "2400000"
         run: node --import tsx scripts/jobs-smoke.ts ${{ github.event.inputs.verb }}
