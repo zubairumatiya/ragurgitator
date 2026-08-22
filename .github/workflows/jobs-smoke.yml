@@ -17,12 +17,32 @@ on:
         description: The deployment to drive (e.g. https://ragurgitator.com)
         required: true
         default: https://ragurgitator.com
+      # LABELLED BY COST, because the dispatch screen is the last place anyone
+      # reads before spending money and it used to show five verbs that looked
+      # interchangeable. They are not: `background` re-scores over cached query
+      # vectors and bills nothing, while `autotune` runs a real tuning sweep
+      # against a BYOK key. The run step strips the label back off.
       verb:
         description: Which jobs-smoke verb to run
         required: true
-        default: background
+        default: background (free)
         type: choice
-        options: [background, launch, sweep, autotune, abandon]
+        options:
+          - background (free)
+          - sweep (free)
+          - launch (free, no assertions)
+          - autotune (SPENDS — real tuning sweep)
+          - abandon (SPENDS — and rewrites eval_results)
+      # `background` only. The smallest document finishes inside one slice at
+      # production's real 240s budget, which makes the chain and cancel
+      # assertions report INCONCLUSIVE; `all` is how you cross a slice boundary
+      # on a deployment whose budget you cannot lower. Both are free.
+      scope:
+        description: "background only: how much of the config to score"
+        required: true
+        default: smallest-document
+        type: choice
+        options: [smallest-document, all]
 
 permissions:
   contents: read
@@ -56,11 +76,16 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      # SMOKE_ALLOW_WRITES is the script's own second lock: the verbs that SPEND
-      # (background, launch, autotune, abandon) refuse to run without it, so an accidental
-      # dispatch reads rather than writes. `cancel` and `sweep` stay ungated on
-      # purpose — they are the recovery tools, and locking those locks the wrong
-      # thing.
+      # SMOKE_ALLOW_WRITES is the script's own second lock: the verbs that write
+      # (background, launch, autotune, abandon) refuse to run without it, so an
+      # accidental dispatch reads rather than writes. `cancel` and `sweep` stay
+      # ungated on purpose — they are the recovery tools, and locking those locks
+      # the wrong thing.
+      #
+      # Note this lock does NOT distinguish free from expensive: `background`
+      # needs it too, because it writes rows. The cost labels on the dropdown
+      # above are the only thing that tells them apart, which is why they are
+      # there.
       - name: Drive a real job
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -77,4 +102,11 @@ jobs:
           # so a slow run fails with the harness's own verdict rather than as a
           # bare cancelled step.
           SMOKE_TIMEOUT_MS: "2400000"
-        run: node --import tsx scripts/jobs-smoke.ts ${{ github.event.inputs.verb }}
+          SMOKE_SCOPE: ${{ github.event.inputs.scope }}
+          # Through the environment rather than interpolated into the command:
+          # a `${{ }}` expression pasted into a shell line is a script-injection
+          # seam, and a constrained choice input today is not a guarantee about
+          # what this input accepts tomorrow.
+          VERB_INPUT: ${{ github.event.inputs.verb }}
+        # Strip the cost label back off — "autotune (SPENDS — ...)" -> "autotune".
+        run: node --import tsx scripts/jobs-smoke.ts "${VERB_INPUT%% *}"
