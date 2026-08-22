@@ -1,0 +1,53 @@
+# THE LAYER THAT TALKS TO A REAL LAMBDA.
+#
+# ci.yml proves the code compiles, the tests pass and the trace is clean. None of
+# that makes a request to a deployed function, which is why six routes could 500
+# from the first deploy onward with every check green — a route's module tree is
+# only assembled when a request arrives. See docs/serverless-bundle-fix-plan.md.
+#
+# TRIGGERED BY THE DEPLOYMENT, NOT BY THE PUSH. `deployment_status` fires when
+# Vercel finishes, so this runs against the preview build for the commit rather
+# than racing it. A push-triggered job would have nothing to talk to.
+name: Smoke
+
+on:
+  deployment_status:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    # Two conditions, both load-bearing. `state == success` skips the queued and
+    # failed notifications Vercel also sends. The fork check is because a fork PR
+    # cannot read secrets: without the bypass secret every probe would come back
+    # 401 from Vercel's own authentication gate rather than from the app, and the
+    # run would report a pass it did not earn. The trace guard still runs for
+    # forks in ci.yml.
+    if: >-
+      github.event.deployment_status.state == 'success' &&
+      github.event.pull_request.head.repo.fork != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # environment_url is the deployment's own URL, so this follows Vercel to
+      # whatever host it actually published — a preview alias, or the production
+      # domain on a merge to main.
+      - name: Smoke test the deployment
+        env:
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          SMOKE_BASE_URL: ${{ github.event.deployment_status.environment_url }}
+        run: npm run smoke

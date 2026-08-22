@@ -1,11 +1,14 @@
-// Four greppable invariants, none of which a typecheck, a unit test or a page that
+// Five greppable invariants, none of which a typecheck, a unit test or a page that
 // renders one account's data can see. The first three have each already been
-// violated once; the fourth guards a column that fails silently.
+// violated once; the fourth guards a column that fails silently; the fifth guards
+// a package whose mere presence in the module graph broke every background job in
+// production.
 //
 //   1. .expose() appears only where a provider client is constructed.
 //   2. Every app entry point that touches the store enters a request scope.
 //   3. Every API handler is behind the authentication boundary — per METHOD.
 //   4. Every read of eval_results has a view on is_baseline (0057).
+//   5. @huggingface/transformers is never imported for its VALUE at module scope.
 //
 // WHY GREP AND NOT THE TYPE SYSTEM. All four are properties of where a call (or a
 // column) APPEARS, not of what it returns, so no signature could encode them. The
@@ -267,15 +270,86 @@ function sweepBaselineReads() {
   console.log(`   ${reads} eval_results read(s) across ${files.length} files, all accounted for`);
 }
 
+
+// 5. The transformers barrel
+//
+// @huggingface/transformers' Node entry does a static, top-level
+// `import * as ONNX_NODE from "onnxruntime-node"`. Importing ANY value from the
+// package — even AutoTokenizer, which is pure JS — therefore loads a 26 MB native
+// runtime whose platform binary @vercel/nft cannot trace, and every route that
+// could reach it 500'd in production for weeks. See
+// docs/serverless-bundle-fix-plan.md; chunking now goes through
+// lib/rag/tokenizerLoader.ts and @huggingface/tokenizers instead.
+//
+// Two forms stay legal, because neither puts the package in the serverless module
+// graph: a TYPE-ONLY import, which erases at compile time, and the single dynamic
+// `import()` in the local embedding adapter, which is unreachable unless
+// LOCAL_EMBEDDINGS is set and so never fires on a deployment.
+//
+// A source sweep rather than a trace check because this is the form the mistake
+// takes: someone wants a tokenizer, reaches for the package they know, and the
+// build stays green. scripts/trace-guard.ts checks the other end — the artifact.
+const TRANSFORMERS = "@huggingface/transformers";
+const TRANSFORMERS_DYNAMIC_ALLOWED: Record<string, string> = {
+  "lib/rag/embeddingProviders.ts":
+    "await import() in the local adapter, gated behind LOCAL_EMBEDDINGS",
+};
+
+function sweepTransformersBarrel() {
+  console.log(`\n5. ${TRANSFORMERS} stays out of the module graph\n`);
+  const files = [
+    ...walk(join(ROOT, "lib"), (p) => p.endsWith(".ts") || p.endsWith(".tsx")),
+    ...walk(join(ROOT, "app"), (p) => p.endsWith(".ts") || p.endsWith(".tsx")),
+  ];
+  let statics = 0;
+
+  for (const file of files) {
+    const path = rel(file);
+    const lines = read(file).split("\n");
+
+    lines.forEach((line, i) => {
+      // Comments describe this rule at length in several files; the words are
+      // not imports.
+      const code = line.replace(/\/\/.*$/, "");
+      if (!code.includes(TRANSFORMERS)) return;
+
+      // Erased at compile time — costs the bundle nothing.
+      if (/^\s*import\s+type\s/.test(code)) return;
+
+      if (/\bimport\s*\(/.test(code) || /\brequire\s*\(/.test(code)) {
+        const why = TRANSFORMERS_DYNAMIC_ALLOWED[path];
+        if (!why) {
+          fail(`${path}:${i + 1} — dynamic import of ${TRANSFORMERS} outside the allowlist in scripts/guards.ts`);
+        }
+        return;
+      }
+
+      statics++;
+      fail(
+        `${path}:${i + 1} — value import of ${TRANSFORMERS}; use ` +
+          `@/lib/rag/tokenizerLoader for tokenizers, or import type only`,
+      );
+    });
+  }
+
+  if (statics === 0) {
+    console.log(`   no value imports; ${Object.keys(TRANSFORMERS_DYNAMIC_ALLOWED).length} allowed dynamic import(s):`);
+    for (const [path, why] of Object.entries(TRANSFORMERS_DYNAMIC_ALLOWED)) {
+      console.log(`   ${path.padEnd(32)} ${why}`);
+    }
+  }
+}
+
 sweepExpose();
 sweepScopes();
 sweepApiGates();
 sweepBaselineReads();
+sweepTransformersBarrel();
 
 console.log(
   failures === 0
     ? "\nOK — keys stay wrapped, scopes are entered, every handler is gated, " +
-        "baseline rows stay out of live reads."
+        "baseline rows stay out of live reads, the transformers barrel is unimported."
     : `\nFAILED — ${failures} violation(s).`,
 );
 if (failures) process.exitCode = 1;

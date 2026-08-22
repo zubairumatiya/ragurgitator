@@ -1,0 +1,61 @@
+# THE ONLY LAYER THAT PROVES A JOB FINISHES.
+#
+# smoke.yml proves a route ANSWERS. That is a different claim from "a background
+# job launches, slices, chains, checkpoints and completes" — the thing that had
+# never once worked in production. Only driving a real job end to end shows that.
+#
+# workflow_dispatch ONLY, and deliberately not on every PR: this needs
+# DATABASE_URL and the deployment's JOBS_SECRET, it spends real provider calls
+# against a BYOK key, and it writes rows to the live jobs ledger. Run it after a
+# deploy that touches lib/jobs/**. See docs/serverless-bundle-fix-plan.md phase 7.
+name: Jobs smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: The deployment to drive (e.g. https://ragurgitator.com)
+        required: true
+        default: https://ragurgitator.com
+      verb:
+        description: Which jobs-smoke verb to run
+        required: true
+        default: launch
+        type: choice
+        options: [launch, sweep, autotune, abandon]
+
+permissions:
+  contents: read
+
+jobs:
+  jobs-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # A named environment so the write-capable secrets live behind a review gate
+    # rather than being readable by every workflow in the repo.
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # SMOKE_ALLOW_WRITES is the script's own second lock: the verbs that mutate
+      # the live ledger refuse to run without it, so an accidental dispatch reads
+      # rather than writes.
+      - name: Drive a real job
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          JOBS_SECRET: ${{ secrets.JOBS_SECRET }}
+          JOBS_BASE_URL: ${{ github.event.inputs.base_url }}
+          SCRIPT_CONFIG_ID: ${{ secrets.SMOKE_CONFIG_ID }}
+          SMOKE_ALLOW_WRITES: "1"
+        run: node --import tsx scripts/jobs-smoke.ts ${{ github.event.inputs.verb }}
