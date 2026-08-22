@@ -18,17 +18,35 @@ permissions:
 
 jobs:
   smoke:
-    # Two conditions, both load-bearing. `state == success` skips the queued and
-    # failed notifications Vercel also sends. The fork check is because a fork PR
-    # cannot read secrets: without the bypass secret every probe would come back
-    # 401 from Vercel's own authentication gate rather than from the app, and the
-    # run would report a pass it did not earn. The trace guard still runs for
-    # forks in ci.yml.
+    # Three conditions, all load-bearing.
+    #
+    # `state == success` skips the queued and failed notifications Vercel also
+    # sends.
+    #
+    # `environment_url != ''` is the one this workflow spent its first seven runs
+    # without. Not every deployment status carries a URL: the ones vercel[bot]
+    # creates do, and the ones a CLI or dashboard deploy creates do not. Those
+    # fired the job with an empty base url, which smoke-deploy.ts correctly
+    # rejects as a usage error — a red check that says nothing about the
+    # deployment. Skipping is the honest answer for an event that never named a
+    # host to talk to.
+    #
+    # The fork check is because a fork PR cannot read secrets: without the bypass
+    # secret every probe would come back 401 from Vercel's own authentication
+    # gate rather than from the app, and the run would report a pass it did not
+    # earn. The trace guard still runs for forks in ci.yml.
     if: >-
       github.event.deployment_status.state == 'success' &&
+      github.event.deployment_status.environment_url != '' &&
       github.event.pull_request.head.repo.fork != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # The bypass secret lives on this environment, not at repo level. Without
+    # this line `secrets.VERCEL_AUTOMATION_BYPASS_SECRET` silently resolves to
+    # an empty string and every probe against a protected preview comes back 401
+    # from Vercel's gate — the exact false reading the fork check above exists to
+    # prevent, arriving through a different door.
+    environment: Production
 
     steps:
       - uses: actions/checkout@v5
