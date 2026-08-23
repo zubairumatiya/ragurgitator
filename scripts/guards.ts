@@ -414,8 +414,22 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
   },
   {
     file: "lib/demo/clone.ts",
-    needles: ["freezeAllBut", "FROZEN_REASON"],
-    why: "the publish hop that writes the frozen set in the first place",
+    needles: ["freezeAllBut", "FROZEN_REASON", "limit: BANKED_QUESTION_CAP"],
+    why:
+      "the publish hop that writes the frozen set, and the cap on the banked " +
+      "questions a guest can ADD to it (a question a guest adds is unfrozen, so " +
+      "an uncapped bank is an uncapped autotune set)",
+  },
+  // Phase 6 opened ONE form of bulk-generate to a guest: `cachedOnly`, which
+  // reads question_cache and calls no model. Sweep 6 above still passes if that
+  // condition WIDENS — the file keeps its assertDemoAllows() either way — so the
+  // condition itself is pinned here. This is the whole difference between "a
+  // guest may add a question that was already paid for" and "a guest may spend
+  // the operator's answer-model key", and it is one boolean long.
+  {
+    file: "app/api/eval/bulk-generate/route.ts",
+    needles: ['if (!body.data.cachedOnly) await assertDemoAllows("generate")'],
+    why: "the carve-out is exactly the cachedOnly flag and nothing wider",
   },
 ];
 

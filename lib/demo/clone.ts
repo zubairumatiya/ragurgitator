@@ -35,7 +35,7 @@ import "server-only";
 import type postgres from "postgres";
 
 import { privilegedSql } from "@/lib/db";
-import { FROZEN_REASON } from "@/lib/demo/frozen";
+import { BANKED_QUESTION_CAP, FROZEN_REASON } from "@/lib/demo/frozen";
 import { answerFingerprint } from "@/lib/rag/semanticCacheCore";
 import { chunksTable, modelDimension } from "@/lib/rag/vectorStore";
 
@@ -66,13 +66,18 @@ async function columnsOf(tx: Tx, table: string): Promise<string[]> {
 // `omit` drops a column from BOTH lists so its default applies — used for `id`
 // on the tables nothing points at, which need no map and therefore no map join.
 //
-// `dedupe` narrows the copy to one row per key, newest first. Only semantic_cache
-// needs it, and only because step 6 REWRITES fingerprints: rows that were
-// distinct in the source (different corpus signatures) become the same key in the
-// destination, and 0058's unique (user_id, embedding_model, llm_model,
-// fingerprint, query_hash) then rejects the whole insert. Keeping the newest is
-// not a tie-break, it is the row the cache would serve anyway —
-// semantic_cache_lookup_idx orders by created_at desc.
+// `dedupe` narrows the copy to one row per key, `tieBreak` deciding which row
+// wins. semantic_cache needs it because step 6 REWRITES fingerprints: rows that
+// were distinct in the source (different corpus signatures) become the same key
+// in the destination, and 0058's unique (user_id, embedding_model, llm_model,
+// fingerprint, query_hash) then rejects the whole insert. There the tie-break is
+// not really a tie-break — `created_at desc` is the row the cache would serve
+// anyway, since semantic_cache_lookup_idx orders by it. Step 4e uses the same
+// machinery to spread a capped copy across passages instead.
+//
+// `limit` caps the copy. It applies AFTER the dedupe, so "one row per key, at
+// most N keys" is one call — which is exactly what a cap on a published set
+// wants, and why the two options live together.
 //
 // Every identifier here is an internal constant; the only caller-supplied values
 // are the two user ids, which travel as bound parameters.
@@ -84,7 +89,8 @@ async function copyRows(
     where: string;
     overrides?: Overrides;
     omit?: string[];
-    dedupe?: { on: string; newest: string };
+    dedupe?: { on: string; tieBreak: string };
+    limit?: number;
     params: unknown[];
   },
 ): Promise<number> {
@@ -94,7 +100,10 @@ async function copyRows(
   const targets = cols.map((c) => `"${c}"`).join(", ");
   const values = cols.map((c) => overrides[c] ?? `s."${c}"`).join(", ");
   const distinct = opts.dedupe ? `distinct on (${opts.dedupe.on}) ` : "";
-  const order = opts.dedupe ? `order by ${opts.dedupe.on}, ${opts.dedupe.newest}` : "";
+  const order = opts.dedupe ? `order by ${opts.dedupe.on}, ${opts.dedupe.tieBreak}` : "";
+  // Number, not a bound parameter: every caller passes a module constant, and a
+  // bind here would collide with the positional params the joins already use.
+  const limit = opts.limit === undefined ? "" : `limit ${Number(opts.limit)}`;
 
   const result = await tx.unsafe(
     `insert into "${opts.table}" (${targets})
@@ -102,7 +111,8 @@ async function copyRows(
        from "${opts.table}" s
        ${opts.joins}
       where ${opts.where}
-      ${order}`,
+      ${order}
+      ${limit}`,
     opts.params as never[],
   );
   return result.count ?? 0;
@@ -152,9 +162,6 @@ async function buildMap(
 //     ~40x, and it is also what gives a visitor an untuned corpus to autotune.
 //   embedding_cache   107 MB live, and it exists to avoid paying to RE-embed.
 //     Guests cannot re-embed, so it would be pure storage for zero saving.
-//   question_cache    Content-addressed and therefore cloneable for free — but it
-//     only pays off during question GENERATION, which the demo blocks. Copying it
-//     would be storage bought against a lever that is switched off.
 //   user_provider_keys   Cannot be cloned even in principle: aadFor(userId,
 //     provider) binds the AAD to the user id, so a copied row fails its GCM tag
 //     check on first use. The key is re-sealed instead — see lib/demo/provision.
@@ -173,6 +180,8 @@ export type CloneSummary = {
   runs: number;
   rankings: number; // graded-nDCG truth rows — the size of the drilldown set
   frozen: number; // questions a visitor may look at but not move (step 4d)
+  bankedQuestions: number; // spare wording "Add cached" can hand out for free (step 4e)
+  bankedAvailable: number; // passages that HAD banked wording, before the cap
   cachedAnswers: number;
 };
 
@@ -262,10 +271,14 @@ export async function cloneSeedWorkspace(
     // ON DELETE **SET NULL** where every other child of `configs` cascades, so
     // dropping the configs alone would leave the last build's answers behind as
     // rows with a null config: invisible, un-fingerprintable, copied into no
-    // guest, and ~350 more of them per publish forever. The rest of the list is
-    // this function's own write set — documents cascade to chunks, embeddings and
-    // the question bank; configs cascade to everything keyed by tab.
+    // guest, and ~350 more of them per publish forever. question_cache (step 4e)
+    // is here for a related reason: it hangs off user_profiles ALONE, by design,
+    // so that banked wording outlives the documents and configs it was written
+    // for — which also means no cascade in this list reaches it. The rest is this
+    // function's own write set — documents cascade to chunks, embeddings and the
+    // question bank; configs cascade to everything keyed by tab.
     if (opts.replaceDestination) {
+      await tx`delete from question_cache where user_id = ${guestId}`;
       await tx`delete from semantic_cache where user_id = ${guestId}`;
       await tx`delete from semantic_cache_thresholds where user_id = ${guestId}`;
       await tx`delete from documents where user_id = ${guestId}`;
@@ -546,7 +559,7 @@ export async function cloneSeedWorkspace(
           '{}'::uuid[])`,
       },
       omit: ["id"],
-      dedupe: { on: `s.eval_label_id, s.k`, newest: `s.scored_at desc` },
+      dedupe: { on: `s.eval_label_id, s.k`, tieBreak: `s.scored_at desc` },
       params: [],
     });
 
@@ -671,6 +684,85 @@ export async function cloneSeedWorkspace(
           params: [],
         });
 
+    // --- 4e. the spare wording, so "Add cached" costs nothing ----------------
+    //
+    // question_cache was on the not-cloned list above until phase 6 of
+    // docs/demo-analytics-plan.md, on the reasoning that it "only pays off during
+    // question GENERATION, which the demo blocks". That was true of the Add
+    // button and never true of ADD CACHED, which is a different lever wearing the
+    // same panel: fillChunksFromCache reads the bank, inserts what it finds and
+    // calls no model at all. Blocking generation is exactly why this table is
+    // worth carrying — it is the only way a guest gets a new question.
+    //
+    // A HIT IS EXACT AND THEREFORE FREE HERE. 0055 keys on sha256 of the chunk
+    // TEXT, and the clone copies chunk text byte for byte, so a guest recomputes
+    // the same hash the seed banked under. That is the same property step 6 has
+    // to REPAIR for semantic_cache, which keys on document ids: content-addressed
+    // caches clone, id-addressed ones need a rewrite.
+    //
+    // SCOPED THREE WAYS, because the seed's bank spans every corpus and model that
+    // account ever generated for and the guest is handed one config over a
+    // trimmed corpus.
+    //
+    //   1. `_hash_scope` — the published chunks' own hashes, so a row for a
+    //      passage the guest cannot see is not copied.
+    //   2. `llm_model` — wording no config on this build could ever ask for is
+    //      dropped (readBanked pins both llm_model and prompt_version).
+    //      prompt_version is deliberately NOT filtered: a stale-prompt row is
+    //      dead weight the same query already ignores, and pinning today's
+    //      fingerprint here would mean a publish silently dropping the bank the
+    //      moment someone edits a prompt constant.
+    //   3. BANKED_QUESTION_CAP — the one that is a spend limit rather than a
+    //      correctness filter, and the reason this step reads as carefully as
+    //      step 4d does. A question a guest ADDS is unfrozen by construction
+    //      (only a publish writes FROZEN_REASON), so every row copied here is a
+    //      row autotune may later run over. Uncapped, the demo's tunable set is
+    //      whatever the master happens to have banked — 43 today, unknown after
+    //      the master's next generation run, and nothing would report the drift.
+    //      Capped, the ceiling is 12 + 12 and it is written down in
+    //      lib/demo/frozen.ts next to the other two halves of the same scope.
+    //
+    // ONE PER PASSAGE, then the cap. `distinct on (text_hash)` spreads the twelve
+    // across twelve different chunks rather than stacking four slots onto three,
+    // which is what makes them worth something to a visitor: twelve passages to
+    // ask about, and twelve distinct chunks for autotune to find an override on.
+    // The ordering is arbitrary but STABLE (hash, then difficulty, then slot), so
+    // two publishes of an unchanged master carry the same twelve.
+    await tx.unsafe(
+      `create temp table _hash_scope (text_hash text primary key) on commit drop`,
+    );
+    for (const table of tables) {
+      await tx.unsafe(
+        `insert into _hash_scope (text_hash)
+         select distinct encode(sha256(convert_to(c."text", 'UTF8')), 'hex')
+           from "${table}" c join _map_chunk m on m.old_id = c.id
+         on conflict do nothing`,
+      );
+    }
+    const bankedScope = `s.user_id = $1
+       and s.llm_model in (
+         select c.llm_model from configs c join _map_config mc on mc.old_id = c.id
+       )`;
+    // What the cap turned away, so the publish can say so out loud rather than
+    // leaving "12" to be read as "that is all there was".
+    const [{ count: bankedAvailable }] = await tx.unsafe<{ count: number }[]>(
+      `select count(distinct s.text_hash)::int as count
+         from question_cache s join _hash_scope h on h.text_hash = s.text_hash
+        where ${bankedScope}`,
+      // $1 only: the census does not rewrite user_id, and a $2 this statement
+      // never mentions is a type postgres cannot infer.
+      [seedId] as never[],
+    );
+    const bankedQuestions = await copyRows(tx, {
+      table: "question_cache",
+      joins: `join _hash_scope h on h.text_hash = s.text_hash`,
+      where: bankedScope,
+      overrides: { user_id: "$2" },
+      dedupe: { on: `s.text_hash`, tieBreak: `s.difficulty, s.slot` },
+      limit: BANKED_QUESTION_CAP,
+      params: ids,
+    });
+
     // --- 5. the pre-warmed answers ------------------------------------------
     // The INNER join on the config map drops rows whose config_id is null. That
     // is deliberate: their fingerprint could not be rewritten in step 6 (there
@@ -689,7 +781,7 @@ export async function cloneSeedWorkspace(
       omit: ["id"],
       dedupe: {
         on: `s.config_id, s.embedding_model, s.llm_model, s.query_hash`,
-        newest: `s.created_at desc`,
+        tieBreak: `s.created_at desc`,
       },
       params: ids,
     });
@@ -773,6 +865,8 @@ export async function cloneSeedWorkspace(
       runs,
       rankings,
       frozen,
+      bankedQuestions,
+      bankedAvailable,
       cachedAnswers,
     };
   }) as Promise<CloneSummary>;

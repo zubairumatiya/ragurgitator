@@ -64,6 +64,13 @@ export const DEMO_BLOCKED = "demo_blocked";
 // `appraise` is read twice: as a 403 body, and as the Models tab's own empty
 // state (app/appraise/models/page.tsx), so it has to work as a sentence standing
 // alone on an otherwise blank panel.
+//
+// `generate` NOW POINTS AT A BUTTON, which is only honest because phase 6 made
+// it true: lib/demo/clone step 4e copies question_cache, so "Bulk actions → Add
+// question → Add cached" is a working, model-free way for a guest to add a
+// question. That path is carved out of this gate in the route itself
+// (app/api/eval/bulk-generate), because `cachedOnly` is the one form of that
+// request that calls nothing.
 export const DEMO_ACTIONS = {
   ingest:
     "Uploading and ingesting documents is off in the demo — it would spend the " +
@@ -73,8 +80,11 @@ export const DEMO_ACTIONS = {
     "Re-chunking or switching embedding model re-embeds the whole corpus, which " +
     "the demo doesn't pay for. Everything else on this page is live.",
   generate:
-    "Question generation needs an answer-model key, which the demo doesn't " +
-    "carry. The question bank you're looking at was generated the same way.",
+    "Writing a NEW question needs an answer-model key, which the demo doesn't " +
+    "carry — the bank you're looking at was generated the same way. \u201cAdd " +
+    "cached\u201d does work: this workspace was published with the wording " +
+    "already paid for, so it hands chunks questions that cost nothing and scores " +
+    "them like any other.",
   tryModel:
     "Trying a chunk under a different embedding model re-embeds it and every " +
     "chunk it is ranked against, so it's off in the demo, and no saved trials " +

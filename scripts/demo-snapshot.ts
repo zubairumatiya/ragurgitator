@@ -28,6 +28,7 @@
 import { privilegedSql } from "../lib/db";
 import { createSnapshotAccount } from "../lib/demo/admin";
 import { cloneSeedWorkspace } from "../lib/demo/clone";
+import { BANKED_QUESTION_CAP } from "../lib/demo/frozen";
 import { ndcg } from "../lib/rag/evalMetrics";
 import { answerFingerprint } from "../lib/rag/semanticCacheCore";
 import { chunksTable, modelDimension } from "../lib/rag/vectorStore";
@@ -598,8 +599,31 @@ async function main() {
     `  ${summary.configs} config, ${summary.documents} documents, ${summary.chunks} chunks, ` +
       `${summary.questions} questions, ${summary.results} scores, ` +
       `${summary.rankings} graded rankings, ${summary.frozen} frozen, ` +
-      `${summary.cachedAnswers} cached answers\n`,
+      `${summary.cachedAnswers} cached answers, ` +
+      `${summary.bankedQuestions} banked questions\n`,
   );
+  // The one thing a guest can ADD without a key: "Bulk actions → Add question →
+  // Add cached" reads question_cache, which step 4e of the clone now carries
+  // (phase 6.1 of docs/demo-analytics-plan.md).
+  //
+  // Both directions are worth a line, because the count alone reads the same
+  // either way. A CAPPED build is working as designed and the number is not the
+  // master's — say which. An EMPTY one is not an error (the master's bank only
+  // fills as it generates) but it is a dead button on the published build, and it
+  // is invisible from the outside.
+  if (summary.bankedQuestions === 0) {
+    console.log(
+      "⚠ no banked questions published — the master's question_cache holds nothing for\n" +
+        "  this corpus's chunk text, so a guest's \u201cAdd cached\u201d will find nothing to add.\n" +
+        "  Generate some questions on the master and re-publish to give it something.\n",
+    );
+  } else if (summary.bankedAvailable > summary.bankedQuestions) {
+    console.log(
+      `  (${summary.bankedAvailable} passages had banked wording; capped to ` +
+        `${BANKED_QUESTION_CAP} — a guest's tunable set tops out at ` +
+        `${tunable.length + summary.bankedQuestions}, which is what autotune runs over.)\n`,
+    );
+  }
   // The frozen set is the complement, so this is an equation and not a guess: a
   // published question is either tunable or frozen. A mismatch means step 4d's
   // exclusion missed — and the failure it is guarding against is the silent

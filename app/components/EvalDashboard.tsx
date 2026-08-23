@@ -779,17 +779,28 @@ export function EvalDashboard() {
   // was already generated for identical chunk text, at any difficulty. Free, and
   // it generates nothing — chunks with nothing banked are simply left alone, and
   // anything a chunk already shows is skipped, so pressing it twice adds nothing.
-  const onBulkAddCached = (documentIds: string[] | null) =>
-    runStream(
+  //
+  // THIS IS THE ONE ADD A GUEST CAN PRESS (phase 6 of docs/demo-analytics-plan
+  // .md): the demo clones question_cache and carves `cachedOnly` out of the
+  // generate gate, so the empty-handed sentence must not send a visitor back to
+  // the Add button that will refuse them. Detected the way DemoScope detects a
+  // demo — a frozen row, which only a publish writes — rather than by asking who
+  // is logged in.
+  const onBulkAddCached = (documentIds: string[] | null) => {
+    const published = summary?.questions.some((q) => q.frozen) ?? false;
+    return runStream(
       "/api/eval/bulk-generate",
       (r) =>
         r.reused
           ? `Added ${r.reused} cached question(s) for $0, scored ${r.scored}. ` +
             `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`
           : `No new cached questions for these chunks — nothing added, nothing spent. ` +
-            `Use Add to generate them.`,
+            (published
+              ? `Every question this workspace was published with is already on its chunk.`
+              : `Use Add to generate them.`),
       { documentIds: documentIds ?? undefined, cachedOnly: true },
     );
+  };
 
   // Bulk actions → Add nDCG rankings: for every question in scope without a
   // ground truth, build the aggregate ranking and promote it (the panel's

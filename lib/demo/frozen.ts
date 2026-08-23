@@ -39,3 +39,21 @@ export const FROZEN_REASON = "demo_frozen";
 // visitor's own result as the published build's headline. That is the one lie
 // this whole section exists to stop telling.
 export const PUBLISHED_RUN_NOTE = "as published";
+
+// HOW MANY BANKED QUESTIONS A PUBLISH CARRIES (phase 6.1).
+//
+// The third piece of the demo's scope, and the least obvious one. `Add cached`
+// is the ONLY way a guest can add a question — generation needs a key the demo
+// does not carry — so the size of the published question_cache is a hard ceiling
+// on how far the tunable set can grow, and therefore on what autotune runs over.
+// Without it the ceiling is whatever the master happened to bank: 43 today, an
+// unknown number after the next generation run on the master, and nothing in the
+// publish would report the difference.
+//
+// TWELVE, to match the tunable set: the worst case a guest can reach is 24
+// questions, exactly twice the number phase 4 sized and measured autotune
+// against. A cap that moves with the master's bookkeeping is not a cap.
+//
+// It is applied in lib/demo/clone step 4e, at PUBLISH time, for the same reason
+// FROZEN_REASON is: the scope is data in the build, not a branch in the app.
+export const BANKED_QUESTION_CAP = 12;
