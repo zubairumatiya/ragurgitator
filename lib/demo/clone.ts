@@ -123,6 +123,14 @@ async function buildMap(
 //     the guest did not make. They are the bulk of the seed's disk (eval_results
 //     alone is 11 MB against the whole trimmed seed's ~8) and nothing a guest can
 //     do produces more of them, since every path that would is gated.
+//   config_chunk_overrides   The per-chunk tuning the master has accumulated.
+//     Omitted as "a measurement the guest did not make", but it is the single
+//     biggest EGRESS decision in the clone and worth naming as such: with
+//     overrides present, retrieval takes the fusion path, where FUSION_DEEP_FLOOR
+//     pulls a 200-row pool with text on every row (~470 KB) and re-reads every
+//     override vector per query (~1.1 MB) — measured on the master, 2026-08-22.
+//     Without them every question is one ~12 KB ANN. Leaving this out is worth
+//     ~40x, and it is also what gives a visitor an untuned corpus to autotune.
 //   embedding_cache   107 MB live, and it exists to avoid paying to RE-embed.
 //     Guests cannot re-embed, so it would be pure storage for zero saving.
 //   question_cache    Content-addressed and therefore cloneable for free — but it
