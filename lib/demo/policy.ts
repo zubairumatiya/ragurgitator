@@ -50,6 +50,20 @@ export const DEMO_BLOCKED = "demo_blocked";
 // The actions a guest cannot take, each with the sentence the visitor reads.
 // Phrased as "what this would do and why the demo won't", never as an error:
 // hitting one of these is the expected outcome of exploring, not a mistake.
+//
+// A SENTENCE MAY ONLY POINT AT SOMETHING THE CLONE CARRIES. Phase 5 of
+// docs/demo-analytics-plan.md is here because several of these consoled the
+// visitor with a pointer — "the saved trials show you", "its results are on the
+// Appraise tab", "the override panel still shows you what a real one did" — at
+// tables lib/demo/clone.ts deliberately does not copy. A refusal that sends
+// someone to an empty tab is worse than a bare refusal: it spends their trust to
+// say nothing. So when one of these offers a consolation, check the clone's
+// "WHAT IS DELIBERATELY NOT CLONED" list first, and point at the Eval tab, live
+// retrieval or the answer cache — the three things a guest actually has.
+//
+// `appraise` is read twice: as a 403 body, and as the Models tab's own empty
+// state (app/appraise/models/page.tsx), so it has to work as a sentence standing
+// alone on an otherwise blank panel.
 export const DEMO_ACTIONS = {
   ingest:
     "Uploading and ingesting documents is off in the demo — it would spend the " +
@@ -63,16 +77,18 @@ export const DEMO_ACTIONS = {
     "carry. The question bank you're looking at was generated the same way.",
   tryModel:
     "Trying a chunk under a different embedding model re-embeds it and every " +
-    "chunk it is ranked against, so it's off in the demo. The saved trials show " +
-    "you what a real one measured.",
+    "chunk it is ranked against, so it's off in the demo, and no saved trials " +
+    "were published with this workspace. The live measurement is on the Eval " +
+    "tab: the tunable questions there are yours to re-score and autotune.",
   unfreeze:
     "That question is part of this demo's published measurement, not one of its " +
     "dials — un-ignoring it would let one visitor move a number the next one " +
-    "reads. The twelve tunable questions are yours to change.",
+    "reads. The questions marked tunable on the Eval tab are yours to change.",
   override:
-    "Per-chunk overrides re-embed the chunk and re-score the questions hanging " +
-    "off it — a small version of the two things the demo doesn't pay for. The " +
-    "override panel still shows you what a real one did.",
+    "Setting an override by hand re-embeds the chunk under whatever you pick, " +
+    "which the demo doesn't pay for. Autotune can still write one for you: it " +
+    "searches sizes on the tunable questions' own chunks, and the corpus you " +
+    "were handed is deliberately untuned so there is something to find.",
   cluster:
     "Clustering downloads every chunk vector to fit centroids, so it's off in " +
     "the demo. Sign up with your own keys to run it on your corpus.",
@@ -82,13 +98,18 @@ export const DEMO_ACTIONS = {
     "open are real, and the nDCG on the Eval tab is scored against them.",
   appraise:
     "The model comparison replays the whole corpus from cached vectors, which " +
-    "the demo doesn't have the bandwidth for. The rankings shown are real.",
+    "the demo doesn't have the bandwidth for — so this workspace was published " +
+    "without any saved trials, and there is nothing here to show you. The Eval " +
+    "tab is where this demo measures itself: published scores for every " +
+    "question, and a tunable set you can move.",
   batch:
     "Batch submission spends provider credit hours later, when the demo " +
     "workspace no longer exists. Sign up to use it.",
   sweep:
-    "The cache-key sweep re-embeds the whole question bank in several models. " +
-    "Its results are on the Appraise tab.",
+    "The cache-key sweep re-embeds the whole question bank in several models, " +
+    "so it's off in the demo and its results weren't published with this " +
+    "workspace. The cache it was measuring is live: ask a banked question two " +
+    "different ways and watch the second one hit.",
   // Not an action anyone takes — the outcome of taking enough of them. It shares
   // this table because it shares the transport: a 403 with a sentence, from the
   // one catch site.

@@ -6,6 +6,12 @@
 // about to get, what it costs them (nothing), and what it won't do — and then
 // gets out of the way.
 //
+// THE "WHAT DOESN'T" LIST IS A PROMISE, so it is kept in step with
+// lib/demo/policy.ts rather than written from memory. Phase 5 of
+// docs/demo-analytics-plan.md took autotune out of it: phase 4 scoped that lever
+// to a dozen questions instead of blocking it, and a front door still calling it
+// dead was talking a visitor out of the most interesting thing on the other side.
+//
 // DB-FREE by construction: it reads config flags and renders. Nothing here needs
 // a session, and a page on the unauthenticated path that touched the store would
 // be a scope violation waiting to happen.
@@ -36,8 +42,9 @@ export default async function DemoPage() {
         <h1 className="text-sm font-medium">A RAG workbench you can actually run</h1>
         <p className="text-sm text-zinc-600 dark:text-zinc-400">
           No account, no API keys. You get your own private copy of a real corpus —
-          documents, ingested chunks, tuned configs, a labelled question bank and a
-          bank of pre-computed answers — and everything on top of it is live.
+          documents, ingested chunks, a labelled question bank carrying its published
+          scores, and a bank of pre-computed answers — and everything on top of it is
+          live.
         </p>
       </div>
 
@@ -47,13 +54,15 @@ export default async function DemoPage() {
         <p>
           <span className="font-medium text-zinc-700 dark:text-zinc-300">What works:</span>{" "}
           asking questions and watching the semantic cache answer them, browsing
-          retrieval and its scores, the eval bank and its metrics, cost and savings
-          accounting, and the config tabs.
+          retrieval and its scores, the eval bank and its published metrics, cost and
+          savings accounting, and the config tabs — plus a scoped set of eval questions
+          you can re-score and autotune for real, and watch the numbers move.
         </p>
         <p>
           <span className="font-medium text-zinc-700 dark:text-zinc-300">What doesn&apos;t:</span>{" "}
-          anything that spends money on someone else&apos;s behalf — uploading documents,
-          re-chunking, autotune, generating new questions. Those need your own keys.
+          anything whose cost nothing bounds — uploading documents, re-chunking,
+          generating new questions, replaying the corpus under other models. Those
+          need your own keys.
         </p>
         <p>
           The workspace is deleted after {hours} {hours === 1 ? "hour" : "hours"}. Nothing

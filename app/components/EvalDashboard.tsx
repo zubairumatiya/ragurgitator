@@ -1141,6 +1141,9 @@ export function EvalDashboard() {
         <p className="text-sm text-zinc-500">Loading…</p>
       ) : (
         <>
+          {/* The sentence that makes the two sections below legible (phase 5). */}
+          <DemoScope summary={summary} />
+
           {/* THE DEMO'S TWO SECTIONS (docs/demo-analytics-plan.md, phase 2).
               "As published" is the frozen build a visitor was handed; "Now" is
               what their own tuning has made of it. Neither heading appears for a
@@ -2655,9 +2658,48 @@ function BulkActions({
   );
 }
 
-// A plain bordered headline card. `sub` is an optional small line under the
-// value — e.g. the nDCG card's "graded" coverage count. (Metric cards are no
-// longer tinted; the per-question MetricChip still carries the red→green tint.)
+// THE BANNER THAT SAYS WHAT THE TWO SECTIONS BELOW MEAN (phase 5 of
+// docs/demo-analytics-plan.md).
+//
+// By phase 4 the demo's Eval tab had a frozen headline, a live headline, a
+// per-question "frozen" chip and a set of buttons quietly pointed at a dozen
+// questions — and nothing on the page said so. A visitor could re-score, watch
+// "12 questions" go by, and reasonably conclude the workbench was broken. This
+// is not decoration: an app that leaves its own scope to be inferred is telling
+// the visitor the same lie by omission that phase 2 removed from the cards.
+//
+// IT COUNTS RATHER THAN ASSERTS. Every number here comes off the questions the
+// page already has, so a re-publish that lands 9 tunable questions instead of 12
+// (scripts/demo-snapshot's assertSpread accepts 8) prints 9, and a visitor who
+// adds one of their own prints 13 — their question is unfrozen by construction
+// (nothing writes FROZEN_REASON but a publish), which is exactly the promise
+// this paragraph makes.
+//
+// IT IS NOT AN isGuest() BRANCH, for the reason lib/demo/frozen.ts gives at
+// length: a real account has no frozen rows, so `frozen === 0` and this renders
+// nothing — by construction rather than by a test of who is asking. That also
+// makes an UNPUBLISHED guest build silent rather than boastful, which is the
+// honest outcome: with no frozen set there is no scope to announce.
+function DemoScope({ summary }: { summary: EvalSummary }) {
+  const frozen = summary.questions.filter((q) => q.frozen).length;
+  if (frozen === 0) return null;
+  const tunable = summary.questions.length - frozen;
+  return (
+    <section className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/50 dark:text-amber-200">
+      <p>
+        <strong className="font-semibold">This demo is deliberately scoped.</strong>{" "}
+        All {summary.questions.length} questions carry the scores they were
+        measured with before this workspace was published
+        {summary.asPublished ? " — that is the “As published” row, and it never moves." : "."}{" "}
+        <strong className="font-semibold">{tunable} of them are live</strong>,
+        picked to span a first-place hit through to a complete miss: re-score
+        them, autotune them, add your own. The other {frozen} are frozen, so one
+        visitor’s experiment cannot cost the next one their demo.
+      </p>
+    </section>
+  );
+}
+
 // THE FROZEN CARD — the published build's own numbers, for a guest only.
 //
 // It reads from a single stored eval_runs row rather than recomputing, and that is
@@ -2719,6 +2761,9 @@ function AsPublished({
   );
 }
 
+// A plain bordered headline card. `sub` is an optional small line under the
+// value — e.g. the nDCG card's "graded" coverage count. (Metric cards are no
+// longer tinted; the per-question MetricChip still carries the red→green tint.)
 function Stat({
   label,
   value,
