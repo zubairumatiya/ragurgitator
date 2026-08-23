@@ -768,6 +768,7 @@ export async function scorePendingQuestions(
       hitCount: summary.hits,
       mrr: summary.mrr,
       ndcg: summary.ndcg,
+      ndcgCovered: summary.ndcgCovered,
       k: summary.recallK,
     });
   }
@@ -821,6 +822,7 @@ export async function bulkAddDifficulties(
       hitCount: summary.hits,
       mrr: summary.mrr,
       ndcg: summary.ndcg,
+      ndcgCovered: summary.ndcgCovered,
       k: summary.recallK,
     });
   }
@@ -887,6 +889,7 @@ export async function bulkAddCachedQuestions(
       hitCount: summary.hits,
       mrr: summary.mrr,
       ndcg: summary.ndcg,
+      ndcgCovered: summary.ndcgCovered,
       k: summary.recallK,
     });
   }
@@ -1075,6 +1078,7 @@ export async function settleAffectedRescore(
       hitCount: summary.hits,
       mrr: summary.mrr,
       ndcg: summary.ndcg,
+      ndcgCovered: summary.ndcgCovered,
       k: summary.recallK,
     });
   }

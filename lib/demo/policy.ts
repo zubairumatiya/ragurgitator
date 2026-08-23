@@ -12,10 +12,24 @@
 //             demo has no reason to spend.
 //   EGRESS    the three sites that still ship VECTORS to the app server:
 //             clusterStore's `select c.id, c.embedding::text` (~5.6 MB a run),
-//             chunkEmbeddings() behind re-score and the efficacy gate, and
+//             chunkEmbeddings() behind the override efficacy screen, and
 //             /appraise → Models' replay from cached vectors. These are cheap in
 //             dollars and ruinous in bytes, which is why the gate covers more
 //             than the obviously expensive levers.
+//
+// WHAT IS NO LONGER IN THIS TABLE, AND WHY THAT IS NOT AN OVERSIGHT. Re-scoring
+// and autotune used to sit here. Both objections to them were about SIZE — 472
+// questions of retrieved chunk text, 472 questions' worth of chunks to search —
+// and neither was about the lever. So phase 4 of docs/demo-analytics-plan.md
+// stopped blocking them and SCOPED them instead: a published build freezes every
+// question but twelve (lib/demo/frozen), and the store's scoring queries skip
+// frozen rows. A blanket block and a scope are both spend limits; the difference
+// is that one of them leaves the workbench working.
+//
+// The rule that survives: a lever whose cost is UNBOUNDED by anything the
+// publish controls belongs in this table. A lever the frozen set already bounds
+// does not, and adding it back would just be a second limit disagreeing with the
+// first.
 //
 // Live retrieval is deliberately NOT in this table. It ranks in SQL and returns
 // chunk text (vectorStore.ts:277/:319), and the cache probe returns one row with
@@ -44,16 +58,17 @@ export const DEMO_ACTIONS = {
   reconfigure:
     "Re-chunking or switching embedding model re-embeds the whole corpus, which " +
     "the demo doesn't pay for. Everything else on this page is live.",
-  autotune:
-    "Autotune re-embeds every chunk it tries, so it's off in the demo. The " +
-    "results of a real run are on the Eval tab.",
   generate:
     "Question generation needs an answer-model key, which the demo doesn't " +
     "carry. The question bank you're looking at was generated the same way.",
-  rescore:
-    "Re-scoring pulls every chunk vector back out of the database — cheap in " +
-    "dollars, expensive in bandwidth — so it's off in the demo. The scores " +
-    "shown are real.",
+  tryModel:
+    "Trying a chunk under a different embedding model re-embeds it and every " +
+    "chunk it is ranked against, so it's off in the demo. The saved trials show " +
+    "you what a real one measured.",
+  unfreeze:
+    "That question is part of this demo's published measurement, not one of its " +
+    "dials — un-ignoring it would let one visitor move a number the next one " +
+    "reads. The twelve tunable questions are yours to change.",
   override:
     "Per-chunk overrides re-embed the chunk and re-score the questions hanging " +
     "off it — a small version of the two things the demo doesn't pay for. The " +
@@ -61,6 +76,10 @@ export const DEMO_ACTIONS = {
   cluster:
     "Clustering downloads every chunk vector to fit centroids, so it's off in " +
     "the demo. Sign up with your own keys to run it on your corpus.",
+  rank:
+    "Rebuilding a question's ideal ranking embeds a pool of chunks under every " +
+    "model on the list, so it's off in the demo. The graded rankings you can " +
+    "open are real, and the nDCG on the Eval tab is scored against them.",
   appraise:
     "The model comparison replays the whole corpus from cached vectors, which " +
     "the demo doesn't have the bandwidth for. The rankings shown are real.",

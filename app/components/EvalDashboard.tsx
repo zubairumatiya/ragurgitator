@@ -504,6 +504,10 @@ export function EvalDashboard() {
             // A question born this second is in neither set until the next
             // holdout draw, which happens on the next settings save.
             heldOut: false,
+            // Nor in the demo's frozen set: only a publish writes those, and a
+            // question the visitor just wrote is exactly the kind the demo wants
+            // live. This is what makes "add your own question" mean something.
+            frozen: false,
           },
         ],
       };
@@ -1702,15 +1706,20 @@ const QuestionRow = memo(function QuestionRow({
           </span>
         )}
         <span className="flex shrink-0 items-center gap-1.5">
-          {/* Held-out questions are ignores too, so they need their own label —
-              "ignored" would read as a judgement about the question rather than
-              as membership of the test set. */}
+          {/* Three different facts wear the same `ignored` flag, and each needs
+              its own word. "ignored" on a held-out question would read as a
+              judgement about the question rather than as membership of the test
+              set; "ignored" on one of a demo's frozen questions would be worse
+              still, since nobody ignored it — the publish froze it so that one
+              visitor's experiment cannot cost the next one their demo. */}
           {q.ignored && (
             <span
               title={
                 q.heldOut
                   ? "Held out (test set) — excluded from the rates and from autotune, but still scored: this is where the generalization number comes from"
-                  : "Ignored in rates — excluded from Recall/nDCG and autotune targeting"
+                  : q.frozen
+                    ? "Frozen for the demo — its published score is real and is what the \u201cAs published\u201d card averages, but re-scoring and autotune are pointed at the tunable questions instead"
+                    : "Ignored in rates — excluded from Recall/nDCG and autotune targeting"
               }
               className={
                 q.heldOut
@@ -1718,7 +1727,7 @@ const QuestionRow = memo(function QuestionRow({
                   : "rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
               }
             >
-              {q.heldOut ? "holdout" : "ignored"}
+              {q.heldOut ? "holdout" : q.frozen ? "frozen" : "ignored"}
             </span>
           )}
           {!q.ignored &&
@@ -1815,7 +1824,10 @@ const QuestionRow = memo(function QuestionRow({
               >
                 nDCG
               </button>
-              {(q.ignored || failsBar(q, criteria)) && (
+              {/* Not on a frozen question: the route refuses it (DEMO_ACTIONS
+                  .unfreeze) because the frozen set IS the demo's spend limit, and
+                  a button whose only outcome is a 403 is worse than no button. */}
+              {!q.frozen && (q.ignored || failsBar(q, criteria)) && (
                 <button
                   onClick={() => onToggleIgnore(q)}
                   disabled={busy}
@@ -2659,8 +2671,14 @@ function BulkActions({
 // the config's k, and this row would then be labelled with a window it was never
 // measured in.
 //
-// nDCG shows "—" until the truth rankings are cloned (phase 3). An ungraded metric
-// renders as ungraded; it does not borrow recall's number to look complete.
+// nDCG CARRIES ITS OWN DENOMINATOR. Recall and MRR are measured over every scored
+// question; the graded nDCG is measured over the twelve that were published with a
+// truth ranking (phase 3), and the header two lines up says "472 questions". So the
+// count comes off the stored row (0076's ndcg_covered) and sits under the number —
+// an nDCG read as covering 472 is the misreading this whole section exists to stop.
+//
+// Still "—" when the row predates 0076 or nothing was graded: an ungraded metric
+// renders as ungraded, and does not borrow recall's number to look complete.
 function AsPublished({
   run,
   summary,
@@ -2685,7 +2703,16 @@ function AsPublished({
           <Stat label={`MRR@${run.k}`} value={fmtScore(run.mrr)} big />
         )}
         {summary.criteria.ndcg.enabled && (
-          <Stat label={`nDCG@${run.k}`} value={fmtScore(run.ndcg)} big />
+          <Stat
+            label={`nDCG@${run.k}`}
+            value={fmtScore(run.ndcg)}
+            big
+            sub={
+              run.ndcg !== null && run.ndcgCovered !== null
+                ? `${run.ndcgCovered}/${run.questionCount} graded`
+                : undefined
+            }
+          />
         )}
       </div>
     </section>

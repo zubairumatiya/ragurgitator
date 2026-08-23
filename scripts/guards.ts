@@ -374,8 +374,6 @@ const DEMO_GATED: Record<string, string> = {
   "app/api/corpora/[id]/documents/route.ts": "adding a document ingests it",
   "app/api/configs/[id]/populate/route.ts": "populates a config's chunks",
   "app/api/configs/[id]/reconfigure/route.ts": "re-chunks, i.e. re-embeds the corpus",
-  "app/api/eval/autotune/route.ts": "re-embeds every chunk it tries",
-  "app/api/eval/autotune/apply/route.ts": "applies an autotune result, re-embedding",
   "app/api/semantic-cache/key-model/route.ts": "re-embeds the question bank per model",
   "app/api/semantic-cache/pairs/route.ts": "generates + embeds calibration pairs",
   // spends an answer-model key the demo does not carry
@@ -387,16 +385,68 @@ const DEMO_GATED: Record<string, string> = {
   "app/api/clusters/[id]/label/route.ts": "LLM cluster labels",
   // ships VECTORS to the app server — cheap in dollars, ruinous in egress
   "app/api/clusters/run/route.ts": "clusterStore pulls every chunk embedding",
-  "app/api/eval/rescore/route.ts": "chunkEmbeddings() pulls vectors",
-  "app/api/eval/process/route.ts": "chunkEmbeddings() pulls vectors",
-  "app/api/eval/bulk-ndcg/route.ts": "chunkEmbeddings() pulls vectors",
+  "app/api/eval/bulk-ndcg/route.ts": "aggregate ranking embeds a pool under every model",
   "app/api/eval/chunks/[chunkId]/try-model/route.ts": "embeds a chunk under another model",
+  "app/api/eval/questions/[id]/ranking/route.ts": "aggregate ranking embeds a pool under every model",
   "app/api/eval/chunks/[chunkId]/override/route.ts": "re-embeds a chunk, then rescores it",
   // spends later, when the workspace no longer exists
   "app/api/batch/submit/route.ts": "provider batch submission",
-  // the other door into three of the above
-  "app/api/jobs/route.ts": "background launch of rescore / bulk_ndcg / autotune",
+  // guards the SCOPE the two ungated levers rely on — see sweepDemoScope
+  "app/api/eval/questions/[id]/ignore/route.ts": "un-ignoring thaws a frozen question",
+  // the other door into one of the above
+  "app/api/jobs/route.ts": "background launch of bulk_ndcg",
 };
+
+// 6b. The frozen scope is still in the two queries that spend on its behalf.
+//
+// Re-score and autotune are NOT in the table above any more: phase 4 of
+// docs/demo-analytics-plan.md scopes them instead of blocking them, and the whole
+// of that scope is two `not exists` clauses in evalStore. Delete them — or
+// "simplify" the shared fragment away — and nothing fails: a guest just quietly
+// gets a re-score button pointed at 472 questions and an autotune with 460
+// candidates. That is the same erosion sweep 6 exists to catch, one indirection
+// further in, so it gets the same treatment.
+const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
+  {
+    file: "lib/rag/evalStore.ts",
+    needles: ["const notFrozen", "${notFrozen()}"],
+    why: "the frozen-set scope on questionsNeedingScoring + allLabeledQuestions",
+  },
+  {
+    file: "lib/demo/clone.ts",
+    needles: ["freezeAllBut", "FROZEN_REASON"],
+    why: "the publish hop that writes the frozen set in the first place",
+  },
+];
+
+function sweepDemoScope() {
+  console.log("\n6b. the demo's frozen scope\n");
+  for (const { file, needles, why } of DEMO_SCOPED) {
+    let source: string;
+    try {
+      source = read(join(ROOT, file));
+    } catch {
+      fail(`${file} — named in DEMO_SCOPED but the file does not exist`);
+      continue;
+    }
+    const missing = needles.filter((n) => !source.includes(n));
+    if (missing.length > 0) {
+      fail(
+        `${file} — lost ${missing.join(", ")}, i.e. ${why}. Re-score and autotune ` +
+          `are ungated for a guest BECAUSE of this; without it they are unbounded.`,
+      );
+    }
+  }
+  // The two ungated routes, asserted from the other end: if one of them grows a
+  // gate back, the scope stopped being trusted and this file should say why.
+  const expectedOpen = ["app/api/eval/rescore/route.ts", "app/api/eval/process/route.ts"];
+  for (const path of expectedOpen) {
+    if (/assertDemoAllows\(/.test(read(join(ROOT, path)))) {
+      fail(`${path} — gated again, but still relied on as SCOPED in lib/demo/policy.ts`);
+    }
+  }
+  console.log(`   ${DEMO_SCOPED.length} scope sites intact, ${expectedOpen.length} routes open`);
+}
 
 function sweepDemoGates() {
   console.log("\n6. spending routes behind the demo gate\n");
@@ -421,12 +471,13 @@ sweepApiGates();
 sweepBaselineReads();
 sweepTransformersBarrel();
 sweepDemoGates();
+sweepDemoScope();
 
 console.log(
   failures === 0
     ? "\nOK — keys stay wrapped, scopes are entered, every handler is gated, " +
-        "baseline rows stay out of live reads, no guest can spend, and the "
-        + "transformers barrel is unimported."
+        "baseline rows stay out of live reads, no guest can spend outside the "
+        + "demo's frozen scope, and the transformers barrel is unimported."
     : `\nFAILED — ${failures} violation(s).`,
 );
 if (failures) process.exitCode = 1;

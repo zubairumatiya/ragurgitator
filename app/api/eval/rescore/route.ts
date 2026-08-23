@@ -17,7 +17,6 @@ import { runStepStreamed } from "@/lib/jobs/stream";
 import { rescoreStep } from "@/lib/jobs/steps/rescore";
 import type { EvalEvent } from "@/lib/rag/eval";
 import { getSummary } from "@/lib/rag/evalStore";
-import { assertDemoAllows } from "@/lib/demo/policy";
 
 export async function POST(request: Request) {
   // Optional body { documentIds } (or legacy { documentId }) — the bulk-actions
@@ -32,8 +31,10 @@ export async function POST(request: Request) {
       ? [raw.documentId]
       : undefined;
 
+  // NO DEMO GATE, deliberately — see /api/eval/process. allLabeledQuestions
+  // excludes the frozen set, so "re-score all" on a guest's workspace is twelve
+  // questions (~150 KB of retrieved chunk text), not 472 (~5.7 MB).
   return withRequestConfig(request, async () => {
-    await assertDemoAllows("rescore");
     return ndjsonStream<EvalEvent>(async (send, shouldStop) => {
       try {
         const run = await runStepStreamed(

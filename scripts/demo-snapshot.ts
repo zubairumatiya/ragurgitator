@@ -28,6 +28,7 @@
 import { privilegedSql } from "../lib/db";
 import { createSnapshotAccount } from "../lib/demo/admin";
 import { cloneSeedWorkspace } from "../lib/demo/clone";
+import { ndcg } from "../lib/rag/evalMetrics";
 import { answerFingerprint } from "../lib/rag/semanticCacheCore";
 import { chunksTable, modelDimension } from "../lib/rag/vectorStore";
 
@@ -175,6 +176,201 @@ async function verifyFingerprints(userId: string): Promise<boolean> {
   return ok;
 }
 
+// --- THE TWELVE ---------------------------------------------------------------
+//
+// Which questions get a graded-nDCG drilldown in the published demo, and — once
+// phase 4 lands — which ones a visitor may re-score and autotune.
+//
+// SELECTED BY QUERY, NOT BY HAND, so a re-publish after the master has moved
+// re-rolls the set against the corpus as it now scores rather than pinning twelve
+// uuids that quietly stopped being interesting. The trade is that a re-publish can
+// silently produce a duller set, which is what assertSpread below is for.
+//
+// THE COMPOSITION IS THE WHOLE POINT. Autotune only has work to do on questions
+// that are FAILING: twelve rank-1 hits give the demo's most interesting button
+// nothing to search for. So the quota is weighted at the hard tail of the
+// distribution the demo actually publishes (measured 2026-08-22, the no-override
+// generation): 355 at rank 1, 62 at 2, 16 at 3, 11 at 4, none at 5, 28 missed.
+//
+// A couple of comfortable questions are in the set deliberately — a drilldown
+// showing what a rank-1 ideal ordering looks like is what makes the failures
+// legible as failures.
+const QUOTAS: { tier: number; n: number; label: string }[] = [
+  { tier: 99, n: 4, label: "missed" }, // 99 = not found in the top k
+  { tier: 4, n: 3, label: "rank 4" },
+  { tier: 3, n: 3, label: "rank 3" },
+  { tier: 2, n: 1, label: "rank 2" },
+  { tier: 1, n: 1, label: "rank 1" },
+];
+
+type Tunable = { id: string; tier: number; chunk: string; document: string };
+
+// ONE QUESTION PER SOURCE CHUNK. Autotune reshapes CHUNKS, so twelve questions
+// hanging off one chunk is one candidate search wearing twelve hats — the plan's
+// "several distinct chunks" requirement, enforced rather than hoped for.
+//
+// Ordered by md5(id) inside every bucket, not by id or created_at: those correlate
+// with ingest order, which correlates with document, and the top of the list would
+// be four questions from whichever file was uploaded first. md5 is stable, so the
+// same corpus re-rolls the same twelve.
+async function selectTunable(configId: string): Promise<Tunable[]> {
+  // The quota table, inlined as a CASE rather than joined in as a VALUES list, so
+  // QUOTAS above stays the single place the composition is written down.
+  const quotaCase =
+    QUOTAS.map((q) => `when ${q.tier} then ${q.n}`).join(" ") + " else 0";
+  return privilegedSql.unsafe<Tunable[]>(
+    `with latest as (
+       select distinct on (r.eval_label_id, r.k)
+              r.eval_question_id as id,
+              coalesce(r.found_rank, 99) as tier,
+              l.source_chunk_id::text as chunk,
+              q.document_id::text as document
+         from eval_results r
+         join eval_labels l on l.id = r.eval_label_id
+         join document_embeddings de on de.id = l.document_embedding_id
+         join eval_questions q on q.id = r.eval_question_id
+        where de.config_id = $1
+          and r.retrieval_state = 'baseline' and not r.is_baseline
+          -- Ungradable without one: this selection decides which truth rows get
+          -- cloned, and a question with none cannot supply one.
+          and exists (select 1 from eval_rankings er
+                       join document_embeddings de2 on de2.id = er.document_embedding_id
+                      where er.eval_question_id = q.id and er.is_truth
+                        and de2.config_id = $1)
+          -- Ignored on the master (0014), holdout rows (0061) included: the
+          -- operator took these out of the live aggregate, so they are not the
+          -- questions to hand a visitor.
+          and not exists (select 1 from config_question_ignores i
+                           where i.config_id = $1 and i.eval_question_id = q.id)
+        order by r.eval_label_id, r.k, r.scored_at desc
+     ),
+     per_chunk as (
+       select distinct on (chunk) * from latest order by chunk, md5(id::text)
+     ),
+     ranked as (
+       select *, row_number() over (partition by tier order by md5(id::text)) as rn
+         from per_chunk
+     )
+     select id::text as id, tier::int as tier, chunk, document
+       from ranked
+      where rn <= case tier ${quotaCase} end
+      order by tier desc, md5(id::text)`,
+    [configId] as never[],
+  );
+}
+
+// REFUSE A DULL BUILD. The set drifts on purpose, so the failure mode is not a
+// crash — it is a publish that quietly hands every visitor twelve rank-1 questions,
+// an autotune button with nothing to search, and a drilldown that shows twelve
+// identical perfect orderings. That is a worse demo than the one this replaces, and
+// it would ship without a single error.
+//
+// The bars are deliberately below the quota: the quota is what we ask for, this is
+// what the demo cannot do without.
+function assertSpread(picked: Tunable[]): void {
+  const misses = picked.filter((p) => p.tier === 99).length;
+  const tail = picked.filter((p) => p.tier >= 3).length; // rank 3+ or missed
+  const easy = picked.filter((p) => p.tier === 1).length;
+  const chunks = new Set(picked.map((p) => p.chunk)).size;
+  const docs = new Set(picked.map((p) => p.document)).size;
+
+  const problems: string[] = [];
+  if (picked.length < 8) problems.push(`only ${picked.length} tunable questions (want 12)`);
+  if (misses < 2) problems.push(`only ${misses} missed question(s) — autotune needs failures`);
+  if (tail < 5) problems.push(`only ${tail} in the hard tail (rank 3+ or missed)`);
+  if (easy < 1) problems.push("no rank-1 question — nothing to show a working retrieval against");
+  if (chunks < 8) problems.push(`only ${chunks} distinct chunks — autotune reshapes chunks`);
+  if (docs < 2) problems.push(`only ${docs} document(s)`);
+  if (problems.length > 0) {
+    die(
+      `the tunable set has no spread, so the published demo would have a dead autotune button:\n` +
+        problems.map((p) => `    - ${p}`).join("\n") +
+        `\n\n  The master's scores have moved. Re-check the found_rank distribution for the\n` +
+        `  config being published before forcing this through.`,
+    );
+  }
+}
+
+// MAKE THE AUTOTUNE BUTTON ABLE TO FIND ITS TARGETS.
+//
+// Phase 4 hands a guest a real autotune run over the twelve. Two settings on the
+// published config can quietly make that run a no-op, and both are settings the
+// operator set for their OWN work on the master, months ago, for reasons that
+// have nothing to do with the demo:
+//
+//   autotune_chunk_scope (0025) — a non-null list restricts a run to those chunks.
+//     The master's is a two-chunk experiment. The twelve deliberately span eight
+//     or more chunks (selectTunable picks one question per chunk), so a scope set
+//     for something else will almost never intersect them, and the button would
+//     search nothing and report success. CLEARED, because the frozen set is now
+//     the scope and two mechanisms narrowing the same run is one too many.
+//
+//   the min-rates — prepareAutotune refuses outright ("Set a min-rate on an
+//     enabled metric in Settings") when no enabled metric carries one. That is a
+//     legible refusal rather than a silent no-op, so it is reported, not fixed:
+//     which bar the demo should tune against is an editorial choice, and guessing
+//     one here would publish a number nobody chose.
+//
+// Also reported: a holdout draw left enabled would write its own ignores over the
+// twelve on the guest's first settings save, shrinking the live set again for a
+// measurement the demo has no room to take.
+async function armAutotune(snapshot: string): Promise<void> {
+  const [cfg] = await privilegedSql<
+    {
+      id: string;
+      autotune_chunk_scope: string[] | null;
+      recall_enabled: boolean;
+      recall_min_rate: number | null;
+      mrr_enabled: boolean;
+      mrr_min_rate: number | null;
+      ndcg_enabled: boolean;
+      ndcg_min_rate: number | null;
+      autotune_holdout_enabled: boolean;
+    }[]
+  >`
+    select id, autotune_chunk_scope, recall_enabled, recall_min_rate, mrr_enabled,
+           mrr_min_rate, ndcg_enabled, ndcg_min_rate, autotune_holdout_enabled
+      from configs where user_id = ${snapshot}
+  `;
+  if (!cfg) throw new Error("arm: the snapshot holds no config after publishing");
+
+  if (cfg.autotune_chunk_scope !== null) {
+    await privilegedSql`
+      update configs set autotune_chunk_scope = null where id = ${cfg.id}
+    `;
+    console.log(
+      `cleared the published config's autotune chunk scope ` +
+        `(${cfg.autotune_chunk_scope.length} chunk(s) — the master's, not the demo's)`,
+    );
+  }
+
+  const bars = [
+    cfg.recall_enabled && cfg.recall_min_rate !== null ? "recall" : null,
+    cfg.mrr_enabled && cfg.mrr_min_rate !== null ? "MRR" : null,
+    // Gradable for the twelve and only the twelve: nDCG needs an is_truth
+    // ranking, which is exactly what step 4c copied. No LLM is involved — the
+    // ideal ordering is already stored.
+    cfg.ndcg_enabled && cfg.ndcg_min_rate !== null ? "nDCG" : null,
+  ].filter(Boolean);
+  if (bars.length === 0) {
+    console.log(
+      `⚠ no enabled metric on the published config carries a min-rate, so a guest's\n` +
+        `  autotune will refuse before it searches. Set one in Settings on the master\n` +
+        `  and re-publish.\n`,
+    );
+  } else {
+    console.log(`autotune targets: ${bars.join(", ")}`);
+  }
+
+  if (cfg.autotune_holdout_enabled) {
+    console.log(
+      `⚠ the published config has the holdout draw enabled. It writes its own ignores,\n` +
+        `  so a guest's first settings save would hold back part of an already tiny\n` +
+        `  tunable set. Turn it off on the master and re-publish.\n`,
+    );
+  }
+}
+
 // THE "AS PUBLISHED" NUMBER, measured over what was actually published.
 //
 // The analytics plan assumed this card could just read the newest `eval_runs` row,
@@ -194,9 +390,16 @@ async function verifyFingerprints(userId: string): Promise<boolean> {
 // wholesale rather than sitting on top of it — a run panel offering a 99.2% result
 // the guest can never reproduce is the same lie in a smaller font.
 //
-// nDCG stays null (renders "—"): it is graded against eval_rankings truth rows,
-// which are Phase 3 and are not cloned yet. A null is honest; a recall-shaped
-// number in the nDCG slot would not be.
+// nDCG IS MEASURED FROM THE SNAPSHOT'S OWN ROWS, AFTER THE COPY — not from the
+// master's. That is a deliberate second job: the graded score is
+// ndcg(chunk_ids, retrieved_ids, k) over two uuid arrays that clone.ts rewrote
+// element-wise into a fresh id space (steps 4b and 4c). Compute it here and a
+// remap that silently failed shows up as a frozen nDCG of 0.000 in the publish
+// output, in front of the operator, rather than as a quietly flat metric on a
+// visitor's dashboard.
+//
+// Its denominator is the TWELVE, not the 472 beside it — see 0076 and the
+// ndcg_covered column, which is what stops the card claiming otherwise.
 async function freezePublishedRun(snapshot: string, copied: number): Promise<void> {
   const [cfg] = await privilegedSql<
     { id: string; base_model: string; chunk_size: number; chunk_overlap: number }[]
@@ -229,23 +432,60 @@ async function freezePublishedRun(snapshot: string, copied: number): Promise<voi
     return;
   }
 
+  // The graded pairs, as published. Both arrays are small (k ids and a 30-chunk
+  // ideal), and there are twelve of them, so this is the one place in a publish
+  // that reads row bodies back — a few KB against clone.ts's zero-egress rule,
+  // which is a rule about the per-guest path, not about the operator's own run.
+  const graded = await privilegedSql<{ ideal: string[]; retrieved: string[] }[]>`
+    select rk.chunk_ids as ideal, res.retrieved_ids as retrieved
+      from eval_rankings rk
+      join eval_questions q on q.id = rk.eval_question_id
+      join documents d on d.id = q.document_id
+      join eval_labels l on l.eval_question_id = q.id
+                        and l.document_embedding_id = rk.document_embedding_id
+      join eval_results res on res.eval_label_id = l.id and res.k = ${agg.k}
+     where d.user_id = ${snapshot} and rk.is_truth
+  `;
+  // Same call evalStore's per-question nDCG makes, at the run's own k. Every
+  // metric k on this config is unset and therefore top_k (A1), so the run's
+  // single k labels all three cards honestly; the day nDCG gets its own k, this
+  // row can no longer carry all three and the card has to split.
+  // ndcg() returns null for an ideal with no gain — an empty chunk_ids, i.e. a
+  // truth row whose ids all failed to map. Dropped rather than counted as zero:
+  // that question is UNGRADED, and averaging a null in as 0 would blame the
+  // corpus for a copy that did not happen. The count below is what says so.
+  const scores = graded
+    .map((g) => ndcg(g.ideal, g.retrieved ?? [], agg.k))
+    .filter((v): v is number => v !== null);
+  const meanNdcg =
+    scores.length > 0 ? scores.reduce((a, b) => a + b, 0) / scores.length : null;
+
   await privilegedSql.begin(async (tx) => {
     await tx`delete from eval_runs where config_id = ${cfg.id}`;
     await tx`
       insert into eval_runs
-        (config_id, model, chunk_size, chunk_overlap, k, question_count, hit_count, mrr, ndcg, notes)
+        (config_id, model, chunk_size, chunk_overlap, k, question_count, hit_count, mrr, ndcg,
+         ndcg_covered, notes)
       values
         (${cfg.id}, ${cfg.base_model}, ${cfg.chunk_size}, ${cfg.chunk_overlap}, ${agg.k},
-         ${agg.questions}, ${agg.hits}, ${agg.mrr}, null, 'as published')
+         ${agg.questions}, ${agg.hits}, ${agg.mrr}, ${meanNdcg},
+         ${scores.length > 0 ? scores.length : null}, 'as published')
     `;
   });
 
   const recall = ((100 * agg.hits) / agg.questions).toFixed(1);
   console.log(
     `frozen baseline: ${agg.hits}/${agg.questions} at k=${agg.k} — recall ${recall}%, ` +
-      `MRR ${agg.mrr?.toFixed(3) ?? "—"}\n` +
+      `MRR ${agg.mrr?.toFixed(3) ?? "—"}, ` +
+      `nDCG ${meanNdcg?.toFixed(3) ?? "—"} over ${scores.length} graded\n` +
       `  (replaced ${copied} run snapshot${copied === 1 ? "" : "s"} copied from the master)\n`,
   );
+  if (scores.length > 0 && meanNdcg === 0) {
+    console.log(
+      "⚠ every graded question scored nDCG 0. That is not a bad corpus, it is a broken\n" +
+        "  id remap: the ideal order and the retrieved order are in different id spaces.\n",
+    );
+  }
 }
 
 async function main() {
@@ -305,6 +545,7 @@ async function main() {
 
   const from = await sourceCensus(configId, cfg.base_model);
   const to = await destCensus(snapshot);
+  const tunable = await selectTunable(configId);
 
   console.log(`\nmaster    ${master}`);
   console.log(`snapshot  ${snapshot}  (${profile.email})\n`);
@@ -315,6 +556,22 @@ async function main() {
         from.labeled === from.questions ? "" : ` (of ${from.questions} — the rest carry no label here)`
       }, ${from.scores} published scores, ${from.cached} cached answers`,
   );
+  // The composition, not just the count: twelve is the uninteresting half of this
+  // number and the spread is the half that decides whether the demo has a working
+  // autotune button.
+  const tiers = QUOTAS.map((q) => {
+    const n = tunable.filter((t) => t.tier === q.tier).length;
+    return n > 0 ? `${n} ${q.label}` : null;
+  }).filter(Boolean);
+  console.log(
+    `  ${tunable.length} of them graded for nDCG (${tiers.join(", ")}), over ` +
+      `${new Set(tunable.map((t) => t.chunk)).size} chunks in ` +
+      `${new Set(tunable.map((t) => t.document)).size} documents`,
+  );
+  // Before the dry-run exit, so an operator sees the refusal without having to
+  // type --yes to earn it.
+  assertSpread(tunable);
+
   console.log(`\nreplacing the snapshot's current build`);
   console.log(
     `  ${to.configs} configs, ${to.documents} documents, ${to.chunks} chunks, ` +
@@ -333,16 +590,42 @@ async function main() {
   const summary = await cloneSeedWorkspace(master, snapshot, {
     onlyConfigId: configId,
     replaceDestination: true,
+    tunableQuestionIds: tunable.map((t) => t.id),
   });
 
   console.log("published:");
   console.log(
     `  ${summary.configs} config, ${summary.documents} documents, ${summary.chunks} chunks, ` +
       `${summary.questions} questions, ${summary.results} scores, ` +
+      `${summary.rankings} graded rankings, ${summary.frozen} frozen, ` +
       `${summary.cachedAnswers} cached answers\n`,
   );
+  // The frozen set is the complement, so this is an equation and not a guess: a
+  // published question is either tunable or frozen. A mismatch means step 4d's
+  // exclusion missed — and the failure it is guarding against is the silent
+  // direction, where nothing froze and every guest gets a re-score button
+  // pointed at all 472 questions.
+  if (summary.frozen !== summary.questions - summary.rankings) {
+    console.log(
+      `⚠ ${summary.questions} questions published, ${summary.rankings} tunable, but ` +
+        `${summary.frozen} frozen — expected ${summary.questions - summary.rankings}.\n` +
+        `  A guest's re-score and autotune are scoped by the frozen rows, so this is\n` +
+        `  the demo's spend limit disagreeing with itself. Do not leave it.\n`,
+    );
+  }
+  // A silent shortfall here means the clone dropped a selected question — its
+  // label did not resolve under the published config, say — and the demo ships
+  // with a smaller tunable set than the spread assertion just approved.
+  if (summary.rankings !== tunable.length) {
+    console.log(
+      `⚠ selected ${tunable.length} questions to grade but published ${summary.rankings} ` +
+        `rankings.\n  The clone dropped some — check that every one of them is labeled ` +
+        `under this config.\n`,
+    );
+  }
 
   await freezePublishedRun(snapshot, summary.runs);
+  await armAutotune(snapshot);
 
   const ok = await verifyFingerprints(snapshot);
   console.log();

@@ -115,6 +115,7 @@ export const rescoreStep: JobStep<RescoreScope, RescoreCursor, RescoreResult, Ev
         hitCount: summary.hits,
         mrr: summary.mrr,
         ndcg: summary.ndcg,
+        ndcgCovered: summary.ndcgCovered,
         k: summary.recallK,
       });
     }

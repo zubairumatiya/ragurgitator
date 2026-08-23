@@ -100,7 +100,7 @@ export async function POST(
   const { poolChunkIds, save } = body.data;
 
   return withRequestConfig(request, async () => {
-    await assertDemoAllows("rescore");
+    await assertDemoAllows("tryModel");
     try {
       const out = await runModelTrial(chunkId, toVariation(body.data), poolChunkIds, save);
       if (!out) {

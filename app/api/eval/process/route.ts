@@ -12,11 +12,14 @@ import { streamError } from "@/lib/http/missingKeyServer";
 import { scorePendingQuestions, type EvalEvent } from "@/lib/rag/eval";
 import { ndjsonStream } from "@/lib/http/ndjson";
 import { withRequestConfig } from "@/lib/http/configScope";
-import { assertDemoAllows } from "@/lib/demo/policy";
 
 export async function POST(request: Request) {
+  // NO DEMO GATE, deliberately. What this costs is one retrieval per PENDING
+  // question, and for a guest that set is scoped to the twelve tunable questions
+  // by the frozen rows a publish writes (lib/demo/frozen) — questionsNeedingScoring
+  // skips the rest. A guest's own hand-written question is not frozen, so this is
+  // the button that makes "add a question" mean something.
   return withRequestConfig(request, async () => {
-    await assertDemoAllows("rescore");
     return ndjsonStream<EvalEvent>(async (send, shouldStop) => {
       try {
         await scorePendingQuestions(send, shouldStop);

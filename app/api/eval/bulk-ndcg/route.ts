@@ -38,7 +38,11 @@ export async function POST(request: Request) {
   const { documentIds, rebuild } = body.data;
 
   return withRequestConfig(request, async () => {
-    await assertDemoAllows("rescore");
+    // `rank`, not the scoring gate: what this spends is the cross-model aggregate
+    // ranking builder — the same pool-embedded-under-every-model work the
+    // per-question Rank panel does, in bulk. Scoring is scoped for a guest now;
+    // this is not, and it is the expensive half anyway.
+    await assertDemoAllows("rank");
     return ndjsonStream<EvalEvent>(async (send, shouldStop) => {
       try {
         const run = await runStepStreamed(

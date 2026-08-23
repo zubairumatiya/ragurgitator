@@ -35,6 +35,7 @@ import "server-only";
 import type postgres from "postgres";
 
 import { privilegedSql } from "@/lib/db";
+import { FROZEN_REASON } from "@/lib/demo/frozen";
 import { answerFingerprint } from "@/lib/rag/semanticCacheCore";
 import { chunksTable, modelDimension } from "@/lib/rag/vectorStore";
 
@@ -170,6 +171,8 @@ export type CloneSummary = {
   questions: number;
   results: number;
   runs: number;
+  rankings: number; // graded-nDCG truth rows — the size of the drilldown set
+  frozen: number; // questions a visitor may look at but not move (step 4d)
   cachedAnswers: number;
 };
 
@@ -190,7 +193,53 @@ export type CloneOptions = {
   // re-publishing replaces the last build rather than stacking a second copy
   // beside it — and so a publish that throws leaves the previous build serving.
   replaceDestination?: boolean;
+  // THE TWELVE — the questions a visitor may actually put their hands on. The
+  // publisher passes the set it selected; a GUEST clone passes nothing and copies
+  // what the snapshot already says, which IS that set.
+  //
+  // Two things hang off it, and they are the same fact seen from two sides:
+  //   step 4c  these get a graded-nDCG truth ranking, so they are the ones whose
+  //            drilldown shows an ideal ordering rather than a grey chip;
+  //   step 4d  every OTHER question is frozen, so they are the ones a re-score
+  //            and an autotune are allowed to move (phase 4).
+  //
+  // Undefined and [] mean opposite things on purpose: undefined is "copy what is
+  // there", [] is "copy none". A publish that selected nothing must publish
+  // nothing rather than silently falling back to all 472 — and, since 4d is the
+  // complement, [] freezes the whole bank rather than thawing it.
+  tunableQuestionIds?: string[];
 };
+
+// Freeze every question in the DESTINATION account except the ones the publisher
+// selected — step 4d's publish half.
+//
+// Runs entirely in the new id space: `tunable` holds the MASTER's ids, so the
+// exclusion goes through _map_question rather than comparing them to the ids
+// that were just minted. Getting that backwards would freeze nothing (no new id
+// is ever equal to an old one), which is a silent failure — the publish census
+// would report 0 frozen and the build would ship with all 472 live.
+//
+// `on conflict do nothing` because a re-publish into a destination that step 0
+// did not wipe would otherwise abort on the previous build's rows.
+async function freezeAllBut(tx: Tx, guestId: string, tunable: string[]): Promise<number> {
+  const result = await tx.unsafe(
+    `insert into config_question_ignores (config_id, eval_question_id, reason)
+     select distinct de.config_id, q.id, $3
+       from eval_questions q
+       join eval_labels l on l.eval_question_id = q.id
+       join document_embeddings de on de.id = l.document_embedding_id
+       join _map_config mc on mc.new_id = de.config_id
+       join documents d on d.id = q.document_id
+      where d.user_id = $1
+        and not exists (
+          select 1 from _map_question mq
+           where mq.new_id = q.id and mq.old_id = any($2::uuid[])
+        )
+     on conflict (config_id, eval_question_id) do nothing`,
+    [guestId, tunable, FROZEN_REASON] as never[],
+  );
+  return result.count ?? 0;
+}
 
 // Copy the seed account's workspace into `guestId`, in ONE transaction.
 //
@@ -518,6 +567,110 @@ export async function cloneSeedWorkspace(
       params: [],
     });
 
+    // --- 4c. the graded-nDCG truth rankings ----------------------------------
+    //
+    // WHY ONLY A HANDFUL, when the other 4b tables are copied whole.
+    //
+    // Per-question nDCG is ndcg(idealOrder, retrieved_ids, k), and idealOrder is
+    // this question's is_truth eval_rankings row (evalStore's getTruthOrder). No
+    // truth row means null means the grey "ungraded" chip the dashboard already
+    // renders — so the SIZE OF THE GRADED SET IS EXACTLY THE SIZE OF THIS COPY,
+    // with no UI branch anywhere.
+    //
+    // The master holds one for all 472 questions and they are 1.26 MB — three
+    // times the whole rest of the analytics copy, to grade 460 questions a guest
+    // cannot tune, re-rank or re-score. Twelve is 33 KB. The asymmetry is the
+    // demo's point rather than a corner cut: the graded drilldown marks the part
+    // a visitor can put their hands on (docs/demo-analytics-plan.md, phase 3).
+    //
+    // ONLY is_truth. The master's workbench also holds llm_pool / llm_rerank /
+    // manual alternatives for some questions; those are candidates in a panel
+    // whose Rank buttons a guest cannot press, and their `details.signature`
+    // freshness is computed against an aggregate that may not have come along.
+    const rankings = await copyRows(tx, {
+      table: "eval_rankings",
+      joins: `join _map_question mq on mq.old_id = s.eval_question_id
+              join _map_de mde on mde.old_id = s.document_embedding_id`,
+      where: `s.is_truth and ($1::uuid[] is null or s.eval_question_id = any($1::uuid[]))`,
+      overrides: {
+        eval_question_id: "mq.new_id",
+        document_embedding_id: "mde.new_id",
+        // The ideal order, remapped the same way step 4b remaps retrieved_ids and
+        // for the same reason: these are CHUNK ids and the clone minted new ones.
+        // Left join + ordinality so an unmappable id becomes a null holding its
+        // place — dropping it would promote every chunk below it in the ideal
+        // order, which is a different ground truth, silently. (Measured
+        // 2026-08-23: all 14,160 ids across the master's 472 rows resolve.)
+        chunk_ids: `coalesce(
+          (select array_agg(mch.new_id order by u.ord)
+             from unnest(s.chunk_ids) with ordinality u(old_id, ord)
+             left join _map_chunk mch on mch.old_id = u.old_id),
+          '{}'::uuid[])`,
+        // details.perModelRanks is KEYED BY CHUNK ID — it is what draws the
+        // "[4-lite:14 4:12 …]" provenance beside each row of the drilldown
+        // (ranking.ts resolve(), NdcgRankingPanel ChunkRow). Left alone it would
+        // key on the master's ids, every lookup would miss, and the annotation
+        // would just not appear: a degradation with no error and no symptom but
+        // an emptier panel. Rebuilt here against the new ids.
+        //
+        // The inner join DROPS a rank for a chunk that did not map, which is
+        // right — there is no row to draw it beside. `? 'perModelRanks'` guards
+        // the rankings that have none (llm/manual kinds today, and any future
+        // aggregate written without provenance): jsonb_set would otherwise CREATE
+        // the key, inventing an empty object where the code expects undefined.
+        details: `case when s.details ? 'perModelRanks'
+                  then jsonb_set(s.details, '{perModelRanks}', coalesce(
+                    (select jsonb_object_agg(mch.new_id::text, e.value)
+                       from jsonb_each(s.details->'perModelRanks') e
+                       join _map_chunk mch on mch.old_id = e.key::uuid),
+                    '{}'::jsonb))
+                  else s.details end`,
+      },
+      omit: ["id"],
+      // The ONE copyRows call that takes a parameter: everything else in this
+      // file is scoped by a temp-table join. Postgres rejects a bind that
+      // supplies more parameters than the statement names, so the two user ids
+      // that other steps carry implicitly are not passed here.
+      params: [opts.tunableQuestionIds ?? null],
+    });
+
+    // --- 4d. the frozen set --------------------------------------------------
+    //
+    // THE COMPLEMENT OF THE TWELVE, written down as data so the app never has to
+    // ask "is this a guest?" to know what a guest may move (lib/demo/frozen).
+    //
+    // Phase 4 opens re-scoring and autotune, which were blanket-blocked because
+    // the honest objection to them was SIZE, not principle: a re-score retrieves
+    // a top-k of chunk text per question, and ~460 questions of that is megabytes
+    // per click on a workspace that exists for two hours. Twelve is ~150 KB and
+    // an autotune over twelve is dozens of chunk embeds against a 200,000-token
+    // budget. So the lever is not turned off, it is pointed at a set the demo can
+    // afford — and the set is the SAME twelve that step 4c graded, so the part a
+    // visitor can tune is exactly the part whose nDCG they can see move.
+    //
+    // WHY THE COMPLEMENT RATHER THAN A WHITELIST. `config_question_ignores`
+    // already carries the three properties the frozen set needs — out of the
+    // rates, out of autotune targeting, still rendered and still scored — and it
+    // is the table autotune ALREADY consults. Writing a whitelist instead would
+    // mean teaching every one of those readers about a second table, and the
+    // failure mode of forgetting one is a guest spending on 460 questions.
+    //
+    // ON THE PUBLISH HOP this is synthesised, because the master's own ignores
+    // are a different fact (a human's "ignore in rates", or 0061's holdout draw)
+    // and copying them into a published build would relabel the operator's
+    // bookkeeping as the demo's scope. ON THE GUEST HOP it is copied, because by
+    // then the snapshot's rows ARE the scope.
+    const frozen = opts.tunableQuestionIds
+      ? await freezeAllBut(tx, guestId, opts.tunableQuestionIds)
+      : await copyRows(tx, {
+          table: "config_question_ignores",
+          joins: `join _map_config mc on mc.old_id = s.config_id
+                  join _map_question mq on mq.old_id = s.eval_question_id`,
+          where: `true`,
+          overrides: { config_id: "mc.new_id", eval_question_id: "mq.new_id" },
+          params: [],
+        });
+
     // --- 5. the pre-warmed answers ------------------------------------------
     // The INNER join on the config map drops rows whose config_id is null. That
     // is deliberate: their fingerprint could not be rewritten in step 6 (there
@@ -618,6 +771,8 @@ export async function cloneSeedWorkspace(
       questions,
       results,
       runs,
+      rankings,
+      frozen,
       cachedAnswers,
     };
   }) as Promise<CloneSummary>;
