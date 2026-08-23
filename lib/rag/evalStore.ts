@@ -7,6 +7,7 @@
 // without re-authoring.
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql, toJsonb } from "@/lib/db";
+import { isGuest } from "@/lib/demo/guest";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";
 import { reciprocalRank, ndcg } from "@/lib/rag/evalMetrics";
 import { reduceRates } from "@/lib/rag/evalRates";
@@ -236,6 +237,18 @@ export type EvalSummary = {
   perDocument: DocumentBreakdown[];
   questions: QuestionDetail[];
   runs: RunSnapshot[];
+  // THE DEMO'S FROZEN HEADLINE — non-null only for a guest, and only once a build
+  // has been published (scripts/demo-snapshot.ts writes exactly one eval_runs row).
+  //
+  // A guest's workspace is a copy of a published build, so the ordinary aggregates
+  // above are "what the numbers are NOW, after whatever you have done to them" and
+  // this is "what they were when this demo was published". The Eval tab shows both,
+  // which is the only way a visitor can tell their own tuning apart from the corpus.
+  //
+  // Deliberately NOT called `baseline`: that name is taken twice over in this file
+  // already — 0057's no-overrides shadow leg (the `baseline` field above) and
+  // 0074's holdout split. This is a third and different thing.
+  asPublished: RunSnapshot | null;
   // How many autotune runs of this config recorded a held-out set (0074). The
   // gate for the /eval "Held-out set" section, which must not appear at all for a
   // config that has never taken the measurement — and must appear for one whose
@@ -2506,6 +2519,7 @@ export async function getSummary(): Promise<EvalSummary> {
     perDocument: [],
     questions: [],
     runs: [],
+    asPublished: null,
     holdoutRuns: 0,
     pendingChunks: 0,
     pendingScoring: 0,
@@ -2801,6 +2815,16 @@ export async function getSummary(): Promise<EvalSummary> {
     }
   }
 
+  const runs: RunSnapshot[] = runRows.map((r) => ({
+    id: r.id,
+    k: r.k,
+    questionCount: r.question_count,
+    hitCount: r.hit_count,
+    mrr: r.mrr,
+    ndcg: r.ndcg,
+    createdAt: r.created_at.getTime(),
+  }));
+
   return {
     k: recallK,
     recallK,
@@ -2820,15 +2844,12 @@ export async function getSummary(): Promise<EvalSummary> {
     baseline,
     perDocument: [...byDoc.values()],
     questions,
-    runs: runRows.map((r) => ({
-      id: r.id,
-      k: r.k,
-      questionCount: r.question_count,
-      hitCount: r.hit_count,
-      mrr: r.mrr,
-      ndcg: r.ndcg,
-      createdAt: r.created_at.getTime(),
-    })),
+    runs,
+    // runRows is already ordered newest-first, and a published snapshot holds
+    // exactly one row — so for a guest "the newest run" and "the build they were
+    // handed" are the same row. For everyone else this stays null and the Eval tab
+    // renders exactly as it always has.
+    asPublished: (await isGuest()) ? (runs[0] ?? null) : null,
     holdoutRuns: holdoutRunRows[0]?.n ?? 0,
     pendingChunks: pendingChunkRows[0]?.n ?? 0,
     pendingScoring,

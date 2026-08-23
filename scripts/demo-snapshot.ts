@@ -82,16 +82,38 @@ async function sourceCensus(configId: string, baseModel: string) {
   const [{ n: cached }] = await privilegedSql<{ n: number }[]>`
     select count(*)::int as n from semantic_cache where config_id = ${configId}
   `;
-  const questions = table
-    ? (
-        await privilegedSql.unsafe<{ n: number }[]>(
-          `select count(*)::int as n from eval_questions q
-            where q.document_id in (select distinct document_id from "${table}" where config_id = $1)`,
-          [configId] as never[],
-        )
-      )[0].n
-    : 0;
-  return { documents, chunks: await chunkCount(configId, baseModel), cached, questions };
+  // Counted two ways because the clone copies only the LABELED ones. A question
+  // whose label resolves under a different config's chunking arrives with no
+  // ground truth and can never be scored here, so it is not published — and a dry
+  // run that promised 554 and delivered 472 would read as a bug in the filter.
+  const [{ n: questions, labeled }] = table
+    ? await privilegedSql.unsafe<{ n: number; labeled: number }[]>(
+        `select count(*)::int as n,
+                count(*) filter (where exists (
+                  select 1 from eval_labels l
+                    join document_embeddings de on de.id = l.document_embedding_id
+                   where l.eval_question_id = q.id and de.config_id = $1))::int as labeled
+           from eval_questions q
+          where q.document_id in (select distinct document_id from "${table}" where config_id = $1)`,
+        [configId] as never[],
+      )
+    : [{ n: 0, labeled: 0 }];
+  const [{ n: scores }] = await privilegedSql<{ n: number }[]>`
+    select count(distinct (r.eval_label_id, r.k))::int as n
+      from eval_results r
+      join eval_labels l on l.id = r.eval_label_id
+      join document_embeddings de on de.id = l.document_embedding_id
+     where de.config_id = ${configId}
+       and r.retrieval_state = 'baseline' and not r.is_baseline
+  `;
+  return {
+    documents,
+    chunks: await chunkCount(configId, baseModel),
+    cached,
+    questions,
+    labeled,
+    scores,
+  };
 }
 
 // WHAT WOULD BE DESTROYED — the destination account as a whole, deliberately:
@@ -151,6 +173,79 @@ async function verifyFingerprints(userId: string): Promise<boolean> {
     );
   }
   return ok;
+}
+
+// THE "AS PUBLISHED" NUMBER, measured over what was actually published.
+//
+// The analytics plan assumed this card could just read the newest `eval_runs` row,
+// on the grounds that it "is a row that already exists". It is not — checked
+// against live 2026-08-23:
+//
+//   - eval_runs carries no retrieval_state column, so a run measured WITH the
+//     master's 274 chunk overrides is indistinguishable from one measured without
+//     them. There is no filter that selects the honest row.
+//   - Every one of this config's 33 rows is either the tuned state (99.2% recall,
+//     468/472) or a 354-question corpus from an earlier chunking. None of them
+//     matches the generation a guest actually gets, which is 444/472.
+//
+// Shipping the newest row would print "468 hits" above a question list showing 444,
+// with 28 misses visible underneath a card claiming 4. So the row is COMPUTED here,
+// over the scores the clone just copied, and it replaces the master's history
+// wholesale rather than sitting on top of it — a run panel offering a 99.2% result
+// the guest can never reproduce is the same lie in a smaller font.
+//
+// nDCG stays null (renders "—"): it is graded against eval_rankings truth rows,
+// which are Phase 3 and are not cloned yet. A null is honest; a recall-shaped
+// number in the nDCG slot would not be.
+async function freezePublishedRun(snapshot: string, copied: number): Promise<void> {
+  const [cfg] = await privilegedSql<
+    { id: string; base_model: string; chunk_size: number; chunk_overlap: number }[]
+  >`
+    select id, base_model, chunk_size, chunk_overlap
+      from configs where user_id = ${snapshot}
+  `;
+  if (!cfg) throw new Error("freeze: the snapshot holds no config after publishing");
+
+  // Aggregated the way evalStore does it: MRR is reciprocalRank(found_rank, k) —
+  // zero on a miss AND on a rank beyond k — averaged over every scored question.
+  const [agg] = await privilegedSql<
+    { k: number; questions: number; hits: number; mrr: number | null }[]
+  >`
+    select r.k,
+           count(*)::int as questions,
+           count(*) filter (where r.hit)::int as hits,
+           avg(case when r.found_rank is not null and r.found_rank <= r.k
+                    then 1.0 / r.found_rank else 0 end)::real as mrr
+      from eval_results r
+      join eval_questions q on q.id = r.eval_question_id
+      join documents d on d.id = q.document_id
+     where d.user_id = ${snapshot}
+     group by r.k
+     order by count(*) desc
+     limit 1
+  `;
+  if (!agg) {
+    console.log("⚠ no scores were published — the Eval tab's \"As published\" card will be empty\n");
+    return;
+  }
+
+  await privilegedSql.begin(async (tx) => {
+    await tx`delete from eval_runs where config_id = ${cfg.id}`;
+    await tx`
+      insert into eval_runs
+        (config_id, model, chunk_size, chunk_overlap, k, question_count, hit_count, mrr, ndcg, notes)
+      values
+        (${cfg.id}, ${cfg.base_model}, ${cfg.chunk_size}, ${cfg.chunk_overlap}, ${agg.k},
+         ${agg.questions}, ${agg.hits}, ${agg.mrr}, null, 'as published')
+    `;
+  });
+
+  const recall = ((100 * agg.hits) / agg.questions).toFixed(1);
+  console.log(
+    `frozen baseline: ${agg.hits}/${agg.questions} at k=${agg.k} — recall ${recall}%, ` +
+      `MRR ${agg.mrr?.toFixed(3) ?? "—"}\n` +
+      `  (replaced ${copied} run snapshot${copied === 1 ? "" : "s"} copied from the master)\n`,
+  );
 }
 
 async function main() {
@@ -215,8 +310,10 @@ async function main() {
   console.log(`snapshot  ${snapshot}  (${profile.email})\n`);
   console.log(`publishing "${cfg.name}" (${cfg.base_model})`);
   console.log(
-    `  ${from.documents} documents, ${from.chunks} chunks, ${from.questions} questions, ` +
-      `${from.cached} cached answers`,
+    `  ${from.documents} documents, ${from.chunks} chunks, ` +
+      `${from.labeled} questions${
+        from.labeled === from.questions ? "" : ` (of ${from.questions} — the rest carry no label here)`
+      }, ${from.scores} published scores, ${from.cached} cached answers`,
   );
   console.log(`\nreplacing the snapshot's current build`);
   console.log(
@@ -241,8 +338,11 @@ async function main() {
   console.log("published:");
   console.log(
     `  ${summary.configs} config, ${summary.documents} documents, ${summary.chunks} chunks, ` +
-      `${summary.questions} questions, ${summary.cachedAnswers} cached answers\n`,
+      `${summary.questions} questions, ${summary.results} scores, ` +
+      `${summary.cachedAnswers} cached answers\n`,
   );
+
+  await freezePublishedRun(snapshot, summary.runs);
 
   const ok = await verifyFingerprints(snapshot);
   console.log();

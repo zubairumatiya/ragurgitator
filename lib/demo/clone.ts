@@ -132,10 +132,15 @@ async function buildMap(
 // WHAT IS DELIBERATELY NOT CLONED, because a list of ten tables invites the
 // question about the other thirty-odd:
 //
-//   eval_results, eval_runs, autotune_*, cluster_*   Derived measurements of runs
-//     the guest did not make. They are the bulk of the seed's disk (eval_results
-//     alone is 11 MB against the whole trimmed seed's ~8) and nothing a guest can
-//     do produces more of them, since every path that would is gated.
+//   autotune_*, cluster_*   Derived measurements of runs the guest did not make,
+//     and nothing a guest can do produces more of them since every path that
+//     would is gated.
+//   eval_results, EXCEPT the `retrieval_state = 'baseline'` generation. The table
+//     holds 11 MB for this corpus against the whole trimmed seed's ~8, but that is
+//     24 historical re-scores of the same questions. The one generation a guest's
+//     override-free config can actually reproduce is 472 rows and 169 KB, and
+//     without it the Eval tab is a dashboard with its instruments removed — see
+//     step 4b.
 //   config_chunk_overrides   The per-chunk tuning the master has accumulated.
 //     Omitted as "a measurement the guest did not make", but it is the single
 //     biggest EGRESS decision in the clone and worth naming as such: with
@@ -163,6 +168,8 @@ export type CloneSummary = {
   configs: number;
   chunks: number;
   questions: number;
+  results: number;
+  runs: number;
   cachedAnswers: number;
 };
 
@@ -269,11 +276,22 @@ export async function cloneSeedWorkspace(
     );
     // eval_questions carries no user_id and no config_id — it hangs off
     // documents, which is what scopes it (0051 §3b's transitive ownership).
+    //
+    // SCOPED TO QUESTIONS THAT HAVE A LABEL under this config, which drops 82 of
+    // the master's 554. They are labeled, but under a DIFFERENT config's chunking,
+    // so their label resolves to no document_embeddings row here: they arrive with
+    // no ground truth, score nothing, and read as permanently unscored. In an
+    // account holding exactly one config that is not a gap waiting to be filled,
+    // it is a row that can never become anything — the very "554 questions, every
+    // one reading as unscored" the analytics plan opens by complaining about.
+    // `distinct` because a question may carry more than one label.
     await buildMap(
       tx,
       "_map_question",
-      `select q.id from eval_questions q
-         join _map_doc md on md.old_id = q.document_id`,
+      `select distinct q.id from eval_questions q
+         join _map_doc md on md.old_id = q.document_id
+         join eval_labels l on l.eval_question_id = q.id
+         join _map_de mde on mde.old_id = l.document_embedding_id`,
       [],
     );
 
@@ -386,28 +404,116 @@ export async function cloneSeedWorkspace(
       params: [],
     });
 
-    // `id` omitted so the default mints one: nothing points at a label or a
-    // question embedding, so neither needs a map.
+    // Labels DO need a map, because eval_results.eval_label_id points at one and
+    // every aggregate in evalStore joins on it (`join active_labels al on
+    // al.label_id = r.eval_label_id`). A result copied against an unmapped label id
+    // would point into the MASTER's rows — invisible to the guest's RLS, so it
+    // would not error, it would just silently score nothing.
+    //
+    // The map's joins must match the copy's EXACTLY. A label in the map but not in
+    // the copy (source_chunk_id that failed to map, say) would let the eval_results
+    // insert below reference a row that was never written, and the foreign key
+    // would abort the whole clone.
+    await buildMap(
+      tx,
+      "_map_label",
+      `select l.id from eval_labels l
+         join _map_question mq on mq.old_id = l.eval_question_id
+         join _map_de mde on mde.old_id = l.document_embedding_id
+         join _map_chunk mch on mch.old_id = l.source_chunk_id`,
+      [],
+    );
+
     await copyRows(tx, {
       table: "eval_labels",
-      joins: `join _map_question mq on mq.old_id = s.eval_question_id
+      joins: `join _map_label ml on ml.old_id = s.id
+              join _map_question mq on mq.old_id = s.eval_question_id
               join _map_de mde on mde.old_id = s.document_embedding_id
               join _map_chunk mch on mch.old_id = s.source_chunk_id`,
       where: `true`,
       overrides: {
+        id: "ml.new_id",
         eval_question_id: "mq.new_id",
         document_embedding_id: "mde.new_id",
         source_chunk_id: "mch.new_id",
       },
-      omit: ["id"],
       params: [],
     });
 
+    // `id` omitted so the default mints one: nothing points at a question
+    // embedding, so it needs no map.
     await copyRows(tx, {
       table: "eval_question_embeddings",
       joins: `join _map_question mq on mq.old_id = s.eval_question_id`,
       where: `true`,
       overrides: { eval_question_id: "mq.new_id" },
+      omit: ["id"],
+      params: [],
+    });
+
+    // --- 4b. the published scores -------------------------------------------
+    //
+    // WHY ONLY THE `retrieval_state = 'baseline'` GENERATION, and not the latest.
+    //
+    // config_chunk_overrides is not cloned, so a guest's config has zero overrides
+    // and retrievalStateFingerprint() returns the literal string "baseline" for it.
+    // evalStore picks a question's result by `(retrieval_state is not distinct from
+    // currentState) desc, scored_at desc`, so the rows that will actually SURFACE in
+    // a guest's Eval tab are the ones stamped 'baseline'. Copying the master's tuned
+    // latest instead would copy rows measured in a vector space the guest does not
+    // have: they would rank below the state match, or show scores no query in the
+    // guest workspace can reproduce.
+    //
+    // Note this is the `retrieval_state` VALUE 'baseline', not the `is_baseline`
+    // boolean — 0057's shadow leg is a different measurement and is excluded.
+    //
+    // One row per (label, k): the state holds 652 rows for 472 questions, the extras
+    // being re-scores within the same state. The newest is the one evalStore would
+    // serve anyway, and 472 rows is 169 KB.
+    const results = await copyRows(tx, {
+      table: "eval_results",
+      joins: `join _map_question mq on mq.old_id = s.eval_question_id
+              join _map_label ml on ml.old_id = s.eval_label_id`,
+      where: `s.retrieval_state = 'baseline' and not s.is_baseline`,
+      overrides: {
+        eval_question_id: "mq.new_id",
+        eval_label_id: "ml.new_id",
+        // retrieved_ids is a uuid[] OF CHUNK IDS — the ranked window the question
+        // pulled back — and the clone minted new chunk UUIDs. Left the untranslated
+        // ids in place it would resolve to nothing and every drilldown would render
+        // an empty top-k against a hit badge saying rank 1.
+        //
+        // LEFT join, and `with ordinality` to hold the order: rank IS the position
+        // here. An id that failed to map becomes a null in place rather than being
+        // dropped, because dropping it would silently renumber every rank below it
+        // and turn a rank-4 hit into a rank-3 one. (Measured 2026-08-23: all 2,360
+        // ids in this generation map, so the left join is insurance, not a fix.)
+        // coalesce guards the empty-array case, where array_agg returns null into a
+        // not-null column.
+        retrieved_ids: `coalesce(
+          (select array_agg(mch.new_id order by u.ord)
+             from unnest(s.retrieved_ids) with ordinality u(old_id, ord)
+             left join _map_chunk mch on mch.old_id = u.old_id),
+          '{}'::uuid[])`,
+      },
+      omit: ["id"],
+      dedupe: { on: `s.eval_label_id, s.k`, newest: `s.scored_at desc` },
+      params: [],
+    });
+
+    // The aggregate snapshots behind the "As published" card and the run-history
+    // panel. Scoped through the config map, which also drops the pre-0011 rows
+    // whose config_id is null.
+    //
+    // On the PUBLISH hop these are the master's tuned runs and are wrong for the
+    // demo — scripts/demo-snapshot.ts replaces them with one row measured over the
+    // generation just copied. On the guest hop that corrected row is what lands
+    // here, which is why this copy is unconditional rather than publish-only.
+    const runs = await copyRows(tx, {
+      table: "eval_runs",
+      joins: `join _map_config mc on mc.old_id = s.config_id`,
+      where: `true`,
+      overrides: { config_id: "mc.new_id" },
       omit: ["id"],
       params: [],
     });
@@ -510,6 +616,8 @@ export async function cloneSeedWorkspace(
       configs,
       chunks,
       questions,
+      results,
+      runs,
       cachedAnswers,
     };
   }) as Promise<CloneSummary>;

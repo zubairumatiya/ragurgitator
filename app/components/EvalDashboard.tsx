@@ -46,6 +46,7 @@ import type {
   PoolChunk,
   QuestionDetail,
   QuestionExplain,
+  RunSnapshot,
   SavedModelTrial,
   TrialKind,
   TrialQuestionOutcome,
@@ -1136,6 +1137,21 @@ export function EvalDashboard() {
         <p className="text-sm text-zinc-500">Loading…</p>
       ) : (
         <>
+          {/* THE DEMO'S TWO SECTIONS (docs/demo-analytics-plan.md, phase 2).
+              "As published" is the frozen build a visitor was handed; "Now" is
+              what their own tuning has made of it. Neither heading appears for a
+              real account — summary.asPublished is null there and the headline
+              row renders bare, exactly as it always has. */}
+          {summary.asPublished && (
+            <AsPublished run={summary.asPublished} summary={summary} />
+          )}
+
+          {summary.asPublished && (
+            <h2 className="-mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+              Now
+            </h2>
+          )}
+
           {/* Headline metrics — one labeled card per eval */}
           <div className="flex flex-wrap gap-4">
             {summary.criteria.recall.enabled && (
@@ -2630,6 +2646,52 @@ function BulkActions({
 // A plain bordered headline card. `sub` is an optional small line under the
 // value — e.g. the nDCG card's "graded" coverage count. (Metric cards are no
 // longer tinted; the per-question MetricChip still carries the red→green tint.)
+// THE FROZEN CARD — the published build's own numbers, for a guest only.
+//
+// It reads from a single stored eval_runs row rather than recomputing, and that is
+// the whole point: it must NOT move when the visitor re-scores or tunes something.
+// A recomputed "baseline" that drifts with the thing it is the baseline FOR would
+// measure nothing.
+//
+// It deliberately mirrors the live row's labels (Recall@k / MRR@k / nDCG@k) so the
+// two are read as the same three measurements at two moments, not as two different
+// metrics. The k comes from the stored row, not from the config: a visitor can move
+// the config's k, and this row would then be labelled with a window it was never
+// measured in.
+//
+// nDCG shows "—" until the truth rankings are cloned (phase 3). An ungraded metric
+// renders as ungraded; it does not borrow recall's number to look complete.
+function AsPublished({
+  run,
+  summary,
+}: {
+  run: RunSnapshot;
+  summary: EvalSummary;
+}) {
+  const recall = run.questionCount > 0 ? run.hitCount / run.questionCount : null;
+  return (
+    <section className="flex flex-col gap-2">
+      <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+        As published
+        <span className="ml-2 font-normal normal-case tracking-normal text-zinc-400">
+          frozen — {run.questionCount} questions, measured before this demo went out
+        </span>
+      </h2>
+      <div className="flex flex-wrap gap-4">
+        {summary.criteria.recall.enabled && (
+          <Stat label={`Recall@${run.k}`} value={pct(recall)} big />
+        )}
+        {summary.criteria.mrr.enabled && (
+          <Stat label={`MRR@${run.k}`} value={fmtScore(run.mrr)} big />
+        )}
+        {summary.criteria.ndcg.enabled && (
+          <Stat label={`nDCG@${run.k}`} value={fmtScore(run.ndcg)} big />
+        )}
+      </div>
+    </section>
+  );
+}
+
 function Stat({
   label,
   value,

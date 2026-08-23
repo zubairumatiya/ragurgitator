@@ -60,6 +60,7 @@ let admin: Sql;
 let seed: { id: string; email: string };
 let guest: { id: string; email: string };
 let seedConfigId: string;
+let seedLabelId: string;
 
 const RESULT = (answer: string): CachedResult => ({
   answer,
@@ -140,6 +141,37 @@ beforeEach(async () => {
   await admin`
     insert into eval_question_embeddings (eval_question_id, model, embedding)
     values (${q.id}, ${KEY_MODEL}, ${`{${V.join(",")}}`})`;
+
+  // A question with NO label under this config — the shape the master carries 82
+  // of. It must not reach the guest: nothing can ever score it there.
+  await admin`
+    insert into eval_questions (document_id, question) values (${doc.id}, 'unlabeled?')`;
+
+  const [label] = await admin<{ id: string }[]>`
+    select id from eval_labels where eval_question_id = ${q.id}`;
+  seedLabelId = label.id;
+
+  // Three results for the one label, and only ONE of them belongs in a guest:
+  //   - the newest 'baseline' row, which is what an override-free config serves;
+  //   - an older 'baseline' row, which the per-(label, k) dedupe must drop;
+  //   - a row from a TUNED state, which the guest cannot reproduce at all.
+  // retrieved_ids is deliberately out of chunk order so a remap that loses the
+  // ranking shows up as a reordered array rather than as nothing.
+  await admin`
+    insert into eval_results
+      (eval_question_id, eval_label_id, k, hit, found_rank, retrieved_ids, retrieval_state, scored_at)
+    values
+      (${q.id}, ${label.id}, 5, true, 2,
+       ${[chunks[1].id, chunks[0].id]}::uuid[], 'baseline', '2026-01-02'),
+      (${q.id}, ${label.id}, 5, false, null,
+       ${[chunks[0].id]}::uuid[], 'baseline', '2026-01-01'),
+      (${q.id}, ${label.id}, 5, true, 1,
+       ${[chunks[0].id, chunks[1].id]}::uuid[], 'tuned-fingerprint', '2026-01-03')`;
+
+  await admin`
+    insert into eval_runs
+      (config_id, model, chunk_size, chunk_overlap, k, question_count, hit_count, mrr, ndcg)
+    values (${cfg.id}, ${KEY_MODEL}, 500, 50, 5, 1, 1, 0.5, null)`;
   await admin`
     insert into semantic_cache_thresholds (space, threshold, user_id)
     values ('test-space', 0.9, ${seed.id})`;
@@ -161,7 +193,9 @@ describe("cloneSeedWorkspace", () => {
     assert.equal(summary.documents, 1);
     assert.equal(summary.configs, 1);
     assert.equal(summary.chunks, 2);
-    assert.equal(summary.questions, 1);
+    assert.equal(summary.questions, 1, "the unlabeled question came along");
+    assert.equal(summary.results, 1, "the baseline generation is not exactly one row");
+    assert.equal(summary.runs, 1);
     assert.equal(summary.cachedAnswers, 1);
 
     // THE ISOLATION WALK. Each row is fetched by the guest's ownership and its
@@ -279,6 +313,76 @@ describe("cloneSeedWorkspace", () => {
 // the clone does: an unfiltered publish looks like a working demo that happens to
 // show visitors the master's scratch tabs, and an appending republish looks like
 // a working demo carrying two of everything until the storage cap bites.
+// THE PUBLISHED SCORES (docs/demo-analytics-plan.md, phase 2). Without these the
+// demo's Eval tab is a dashboard with its instruments removed — 554 questions all
+// reading as unscored, under three refusal messages telling the visitor to go look
+// at results that were never cloned.
+//
+// Two of the copies here are the kind that fail SILENTLY rather than loudly, which
+// is why they get assertions of their own: an eval_label_id left pointing at the
+// master's row is invisible to the guest's RLS and simply scores nothing, and an
+// unremapped retrieved_ids array resolves to no chunks and renders an empty top-k
+// under a hit badge claiming rank 2.
+describe("cloneSeedWorkspace published scores", () => {
+  it("copies the baseline generation, repointed at the guest's own label and chunks", async () => {
+    await cloneSeedWorkspace(seed.id, guest.id);
+
+    const [gQ] = await admin<{ id: string }[]>`
+      select q.id from eval_questions q
+        join documents d on d.id = q.document_id
+       where d.user_id = ${guest.id}`;
+    const [gLabel] = await admin<{ id: string }[]>`
+      select id from eval_labels where eval_question_id = ${gQ.id}`;
+    assert.notEqual(gLabel.id, seedLabelId, "the guest's label is the seed's row");
+
+    const rows = await admin<
+      { eval_label_id: string; found_rank: number; retrieved_ids: string[]; retrieval_state: string }[]
+    >`
+      select eval_label_id, found_rank, retrieved_ids, retrieval_state
+        from eval_results where eval_question_id = ${gQ.id}`;
+    assert.equal(rows.length, 1, "the tuned row or the superseded baseline row came along");
+    assert.equal(rows[0].retrieval_state, "baseline");
+    assert.equal(rows[0].found_rank, 2, "the newest baseline row is not the one that survived");
+    assert.equal(rows[0].eval_label_id, gLabel.id, "the result still points at the SEED's label");
+
+    // Rank IS position here, so the assertion is on the ORDER, not the set.
+    const gChunks = await admin<{ id: string; position: number }[]>`
+      select c.id, c.position from ${admin(CHUNKS)} c
+        join documents d on d.id = c.document_id
+       where d.user_id = ${guest.id} order by c.position`;
+    assert.deepEqual(
+      rows[0].retrieved_ids,
+      [gChunks[1].id, gChunks[0].id],
+      "retrieved_ids lost its ranking or still points at the seed's chunks",
+    );
+  });
+
+  it("copies the run snapshots behind the As-published card", async () => {
+    await cloneSeedWorkspace(seed.id, guest.id);
+
+    const [gCfg] = await admin<{ id: string }[]>`
+      select id from configs where user_id = ${guest.id}`;
+    const runs = await admin<{ config_id: string; hit_count: number }[]>`
+      select config_id, hit_count from eval_runs where config_id = ${gCfg.id}`;
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].hit_count, 1);
+  });
+
+  it("leaves behind a question nothing in the guest's workspace could ever score", async () => {
+    await cloneSeedWorkspace(seed.id, guest.id);
+
+    const qs = await admin<{ question: string }[]>`
+      select q.question from eval_questions q
+        join documents d on d.id = q.document_id
+       where d.user_id = ${guest.id}`;
+    assert.deepEqual(
+      qs.map((r) => r.question),
+      ["what?"],
+      "a question with no label under the published config reached the guest",
+    );
+  });
+});
+
 describe("cloneSeedWorkspace publish options", () => {
   // A second tab with its own ingested document, plus a document sitting in the
   // library with no vectors anywhere — the two shapes the filter has to drop, and
