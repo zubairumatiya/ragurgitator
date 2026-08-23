@@ -91,7 +91,19 @@ export async function POST(request: Request) {
   }
 
   return withRequestConfig(request, async () => {
-    await assertDemoAllows("generate");
+    // THE DEMO GATE, WITH ONE CARVE-OUT. `cachedOnly` is the only form of this
+    // request that calls no model: bulkAddCachedQuestions reads question_cache
+    // and inserts what it finds, and a MISS adds nothing rather than falling back
+    // to generation. Phase 6 of docs/demo-analytics-plan.md clones that table
+    // (lib/demo/clone step 4e) precisely so a guest has a free way to add a
+    // question. Every other form still spends an answer-model key the demo does
+    // not carry, so the gate stays exactly where it was for them.
+    //
+    // The carve-out is on the BODY FLAG, not on a separate route, so there is one
+    // place where "does this generate?" is decided. Keep it that way: an
+    // `if (!cachedOnly)` that drifts above the parse, or a second entry point
+    // without this line, is how a guest reaches the generator.
+    if (!body.data.cachedOnly) await assertDemoAllows("generate");
     return ndjsonStream<EvalEvent>(async (send, shouldStop) => {
       try {
         if (body.data.cachedOnly) {

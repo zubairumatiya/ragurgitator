@@ -18,11 +18,16 @@ import { autotuneStep, STREAM_BUDGET_MS } from "@/lib/jobs/steps/autotune";
 import type { StopReason, StopSignal } from "@/lib/jobs/types";
 import type { AutotuneEvent } from "@/lib/rag/autotune";
 import { getSummary } from "@/lib/rag/evalStore";
-import { assertDemoAllows } from "@/lib/demo/policy";
 
 export async function POST(request: Request) {
+  // NO DEMO GATE, deliberately. The old refusal said autotune "re-embeds every
+  // chunk it tries", which was true and read as if it re-embedded the corpus: the
+  // engine searches the chunks belonging to FAILING questions, and for a guest
+  // that set is the twelve (prepareAutotune skips ignored questions, and a publish
+  // freezes the rest as ignores). Dozens of chunk embeds against the 200,000-token
+  // per-guest budget, which lib/demo/budget enforces at the embed dispatcher
+  // whatever this route decides.
   return withRequestConfig(request, async () => {
-    await assertDemoAllows("autotune");
     return ndjsonStream<AutotuneEvent>(async (send, shouldStop) => {
       const t0 = performance.now();
       // The soft deadline this driver imposes on itself. A background job gets one

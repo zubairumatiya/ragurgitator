@@ -11,6 +11,13 @@
 // this, what won't work, and how long have I got. The countdown is the one worth
 // the extra code — a workspace that will vanish should say so continuously
 // rather than surprising someone mid-experiment.
+//
+// The middle sentence named autotune as switched off until phase 5 of
+// docs/demo-analytics-plan.md; phase 4 had made it work, scoped to the frozen
+// set. A banner on every page is the most expensive place in the app to be out
+// of date, because it is the one claim a visitor reads before trying anything —
+// so it now names the RULE (bounded levers are on, unbounded ones are off)
+// rather than a list that has to be re-checked every time a gate moves.
 "use client";
 
 import Link from "next/link";
@@ -67,8 +74,9 @@ export function DemoBanner() {
     <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 border-b border-amber-300 bg-amber-50 px-4 py-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
       <span className="font-medium">Demo workspace</span>
       <span className="opacity-80">
-        Everything here is a private copy. Anything that spends money — uploads,
-        re-chunking, autotune, generating questions — is switched off.
+        Everything here is a private copy. Autotune and re-scoring are live on a
+        scoped set of eval questions; the levers whose cost nothing bounds —
+        uploads, re-chunking, generating questions — are switched off.
       </span>
       {expiresAt ? <span className="opacity-80">Expires in {remaining(expiresAt)}.</span> : null}
       <Link href="/signup" className="font-medium underline underline-offset-2">

@@ -15,12 +15,19 @@ import { JOB_KINDS, JOB_LABELS, type JobKind } from "@/lib/jobs/types";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { assertDemoAllows, type DemoAction } from "@/lib/demo/policy";
 
-// Which sentence a guest sees per job kind. Exhaustive by type, so a fourth kind
-// cannot be added without deciding whether the demo may run it.
-const DEMO_ACTION_FOR_JOB: Record<JobKind, DemoAction> = {
-  rescore: "rescore",
-  bulk_ndcg: "rescore",
-  autotune: "autotune",
+// Which sentence a guest sees per job kind, or null for a kind the demo runs.
+// Exhaustive by type, so a fourth kind cannot be added without deciding whether
+// the demo may run it.
+//
+// re-score and autotune are null because phase 4 scopes them rather than blocking
+// them (lib/demo/frozen): whichever driver runs the step, the step's question set
+// is the twelve. bulk nDCG is not scoped — its cost is the aggregate ranking
+// builder, which embeds a candidate pool under every model on the config's list —
+// so the background door stays shut on exactly the kind the front door refuses.
+const DEMO_ACTION_FOR_JOB: Record<JobKind, DemoAction | null> = {
+  rescore: null,
+  bulk_ndcg: "rank",
+  autotune: null,
 };
 
 export async function GET() {
@@ -44,7 +51,8 @@ export async function POST(request: Request) {
     // long bulk actions — re-score, bulk nDCG, autotune — and each has an NDJSON
     // twin that is gated at its own route. This is the other door into the same
     // work, and it would be the one nobody remembered.
-    await assertDemoAllows(DEMO_ACTION_FOR_JOB[kind]);
+    const demoAction = DEMO_ACTION_FOR_JOB[kind];
+    if (demoAction) await assertDemoAllows(demoAction);
     if (!isWired(kind)) {
       return Response.json(
         { error: `${JOB_LABELS[kind]} cannot run in the background yet.` },

@@ -46,6 +46,7 @@ import type {
   PoolChunk,
   QuestionDetail,
   QuestionExplain,
+  RunSnapshot,
   SavedModelTrial,
   TrialKind,
   TrialQuestionOutcome,
@@ -503,6 +504,10 @@ export function EvalDashboard() {
             // A question born this second is in neither set until the next
             // holdout draw, which happens on the next settings save.
             heldOut: false,
+            // Nor in the demo's frozen set: only a publish writes those, and a
+            // question the visitor just wrote is exactly the kind the demo wants
+            // live. This is what makes "add your own question" mean something.
+            frozen: false,
           },
         ],
       };
@@ -774,17 +779,28 @@ export function EvalDashboard() {
   // was already generated for identical chunk text, at any difficulty. Free, and
   // it generates nothing — chunks with nothing banked are simply left alone, and
   // anything a chunk already shows is skipped, so pressing it twice adds nothing.
-  const onBulkAddCached = (documentIds: string[] | null) =>
-    runStream(
+  //
+  // THIS IS THE ONE ADD A GUEST CAN PRESS (phase 6 of docs/demo-analytics-plan
+  // .md): the demo clones question_cache and carves `cachedOnly` out of the
+  // generate gate, so the empty-handed sentence must not send a visitor back to
+  // the Add button that will refuse them. Detected the way DemoScope detects a
+  // demo — a frozen row, which only a publish writes — rather than by asking who
+  // is logged in.
+  const onBulkAddCached = (documentIds: string[] | null) => {
+    const published = summary?.questions.some((q) => q.frozen) ?? false;
+    return runStream(
       "/api/eval/bulk-generate",
       (r) =>
         r.reused
           ? `Added ${r.reused} cached question(s) for $0, scored ${r.scored}. ` +
             `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`
           : `No new cached questions for these chunks — nothing added, nothing spent. ` +
-            `Use Add to generate them.`,
+            (published
+              ? `Every question this workspace was published with is already on its chunk.`
+              : `Use Add to generate them.`),
       { documentIds: documentIds ?? undefined, cachedOnly: true },
     );
+  };
 
   // Bulk actions → Add nDCG rankings: for every question in scope without a
   // ground truth, build the aggregate ranking and promote it (the panel's
@@ -1136,6 +1152,24 @@ export function EvalDashboard() {
         <p className="text-sm text-zinc-500">Loading…</p>
       ) : (
         <>
+          {/* The sentence that makes the two sections below legible (phase 5). */}
+          <DemoScope summary={summary} />
+
+          {/* THE DEMO'S TWO SECTIONS (docs/demo-analytics-plan.md, phase 2).
+              "As published" is the frozen build a visitor was handed; "Now" is
+              what their own tuning has made of it. Neither heading appears for a
+              real account — summary.asPublished is null there and the headline
+              row renders bare, exactly as it always has. */}
+          {summary.asPublished && (
+            <AsPublished run={summary.asPublished} summary={summary} />
+          )}
+
+          {summary.asPublished && (
+            <h2 className="-mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+              Now
+            </h2>
+          )}
+
           {/* Headline metrics — one labeled card per eval */}
           <div className="flex flex-wrap gap-4">
             {summary.criteria.recall.enabled && (
@@ -1686,15 +1720,20 @@ const QuestionRow = memo(function QuestionRow({
           </span>
         )}
         <span className="flex shrink-0 items-center gap-1.5">
-          {/* Held-out questions are ignores too, so they need their own label —
-              "ignored" would read as a judgement about the question rather than
-              as membership of the test set. */}
+          {/* Three different facts wear the same `ignored` flag, and each needs
+              its own word. "ignored" on a held-out question would read as a
+              judgement about the question rather than as membership of the test
+              set; "ignored" on one of a demo's frozen questions would be worse
+              still, since nobody ignored it — the publish froze it so that one
+              visitor's experiment cannot cost the next one their demo. */}
           {q.ignored && (
             <span
               title={
                 q.heldOut
                   ? "Held out (test set) — excluded from the rates and from autotune, but still scored: this is where the generalization number comes from"
-                  : "Ignored in rates — excluded from Recall/nDCG and autotune targeting"
+                  : q.frozen
+                    ? "Frozen for the demo — its published score is real and is what the \u201cAs published\u201d card averages, but re-scoring and autotune are pointed at the tunable questions instead"
+                    : "Ignored in rates — excluded from Recall/nDCG and autotune targeting"
               }
               className={
                 q.heldOut
@@ -1702,7 +1741,7 @@ const QuestionRow = memo(function QuestionRow({
                   : "rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
               }
             >
-              {q.heldOut ? "holdout" : "ignored"}
+              {q.heldOut ? "holdout" : q.frozen ? "frozen" : "ignored"}
             </span>
           )}
           {!q.ignored &&
@@ -1799,7 +1838,10 @@ const QuestionRow = memo(function QuestionRow({
               >
                 nDCG
               </button>
-              {(q.ignored || failsBar(q, criteria)) && (
+              {/* Not on a frozen question: the route refuses it (DEMO_ACTIONS
+                  .unfreeze) because the frozen set IS the demo's spend limit, and
+                  a button whose only outcome is a 403 is worse than no button. */}
+              {!q.frozen && (q.ignored || failsBar(q, criteria)) && (
                 <button
                   onClick={() => onToggleIgnore(q)}
                   disabled={busy}
@@ -2624,6 +2666,109 @@ function BulkActions({
         </>
       )}
     </div>
+  );
+}
+
+// THE BANNER THAT SAYS WHAT THE TWO SECTIONS BELOW MEAN (phase 5 of
+// docs/demo-analytics-plan.md).
+//
+// By phase 4 the demo's Eval tab had a frozen headline, a live headline, a
+// per-question "frozen" chip and a set of buttons quietly pointed at a dozen
+// questions — and nothing on the page said so. A visitor could re-score, watch
+// "12 questions" go by, and reasonably conclude the workbench was broken. This
+// is not decoration: an app that leaves its own scope to be inferred is telling
+// the visitor the same lie by omission that phase 2 removed from the cards.
+//
+// IT COUNTS RATHER THAN ASSERTS. Every number here comes off the questions the
+// page already has, so a re-publish that lands 9 tunable questions instead of 12
+// (scripts/demo-snapshot's assertSpread accepts 8) prints 9, and a visitor who
+// adds one of their own prints 13 — their question is unfrozen by construction
+// (nothing writes FROZEN_REASON but a publish), which is exactly the promise
+// this paragraph makes.
+//
+// IT IS NOT AN isGuest() BRANCH, for the reason lib/demo/frozen.ts gives at
+// length: a real account has no frozen rows, so `frozen === 0` and this renders
+// nothing — by construction rather than by a test of who is asking. That also
+// makes an UNPUBLISHED guest build silent rather than boastful, which is the
+// honest outcome: with no frozen set there is no scope to announce.
+function DemoScope({ summary }: { summary: EvalSummary }) {
+  const frozen = summary.questions.filter((q) => q.frozen).length;
+  if (frozen === 0) return null;
+  const tunable = summary.questions.length - frozen;
+  return (
+    <section className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/50 dark:text-amber-200">
+      <p>
+        <strong className="font-semibold">This demo is deliberately scoped.</strong>{" "}
+        All {summary.questions.length} questions carry the scores they were
+        measured with before this workspace was published
+        {summary.asPublished ? " — that is the “As published” row, and it never moves." : "."}{" "}
+        <strong className="font-semibold">{tunable} of them are live</strong>,
+        picked to span a first-place hit through to a complete miss: re-score
+        them, autotune them, add your own. The other {frozen} are frozen, so one
+        visitor’s experiment cannot cost the next one their demo.
+      </p>
+    </section>
+  );
+}
+
+// THE FROZEN CARD — the published build's own numbers, for a guest only.
+//
+// It reads from a single stored eval_runs row rather than recomputing, and that is
+// the whole point: it must NOT move when the visitor re-scores or tunes something.
+// A recomputed "baseline" that drifts with the thing it is the baseline FOR would
+// measure nothing.
+//
+// It deliberately mirrors the live row's labels (Recall@k / MRR@k / nDCG@k) so the
+// two are read as the same three measurements at two moments, not as two different
+// metrics. The k comes from the stored row, not from the config: a visitor can move
+// the config's k, and this row would then be labelled with a window it was never
+// measured in.
+//
+// nDCG CARRIES ITS OWN DENOMINATOR. Recall and MRR are measured over every scored
+// question; the graded nDCG is measured over the twelve that were published with a
+// truth ranking (phase 3), and the header two lines up says "472 questions". So the
+// count comes off the stored row (0076's ndcg_covered) and sits under the number —
+// an nDCG read as covering 472 is the misreading this whole section exists to stop.
+//
+// Still "—" when the row predates 0076 or nothing was graded: an ungraded metric
+// renders as ungraded, and does not borrow recall's number to look complete.
+function AsPublished({
+  run,
+  summary,
+}: {
+  run: RunSnapshot;
+  summary: EvalSummary;
+}) {
+  const recall = run.questionCount > 0 ? run.hitCount / run.questionCount : null;
+  return (
+    <section className="flex flex-col gap-2">
+      <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+        As published
+        <span className="ml-2 font-normal normal-case tracking-normal text-zinc-400">
+          frozen — {run.questionCount} questions, measured before this demo went out
+        </span>
+      </h2>
+      <div className="flex flex-wrap gap-4">
+        {summary.criteria.recall.enabled && (
+          <Stat label={`Recall@${run.k}`} value={pct(recall)} big />
+        )}
+        {summary.criteria.mrr.enabled && (
+          <Stat label={`MRR@${run.k}`} value={fmtScore(run.mrr)} big />
+        )}
+        {summary.criteria.ndcg.enabled && (
+          <Stat
+            label={`nDCG@${run.k}`}
+            value={fmtScore(run.ndcg)}
+            big
+            sub={
+              run.ndcg !== null && run.ndcgCovered !== null
+                ? `${run.ndcgCovered}/${run.questionCount} graded`
+                : undefined
+            }
+          />
+        )}
+      </div>
+    </section>
   );
 }
 

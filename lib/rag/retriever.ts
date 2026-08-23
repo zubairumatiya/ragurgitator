@@ -240,7 +240,7 @@ export async function fuseWithOverrides(
   // for baseVector — they're 1:1 under a fixed base model, and the vector itself
   // would be a 1024-float key.
   const annKey = annCache
-    ? `${text} ${deepN} ${[...overriddenIds].sort().join(",")}`
+    ? `${text}\0${deepN}\0${[...overriddenIds].sort().join(",")}`
     : null;
   const cachedAnn = annKey !== null ? annCache!.get(annKey) : undefined;
   const baseChunks = cachedAnn ?? (await queryExcluding(baseVector, deepN, overriddenIds));

@@ -60,6 +60,7 @@ let admin: Sql;
 let seed: { id: string; email: string };
 let guest: { id: string; email: string };
 let seedConfigId: string;
+let seedLabelId: string;
 
 const RESULT = (answer: string): CachedResult => ({
   answer,
@@ -140,6 +141,60 @@ beforeEach(async () => {
   await admin`
     insert into eval_question_embeddings (eval_question_id, model, embedding)
     values (${q.id}, ${KEY_MODEL}, ${`{${V.join(",")}}`})`;
+
+  // A question with NO label under this config — the shape the master carries 82
+  // of. It must not reach the guest: nothing can ever score it there.
+  await admin`
+    insert into eval_questions (document_id, question) values (${doc.id}, 'unlabeled?')`;
+
+  const [label] = await admin<{ id: string }[]>`
+    select id from eval_labels where eval_question_id = ${q.id}`;
+  seedLabelId = label.id;
+
+  // Three results for the one label, and only ONE of them belongs in a guest:
+  //   - the newest 'baseline' row, which is what an override-free config serves;
+  //   - an older 'baseline' row, which the per-(label, k) dedupe must drop;
+  //   - a row from a TUNED state, which the guest cannot reproduce at all.
+  // retrieved_ids is deliberately out of chunk order so a remap that loses the
+  // ranking shows up as a reordered array rather than as nothing.
+  await admin`
+    insert into eval_results
+      (eval_question_id, eval_label_id, k, hit, found_rank, retrieved_ids, retrieval_state, scored_at)
+    values
+      (${q.id}, ${label.id}, 5, true, 2,
+       ${[chunks[1].id, chunks[0].id]}::uuid[], 'baseline', '2026-01-02'),
+      (${q.id}, ${label.id}, 5, false, null,
+       ${[chunks[0].id]}::uuid[], 'baseline', '2026-01-01'),
+      (${q.id}, ${label.id}, 5, true, 1,
+       ${[chunks[0].id, chunks[1].id]}::uuid[], 'tuned-fingerprint', '2026-01-03')`;
+
+  // The graded-nDCG ground truth (phase 3). chunk_ids is deliberately in the
+  // OPPOSITE order to the chunk table so a remap that drops the ordering shows up,
+  // and details.perModelRanks is keyed by chunk id — the shape that silently stops
+  // rendering if the keys are left in the seed's id space.
+  await admin`
+    insert into eval_rankings
+      (eval_question_id, document_embedding_id, kind, is_truth, chunk_ids, details)
+    values (${q.id}, ${run.id}, 'aggregate', true,
+            ${[chunks[1].id, chunks[0].id]}::uuid[],
+            ${admin.json({
+              models: [KEY_MODEL],
+              perModelRanks: {
+                [chunks[1].id]: { [KEY_MODEL]: 1 },
+                [chunks[0].id]: { [KEY_MODEL]: 2 },
+              },
+            })})`;
+  // A non-truth alternative: a candidate in the master's panel, and not the thing
+  // nDCG grades against. It must not reach the guest.
+  await admin`
+    insert into eval_rankings
+      (eval_question_id, document_embedding_id, kind, is_truth, chunk_ids, details)
+    values (${q.id}, ${run.id}, 'manual', false, ${[chunks[0].id]}::uuid[], '{}')`;
+
+  await admin`
+    insert into eval_runs
+      (config_id, model, chunk_size, chunk_overlap, k, question_count, hit_count, mrr, ndcg)
+    values (${cfg.id}, ${KEY_MODEL}, 500, 50, 5, 1, 1, 0.5, null)`;
   await admin`
     insert into semantic_cache_thresholds (space, threshold, user_id)
     values ('test-space', 0.9, ${seed.id})`;
@@ -161,7 +216,10 @@ describe("cloneSeedWorkspace", () => {
     assert.equal(summary.documents, 1);
     assert.equal(summary.configs, 1);
     assert.equal(summary.chunks, 2);
-    assert.equal(summary.questions, 1);
+    assert.equal(summary.questions, 1, "the unlabeled question came along");
+    assert.equal(summary.results, 1, "the baseline generation is not exactly one row");
+    assert.equal(summary.runs, 1);
+    assert.equal(summary.rankings, 1, "the non-truth alternative came along");
     assert.equal(summary.cachedAnswers, 1);
 
     // THE ISOLATION WALK. Each row is fetched by the guest's ownership and its
@@ -271,5 +329,393 @@ describe("cloneSeedWorkspace", () => {
       rows[1].fingerprint,
       "the guest inherited the seed's fingerprint — step 6 did not run",
     );
+  });
+});
+
+// THE PUBLISH OPTIONS — the snapshot path (docs/demo-snapshot-plan.md), which is
+// the same copy with two flags on it. Both flags fail SILENTLY in the same way
+// the clone does: an unfiltered publish looks like a working demo that happens to
+// show visitors the master's scratch tabs, and an appending republish looks like
+// a working demo carrying two of everything until the storage cap bites.
+// THE PUBLISHED SCORES (docs/demo-analytics-plan.md, phase 2). Without these the
+// demo's Eval tab is a dashboard with its instruments removed — 554 questions all
+// reading as unscored, under three refusal messages telling the visitor to go look
+// at results that were never cloned.
+//
+// Two of the copies here are the kind that fail SILENTLY rather than loudly, which
+// is why they get assertions of their own: an eval_label_id left pointing at the
+// master's row is invisible to the guest's RLS and simply scores nothing, and an
+// unremapped retrieved_ids array resolves to no chunks and renders an empty top-k
+// under a hit badge claiming rank 2.
+describe("cloneSeedWorkspace published scores", () => {
+  it("copies the baseline generation, repointed at the guest's own label and chunks", async () => {
+    await cloneSeedWorkspace(seed.id, guest.id);
+
+    const [gQ] = await admin<{ id: string }[]>`
+      select q.id from eval_questions q
+        join documents d on d.id = q.document_id
+       where d.user_id = ${guest.id}`;
+    const [gLabel] = await admin<{ id: string }[]>`
+      select id from eval_labels where eval_question_id = ${gQ.id}`;
+    assert.notEqual(gLabel.id, seedLabelId, "the guest's label is the seed's row");
+
+    const rows = await admin<
+      { eval_label_id: string; found_rank: number; retrieved_ids: string[]; retrieval_state: string }[]
+    >`
+      select eval_label_id, found_rank, retrieved_ids, retrieval_state
+        from eval_results where eval_question_id = ${gQ.id}`;
+    assert.equal(rows.length, 1, "the tuned row or the superseded baseline row came along");
+    assert.equal(rows[0].retrieval_state, "baseline");
+    assert.equal(rows[0].found_rank, 2, "the newest baseline row is not the one that survived");
+    assert.equal(rows[0].eval_label_id, gLabel.id, "the result still points at the SEED's label");
+
+    // Rank IS position here, so the assertion is on the ORDER, not the set.
+    const gChunks = await admin<{ id: string; position: number }[]>`
+      select c.id, c.position from ${admin(CHUNKS)} c
+        join documents d on d.id = c.document_id
+       where d.user_id = ${guest.id} order by c.position`;
+    assert.deepEqual(
+      rows[0].retrieved_ids,
+      [gChunks[1].id, gChunks[0].id],
+      "retrieved_ids lost its ranking or still points at the seed's chunks",
+    );
+  });
+
+  it("copies the run snapshots behind the As-published card", async () => {
+    await cloneSeedWorkspace(seed.id, guest.id);
+
+    const [gCfg] = await admin<{ id: string }[]>`
+      select id from configs where user_id = ${guest.id}`;
+    const runs = await admin<{ config_id: string; hit_count: number }[]>`
+      select config_id, hit_count from eval_runs where config_id = ${gCfg.id}`;
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].hit_count, 1);
+  });
+
+  it("leaves behind a question nothing in the guest's workspace could ever score", async () => {
+    await cloneSeedWorkspace(seed.id, guest.id);
+
+    const qs = await admin<{ question: string }[]>`
+      select q.question from eval_questions q
+        join documents d on d.id = q.document_id
+       where d.user_id = ${guest.id}`;
+    assert.deepEqual(
+      qs.map((r) => r.question),
+      ["what?"],
+      "a question with no label under the published config reached the guest",
+    );
+  });
+
+  it("copies the truth ranking into the guest's own id space, order intact", async () => {
+    await cloneSeedWorkspace(seed.id, guest.id);
+
+    const gChunks = await admin<{ id: string; position: number }[]>`
+      select c.id, c.position from ${admin(CHUNKS)} c
+        join documents d on d.id = c.document_id
+       where d.user_id = ${guest.id} order by c.position`;
+    const [gRanking] = await admin<
+      { chunk_ids: string[]; details: { perModelRanks: Record<string, unknown> } }[]
+    >`
+      select rk.chunk_ids, rk.details from eval_rankings rk
+        join eval_questions q on q.id = rk.eval_question_id
+        join documents d on d.id = q.document_id
+       where d.user_id = ${guest.id}`;
+
+    // The ideal order is position 1 then position 0 — the reverse of the chunk
+    // table, so a remap that silently returned the rows in table order fails here.
+    assert.deepEqual(
+      gRanking.chunk_ids,
+      [gChunks[1].id, gChunks[0].id],
+      "the ideal order did not survive the id remap",
+    );
+    // Keyed by the GUEST's chunk ids. Left in the seed's space every lookup in the
+    // drilldown misses and the per-model annotation just stops appearing — no
+    // error, no symptom, an emptier panel.
+    assert.deepEqual(
+      Object.keys(gRanking.details.perModelRanks).sort(),
+      [gChunks[0].id, gChunks[1].id].sort(),
+      "perModelRanks is still keyed by the seed's chunk ids",
+    );
+  });
+
+  it("copies only the ground truth, not the panel's other candidates", async () => {
+    await cloneSeedWorkspace(seed.id, guest.id);
+
+    const kinds = await admin<{ kind: string; is_truth: boolean }[]>`
+      select rk.kind, rk.is_truth from eval_rankings rk
+        join eval_questions q on q.id = rk.eval_question_id
+        join documents d on d.id = q.document_id
+       where d.user_id = ${guest.id}`;
+    assert.deepEqual(
+      kinds.map((r) => `${r.kind}${r.is_truth ? " (truth)" : ""}`),
+      ["aggregate (truth)"],
+    );
+  });
+
+  it("grades nobody when the publisher selected nobody", async () => {
+    // [] and undefined are opposite instructions: a publish whose selection query
+    // returned nothing must publish nothing, not quietly fall back to all of them.
+    const summary = await cloneSeedWorkspace(seed.id, guest.id, {
+      tunableQuestionIds: [],
+    });
+    assert.equal(summary.rankings, 0);
+  });
+});
+
+// THE FROZEN SET (docs/demo-analytics-plan.md, phase 4).
+//
+// What these assert is a SPEND LIMIT, not a feature. A guest's re-score and
+// autotune are ungated precisely because ~460 of the 472 questions carry a
+// `demo_frozen` ignore and evalStore's scoring queries skip them. Every failure
+// mode here is silent in the expensive direction: freeze nothing and the demo
+// still works, still looks right, and hands each visitor a button that retrieves
+// 472 questions' worth of chunk text.
+describe("cloneSeedWorkspace frozen set", () => {
+  // A second labeled question, so "the complement" is a set with something in it.
+  // The base fixture has exactly one, and a complement of nothing cannot tell a
+  // working exclusion apart from a broken one.
+  async function secondLabeledQuestion(): Promise<string> {
+    const [doc] = await admin<{ id: string }[]>`
+      select id from documents where user_id = ${seed.id} and file_name = 'a.txt'`;
+    const [run] = await admin<{ id: string }[]>`
+      select id from document_embeddings where config_id = ${seedConfigId}`;
+    const [chunk] = await admin<{ id: string }[]>`
+      select id from ${admin(CHUNKS)} where config_id = ${seedConfigId} order by position`;
+    const [q2] = await admin<{ id: string }[]>`
+      insert into eval_questions (document_id, question)
+      values (${doc.id}, 'and the other one?') returning id`;
+    await admin`
+      insert into eval_labels (eval_question_id, document_embedding_id, source_chunk_id)
+      values (${q2.id}, ${run.id}, ${chunk.id})`;
+    return q2.id;
+  }
+
+  const guestFrozen = () =>
+    admin<{ question: string; reason: string }[]>`
+      select q.question, ig.reason
+        from config_question_ignores ig
+        join eval_questions q on q.id = ig.eval_question_id
+        join documents d on d.id = q.document_id
+       where d.user_id = ${guest.id}
+       order by q.question`;
+
+  it("freezes every published question except the ones selected", async () => {
+    const tunable = await admin<{ id: string }[]>`
+      select id from eval_questions where question = 'what?'`;
+    await secondLabeledQuestion();
+
+    const summary = await cloneSeedWorkspace(seed.id, guest.id, {
+      onlyConfigId: seedConfigId,
+      tunableQuestionIds: [tunable[0].id],
+    });
+
+    assert.equal(summary.frozen, 1, "the complement of the selection was not frozen");
+    assert.deepEqual(
+      (await guestFrozen()).map((r) => `${r.question} (${r.reason})`),
+      ["and the other one? (demo_frozen)"],
+      "the wrong question was frozen, or the reason is not the one the store filters on",
+    );
+  });
+
+  it("resolves the selection through the id map, not by raw id", async () => {
+    // THE SILENT DIRECTION. The publisher passes the MASTER's question ids and the
+    // clone has just minted new ones; a comparison that forgot the map would match
+    // nothing, freeze everything, and report a healthy-looking count — a demo
+    // whose autotune button has no candidates at all, shipped without an error.
+    const [tunable] = await admin<{ id: string }[]>`
+      select id from eval_questions where question = 'what?'`;
+    await secondLabeledQuestion();
+
+    await cloneSeedWorkspace(seed.id, guest.id, {
+      onlyConfigId: seedConfigId,
+      tunableQuestionIds: [tunable.id],
+    });
+
+    const frozen = await guestFrozen();
+    assert.equal(frozen.length, 1, "every question froze — the selection did not map");
+    assert.notEqual(frozen[0].question, "what?", "the selected question was frozen");
+  });
+
+  it("freezes the whole bank when the publisher selected nobody", async () => {
+    // The mirror of "grades nobody when the publisher selected nobody": [] is an
+    // empty SELECTION, and since the frozen set is its complement, [] must freeze
+    // everything rather than — the dangerous reading — freezing nothing.
+    await secondLabeledQuestion();
+
+    const summary = await cloneSeedWorkspace(seed.id, guest.id, {
+      onlyConfigId: seedConfigId,
+      tunableQuestionIds: [],
+    });
+
+    assert.equal(summary.frozen, 2);
+  });
+
+  it("copies the snapshot's frozen rows on the guest hop, remapped", async () => {
+    // The publish hop SYNTHESISES the frozen set; the guest hop COPIES it. This is
+    // the second half, and the thing it proves is the repoint: an ignore row left
+    // pointing at the snapshot's question id is invisible to the guest's config,
+    // so the scope silently evaporates for every visitor.
+    const q2 = await secondLabeledQuestion();
+    await admin`
+      insert into config_question_ignores (config_id, eval_question_id, reason)
+      values (${seedConfigId}, ${q2}, 'demo_frozen')`;
+
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+
+    assert.equal(summary.frozen, 1);
+    const [row] = await admin<{ question: string; config_id: string }[]>`
+      select q.question, ig.config_id
+        from config_question_ignores ig
+        join eval_questions q on q.id = ig.eval_question_id
+        join documents d on d.id = q.document_id
+       where d.user_id = ${guest.id}`;
+    assert.equal(row.question, "and the other one?");
+    assert.notEqual(row.config_id, seedConfigId, "the ignore still points at the seed's config");
+  });
+});
+
+describe("cloneSeedWorkspace publish options", () => {
+  // A second tab with its own ingested document, plus a document sitting in the
+  // library with no vectors anywhere — the two shapes the filter has to drop, and
+  // the second is the one a copy-by-owner cannot tell from corpus content.
+  async function widenTheMaster() {
+    const [other] = await admin<{ id: string }[]>`
+      insert into documents (file_name, content_hash, content, user_id)
+      values ('b.txt', ${sha256("b")}, 'other body', ${seed.id}) returning id`;
+    const [orphan] = await admin<{ id: string }[]>`
+      insert into documents (file_name, content_hash, content, user_id)
+      values ('never-ingested.pdf', ${sha256("c")}, 'off topic', ${seed.id}) returning id`;
+    const [cfg] = await admin<{ id: string }[]>`
+      insert into configs (user_id, base_model, chunk_size, chunk_overlap, top_k, llm_model, tab_order)
+      values (${seed.id}, ${KEY_MODEL}, 500, 50, 5, 'test-llm', 1) returning id`;
+    const [run] = await admin<{ id: string }[]>`
+      insert into document_embeddings
+        (document_id, model, dimension, chunk_size, chunk_overlap, chunk_count, config_id)
+      values (${other.id}, ${KEY_MODEL}, ${DIM}, 500, 50, 1, ${cfg.id}) returning id`;
+    await admin.unsafe(
+      `insert into "${CHUNKS}" (document_id, document_embedding_id, position, text, embedding, config_id)
+       values ($1, $2, 0, 'other chunk', $3, $4)`,
+      [other.id, run.id, CHUNK_VECTOR, cfg.id],
+    );
+    await admin`
+      insert into eval_questions (document_id, question) values (${other.id}, 'other?')`;
+    return { otherConfigId: cfg.id, orphanId: orphan.id };
+  }
+
+  it("publishes one config and only the documents with chunks in it", async () => {
+    await widenTheMaster();
+
+    const summary = await cloneSeedWorkspace(seed.id, guest.id, { onlyConfigId: seedConfigId });
+
+    assert.equal(summary.configs, 1, "the other tab came along");
+    assert.equal(summary.documents, 1, "a document outside the published config came along");
+    assert.equal(summary.chunks, 2);
+    assert.equal(summary.questions, 1, "the other tab's question bank came along");
+
+    const names = await admin<{ file_name: string }[]>`
+      select file_name from documents where user_id = ${guest.id}`;
+    assert.deepEqual(
+      names.map((r) => r.file_name),
+      ["a.txt"],
+      "the guest's library is not exactly the published corpus",
+    );
+
+    // The banked answer belongs to the published config, so it must survive the
+    // filter — and reach through the fingerprint rewrite, which now runs over a
+    // document set narrower than the master's.
+    await seedEmbedding(guest.id, "the banked question");
+    const probe = await inScope(guest, summary.configId, () =>
+      semanticCacheLookup("the banked question", { serve: true, threshold: 0.95, keyModel: null }),
+    );
+    assert.equal(probe.hit, true, "a filtered publish lost its answer key");
+  });
+
+  it("refuses a config the master does not own", async () => {
+    const stranger = await createUser(admin);
+    const [theirs] = await admin<{ id: string }[]>`
+      insert into configs (user_id, base_model, chunk_size, chunk_overlap, top_k, llm_model)
+      values (${stranger.id}, ${KEY_MODEL}, 500, 50, 5, 'test-llm') returning id`;
+
+    await assert.rejects(
+      () => cloneSeedWorkspace(seed.id, guest.id, { onlyConfigId: theirs.id }),
+      /is not owned by/,
+    );
+  });
+
+  it("republishes in place instead of stacking a second copy", async () => {
+    const first = await cloneSeedWorkspace(seed.id, guest.id, {
+      onlyConfigId: seedConfigId,
+      replaceDestination: true,
+    });
+    const second = await cloneSeedWorkspace(seed.id, guest.id, {
+      onlyConfigId: seedConfigId,
+      replaceDestination: true,
+    });
+    assert.deepEqual({ ...second, configId: null }, { ...first, configId: null });
+
+    const [counts] = await admin<{ configs: number; documents: number; cached: number }[]>`
+      select (select count(*) from configs where user_id = ${guest.id})::int as configs,
+             (select count(*) from documents where user_id = ${guest.id})::int as documents,
+             (select count(*) from semantic_cache where user_id = ${guest.id})::int as cached`;
+    assert.deepEqual(counts, { configs: 1, documents: 1, cached: 1 });
+
+    // semantic_cache.config_id is ON DELETE SET NULL where every other child of
+    // `configs` cascades, so a republish that only dropped the configs would leave
+    // the previous build's answers behind as unreachable, un-fingerprintable rows
+    // — invisible to every count above except this one.
+    const [{ n: orphans }] = await admin<{ n: number }[]>`
+      select count(*)::int as n from semantic_cache
+       where user_id = ${guest.id} and config_id is null`;
+    assert.equal(orphans, 0, "the previous build left orphaned cache rows behind");
+
+    // And the surviving copy is reachable: the rewrite ran against the rows that
+    // exist now, not the ones the first publish minted.
+    await seedEmbedding(guest.id, "the banked question");
+    const probe = await inScope(guest, second.configId, () =>
+      semanticCacheLookup("the banked question", { serve: true, threshold: 0.95, keyModel: null }),
+    );
+    assert.equal(probe.hit, true, "the republished answer key is unreachable");
+  });
+
+  // THE COLLISION STEP 6 CREATES. Answers banked before and after the corpus
+  // changed carry DIFFERENT fingerprints in the seed, which is why they coexist
+  // there. The rewrite collapses them onto one fingerprint in the destination,
+  // and 0058's unique (user_id, embedding_model, llm_model, fingerprint,
+  // query_hash) then rejects the entire insert — so one edited document is
+  // enough to make every clone from that account fail, provisioning included.
+  //
+  // Found the hard way: the first real publish died here with 100 collisions
+  // against a seed whose corpus had been edited mid-week.
+  it("keeps the newest answer when a fingerprint rewrite collapses two rows onto one key", async () => {
+    // The row banked in beforeEach, aged and stamped with a stale signature —
+    // exactly the shape a pre-edit answer has. Rewriting the fingerprint by hand
+    // is the point here (the collision is about two of them existing), unlike the
+    // reachability tests above, which must use the real fingerprint path.
+    await admin`
+      update semantic_cache
+         set fingerprint = 'stale-signature', created_at = now() - interval '1 day'
+       where user_id = ${seed.id}`;
+    await inScope(seed, seedConfigId, () =>
+      semanticCacheStore("the banked question", { model: KEY_MODEL, vector: V }, RESULT("newer")),
+    );
+    const [{ n: before }] = await admin<{ n: number }[]>`
+      select count(*)::int as n from semantic_cache where user_id = ${seed.id}`;
+    assert.equal(before, 2, "fixture did not produce two rows to collide");
+
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    assert.equal(summary.cachedAnswers, 1, "the colliding row was not deduped");
+
+    // Newest wins, because that is the row the lookup would have served: the
+    // index is (…, created_at desc). Serving the older answer would be a silent
+    // regression the count above cannot see.
+    const [kept] = await admin<{ answer: string }[]>`
+      select result->>'answer' as answer from semantic_cache where user_id = ${guest.id}`;
+    assert.equal(kept.answer, "newer", "dedupe kept the stale answer");
+
+    // The seed still has both: dedupe is a property of the COPY, not a cleanup
+    // of the account being published.
+    const [{ n: after }] = await admin<{ n: number }[]>`
+      select count(*)::int as n from semantic_cache where user_id = ${seed.id}`;
+    assert.equal(after, 2, "the clone mutated the seed's cache");
   });
 });

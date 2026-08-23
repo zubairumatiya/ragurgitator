@@ -7,13 +7,14 @@
 // regressed — same promote→persist→confirm path the engine uses (§5.3).
 import { applyAutotuneCandidate, type CandidateFamily } from "@/lib/rag/autotune";
 import { withRequestConfig } from "@/lib/http/configScope";
-import { assertDemoAllows } from "@/lib/demo/policy";
 
 const FAMILIES: readonly CandidateFamily[] = ["size", "model", "size+model"];
 
 export async function POST(request: Request) {
+  // NO DEMO GATE — see /api/eval/autotune. This applies ONE candidate on ONE
+  // chunk, so it is the cheapest thing in the family, and gating it while the
+  // search that produced the candidate runs would be an odd place to draw a line.
   return withRequestConfig(request, async () => {
-    await assertDemoAllows("autotune");
     const body = (await request.json().catch(() => null)) as {
       chunkId?: string;
       family?: string;

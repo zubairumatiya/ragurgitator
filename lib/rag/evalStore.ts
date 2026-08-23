@@ -7,6 +7,8 @@
 // without re-authoring.
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql, toJsonb } from "@/lib/db";
+import { FROZEN_REASON, PUBLISHED_RUN_NOTE } from "@/lib/demo/frozen";
+import { isGuest } from "@/lib/demo/guest";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";
 import { reciprocalRank, ndcg } from "@/lib/rag/evalMetrics";
 import { reduceRates } from "@/lib/rag/evalRates";
@@ -116,6 +118,12 @@ export type QuestionDetail = {
   // these rows; it can never be read off the dashboard summary, which excludes
   // them by design.
   heldOut: boolean;
+  // The other subset of `ignored`: frozen by a demo publish (lib/demo/frozen)
+  // rather than by anybody's decision about the question. A guest's workbench is
+  // twelve live questions and ~460 frozen ones, and the difference has to be
+  // visible — "ignored" on a question nobody ignored reads as a judgement the
+  // demo never made. Always false for a real account, which has no such rows.
+  frozen: boolean;
 };
 
 // One autotune-run outcome row for the yellow ◷ hover (§6.4): a question's
@@ -157,7 +165,16 @@ export type RunSnapshot = {
   hitCount: number;
   mrr: number | null; // null for snapshots predating migration 0007
   ndcg: number | null;
+  // How many of `questionCount` the nDCG mean covers — questions that had an
+  // is_truth ranking when the run was taken (0076). Null on rows written before
+  // it, where the denominator was never recorded and cannot be reconstructed.
+  ndcgCovered: number | null;
   createdAt: number;
+  // Free-text label on the run. Written by exactly two things today: nothing (the
+  // ordinary snapshot path leaves it null) and a demo publish, whose single row
+  // carries PUBLISHED_RUN_NOTE and is found by it. Carried on the type so
+  // `asPublished` can identify that row without a second query.
+  notes: string | null;
 };
 
 // The active config's basics, surfaced to the dashboard so the Settings UI can
@@ -236,6 +253,18 @@ export type EvalSummary = {
   perDocument: DocumentBreakdown[];
   questions: QuestionDetail[];
   runs: RunSnapshot[];
+  // THE DEMO'S FROZEN HEADLINE — non-null only for a guest, and only once a build
+  // has been published (scripts/demo-snapshot.ts writes exactly one eval_runs row).
+  //
+  // A guest's workspace is a copy of a published build, so the ordinary aggregates
+  // above are "what the numbers are NOW, after whatever you have done to them" and
+  // this is "what they were when this demo was published". The Eval tab shows both,
+  // which is the only way a visitor can tell their own tuning apart from the corpus.
+  //
+  // Deliberately NOT called `baseline`: that name is taken twice over in this file
+  // already — 0057's no-overrides shadow leg (the `baseline` field above) and
+  // 0074's holdout split. This is a third and different thing.
+  asPublished: RunSnapshot | null;
   // How many autotune runs of this config recorded a held-out set (0074). The
   // gate for the /eval "Held-out set" section, which must not appear at all for a
   // config that has never taken the measurement — and must appear for one whose
@@ -708,6 +737,31 @@ export async function getChunkForGeneration(
   };
 }
 
+// THE DEMO'S SCOPE, AS A WHERE CLAUSE — the one place scoring is narrowed to the
+// questions a guest is allowed to move (docs/demo-analytics-plan.md, phase 4).
+//
+// Frozen questions are still SCORED rows: their published result is what the Eval
+// tab shows and what the "As published" card averages. What they are not is work
+// that a re-score, a "Score pending" or an override's dirty screen may redo —
+// each of those retrieves a top-k of chunk TEXT per question, and ~460 of them is
+// the megabytes this demo's egress budget does not have. Twelve is ~150 KB.
+//
+// NOT an isGuest() branch. It filters on a marker the publish wrote (see
+// lib/demo/frozen), so a real account — which has no frozen rows — takes exactly
+// the query it took before, and nothing about the store layer's behaviour depends
+// on who is asking.
+//
+// Both call sites, deliberately: allLabeledQuestions is "re-score all" and
+// questionsNeedingScoring is "score pending", and a scope that covered one of
+// them would just move the whole cost onto the other button.
+const notFrozen = () => sql`
+  and not exists (
+    select 1 from config_question_ignores ig
+     where ig.config_id = ${activeConfig().id}
+       and ig.eval_question_id = q.id
+       and ig.reason = ${FROZEN_REASON}
+  )`;
+
 // Questions (with a label under the active config) that have no fresh result —
 // never scored, edited since their last score (updated_at newer), or scored
 // before the config's retrieval last changed shape (an override/delegate set or
@@ -737,6 +791,7 @@ export async function questionsNeedingScoring(): Promise<QuestionToScore[]> {
     join eval_labels l on l.eval_question_id = q.id
     join document_embeddings de on de.id = l.document_embedding_id
     where de.config_id = ${activeConfig().id}
+      ${notFrozen()}
       and not exists (
         select 1 from eval_results r
         where r.eval_label_id = l.id
@@ -789,6 +844,7 @@ export async function allLabeledQuestions(
     join eval_labels l on l.eval_question_id = q.id
     join document_embeddings de on de.id = l.document_embedding_id
     where de.config_id = ${activeConfig().id}
+      ${notFrozen()}
       and (${docScope}::uuid[] is null or q.document_id = any(${docScope}::uuid[]))
   `;
 
@@ -1988,16 +2044,21 @@ export async function createRunSnapshot(args: {
   hitCount: number;
   mrr: number | null;
   ndcg: number | null;
+  // The nDCG mean's own denominator (0076). `questionCount` is every scored
+  // question; only the graded ones are in `ndcg`, and on a partly-graded corpus
+  // those are different numbers.
+  ndcgCovered?: number | null;
   k?: number; // recall depth this run was scored at (A1); defaults to top_k
 }): Promise<void> {
   const cfg = activeConfig();
   await sql`
     insert into eval_runs
-      (config_id, model, chunk_size, chunk_overlap, k, question_count, hit_count, mrr, ndcg)
+      (config_id, model, chunk_size, chunk_overlap, k, question_count, hit_count, mrr, ndcg,
+       ndcg_covered)
     values
       (${cfg.id}, ${cfg.embeddingModel}, ${cfg.chunkSize}, ${cfg.chunkOverlap},
        ${args.k ?? cfg.topK}, ${args.questionCount}, ${args.hitCount}, ${args.mrr},
-       ${args.ndcg})
+       ${args.ndcg}, ${args.ndcgCovered ?? null})
   `;
 }
 
@@ -2241,6 +2302,7 @@ type EvalDetailRow = {
   retrieval_state: string | null;
   ignored: boolean;
   held_out: boolean;
+  frozen: boolean;
 };
 
 type DetailContext = {
@@ -2276,7 +2338,11 @@ function mapQuestionDetails(
         ? r.retrieval_state !== ctx.currentState
         : ctx.retrievalChangedAt !== null &&
           r.scored_at.getTime() < ctx.retrievalChangedAt.getTime());
-    if (retrStale && !editStale) retrievalStale += 1;
+    // Frozen rows are excluded: a guest's first autotune moves the config's
+    // override fingerprint, which makes all ~460 of them retrieval-stale at once
+    // — a "460 questions need re-scoring" badge over work the demo will never do,
+    // for rows that are out of the rates anyway. The twelve still count.
+    if (retrStale && !editStale && !r.frozen) retrievalStale += 1;
     const stale = editStale || retrStale;
     const scored = r.scored_at !== null;
     // Recompute the hit at the CURRENT recall_k from the stored found_rank (the
@@ -2316,6 +2382,7 @@ function mapQuestionDetails(
       ndcg: qNdcg,
       ignored: r.ignored,
       heldOut: r.held_out,
+      frozen: r.frozen,
     };
   });
   return { questions, retrievalStale, editStaleIds };
@@ -2353,7 +2420,8 @@ async function baselineDetailRows(table: string): Promise<EvalDetailRow[]> {
       lt.hit, lt.found_rank, lt.retrieved_ids, lt.retrieved_scores,
       lt.scored_at, lt.retrieval_state,
       (ig.eval_question_id is not null) as ignored,
-      (ig.reason is not distinct from 'holdout') as held_out
+      (ig.reason is not distinct from 'holdout') as held_out,
+      (ig.reason is not distinct from ${FROZEN_REASON}) as frozen
     from eval_questions q
     join active_labels al on al.eval_question_id = q.id
     join documents d on d.id = q.document_id
@@ -2448,7 +2516,8 @@ export async function getChunkQuestions(
       lt.hit, lt.found_rank, lt.retrieved_ids, lt.retrieved_scores,
       lt.scored_at, lt.retrieval_state,
       (ig.eval_question_id is not null) as ignored,
-      (ig.reason is not distinct from 'holdout') as held_out
+      (ig.reason is not distinct from 'holdout') as held_out,
+      (ig.reason is not distinct from ${FROZEN_REASON}) as frozen
     from eval_questions q
     join active_labels al on al.eval_question_id = q.id
     join documents d on d.id = q.document_id
@@ -2506,6 +2575,7 @@ export async function getSummary(): Promise<EvalSummary> {
     perDocument: [],
     questions: [],
     runs: [],
+    asPublished: null,
     holdoutRuns: 0,
     pendingChunks: 0,
     pendingScoring: 0,
@@ -2554,6 +2624,7 @@ export async function getSummary(): Promise<EvalSummary> {
         retrieval_state: string | null;
         ignored: boolean;
         held_out: boolean;
+        frozen: boolean;
       }[]
     >`
       with active_labels as (
@@ -2594,7 +2665,8 @@ export async function getSummary(): Promise<EvalSummary> {
         lt.scored_at,
         lt.retrieval_state,
         (ig.eval_question_id is not null) as ignored,
-        (ig.reason is not distinct from 'holdout') as held_out
+        (ig.reason is not distinct from 'holdout') as held_out,
+        (ig.reason is not distinct from ${FROZEN_REASON}) as frozen
       from eval_questions q
       join active_labels al on al.eval_question_id = q.id
       join documents d on d.id = q.document_id
@@ -2614,10 +2686,12 @@ export async function getSummary(): Promise<EvalSummary> {
         hit_count: number;
         mrr: number | null;
         ndcg: number | null;
+        ndcg_covered: number | null;
+        notes: string | null;
         created_at: Date;
       }[]
     >`
-      select id, k, question_count, hit_count, mrr, ndcg, created_at
+      select id, k, question_count, hit_count, mrr, ndcg, ndcg_covered, notes, created_at
       from eval_runs
       where config_id = ${activeConfig().id}
       order by created_at desc
@@ -2778,7 +2852,12 @@ export async function getSummary(): Promise<EvalSummary> {
 
   // Questions "Score pending" would score: never scored, or edited since.
   // Matches questionsNeedingScoring() — no extra query needed.
-  const pendingScoring = questions.filter((q) => q.hit === null || q.stale).length;
+  // Same exclusion as retrievalStale above, and for the same reason: this number
+  // enables "Score pending", and pointing that button at frozen questions the
+  // scoped query will not return would leave it permanently lit with nothing to do.
+  const pendingScoring = questions.filter(
+    (q) => (q.hit === null || q.stale) && !q.frozen,
+  ).length;
 
   // Maintenance sweep: when nothing is retrieval-stale anymore but change-log
   // entries linger (a revert restored the fingerprint, netting them out), drop
@@ -2801,6 +2880,18 @@ export async function getSummary(): Promise<EvalSummary> {
     }
   }
 
+  const runs: RunSnapshot[] = runRows.map((r) => ({
+    id: r.id,
+    k: r.k,
+    questionCount: r.question_count,
+    hitCount: r.hit_count,
+    mrr: r.mrr,
+    ndcg: r.ndcg,
+    ndcgCovered: r.ndcg_covered,
+    createdAt: r.created_at.getTime(),
+    notes: r.notes,
+  }));
+
   return {
     k: recallK,
     recallK,
@@ -2820,15 +2911,19 @@ export async function getSummary(): Promise<EvalSummary> {
     baseline,
     perDocument: [...byDoc.values()],
     questions,
-    runs: runRows.map((r) => ({
-      id: r.id,
-      k: r.k,
-      questionCount: r.question_count,
-      hitCount: r.hit_count,
-      mrr: r.mrr,
-      ndcg: r.ndcg,
-      createdAt: r.created_at.getTime(),
-    })),
+    runs,
+    // runRows is already ordered newest-first, and a published snapshot holds
+    // exactly one row — so for a guest "the newest run" and "the build they were
+    // handed" are the same row. For everyone else this stays null and the Eval tab
+    // renders exactly as it always has.
+    // BY NAME, NOT BY RECENCY. Phase 4 lets a guest write eval_runs rows of their
+    // own (a re-score and an autotune each snapshot one), so "the newest run" would
+    // relabel a visitor's own result as the published build's frozen headline —
+    // the exact lie this card exists to stop telling. The publish writes exactly
+    // one row carrying PUBLISHED_RUN_NOTE; that is the row, or there is none.
+    asPublished: (await isGuest())
+      ? (runs.find((r) => r.notes === PUBLISHED_RUN_NOTE) ?? null)
+      : null,
     holdoutRuns: holdoutRunRows[0]?.n ?? 0,
     pendingChunks: pendingChunkRows[0]?.n ?? 0,
     pendingScoring,

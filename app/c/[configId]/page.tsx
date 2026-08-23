@@ -13,9 +13,31 @@ import { FileUpload } from "@/app/components/FileUpload";
 import { withPageUser } from "@/lib/auth/dal";
 import { isGuest } from "@/lib/demo/guest";
 import { llmProviderFor } from "@/lib/llm/llmModels";
+import { resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { getConfig } from "@/lib/rag/configStore";
 import { availableProviders } from "@/lib/rag/providerAvailability";
 import { bankedQuestions } from "@/lib/rag/semanticCache";
+
+// The demo's suggestion chips. bankedQuestions() reads the active config out of
+// AsyncLocalStorage, and withPageUser only establishes the USER scope — so this
+// needs its own withConfig or it throws before the page renders anything.
+//
+// Best-effort on purpose, and the wider version of the promise bankedQuestions
+// already makes internally: no chips is a correct answer, so nothing about a
+// list of suggestions may be what takes the workspace down. That is not
+// hypothetical — a missing config scope here 500'd every guest workspace while
+// /demo itself kept answering 200, because the failure was entirely behind the
+// button.
+async function guestSuggestions(configId: string): Promise<string[]> {
+  try {
+    const cfg = await resolveConfig(configId);
+    if (!cfg) return [];
+    return await withConfig(cfg, () => bankedQuestions());
+  } catch (err) {
+    console.warn(`[demo] suggestion chips unavailable: ${(err as Error).message}`);
+    return [];
+  }
+}
 
 export default async function WorkbenchPage({
   params,
@@ -46,7 +68,7 @@ export default async function WorkbenchPage({
     // Only the demo gets chips. A real account's own questions are already in
     // their history, and offering a signed-in user their own cached queries as
     // "suggestions" would read as the app running out of ideas.
-    const suggestions = guest ? await bankedQuestions() : [];
+    const suggestions = guest ? await guestSuggestions(configId) : [];
     return { provider, hasLlmKey, suggestions };
   });
 

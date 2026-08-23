@@ -13,6 +13,7 @@
 // the new retrieval immediately; every other result goes retrieval-stale (badge +
 // change log) until the next full run.
 import { z } from "zod";
+import { assertDemoAllows } from "@/lib/demo/policy";
 import { parseBody } from "@/lib/http/body";
 import { withRequestConfig } from "@/lib/http/configScope";
 import {
@@ -42,6 +43,13 @@ export async function POST(
   if (body.response) return body.response;
 
   return withRequestConfig(request, async () => {
+    // THE OTHER DOOR INTO THE SAME SPEND, and the one that reads like a
+    // preference rather than a run: an override re-embeds the chunk, and then
+    // rescoreChunkQuestions() pulls vectors back out — which is exactly what
+    // /try-model and /eval/rescore are gated for. Outside the try, so the
+    // refusal reaches catchingMissingKey as a 403 rather than being caught below
+    // and served as a 500 wearing the demo's sentence.
+    await assertDemoAllows("override");
     try {
       // Size (or size+model combo) override when `size` is present.
       if (body.data.size !== undefined) {
@@ -114,6 +122,8 @@ export async function DELETE(
 ) {
   const { chunkId } = await params;
   return withRequestConfig(request, async () => {
+    // Clearing rescores too, so it costs the same egress as setting.
+    await assertDemoAllows("override");
     try {
       const cleared = await clearChunkOverride(chunkId);
       if (!cleared) return Response.json({ error: "No override to clear." }, { status: 404 });
