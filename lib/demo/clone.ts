@@ -64,6 +64,15 @@ async function columnsOf(tx: Tx, table: string): Promise<string[]> {
 //
 // `omit` drops a column from BOTH lists so its default applies — used for `id`
 // on the tables nothing points at, which need no map and therefore no map join.
+//
+// `dedupe` narrows the copy to one row per key, newest first. Only semantic_cache
+// needs it, and only because step 6 REWRITES fingerprints: rows that were
+// distinct in the source (different corpus signatures) become the same key in the
+// destination, and 0058's unique (user_id, embedding_model, llm_model,
+// fingerprint, query_hash) then rejects the whole insert. Keeping the newest is
+// not a tie-break, it is the row the cache would serve anyway —
+// semantic_cache_lookup_idx orders by created_at desc.
+//
 // Every identifier here is an internal constant; the only caller-supplied values
 // are the two user ids, which travel as bound parameters.
 async function copyRows(
@@ -74,6 +83,7 @@ async function copyRows(
     where: string;
     overrides?: Overrides;
     omit?: string[];
+    dedupe?: { on: string; newest: string };
     params: unknown[];
   },
 ): Promise<number> {
@@ -82,13 +92,16 @@ async function copyRows(
   const cols = (await columnsOf(tx, opts.table)).filter((c) => !omit.has(c));
   const targets = cols.map((c) => `"${c}"`).join(", ");
   const values = cols.map((c) => overrides[c] ?? `s."${c}"`).join(", ");
+  const distinct = opts.dedupe ? `distinct on (${opts.dedupe.on}) ` : "";
+  const order = opts.dedupe ? `order by ${opts.dedupe.on}, ${opts.dedupe.newest}` : "";
 
   const result = await tx.unsafe(
     `insert into "${opts.table}" (${targets})
-     select ${values}
+     select ${distinct}${values}
        from "${opts.table}" s
        ${opts.joins}
-      where ${opts.where}`,
+      where ${opts.where}
+      ${order}`,
     opts.params as never[],
   );
   return result.count ?? 0;
@@ -404,12 +417,21 @@ export async function cloneSeedWorkspace(
     // is deliberate: their fingerprint could not be rewritten in step 6 (there
     // is no config to recompute a document signature for), so they would be
     // unreachable rows occupying a guest's disk forever.
+    //
+    // Deduped per DESTINATION config, because that is the granularity step 6
+    // rewrites at: two configs may legitimately share a query_hash and end up
+    // with different fingerprints, so config_id has to be part of the key here
+    // even though 0058 dropped it from the constraint.
     const cachedAnswers = await copyRows(tx, {
       table: "semantic_cache",
       joins: `join _map_config mc on mc.old_id = s.config_id`,
       where: `s.user_id = $1`,
       overrides: { user_id: "$2", config_id: "mc.new_id" },
       omit: ["id"],
+      dedupe: {
+        on: `s.config_id, s.embedding_model, s.llm_model, s.query_hash`,
+        newest: `s.created_at desc`,
+      },
       params: ids,
     });
 

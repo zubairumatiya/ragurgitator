@@ -381,4 +381,46 @@ describe("cloneSeedWorkspace publish options", () => {
     );
     assert.equal(probe.hit, true, "the republished answer key is unreachable");
   });
+
+  // THE COLLISION STEP 6 CREATES. Answers banked before and after the corpus
+  // changed carry DIFFERENT fingerprints in the seed, which is why they coexist
+  // there. The rewrite collapses them onto one fingerprint in the destination,
+  // and 0058's unique (user_id, embedding_model, llm_model, fingerprint,
+  // query_hash) then rejects the entire insert — so one edited document is
+  // enough to make every clone from that account fail, provisioning included.
+  //
+  // Found the hard way: the first real publish died here with 100 collisions
+  // against a seed whose corpus had been edited mid-week.
+  it("keeps the newest answer when a fingerprint rewrite collapses two rows onto one key", async () => {
+    // The row banked in beforeEach, aged and stamped with a stale signature —
+    // exactly the shape a pre-edit answer has. Rewriting the fingerprint by hand
+    // is the point here (the collision is about two of them existing), unlike the
+    // reachability tests above, which must use the real fingerprint path.
+    await admin`
+      update semantic_cache
+         set fingerprint = 'stale-signature', created_at = now() - interval '1 day'
+       where user_id = ${seed.id}`;
+    await inScope(seed, seedConfigId, () =>
+      semanticCacheStore("the banked question", { model: KEY_MODEL, vector: V }, RESULT("newer")),
+    );
+    const [{ n: before }] = await admin<{ n: number }[]>`
+      select count(*)::int as n from semantic_cache where user_id = ${seed.id}`;
+    assert.equal(before, 2, "fixture did not produce two rows to collide");
+
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    assert.equal(summary.cachedAnswers, 1, "the colliding row was not deduped");
+
+    // Newest wins, because that is the row the lookup would have served: the
+    // index is (…, created_at desc). Serving the older answer would be a silent
+    // regression the count above cannot see.
+    const [kept] = await admin<{ answer: string }[]>`
+      select result->>'answer' as answer from semantic_cache where user_id = ${guest.id}`;
+    assert.equal(kept.answer, "newer", "dedupe kept the stale answer");
+
+    // The seed still has both: dedupe is a property of the COPY, not a cleanup
+    // of the account being published.
+    const [{ n: after }] = await admin<{ n: number }[]>`
+      select count(*)::int as n from semantic_cache where user_id = ${seed.id}`;
+    assert.equal(after, 2, "the clone mutated the seed's cache");
+  });
 });
