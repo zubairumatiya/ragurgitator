@@ -1,39 +1,62 @@
-# RAG Document Q&A + Retrieval Evaluation
+# BYOK RAG Evaluation Platform
 
-A small app for asking questions about your own documents using **Retrieval-Augmented
-Generation (RAG)** — and, more interestingly, for **measuring how good the retrieval
-actually is** instead of just trusting it.
+A platform to test the retrieval quality of your RAG setup. Including a full eval suite, autotuning, and cost analysis. Answer a harder question than "does retrieval work?" — how good is it, how do you know, and what does an answer cost?
 
-You upload documents, the app splits them into chunks and embeds them into a vector
-database, and when you ask a question it finds the most relevant chunks and has an
-LLM answer using only those. On top of that, it has a full evaluation suite that
-scores retrieval quality with real information-retrieval metrics.
+Platform underneath: multi-tenant Postgres with row-level security enforced through a non-bypassing role, strict BYOK with provider keys sealed by envelope encryption against a KEK in Azure Key Vault, and an MCP server over OAuth 2.1 whose write tools require a separately approved, hour-capped capability grant.
 
-> Status: personal project / work in progress. It runs locally; it's not a hosted
-> product. Built mainly to explore retrieval quality and embedding-model trade-offs.
+> Status: App is live on [Ragurgitator](https://ragurgitator.com)
 
 ## What it does
 
-- **Ingest documents** — paste text or upload `.txt`, `.md`, `.pdf`, or `.docx` files.
-- **Chunk + embed** — splits text into token-based chunks (using the embedding
-  model's own tokenizer) and stores vectors in Postgres via pgvector.
-- **Ask questions** — retrieves the top-k most relevant chunks and has Claude answer
-  grounded in them.
-- **Evaluate retrieval** — auto-generates synthetic questions from your documents and
-  scores retrieval with **Recall@k**, **MRR**, and **graded nDCG@k**. The nDCG
+Each user creates one or more **corpora** (document sets) and, under each corpus,
+one or more **configs** — a chunk size/overlap + embedding model + retrieval
+settings combination. Configs in the same corpus share the ingested documents but
+keep separate indexes, so you can A/B two indexing strategies against identical
+source material instead of guessing from a single run.
+
+- **No-login demo** — `/demo` Lets potential users test the platform before having to commit. No signup and no keys. Hands a visitor a disposable, sandboxed copy of a
+  seed workspace with pre-warmed cache hits, so the semantic cache and eval
+  metrics are visible without anyone creating an account or supplying a key.
+- **Ingest documents** — paste text or upload `.txt`, `.md`, `.pdf`, or `.docx`
+  files; chunking uses the embedding model's own tokenizer.
+- **Bring your own keys** — every user adds their own Anthropic / Voyage / OpenAI /
+  Cohere keys, encrypted at rest. There's no shared API budget to exhaust and no
+  vendor lock — swap embedding or answer models per config.
+- **Ask questions** — retrieves the top-k most relevant chunks and has Claude
+  answer grounded in them. A **semantic cache** recognizes paraphrased repeats of
+  questions it's already answered and returns the cached answer for $0 instead of
+  re-embedding and re-asking.
+- **Evaluate retrieval** — auto-generates synthetic questions from your documents
+  and scores retrieval with **Recall@k**, **MRR**, and **graded nDCG@k**. The nDCG
   "ideal ranking" is built from a cross-model embedding consensus, with optional
-  LLM re-rankers, so it's a real graded metric rather than a yes/no hit.
+  LLM re-rankers, so it's a real graded metric rather than a yes/no hit. A
+  held-out test split reports a generalization number separate from the rates
+  autotune is allowed to see.
+- **Autotune** — search chunk size/overlap/top-k/model combinations against your
+  real eval set and apply the winner, with every trial's before/after recorded so
+  an applied change can be explained or reverted.
+- **Appraise** — a standing cost dashboard, not a one-off estimate: per-token rate
+  cards for every supported model, full-corpus replay scoring across models from
+  already-cached vectors (so comparing models costs nothing after the first pass),
+  semantic-cache hit-rate and dollars saved, and per-config metrics side by side.
 - **Explore the corpus** — k-means clustering with silhouette/cohesion diagnostics
   and automatic cluster labels.
-- **Experiment** — compare different embedding models, and try different chunk
-  sizes/overlaps, against the live corpus without changing your index.
+- **MCP server** — an external agent (e.g. Claude Code) can connect over OAuth 2.1
+  and call read tools (describe a config, list its chunks) directly; write tools
+  (create a config, add eval questions) require a separately approved, time-capped
+  capability grant, so a connected agent can't silently spend money or mutate data.
 
 ## Tech stack
 
 - **Next.js** + **React** + **TypeScript**
-- **PostgreSQL** + **pgvector** for vector storage and search
-- **Voyage AI** for embeddings
-- **Anthropic Claude** for answer generation and LLM-as-judge ranking
+- **PostgreSQL** + **pgvector** for vector storage and search, with row-level
+  security as the tenant boundary (enforced through a non-bypassing role, not
+  just app-layer checks)
+- **Supabase Auth** for accounts, plus OAuth 2.1 for the MCP server
+- **Voyage AI, OpenAI, and Cohere** for embeddings — pluggable per config
+- **Anthropic Claude** for answer generation, synthetic question generation, and
+  LLM-as-judge re-ranking
+- **Azure Key Vault** for envelope-encrypting user-supplied provider keys
 
 ## Getting started
 
@@ -65,13 +88,16 @@ scores retrieval quality with real information-retrieval metrics.
    `0051_rls.sql` creates the role `rag_app` but deliberately gives it **no
    password** — a migration file is committed and a password should not be. Set
    one out of band, as `postgres`:
+
    ```sql
    alter role rag_app password 'a-strong-password';
    ```
+
    Then put the matching connection string in `.env.local`. It is the same host,
    port and database as `DATABASE_URL`; only the username and password change,
    and through Supabase's pooler the username takes the form
    `rag_app.<project-ref>`:
+
    ```
    RAG_APP_DATABASE_URL=postgresql://rag_app.<project-ref>:<password>@<same-host>:6543/postgres
    ```
@@ -92,6 +118,7 @@ scores retrieval quality with real information-retrieval metrics.
    refuses to start. Falling back to `DATABASE_URL` would run the entire store
    layer as a role that bypasses RLS while appearing to work perfectly, which is
    the one failure mode worth refusing outright.
+
 5. Start the dev server:
    ```bash
    npm run dev
@@ -100,9 +127,18 @@ scores retrieval quality with real information-retrieval metrics.
 
 ## Project layout
 
-- `app/` — pages and API routes (the main Q&A page, `/eval`, and `/clusters`)
+- `app/` — pages and API routes: the corpus/config workspace (`/c/[configId]`,
+  `/c/[configId]/eval`, `/c/[configId]/clusters`), the cost/model dashboard
+  (`/appraise`), account + key management, the MCP OAuth flow, and `/demo`
 - `lib/rag/` — the core logic: ingestion, chunking, embeddings, retrieval,
-  evaluation, clustering, and the ranking builder
+  evaluation, clustering, semantic caching, and the ranking builder
+- `lib/auth/` — Supabase session handling, per-user provider key storage, and
+  request-scoped user identity
+- `lib/crypto/` — envelope encryption for provider keys (Azure Key Vault KEK)
+- `lib/mcp/` — the MCP server's tools and the OAuth write-capability gate
+- `lib/batch/` — provider batch-API adapters (cheaper, async ingestion/eval)
+- `lib/jobs/` — sliced background jobs for long-running actions
+- `lib/demo/` — the guest-demo policy, rate limits, and cleanup
 - `lib/config.ts` — model names and retrieval knobs (chunk size, overlap, top-k)
 - `migrations/` — the database schema, one SQL file per change
 
@@ -123,11 +159,11 @@ happen later or never.
    unwrap, which is everything the app does. Creating a key version is not in
    that role. Grant **Crypto Officer** on the vault, rotate, then remove it.
 2. **Create the new version** of `provider-key-kek` in vault `rag-app-zube`
-   (Azure portal → the key → *New Version*, or `az keyvault key rotate`).
+   (Azure portal → the key → _New Version_, or `az keyvault key rotate`).
 3. **Restart the app.** `currentKeyId()` resolves the current version **once per
    process and caches it forever** — the right call for a hot path that would
    otherwise hit the vault on every save, but it means a running server keeps
-   sealing new keys under the *old* version until it restarts. On Vercel a
+   sealing new keys under the _old_ version until it restarts. On Vercel a
    redeploy does this; locally, restart `npm run dev`.
 4. **Verify** with `npm run vault:check`, which round-trips wrap/unwrap against
    the live vault.
@@ -169,7 +205,7 @@ needs its own.
 So, for each new table:
 
 1. Give it a path to an owner — a `user_id uuid not null references
-   user_profiles(id) on delete cascade`, or a `config_id` / `document_id` that
+user_profiles(id) on delete cascade`, or a `config_id` / `document_id` that
    already reaches one.
 2. Ship a policy `to rag_app` **in the same migration**, matching the shape its
    neighbours use in `0051_rls.sql`: a direct
