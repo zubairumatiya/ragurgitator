@@ -449,7 +449,8 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
             // thing the user has to know is that the verdicts arrive later.
             "Submitted a batch — pairs land when it completes (Batch API panel tracks it), " +
             "and a judge screen is submitted automatically once they do. " +
-            "Mislabelled pairs are quarantined when its verdicts arrive."
+            "Mislabelled pairs are quarantined when its verdicts arrive, and a " +
+            "probe run stocks the shadow judge queue at the same time."
           : String(d.reason ?? "Nothing to generate."),
       );
     } else {
@@ -461,7 +462,11 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
           // is the gate working, not a question that produced nothing.
           (Number(d.screenedOut) > 0
             ? `; ${d.screenedOut} rejected by the judge as mislabelled.`
-            : "."),
+            : ".") +
+          // What generation just did for §3, or why it did nothing. The route
+          // decides the wording (probeTriggerNote) so the batch path and this
+          // one cannot drift apart; absent = nothing worth saying.
+          (d.probeNote ? ` ${d.probeNote}` : ""),
       );
       if (d.stats) setPairs(d.stats as PairStats);
     }

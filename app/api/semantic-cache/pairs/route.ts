@@ -26,6 +26,7 @@ import {
   pairStats,
   PairGenAlreadyRunningError,
 } from "@/lib/rag/semanticCachePairs";
+import { probeTriggerNote, triggerProbeReplay } from "@/lib/rag/probeReplayTrigger";
 import { handlerFor } from "@/lib/batch/jobs/registry";
 import { submitBatch } from "@/lib/batch/orchestrator";
 import { isBatchEnabled } from "@/lib/batch/types";
@@ -79,7 +80,22 @@ export async function POST(request: Request) {
       }
 
       const result = await generatePairs({ limit: body.data.limit });
-      return Response.json({ mode: "inline", ...result, stats: await pairStats() });
+      // Stock §3's judge queue from what just landed (Phase 3 of
+      // docs/probe-replay-plan.md). Fired HERE rather than inside generatePairs
+      // because the launcher pulls in the job registry, which pulls the probe
+      // step, which pulls semanticCachePairs back — the trigger belongs at the
+      // edge, not in the library it would cycle with. The batch path fires from
+      // its own apply(), since that is where its pairs actually appear.
+      //
+      // Best-effort by construction: triggerProbeReplay never throws, so a
+      // generation that paid for pairs still reports them.
+      const probes = await triggerProbeReplay();
+      return Response.json({
+        mode: "inline",
+        ...result,
+        probeNote: probeTriggerNote(probes),
+        stats: await pairStats(),
+      });
     } catch (err) {
       if (err instanceof PairGenAlreadyRunningError) {
         return Response.json({ error: err.message }, { status: 409 });
