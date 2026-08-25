@@ -29,6 +29,7 @@ import { withUser } from "../../lib/auth/userScope";
 import { config } from "../../lib/config";
 import { fragment, privilegedSql } from "../../lib/db";
 import { cloneSeedWorkspace } from "../../lib/demo/clone";
+import { SHADOW_QUEUE_CAP } from "../../lib/demo/frozen";
 import { resolveConfig, withConfig } from "../../lib/rag/activeConfig";
 import { chunksTable, modelDimension, vectorLiteral } from "../../lib/rag/vectorStore";
 import type { CachedResult } from "../../lib/rag/semanticCache";
@@ -717,5 +718,163 @@ describe("cloneSeedWorkspace publish options", () => {
     const [{ n: after }] = await admin<{ n: number }[]>`
       select count(*)::int as n from semantic_cache where user_id = ${seed.id}`;
     assert.equal(after, 2, "the clone mutated the seed's cache");
+  });
+});
+
+// --- step 5b: the shadow-log sample -----------------------------------------
+//
+// The clone's ONLY sampling copy, which makes it the only step whose failure mode
+// is a chart that renders but is wrong. Every other step is checked for
+// reachability — a row is there or it is not. Here a row being there is not
+// enough: the calibration curve IS the accept rate per similarity band, so a
+// sample that dropped one verdict, or clustered at one end of the range, would
+// produce a plausible-looking curve that is not the operator's.
+describe("cloneSeedWorkspace shadow sample", () => {
+  const FLOOR = config.semanticCache.shadowLogFloor;
+
+  // 60 probe rows spanning the floor upward with a verdict pattern that changes
+  // with similarity (as the real population's does — rejects concentrate low), 20
+  // traffic rows, and 6 sub-floor rows that must never travel.
+  async function seedShadow() {
+    const rows: { origin: string; sim: number; verdict: string }[] = [];
+    for (let i = 0; i < 60; i++) {
+      const sim = FLOOR + (i / 60) * (0.999 - FLOOR);
+      // Reject-heavy at the bottom, accept-heavy at the top.
+      rows.push({ origin: "probe", sim, verdict: i < 30 ? "reject" : "accept" });
+    }
+    for (let i = 0; i < 20; i++) {
+      rows.push({ origin: "traffic", sim: FLOOR + (i / 20) * (0.999 - FLOOR), verdict: "accept" });
+    }
+    for (let i = 0; i < 6; i++) {
+      rows.push({ origin: "probe", sim: 0.3 + i * 0.05, verdict: "reject" });
+    }
+    let n = 0;
+    for (const r of rows) {
+      const q = `shadow question ${n++}`;
+      await admin`
+        insert into semantic_cache_shadow
+          (config_id, embedding_model, space, fingerprint, new_query, new_query_hash,
+           matched_query, served_answer, sim, verdict, judge_source, judge_model,
+           judge_reason, judged_at, origin)
+        values (${seedConfigId}, ${KEY_MODEL}, 'test-space', 'seed-fingerprint',
+                ${q}, ${sha256(q)}, 'the banked question', 'an answer',
+                ${r.sim}, ${r.verdict}, 'llm', 'judge-model', 'because', now(),
+                ${r.origin})`;
+    }
+  }
+
+  type Row = {
+    origin: string;
+    sim: number;
+    verdict: string | null;
+    judge_source: string | null;
+    judge_model: string | null;
+    judge_reason: string | null;
+    judged_at: Date | null;
+    fingerprint: string;
+  };
+
+  async function guestShadow(): Promise<Row[]> {
+    return admin<Row[]>`
+      select s.origin, s.sim::float8 as sim, s.verdict, s.judge_source, s.judge_model,
+             s.judge_reason, s.judged_at, s.fingerprint
+        from semantic_cache_shadow s
+        join configs c on c.id = s.config_id
+       where c.user_id = ${guest.id}
+       order by s.sim`;
+  }
+
+  it("takes a capped, stratified sample and leaves the sub-floor band behind", async () => {
+    await seedShadow();
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    const got = await guestShadow();
+
+    assert.equal(got.length, summary.shadowEvents, "summary must count what landed");
+    // Sub-floor rows change no curve (calibrationCurve drops that band), so they
+    // would be pure disk. None may travel.
+    assert.equal(got.filter((r) => r.sim < FLOOR).length, 0, "sub-floor rows must not be cloned");
+
+    const probe = got.filter((r) => r.origin === "probe");
+    const traffic = got.filter((r) => r.origin === "traffic");
+    // Under the cap on both origins, so everything above the floor should have
+    // come — the caps are a ceiling, and this fixture sits below it.
+    assert.equal(traffic.length, 20, "traffic sample");
+    assert.equal(probe.length, 60, "probe sample");
+
+    // BOTH VERDICTS SURVIVE, which is the whole reason the sample is stratified:
+    // a probe set with no rejects in it is a flat curve wearing a probe label.
+    const judged = probe.filter((r) => r.verdict !== null);
+    assert.ok(
+      judged.some((r) => r.verdict === "reject"),
+      "the probe sample must keep its rejects or the curve has no shape",
+    );
+    assert.ok(judged.some((r) => r.verdict === "accept"), "…and its accepts");
+
+    // AND THE RANGE SURVIVES. Sampling only the top of the similarity range would
+    // still satisfy every assertion above and still produce the wrong chart.
+    const sims = probe.map((r) => r.sim);
+    assert.ok(Math.min(...sims) < FLOOR + 0.05, "sample must reach the bottom of the band");
+    assert.ok(Math.max(...sims) > 0.95, "sample must reach the top of the band");
+  });
+
+  it("hands over an unjudged queue with every judge column cleared", async () => {
+    await seedShadow();
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    const got = await guestShadow();
+    const queued = got.filter((r) => r.verdict === null);
+
+    assert.equal(queued.length, SHADOW_QUEUE_CAP, "the queue is capped, and it is stocked");
+    assert.equal(summary.shadowQueued, queued.length, "summary must count what landed");
+    // A row with a cleared verdict but a leftover judge_model reads as a bug in
+    // the judge rather than as a queue entry, and the human queue would render a
+    // model's name beside an undecided event.
+    for (const r of queued) {
+      assert.equal(r.judge_source, null);
+      assert.equal(r.judge_model, null);
+      assert.equal(r.judge_reason, null);
+      assert.equal(r.judged_at, null);
+    }
+    // Drawn from probe: those are the engineered near-misses, so a verdict is a
+    // real judgement call rather than an obvious yes.
+    assert.ok(
+      queued.every((r) => r.origin === "probe"),
+      "queue rows come from the probe population",
+    );
+    assert.ok(queued.every((r) => r.sim >= FLOOR), "a sub-floor verdict would move no curve");
+  });
+
+  it("rewrites the fingerprint, so a guest's own traffic dedupes against the sample", async () => {
+    await seedShadow();
+    const { configId } = await cloneSeedWorkspace(seed.id, guest.id);
+    const got = await guestShadow();
+
+    assert.ok(got.length > 0, "fixture produced no rows to check");
+    assert.ok(
+      got.every((r) => r.fingerprint !== "seed-fingerprint"),
+      "the capture-time fingerprint is stale in a guest's id space",
+    );
+    // The SAME value the answer cache was rewritten to: both key on the config's
+    // document signature, so a divergence here means one of the two rewrites is
+    // computing over the wrong config.
+    const [cached] = await admin<{ fingerprint: string }[]>`
+      select fingerprint from semantic_cache
+       where user_id = ${guest.id} and config_id = ${configId} limit 1`;
+    assert.ok(cached, "no cached answer to compare against");
+    assert.ok(
+      got.every((r) => r.fingerprint === cached.fingerprint),
+      "shadow and answer-cache fingerprints must agree",
+    );
+  });
+
+  it("leaves the seed's shadow log untouched", async () => {
+    await seedShadow();
+    await cloneSeedWorkspace(seed.id, guest.id);
+    const [{ n }] = await admin<{ n: number }[]>`
+      select count(*)::int as n from semantic_cache_shadow where config_id = ${seedConfigId}`;
+    assert.equal(n, 86, "the seed keeps all 86 rows, sub-floor band included");
+    const [{ unjudged }] = await admin<{ unjudged: number }[]>`
+      select count(*)::int as unjudged from semantic_cache_shadow
+       where config_id = ${seedConfigId} and verdict is null`;
+    assert.equal(unjudged, 0, "clearing a verdict happens on the COPY, never in place");
   });
 });

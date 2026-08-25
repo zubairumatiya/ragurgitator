@@ -414,11 +414,20 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
   },
   {
     file: "lib/demo/clone.ts",
-    needles: ["freezeAllBut", "FROZEN_REASON", "limit: BANKED_QUESTION_CAP"],
+    needles: [
+      "freezeAllBut",
+      "FROZEN_REASON",
+      "limit: BANKED_QUESTION_CAP",
+      "SHADOW_CURVE_CAP.probe",
+      "SHADOW_QUEUE_CAP",
+    ],
     why:
-      "the publish hop that writes the frozen set, and the cap on the banked " +
+      "the publish hop that writes the frozen set, the cap on the banked " +
       "questions a guest can ADD to it (a question a guest adds is unfrozen, so " +
-      "an uncapped bank is an uncapped autotune set)",
+      "an uncapped bank is an uncapped autotune set), and the two caps on the " +
+      "shadow-log SAMPLE (step 5b is the clone's only sampling copy — the table " +
+      "grows every time the operator asks a question, so an uncapped copy is a " +
+      "guest's disk tracking the master's bookkeeping)",
   },
   // Phase 6 opened ONE form of bulk-generate to a guest: `cachedOnly`, which
   // reads question_cache and calls no model. Sweep 6 above still passes if that
@@ -430,6 +439,16 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
     file: "app/api/eval/bulk-generate/route.ts",
     needles: ['if (!body.data.cachedOnly) await assertDemoAllows("generate")'],
     why: "the carve-out is exactly the cachedOnly flag and nothing wider",
+  },
+  // Phase 6.2 opened the same shape on the shadow judge: `human` is one UPDATE on
+  // a row the caller owns, `llm` buys tokens. Sweep 6 keeps passing however wide
+  // this condition grows, since the file keeps its gate call either way, so the
+  // condition is the needle. The demo's calibration workbench is downstream of
+  // this one line, and so is the promise lib/demo/policy's `judge` sentence makes.
+  {
+    file: "app/api/semantic-cache/shadow/judge/route.ts",
+    needles: ['if (body.mode !== "human") await assertDemoAllows("judge")'],
+    why: "the carve-out is exactly the human verdict mode and nothing wider",
   },
 ];
 

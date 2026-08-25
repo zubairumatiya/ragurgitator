@@ -600,7 +600,8 @@ async function main() {
       `${summary.questions} questions, ${summary.results} scores, ` +
       `${summary.rankings} graded rankings, ${summary.frozen} frozen, ` +
       `${summary.cachedAnswers} cached answers, ` +
-      `${summary.bankedQuestions} banked questions\n`,
+      `${summary.bankedQuestions} banked questions, ` +
+      `${summary.shadowEvents} shadow events (${summary.shadowQueued} unjudged)\n`,
   );
   // The one thing a guest can ADD without a key: "Bulk actions → Add question →
   // Add cached" reads question_cache, which step 4e of the clone now carries
@@ -624,6 +625,26 @@ async function main() {
         `${tunable.length + summary.bankedQuestions}, which is what autotune runs over.)\n`,
     );
   }
+  // The calibration curve (phase 6.2). Two failure modes, both silent from the
+  // outside, and the second is the one that bites: a build can carry plenty of
+  // shadow rows and still show a FLAT chart, because this account's real traffic
+  // has never produced a reject (F7 — a census, not a shortage). What gives the
+  // curve a shape is the probe sample, and what makes the panel a workbench
+  // rather than a poster is the unjudged queue.
+  if (summary.shadowEvents === 0) {
+    console.log(
+      "⚠ no shadow events published — Appraise → Semantic caching will show an empty\n" +
+        "  calibration curve, which is the state phase 6.2 existed to fix. Check the\n" +
+        "  master's semantic_cache_shadow has judged rows at or above the shadow floor.\n",
+    );
+  } else if (summary.shadowQueued === 0) {
+    console.log(
+      "⚠ every published shadow event is already judged — the Accept / Reject queue\n" +
+        "  will be empty, so the one calibration control a guest is allowed to touch\n" +
+        "  does nothing. It needs unjudged probe rows above the shadow floor.\n",
+    );
+  }
+
   // The frozen set is the complement, so this is an equation and not a guess: a
   // published question is either tunable or frozen. A mismatch means step 4d's
   // exclusion missed — and the failure it is guarding against is the silent

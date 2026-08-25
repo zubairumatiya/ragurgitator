@@ -65,6 +65,13 @@ export const DEMO_BLOCKED = "demo_blocked";
 // state (app/appraise/models/page.tsx), so it has to work as a sentence standing
 // alone on an otherwise blank panel.
 //
+// `judge` IS THE SECOND SENTENCE THAT POINTS AT A BUTTON (phase 6.2), and it is
+// true for the same kind of reason `generate` is: lib/demo/clone step 5b copies a
+// sample of semantic_cache_shadow, SHADOW_QUEUE_CAP of those rows with the verdict
+// cleared, so the queue it names is stocked. Only the LLM half of that route is
+// gated — a human verdict is one UPDATE and buys nothing from a provider — which
+// is why this sentence talks about the judge MODEL rather than about judging.
+//
 // `generate` NOW POINTS AT A BUTTON, which is only honest because phase 6 made
 // it true: lib/demo/clone step 4e copies question_cache, so "Bulk actions → Add
 // question → Add cached" is a working, model-free way for a guest to add a
@@ -115,6 +122,11 @@ export const DEMO_ACTIONS = {
   batch:
     "Batch submission spends provider credit hours later, when the demo " +
     "workspace no longer exists. Sign up to use it.",
+  judge:
+    "The LLM judge grades shadow events in bulk against an answer model, which " +
+    "the demo doesn’t carry a key for. The Accept / Reject queue below is " +
+    "yours: this workspace was published with real events waiting for a verdict, " +
+    "and each one you decide redraws the calibration curve above it.",
   sweep:
     "The cache-key sweep re-embeds the whole question bank in several models, " +
     "so it's off in the demo and its results weren't published with this " +

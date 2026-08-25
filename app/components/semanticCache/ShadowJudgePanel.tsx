@@ -38,6 +38,41 @@ const ABOUT =
 const pctOf = (n: number) => `${(n * 100).toFixed(1)}%`;
 
 const MODELS = config.semanticCache.judgeModelOptions;
+
+// The three populations the sweep can be run over, in the order they should be
+// TRIED, not in the order they were built: what really happened, then the bound,
+// then both at once. Each carries the sentence that keeps its number honest —
+// rendered under the curve, because "τ = 0.81" and "τ = 0.95" look like the same
+// kind of fact and are not.
+type CurveOrigin = "traffic" | "probe" | "all";
+
+const ORIGINS: { value: CurveOrigin; label: string; note: string }[] = [
+  {
+    value: "traffic",
+    label: "Real traffic",
+    note:
+      "Questions someone actually asked. This is the only population a live " +
+      "threshold may be set from, and the only one whose τ is offered to the " +
+      "Set threshold box.",
+  },
+  {
+    value: "probe",
+    label: "Probes (worst-case bound)",
+    note:
+      "Engineered near-misses, half of them hard negatives. Precision here is a " +
+      "lower bound against an adversarial question mix — it shows where matches " +
+      "start failing, which is what real traffic cannot show while it is still " +
+      "all accepts. Not a setting: read it, don't apply it.",
+  },
+  {
+    value: "all",
+    label: "Both pooled",
+    note:
+      "Traffic and probes in one sweep. The mixture is whatever the two sample " +
+      "sizes happen to be rather than anything about the world, so this is a " +
+      "sanity check on the other two, not a third measurement.",
+  },
+];
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 
 export function ShadowJudgePanel() {
@@ -45,6 +80,18 @@ export function ShadowJudgePanel() {
   const [space, setSpace] = useState("");
   const [events, setEvents] = useState<ShadowEvent[]>([]);
   const [curve, setCurve] = useState<CalibrationReport | null>(null);
+  // WHICH POPULATION THE CURVE IS DRAWN FROM (0069). Not a filter on one set —
+  // two different measurements that share a table, and the difference between
+  // them is the difference between "what this account's traffic does" and "what
+  // an adversary could make it do".
+  //
+  // Opens on `traffic`, matching the route's own default, because that is the
+  // only one a serving threshold may be set from. The other two are here so the
+  // bound is LOOKABLE-AT: this account's traffic is one-class (91 judged, 91
+  // accepted), so the traffic curve is flat and shows nothing about where matches
+  // start failing. The probe rows are the only place precision visibly trades
+  // against recall.
+  const [origin, setOrigin] = useState<CurveOrigin>("traffic");
   const [bulkModel, setBulkModel] = useState<string>(config.semanticCache.judgeBulkModel);
   const [boundaryModel, setBoundaryModel] = useState<string>(
     config.semanticCache.judgeBoundaryModel,
@@ -71,12 +118,14 @@ export function ShadowJudgePanel() {
 
   // Only ever sets state from async callbacks (never synchronously in the effect
   // body) so it's safe to call straight from an effect.
-  const loadSpaceData = useCallback((s: string) => {
+  const loadSpaceData = useCallback((s: string, o: CurveOrigin) => {
     apiFetch(`/api/semantic-cache/shadow?space=${encodeURIComponent(s)}&filter=unjudged&limit=50`)
       .then((r) => r.json())
       .then((d) => setEvents(d.events ?? []))
       .catch((e) => setError(String(e)));
-    apiFetch(`/api/semantic-cache/shadow/calibration?space=${encodeURIComponent(s)}`)
+    apiFetch(
+      `/api/semantic-cache/shadow/calibration?space=${encodeURIComponent(s)}&origin=${o}`,
+    )
       .then((r) => r.json())
       .then((d) => {
         const report: CalibrationReport | null = d.report ?? null;
@@ -88,7 +137,15 @@ export function ShadowJudgePanel() {
         // A one-class sample yields no τ to offer — `selectFromCurve` suppresses it
         // and reports "one-class-sample" — so this needs no check of its own beyond
         // the null. The note below explains the absence.
-        if (report !== null && report.recommended !== null) {
+        //
+        // TRAFFIC ONLY, AND THIS IS THE LOAD-BEARING PART OF THE WHOLE CONTROL. A τ
+        // swept over engineered near-misses answers "what would the threshold have
+        // to be if every question were adversarial"; applying it to a real cache
+        // sets the threshold from a question mix nobody asked. The apply box cannot
+        // tell where a recommendation came from — it takes a number — so the
+        // refusal has to be here, at the only place that knows. The bound is still
+        // on screen; it is just not offered as a setting.
+        if (report !== null && report.recommended !== null && o === "traffic") {
           emitRecommendation({
             value: report.recommended,
             space: s,
@@ -105,15 +162,15 @@ export function ShadowJudgePanel() {
     loadSpaces();
   }, [loadSpaces]);
   useEffect(() => {
-    if (space) loadSpaceData(space);
-  }, [space, loadSpaceData]);
+    if (space) loadSpaceData(space, origin);
+  }, [space, origin, loadSpaceData]);
 
   // Reload from the space loadSpaces actually RESOLVED, not the captured one:
   // if the kept space no longer exists it falls back to list[0], and reusing the
   // stale `space` here would then load data for a space we're no longer showing.
   const refresh = useCallback(() => {
-    loadSpaces(space).then((next) => next && loadSpaceData(next));
-  }, [loadSpaces, loadSpaceData, space]);
+    loadSpaces(space).then((next) => next && loadSpaceData(next, origin));
+  }, [loadSpaces, loadSpaceData, space, origin]);
 
   const runJudge = (label: string, body: Record<string, unknown>) => {
     setBusy(label);
@@ -149,7 +206,7 @@ export function ShadowJudgePanel() {
       .then((d) => {
         if (d.error) setError(d.error);
         // Refresh the curve/counts; leave the (already-trimmed) queue as is.
-        loadSpaceData(space);
+        loadSpaceData(space, origin);
         loadSpaces(space);
       })
       .catch((e) => setError(String(e)));
@@ -277,6 +334,26 @@ export function ShadowJudgePanel() {
               was floating as a bare sentence under the chart, reading as a
               caption rather than as the panel's output. */}
           <div className="flex flex-col gap-3 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+            {/* The population picker sits ON the curve block, not on the heading
+                row: it changes what this one chart means and nothing else about
+                the panel — the judging controls above it and the queue below it
+                are per-space, not per-origin. */}
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-zinc-500 dark:text-zinc-400">Curve over</span>
+              <select
+                value={origin}
+                onChange={(e) => setOrigin(e.target.value as CurveOrigin)}
+                aria-label="Population the curve is drawn from"
+                className={SELECT}
+              >
+                {ORIGINS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
               <span className="flex items-baseline gap-2">
                 <span className="text-xs text-zinc-500 dark:text-zinc-400">Recommended τ</span>
@@ -291,11 +368,19 @@ export function ShadowJudgePanel() {
                     ? `, ${(curve.overallAcceptRate * 100).toFixed(0)}% accept`
                     : ""}
                   ; needs ≥ {curve.minSamples}
-                  {/* A τ swept over synthetic near-misses is a worst-case bound, not
-                      a setting — so when probe rows exist, say that they're out and
-                      how many, rather than letting "n judged" imply real traffic. */}
+                  {/* WHAT THIS SAMPLE IS, named against the picker above rather
+                      than assumed. It used to read "real traffic only" because
+                      traffic was the only reachable population; now that probe and
+                      pooled are too, the count has to say which set it left out or
+                      it becomes the misreading it was written to prevent. */}
                   {curve.excludedByOrigin > 0 && (
-                    <> · real traffic only ({curve.excludedByOrigin} probe rows excluded)</>
+                    <>
+                      {" "}
+                      · {curve.origin === "traffic" ? "real traffic" : "probes"} only (
+                      {curve.excludedByOrigin}{" "}
+                      {curve.origin === "traffic" ? "probe" : "traffic"} row
+                      {curve.excludedByOrigin === 1 ? "" : "s"} excluded)
+                    </>
                   )}
                   {/* The F5 sample of the band below the shadow floor. Shown
                       because collecting it is only worth anything if someone
@@ -314,15 +399,34 @@ export function ShadowJudgePanel() {
 
             <CalibrationCurve curve={curve} />
 
+            {/* WHAT THIS POPULATION IS, always — a τ is not interpretable without
+                it, and the two the picker offers differ by more than their sample
+                size. */}
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              {ORIGINS.find((o) => o.value === origin)!.note}
+            </p>
+
             {/* Points UP to the apply box, in the Collision floor panel's footer
-                at the top of the page. */}
-            {rec !== null && (
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                Sent to the <strong className="font-medium">Set threshold</strong> box at the
-                bottom of the Collision floor panel — nothing is live until you apply it
-                there.
-              </p>
-            )}
+                at the top of the page — but ONLY for traffic, because only traffic
+                is emitted (see the guard in loadSpaceData). A sentence promising
+                the number had been sent while nothing was sent is the exact lie
+                phase 5 of the demo plan is about, and it is just as wrong for the
+                operator as for a visitor. */}
+            {rec !== null &&
+              (origin === "traffic" ? (
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                  Sent to the <strong className="font-medium">Set threshold</strong> box at the
+                  bottom of the Collision floor panel — nothing is live until you apply it
+                  there.
+                </p>
+              ) : (
+                <p className={NOTE_AMBER}>
+                  Not sent to <strong className="font-medium">Set threshold</strong>: this τ
+                  was swept over a population nobody asked. Switch to{" "}
+                  <strong className="font-medium">Real traffic</strong> for a number this
+                  cache can be set from.
+                </p>
+              ))}
           </div>
 
           {/* WHY there's no τ. Without this the panel shows a dash and the target
@@ -345,9 +449,15 @@ export function ShadowJudgePanel() {
                   {/* One expression, not interleaved text: at this indent JSX wraps the
                       chunk after the count onto a new line and eats the space in front
                       of it, which renders as "239excluded". */}
-                  {curve.excludedByOrigin > 0
-                    ? ` — the ${curve.excludedByOrigin} excluded probe rows do, but a curve ` +
-                      `built from engineered near-misses is a worst-case bound, not this ` +
+                  {/* Guarded on the origin, not just on the count: under any other
+                      population `excludedByOrigin` counts the rows this curve left
+                      out, which are the traffic ones, and the sentence would name
+                      the wrong set. Traffic is also the only population that can
+                      BE one-class here, so the other branches lose nothing. */}
+                  {origin === "traffic" && curve.excludedByOrigin > 0
+                    ? ` — the ${curve.excludedByOrigin} excluded probe rows do. Switch ` +
+                      `“Curve over” to them to see where, remembering that a curve built ` +
+                      `from engineered near-misses is a worst-case bound and not this ` +
                       `account's traffic`
                     : null}
                   . Keep the current threshold until real rejects appear.
