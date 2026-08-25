@@ -22,6 +22,10 @@ const SEED_MS_PER_UNIT: Record<JobKind, number> = {
   rescore: 700,      // one question: cached vector + one ANN query, 4 in parallel
   bulk_ndcg: 1_500,  // one question: candidate pool + cross-model aggregate
   autotune: 20_000,  // one chunk: a search over sizes and models, with re-scores
+  // one probe: an embed that is usually an embedding_cache read, plus one indexed
+  // single-row match. The cheapest unit here by an order of magnitude — a cold
+  // provider embed would be nearer 400ms, and the average learns that if it happens.
+  probe_replay: 150,
 };
 
 // How fast the average forgets. 0.3 leans on history while still moving after a

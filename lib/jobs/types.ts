@@ -13,13 +13,14 @@
 // generation already has a true background path through the provider batch API
 // (lib/batch/jobs/questionGeneration.ts), and a second mechanism for the same
 // work would just be two things to keep in agreement.
-export const JOB_KINDS = ["rescore", "bulk_ndcg", "autotune"] as const;
+export const JOB_KINDS = ["rescore", "bulk_ndcg", "autotune", "probe_replay"] as const;
 export type JobKind = (typeof JOB_KINDS)[number];
 
 export const JOB_LABELS: Record<JobKind, string> = {
   rescore: "Re-score all questions",
   bulk_ndcg: "Bulk nDCG grading",
   autotune: "Autotune",
+  probe_replay: "Stock the shadow judge queue",
 };
 
 // What one unit of work IS, per kind — the noun the progress bar and the ETA are
@@ -29,6 +30,9 @@ export const JOB_UNITS: Record<JobKind, string> = {
   rescore: "question",
   bulk_ndcg: "question",
   autotune: "chunk",
+  // Not "pair": what the bar counts is probes attempted, and a pair with nothing
+  // reachable to match still costs one (lib/jobs/steps/probeReplay.ts).
+  probe_replay: "probe",
 };
 
 export function isJobKind(value: unknown): value is JobKind {

@@ -30,6 +30,7 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { NEVER_STOP, type ShouldStop } from "@/lib/http/cancelRegistry";
 import { activeConfig } from "@/lib/rag/activeConfig";
+import type { ProbePair } from "@/lib/rag/probeReplayCore";
 import {
   currentFingerprint,
   resolveKeyModel,
@@ -43,19 +44,15 @@ const isMissingTable = (err: unknown): boolean =>
 const sha256 = (text: string): string =>
   createHash("sha256").update(text, "utf8").digest("hex");
 
-// A pair that can produce a MEANINGFUL probe. `variantText` is what gets replayed;
-// `originText` is the banked question it is expected to land on — expected, not
-// guaranteed, which is the caveat callers must not paper over (see below).
-export type ProbePair = {
-  pairId: string;
-  originQuestionId: string;
-  originText: string;
-  variantText: string;
-  // Carried for REPORTING and for spreading a capped sample, never as a label —
-  // rule 1. A hard negative is the interesting probe; a queue of paraphrases only
-  // re-confirms the accept side §3 already has 91 of.
-  difficulty: PairDifficulty;
-};
+// The shape of a probe and the rule for choosing a capped sample of them live in
+// the dependency-free core, so they can be tested without a database. Re-exported
+// here because this module is the one callers reach for.
+export { PROBE_CAP, selectProbes, type ProbePair } from "@/lib/rag/probeReplayCore";
+
+// The core restates the generator's difficulty labels rather than importing them —
+// it imports nothing, by design. The two are held in agreement by the queries below,
+// which read a `PairDifficulty` column straight into a ProbePair: add a third label
+// to PairDifficulty and those assignments stop compiling.
 
 // Why the VARIANT and not both orientations, which the plan left open:
 //
@@ -153,6 +150,58 @@ export async function eligiblePairs(limit = 500): Promise<ProbePair[]> {
   }
 }
 
+// --- resolving a frozen sample -----------------------------------------------
+
+// Resolve frozen pair ids back to probeable pairs, WITHOUT the eligibility filter.
+//
+// The filter is deliberately absent: a job's sample is chosen once, and re-deciding
+// eligibility mid-run would silently swap in pairs the run never planned for. A
+// pair that has become unreachable since (an ingest rotated the fingerprint) simply
+// records nothing when replayed — the same outcome F1 called a dead origin — and
+// one already probed by someone else dedupes on recordShadow's conflict key.
+export async function probePairsByIds(ids: string[]): Promise<ProbePair[]> {
+  if (ids.length === 0) return [];
+  try {
+    const rows = await sql<
+      {
+        id: string;
+        text_a: string;
+        text_b: string;
+        difficulty: PairDifficulty;
+        question_id: string;
+        question: string;
+      }[]
+    >`
+      select p.id, p.text_a, p.text_b, p.difficulty, q.id as question_id, q.question
+      from semantic_cache_pairs p
+      join eval_questions q on q.id = p.origin_question_id
+      join documents d on d.id = q.document_id
+      where d.user_id = ${activeUserId()} and p.id = any(${ids}::uuid[])
+    `;
+    const byId = new Map<string, ProbePair>();
+    for (const r of rows) {
+      const variantText = variantOf(r.text_a, r.text_b, r.question);
+      if (variantText === null) continue;
+      byId.set(r.id, {
+        pairId: r.id,
+        originQuestionId: r.question_id,
+        originText: r.question,
+        variantText,
+        difficulty: r.difficulty,
+      });
+    }
+    // Returned in the FROZEN order, not the database's: the cursor indexes into
+    // this array, so its order is part of the resume contract.
+    return ids.flatMap((id) => {
+      const pair = byId.get(id);
+      return pair ? [pair] : [];
+    });
+  } catch (err) {
+    if (isMissingTable(err)) return [];
+    throw err;
+  }
+}
+
 // --- replay ------------------------------------------------------------------
 
 export type ReplayResult = { probed: number; failed: number; stopped: boolean };
@@ -171,6 +220,11 @@ export type ReplayResult = { probed: number; failed: number; stopped: boolean };
 export async function replayPairs(
   pairs: ProbePair[],
   shouldStop: ShouldStop = NEVER_STOP,
+  // Called once per ATTEMPTED probe, success or failure, with the running count of
+  // attempts. The background step turns it into slice progress; a script can ignore
+  // it. Attempts rather than successes because a failed probe still consumed its
+  // place in a capped run — see the step's cursor.
+  onProgress: (attempted: number, failure?: string) => void = () => {},
 ): Promise<ReplayResult> {
   let probed = 0;
   let failed = 0;
@@ -194,6 +248,7 @@ export async function replayPairs(
         shadow: { floor: 0, origin: "probe" },
       });
       probed++;
+      onProgress(probed + failed);
     } catch (err) {
       // One bad probe must not end the pass; the row simply stays unwritten and a
       // later top-up finds it eligible again.
@@ -201,6 +256,7 @@ export async function replayPairs(
         `[rag:probe-replay] probe failed for pair ${pair.pairId}: ${(err as Error).message}`,
       );
       failed++;
+      onProgress(probed + failed, err instanceof Error ? err.message : "Probe failed.");
     }
   }
 
