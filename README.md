@@ -12,6 +12,10 @@ whose write tools require a separately approved, hour-capped capability grant.
 
 > Live at [ragurgitator.com](https://ragurgitator.com). `/demo` needs no account
 > and no API key.
+>
+> For the results and the reasoning behind them, see the write-up:
+> [BYOK RAG Evaluation Platform](https://www.zubairumatiya.com/work/byok-rag-evaluation-platform).
+> The rest of this README is about operating the repo.
 
 ## What it does
 
