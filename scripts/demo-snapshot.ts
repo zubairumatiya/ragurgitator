@@ -21,15 +21,22 @@
 //   npm run demo:snapshot -- --create      mint the snapshot account (once)
 //   npm run demo:snapshot                  dry run: what would be published
 //   npm run demo:snapshot -- --yes         publish
+//   … --yes --skip-replay                  publish without warming the model
+//                                          comparison (phase 6.3's one deliberate
+//                                          92 MB of egress; the build is valid
+//                                          without it, that tab just ships stale
+//                                          or empty)
 //
 // Env: DEMO_MASTER_USER_ID (the account you work in), DEMO_SNAPSHOT_USER_ID (the
 // published one), DEMO_SNAPSHOT_EMAIL (only for --create; must be a real address,
 // since password reset is the only way back into that account).
+import { withUser } from "../lib/auth/userScope";
 import { privilegedSql } from "../lib/db";
 import { createSnapshotAccount } from "../lib/demo/admin";
 import { cloneSeedWorkspace } from "../lib/demo/clone";
 import { BANKED_QUESTION_CAP } from "../lib/demo/frozen";
 import { ndcg } from "../lib/rag/evalMetrics";
+import { replayConfig } from "../lib/rag/replayStore";
 import { answerFingerprint } from "../lib/rag/semanticCacheCore";
 import { chunksTable, modelDimension } from "../lib/rag/vectorStore";
 
@@ -65,6 +72,42 @@ async function chunkCount(configId: string, baseModel: string): Promise<number> 
     [configId] as never[],
   );
   return row.n;
+}
+
+// IS THE MASTER'S MODEL COMPARISON WARM, and is it warm for THIS config?
+//
+// Phase 6.3 publishes the replay's result (clone step 5c) because a guest cannot
+// compute one. So the build is only as good as what sits in the master's
+// replay_metrics at publish time — and the state that motivated the phase was not
+// "empty", it was WORSE than empty: one generation, for a config that had since
+// been re-chunked, with all seventeen models unscored. Cloned, that is a full
+// table of dashes wearing the same layout as a real appraisal.
+//
+// The check is deliberately NOT the replay's own fingerprint. That is an md5 over
+// the chunk texts and the labels, so asking it means reading the corpus back out
+// — the egress this whole phase exists to avoid. `corpus_chunks` is the cheap
+// proxy that catches the failure that actually happened: a generation computed
+// over a different pool than the one being published.
+async function replayCensus(configId: string, baseModel: string) {
+  const [row] = await privilegedSql<
+    { rows: number; scored: number; corpus: number | null; computed: Date | null }[]
+  >`
+    select count(*)::int as rows, count(mrr)::int as scored,
+           max(corpus_chunks) as corpus, max(computed_at) as computed
+      from replay_metrics where config_id = ${configId}
+  `;
+  const table = tableFor(baseModel);
+  // Distinct TEXT, not rows: the replay pools by text, since the cache it reads
+  // is content-addressed and two identical chunks cannot be told apart.
+  const pool = table
+    ? (
+        await privilegedSql.unsafe<{ n: number }[]>(
+          `select count(distinct text)::int as n from "${table}" where config_id = $1`,
+          [configId] as never[],
+        )
+      )[0].n
+    : 0;
+  return { ...row, pool, warm: row.scored >= 2 && row.corpus === pool };
 }
 
 // WHAT WOULD BE PUBLISHED — measured through the config, which is what makes it
@@ -539,14 +582,15 @@ async function main() {
     )[0]?.id;
   if (!configId) die("the master account has no open config to publish (pass --config <uuid>).");
 
-  const [cfg] = await privilegedSql<{ name: string; base_model: string }[]>`
-    select name, base_model from configs where id = ${configId} and user_id = ${master}
+  const [cfg] = await privilegedSql<{ name: string; base_model: string; top_k: number }[]>`
+    select name, base_model, top_k from configs where id = ${configId} and user_id = ${master}
   `;
   if (!cfg) die(`config ${configId} is not owned by the master account.`);
 
   const from = await sourceCensus(configId, cfg.base_model);
   const to = await destCensus(snapshot);
   const tunable = await selectTunable(configId);
+  const replay = await replayCensus(configId, cfg.base_model);
 
   console.log(`\nmaster    ${master}`);
   console.log(`snapshot  ${snapshot}  (${profile.email})\n`);
@@ -569,6 +613,22 @@ async function main() {
       `${new Set(tunable.map((t) => t.chunk)).size} chunks in ` +
       `${new Set(tunable.map((t) => t.document)).size} documents`,
   );
+  // The model comparison, before the dry-run exit for the same reason the spread
+  // assertion is: an operator deciding whether to publish should see that this
+  // run is about to spend 92 MB warming it, or that it is about to publish a
+  // table of dashes, without having to type --yes to find out.
+  console.log(
+    `  model comparison: ${
+      replay.warm
+        ? `${replay.scored}/${replay.rows} models scored over ${replay.corpus} chunks, ` +
+          `computed ${replay.computed?.toISOString().slice(0, 10)}`
+        : replay.rows === 0
+          ? "never run for this config"
+          : `stale — ${replay.scored}/${replay.rows} scored over ${replay.corpus} chunks, ` +
+            `but this config pools ${replay.pool}`
+    }${replay.warm || has("--skip-replay") ? "" : " → will be computed before the copy (~92 MB)"}`,
+  );
+
   // Before the dry-run exit, so an operator sees the refusal without having to
   // type --yes to earn it.
   assertSpread(tunable);
@@ -588,6 +648,40 @@ async function main() {
     console.log("⚠ the config being published has NO cached answers — guests will pay for every\n");
   }
 
+  // WARM THE MODEL COMPARISON, ON THE MASTER, ONCE (phase 6.3).
+  //
+  // This is the only place in the publish that deliberately spends egress: ~92 MB
+  // of cached vectors for 11 covered models over 236 chunks and 472 questions,
+  // measured 2026-08-25. It buys the thing a guest cannot compute — and it buys
+  // it ONCE PER PUBLISH rather than once per visitor, which is the whole trade.
+  //
+  // It runs BEFORE the clone and in the master's own scope, because replayConfig
+  // is an ordinary user-scoped store call: it reads the master's embedding_cache
+  // and writes the master's replay_metrics, exactly as opening the page would.
+  // Step 5c then copies whatever is there. Doing it the other way round — copy
+  // first, warm after — would publish the previous build's numbers and report the
+  // new ones.
+  //
+  // Skipped when already warm, so a re-publish costs nothing. `--skip-replay` is
+  // for a metered connection: the build is still valid, it just ships the
+  // previous generation, or the empty state if there is none.
+  if (!replay.warm && !has("--skip-replay")) {
+    const [me] = await privilegedSql<{ email: string }[]>`
+      select email from user_profiles where id = ${master}
+    `;
+    if (!me) die(`no user_profiles row for the master account ${master}.`);
+    console.log("computing the model comparison on the master (~92 MB of cached vectors)…");
+    const started = Date.now();
+    const report = await withUser({ id: master, email: me.email }, () =>
+      replayConfig(configId, cfg.base_model, cfg.name, cfg.top_k),
+    );
+    const scored = report.rows.filter((r) => r.mrr !== null).length;
+    console.log(
+      `  ${scored}/${report.rows.length} models scored over ${report.corpusChunks} chunks ` +
+        `and ${report.questions} questions in ${((Date.now() - started) / 1000).toFixed(1)}s\n`,
+    );
+  }
+
   const summary = await cloneSeedWorkspace(master, snapshot, {
     onlyConfigId: configId,
     replaceDestination: true,
@@ -601,7 +695,8 @@ async function main() {
       `${summary.rankings} graded rankings, ${summary.frozen} frozen, ` +
       `${summary.cachedAnswers} cached answers, ` +
       `${summary.bankedQuestions} banked questions, ` +
-      `${summary.shadowEvents} shadow events (${summary.shadowQueued} unjudged)\n`,
+      `${summary.shadowEvents} shadow events (${summary.shadowQueued} unjudged), ` +
+      `${summary.replayRows} model rows (${summary.replayScored} scored)\n`,
   );
   // The one thing a guest can ADD without a key: "Bulk actions → Add question →
   // Add cached" reads question_cache, which step 4e of the clone now carries
@@ -642,6 +737,26 @@ async function main() {
       "⚠ every published shadow event is already judged — the Accept / Reject queue\n" +
         "  will be empty, so the one calibration control a guest is allowed to touch\n" +
         "  does nothing. It needs unjudged probe rows above the shadow floor.\n",
+    );
+  }
+
+  // The model comparison (phase 6.3). Same two directions as the shadow log, and
+  // for the same reason: the count that reads as success is the SCORED one. A
+  // build can carry all seventeen rows and still render a full table of dashes,
+  // which is what the master held before this phase — and dashes in a table that
+  // otherwise looks like a real appraisal is worse than an empty panel saying so.
+  if (summary.replayRows === 0) {
+    console.log(
+      "⚠ no model comparison published — Appraise → Models will show its empty state\n" +
+        "  (lib/demo/policy's `appraise` sentence). Re-publish without --skip-replay to\n" +
+        "  warm it, or check the master's replay_metrics.\n",
+    );
+  } else if (summary.replayScored < 2) {
+    console.log(
+      `⚠ ${summary.replayRows} model rows published but only ${summary.replayScored} scored — the\n` +
+        "  table will render as dashes. A model is scored only at 100% chunk coverage in\n" +
+        "  the master's embedding_cache, so this means the cache no longer covers this\n" +
+        "  corpus. Re-publish without --skip-replay.\n",
     );
   }
 

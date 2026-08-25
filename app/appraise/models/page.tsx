@@ -25,8 +25,8 @@ import {
   meteredEmbedTokens,
 } from "@/lib/rag/modelAppraisal";
 import { availableProviders } from "@/lib/rag/providerAvailability";
-import { listReplays } from "@/lib/rag/replayStore";
-import { DEMO_ACTIONS } from "@/lib/demo/policy";
+import { listPublishedReplays, listReplays } from "@/lib/rag/replayStore";
+import { DEMO_ACTIONS, PUBLISHED_REPLAY_NOTE } from "@/lib/demo/policy";
 import { isGuest } from "@/lib/demo/guest";
 
 export const dynamic = "force-dynamic";
@@ -56,16 +56,22 @@ export default async function AppraiseModelsPage() {
       // THE REPLAY IS THE THIRD VECTOR-SHIPPING SITE (docs/guest-demo-plan.md),
       // and the only one that is a PAGE RENDER rather than an action — a guest
       // reaching this tab would pull the whole corpus's cached vectors back out
-      // of the database just by clicking a link. So it is skipped rather than
-      // gated: assertDemoAllows() throws, and an error page is a worse answer
-      // than the table saying why it is empty. Everything else here is a rate
-      // card and stays live.
+      // of the database just by clicking a link (92 MB, measured on the master
+      // 2026-08-25). So it is never RUN for a guest; it is not gated either,
+      // because assertDemoAllows() throws and an error page is a worse answer
+      // than a table saying what it is showing.
+      //
+      // Phase 6.3: a guest instead reads the rows the publish carried in
+      // (lib/demo/clone step 5c) under the sentinel fingerprint. Same corpus,
+      // same questions, same models — computed once on the master rather than
+      // once per visitor. listPublishedReplays touches no vector column at all,
+      // which is what keeps that promise structural rather than conditional.
       const guest = await isGuest();
       return Promise.all([
         guest,
         listModelRateCard(availability),
         listLlmRateCard(availability),
-        guest ? [] : listReplays(),
+        guest ? listPublishedReplays() : listReplays(),
         listConfigComparisons(),
         meteredEmbedTokens(),
       ]);
@@ -94,6 +100,7 @@ export default async function AppraiseModelsPage() {
           reports={replays}
           comparisons={comparisons}
           emptyNote={guest ? DEMO_ACTIONS.appraise : undefined}
+          publishedNote={guest ? PUBLISHED_REPLAY_NOTE : undefined}
         />
       </main>
     </div>

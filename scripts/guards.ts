@@ -420,14 +420,30 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
       "limit: BANKED_QUESTION_CAP",
       "SHADOW_CURVE_CAP.probe",
       "SHADOW_QUEUE_CAP",
+      "PUBLISHED_REPLAY_FINGERPRINT",
     ],
     why:
       "the publish hop that writes the frozen set, the cap on the banked " +
       "questions a guest can ADD to it (a question a guest adds is unfrozen, so " +
-      "an uncapped bank is an uncapped autotune set), and the two caps on the " +
+      "an uncapped bank is an uncapped autotune set), the two caps on the " +
       "shadow-log SAMPLE (step 5b is the clone's only sampling copy — the table " +
       "grows every time the operator asks a question, so an uncapped copy is a " +
-      "guest's disk tracking the master's bookkeeping)",
+      "guest's disk tracking the master's bookkeeping), and the sentinel step 5c " +
+      "rewrites the replay's fingerprint to (copied under the master's own md5, " +
+      "the rows are present but unreachable and the demo's model comparison " +
+      "renders empty while the table says it is populated)",
+  },
+  // Phase 6.3 makes the demo's model comparison a BUILD ARTIFACT living in a
+  // cache table. The read path can only find it under the sentinel, and
+  // writeCached — which exists to evict stale generations — would otherwise take
+  // it with them the first time anyone opens /appraise/models as the snapshot
+  // account. That is a silent eviction: a cold replay over an empty
+  // embedding_cache is not an error, it is seventeen unscorable rows, and the
+  // next guest is cloned from those.
+  {
+    file: "lib/rag/replayStore.ts",
+    needles: ["and fingerprint <> ${PUBLISHED_REPLAY_FINGERPRINT}"],
+    why: "the published generation is exempt from the cache's own eviction",
   },
   // Phase 6 opened ONE form of bulk-generate to a guest: `cachedOnly`, which
   // reads question_cache and calls no model. Sweep 6 above still passes if that

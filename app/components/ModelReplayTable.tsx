@@ -56,10 +56,18 @@ export function ModelReplayTable({
   // the database. Without this the demo would tell a visitor to go and label
   // questions, which is both wrong and something they cannot do.
   emptyNote,
+  // Rendered once under the heading when the table IS populated but the numbers
+  // were computed somewhere else — currently only the demo, where the publish
+  // carries the replay's result because a guest cannot compute one (phase 6.3).
+  // A measurement that cannot move should say so; otherwise a visitor reads
+  // seventeen live-looking rows and reasonably assumes their own workspace
+  // produced them.
+  publishedNote,
 }: {
   reports: ReplayReport[];
   comparisons: ConfigComparison[];
   emptyNote?: string;
+  publishedNote?: string;
 }) {
   if (reports.length === 0) {
     return (
@@ -76,6 +84,11 @@ export function ModelReplayTable({
   return (
     <section className="flex flex-col gap-5">
       <Heading />
+      {publishedNote && (
+        <p className="rounded-lg border border-zinc-200 bg-white px-4 py-3 text-xs leading-relaxed text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400">
+          {publishedNote}
+        </p>
+      )}
       {reports.map((r) => (
         <ConfigReplay
           key={r.configId}

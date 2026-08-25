@@ -31,6 +31,11 @@ import { fragment, privilegedSql } from "../../lib/db";
 import { cloneSeedWorkspace } from "../../lib/demo/clone";
 import { SHADOW_QUEUE_CAP } from "../../lib/demo/frozen";
 import { resolveConfig, withConfig } from "../../lib/rag/activeConfig";
+import {
+  listPublishedReplays,
+  PUBLISHED_REPLAY_FINGERPRINT,
+  replayConfig,
+} from "../../lib/rag/replayStore";
 import { chunksTable, modelDimension, vectorLiteral } from "../../lib/rag/vectorStore";
 import type { CachedResult } from "../../lib/rag/semanticCache";
 import { semanticCacheLookup, semanticCacheStore } from "../../lib/rag/semanticCache";
@@ -876,5 +881,138 @@ describe("cloneSeedWorkspace shadow sample", () => {
       select count(*)::int as unjudged from semantic_cache_shadow
        where config_id = ${seedConfigId} and verdict is null`;
     assert.equal(unjudged, 0, "clearing a verdict happens on the COPY, never in place");
+  });
+});
+
+// PHASE 6.3 — the model comparison a guest cannot compute.
+//
+// The replay is a COMPUTATION over embedding_cache (92 MB of vectors on the
+// master), not a stored measurement, and the clone deliberately leaves that cache
+// behind. So the publish carries its RESULT under a sentinel fingerprint, and
+// everything below is about the two ways that goes silently wrong: rows arriving
+// under a key nobody will ever compute, and rows a later page visit evicts.
+describe("cloneSeedWorkspace published replay", () => {
+  const MODELS = ["voyage-4-lite", "voyage-4", "voyage-code-3"];
+
+  // One generation for the seed's config under a real-looking md5, with the shape
+  // the master actually holds: some models scored, some with no cached vectors at
+  // all and therefore unscorable.
+  async function seedReplay(fingerprint = "seed-md5") {
+    for (const [i, model] of MODELS.entries()) {
+      const scored = i < 2;
+      await admin`
+        insert into replay_metrics
+          (fingerprint, config_id, model, questions, corpus_chunks, coverage_chunks,
+           recall_at_1, recall_at_3, recall_at_5, recall_at_10, mrr,
+           ndcg, ndcg_k, ndcg_leave_one_out)
+        values (${fingerprint}, ${seedConfigId}, ${model}, ${scored ? 1 : 0}, 2,
+                ${scored ? 2 : 0},
+                ${scored ? 1 : null}, ${scored ? 1 : null}, ${scored ? 1 : null},
+                ${scored ? 1 : null}, ${scored ? 0.9 - i * 0.1 : null},
+                ${scored ? 0.8 : null}, ${scored ? 5 : null}, false)
+        on conflict do nothing`;
+    }
+  }
+
+  type Row = { model: string; fingerprint: string; mrr: string | null };
+
+  async function guestReplay(): Promise<Row[]> {
+    return admin<Row[]>`
+      select r.model, r.fingerprint, r.mrr
+        from replay_metrics r
+        join configs c on c.id = r.config_id
+       where c.user_id = ${guest.id}
+       order by r.model`;
+  }
+
+  it("carries every model row under the sentinel fingerprint, unscorable ones included", async () => {
+    await seedReplay();
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    const got = await guestReplay();
+
+    assert.equal(got.length, MODELS.length, "one row per model");
+    assert.equal(summary.replayRows, got.length, "summary must count what landed");
+    assert.equal(summary.replayScored, 2, "and must count the SCORED ones separately");
+    // The sentinel is the whole reachability story: the seed's md5 hashes its own
+    // config id and cache-row count, so a copied one is a key the guest will never
+    // compute — rows present, table empty, and nothing erroring.
+    assert.ok(
+      got.every((r) => r.fingerprint === PUBLISHED_REPLAY_FINGERPRINT),
+      "the capture-time fingerprint is unreachable in a guest's id space",
+    );
+    // An unscorable model travels too. Dropping it would publish a leaderboard of
+    // only the models the operator had happened to pay for, with nothing saying so.
+    assert.equal(got.filter((r) => r.mrr === null).length, 1, "the uncovered model comes too");
+  });
+
+  it("is reachable through the guest's own read path", async () => {
+    await seedReplay();
+    await cloneSeedWorkspace(seed.id, guest.id);
+
+    // The proof that matters is not "the rows exist" but "the page finds them".
+    const reports = await withUser(guest, () => listPublishedReplays());
+    assert.equal(reports.length, 1, "one section for the cloned config");
+    assert.equal(reports[0].rows.length, MODELS.length);
+    assert.equal(reports[0].corpusChunks, 2, "the pool the master scored over");
+    assert.equal(reports[0].questions, 1);
+    // MRR desc, unscorable last — the same ordering a real account gets, because
+    // both paths share sortRows.
+    assert.deepEqual(
+      reports[0].rows.map((r) => r.model),
+      ["voyage-4-lite", "voyage-4", "voyage-code-3"],
+    );
+    assert.equal(reports[0].rows.at(-1)?.mrr, null);
+  });
+
+  it("prefers the published generation when the seed holds two", async () => {
+    // The snapshot account is both a destination and the account guests are cloned
+    // FROM, so opening /appraise/models there writes a second, unscorable
+    // generation beside the published one. A guest must be cloned from the build.
+    await seedReplay(PUBLISHED_REPLAY_FINGERPRINT);
+    await admin`
+      insert into replay_metrics
+        (fingerprint, config_id, model, questions, corpus_chunks, coverage_chunks, mrr)
+      values ('a-later-page-visit', ${seedConfigId}, ${MODELS[0]}, 0, 2, 0, null)`;
+
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    const got = await guestReplay();
+
+    // Both generations collapse to one key under the rewrite, so without the
+    // dedupe this would not merely pick the wrong row — it would abort on the
+    // primary key and take the whole publish with it.
+    assert.equal(got.length, MODELS.length, "one row per model, not one per generation");
+    assert.equal(summary.replayScored, 2, "the scored generation won");
+    assert.equal(Number(got.find((r) => r.model === MODELS[0])?.mrr), 0.9);
+  });
+
+  it("survives a cold replay in the destination account", async () => {
+    // THE SILENT EVICTION. writeCached deletes a config's other fingerprints — it
+    // is a cache, and stale generations would only grow. But the published rows are
+    // a build artifact nobody in this account can recompute, and a cold replay here
+    // is not an error: it is a full set of unscorable rows, which is exactly what
+    // would replace them.
+    await seedReplay();
+    const { configId } = await cloneSeedWorkspace(seed.id, guest.id);
+
+    await withUser(guest, () => replayConfig(configId, KEY_MODEL, "cloned", 5));
+
+    const got = await guestReplay();
+    const published = got.filter((r) => r.fingerprint === PUBLISHED_REPLAY_FINGERPRINT);
+    assert.equal(published.length, MODELS.length, "the published generation must survive");
+    assert.equal(published.filter((r) => r.mrr !== null).length, 2, "…with its metrics");
+    const reports = await withUser(guest, () => listPublishedReplays());
+    assert.equal(reports[0]?.rows.length, MODELS.length, "and still be what the page reads");
+  });
+
+  it("leaves the seed's own generation untouched", async () => {
+    await seedReplay();
+    await cloneSeedWorkspace(seed.id, guest.id);
+    const rows = await admin<{ fingerprint: string }[]>`
+      select fingerprint from replay_metrics where config_id = ${seedConfigId}`;
+    assert.equal(rows.length, MODELS.length);
+    assert.ok(
+      rows.every((r) => r.fingerprint === "seed-md5"),
+      "the rewrite happens on the COPY, never in place — the master keeps a live cache",
+    );
   });
 });

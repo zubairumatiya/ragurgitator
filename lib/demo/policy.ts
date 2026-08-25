@@ -13,9 +13,11 @@
 //   EGRESS    the three sites that still ship VECTORS to the app server:
 //             clusterStore's `select c.id, c.embedding::text` (~5.6 MB a run),
 //             chunkEmbeddings() behind the override efficacy screen, and
-//             /appraise → Models' replay from cached vectors. These are cheap in
-//             dollars and ruinous in bytes, which is why the gate covers more
-//             than the obviously expensive levers.
+//             /appraise → Models' replay from cached vectors (92 MB, measured
+//             2026-08-25). These are cheap in dollars and ruinous in bytes,
+//             which is why the gate covers more than the obviously expensive
+//             levers. The third one is not in this table at all: it is a PAGE
+//             RENDER, so phase 6.3 publishes its RESULT instead of gating it.
 //
 // WHAT IS NO LONGER IN THIS TABLE, AND WHY THAT IS NOT AN OVERSIGHT. Re-scoring
 // and autotune used to sit here. Both objections to them were about SIZE — 472
@@ -61,9 +63,13 @@ export const DEMO_BLOCKED = "demo_blocked";
 // "WHAT IS DELIBERATELY NOT CLONED" list first, and point at the Eval tab, live
 // retrieval or the answer cache — the three things a guest actually has.
 //
-// `appraise` is read twice: as a 403 body, and as the Models tab's own empty
-// state (app/appraise/models/page.tsx), so it has to work as a sentence standing
-// alone on an otherwise blank panel.
+// `appraise` is read ONCE, as the Models tab's own empty state
+// (app/appraise/models/page.tsx) — no route throws it, because the replay is a
+// page render rather than an action. Since phase 6.3 that empty state is the
+// FALLBACK: a build published with a warm replay carries its rows (clone step
+// 5c) and the tab renders the real comparison under PUBLISHED_REPLAY_NOTE
+// below. This sentence is what a build published without one says, so it still
+// has to work standing alone on a blank panel.
 //
 // `judge` IS THE SECOND SENTENCE THAT POINTS AT A BUTTON (phase 6.2), and it is
 // true for the same kind of reason `generate` is: lib/demo/clone step 5b copies a
@@ -94,9 +100,10 @@ export const DEMO_ACTIONS = {
     "them like any other.",
   tryModel:
     "Trying a chunk under a different embedding model re-embeds it and every " +
-    "chunk it is ranked against, so it's off in the demo, and no saved trials " +
-    "were published with this workspace. The live measurement is on the Eval " +
-    "tab: the tunable questions there are yours to re-score and autotune.",
+    "chunk it is ranked against, so it's off in the demo. The question it " +
+    "answers is on Appraise → Models: every model ranked over this whole " +
+    "corpus, on these questions, published with the workspace — a fairer " +
+    "comparison than one chunk anyway.",
   unfreeze:
     "That question is part of this demo's published measurement, not one of its " +
     "dials — un-ignoring it would let one visitor move a number the next one " +
@@ -114,11 +121,11 @@ export const DEMO_ACTIONS = {
     "model on the list, so it's off in the demo. The graded rankings you can " +
     "open are real, and the nDCG on the Eval tab is scored against them.",
   appraise:
-    "The model comparison replays the whole corpus from cached vectors, which " +
-    "the demo doesn't have the bandwidth for — so this workspace was published " +
-    "without any saved trials, and there is nothing here to show you. The Eval " +
-    "tab is where this demo measures itself: published scores for every " +
-    "question, and a tunable set you can move.",
+    "The model comparison replays the whole corpus from cached vectors — 92 MB " +
+    "of them — which the demo doesn't have the bandwidth to do per visitor, so " +
+    "it ships the result instead of re-running it. This build was published " +
+    "without one. The Eval tab is where this demo measures itself: published " +
+    "scores for every question, and a tunable set you can move.",
   batch:
     "Batch submission spends provider credit hours later, when the demo " +
     "workspace no longer exists. Sign up to use it.",
@@ -141,6 +148,25 @@ export const DEMO_ACTIONS = {
 } as const;
 
 export type DemoAction = keyof typeof DEMO_ACTIONS;
+
+// THE OTHER HALF OF `appraise`, and the reason that sentence is now a fallback
+// rather than the normal case (phase 6.3).
+//
+// A guest's Appraise → Models is not empty any more: lib/demo/clone step 5c
+// copies the replay's RESULT, so the table renders real rankings. But those
+// numbers were computed on the master before the clone, and a visitor who
+// assumes their own workspace produced them would be wrong about the one thing
+// that matters here — this table cannot move, because the vectors it would need
+// are the 107 MB the clone deliberately leaves behind.
+//
+// So this is the same rule as every sentence above, pointed the other way: a
+// refusal may not point at something absent, and a MEASUREMENT may not imply a
+// computation that did not happen for this workspace.
+export const PUBLISHED_REPLAY_NOTE =
+  "Published measurement: every model was ranked over this corpus before the " +
+  "workspace was cloned for you. Re-running it needs each model's cached " +
+  "vectors for every chunk — 92 MB the demo doesn't hand out — so these rows " +
+  "are fixed. The Eval tab is the part you can move.";
 
 export class DemoBlockedError extends Error {
   readonly action: DemoAction;

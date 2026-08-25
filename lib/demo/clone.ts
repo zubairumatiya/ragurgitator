@@ -42,6 +42,7 @@ import {
   SHADOW_CURVE_CAP,
   SHADOW_QUEUE_CAP,
 } from "@/lib/demo/frozen";
+import { PUBLISHED_REPLAY_FINGERPRINT } from "@/lib/rag/replayStore";
 import { answerFingerprint } from "@/lib/rag/semanticCacheCore";
 import { chunksTable, modelDimension } from "@/lib/rag/vectorStore";
 
@@ -167,7 +168,15 @@ async function buildMap(
 //     Without them every question is one ~12 KB ANN. Leaving this out is worth
 //     ~40x, and it is also what gives a visitor an untuned corpus to autotune.
 //   embedding_cache   107 MB live, and it exists to avoid paying to RE-embed.
-//     Guests cannot re-embed, so it would be pure storage for zero saving.
+//     Guests cannot re-embed, so it would be pure storage for zero saving. ONE
+//     thing did read it — the full-corpus replay behind Appraise → Models — and
+//     the answer was to carry that measurement's RESULT rather than its inputs:
+//     17 rows against 107 MB. See step 5c.
+//   replay_metrics IS cloned now — step 5c — and, like the shadow log below, it
+//     spent this demo's whole life in neither list. The plan's own bullet for the
+//     phase that fixed it named the wrong table (eval_model_trials, which the
+//     replay REPLACED in 0043), which is what a table nobody has written down
+//     costs you.
 //   semantic_cache_shadow IS cloned now, as a SAMPLE — see step 5b. It is listed
 //     here because it spent two phases in neither list, which is how the demo
 //     shipped its most distinctive chart empty: a table that is merely unmentioned
@@ -195,6 +204,8 @@ export type CloneSummary = {
   cachedAnswers: number;
   shadowEvents: number; // judged + queued shadow rows behind the calibration curve
   shadowQueued: number; // of those, the ones arriving unjudged for the human queue
+  replayRows: number; // the published model comparison, one row per model (step 5c)
+  replayScored: number; // of those, the ones with metrics rather than "not scorable"
 };
 
 // THE PUBLISH OPTIONS — used by scripts/demo-snapshot.ts, never by a guest.
@@ -931,6 +942,68 @@ export async function cloneSeedWorkspace(
        where c.user_id = ${guestId} and s.verdict is null
     `;
 
+    // --- 5c. the model comparison, which a guest cannot compute -------------
+    //
+    // Phase 6.3. Appraise → Models is two rate cards above a full-corpus replay:
+    // every embedding model ranking the SAME corpus on the SAME questions, which
+    // is the one place the app answers "would a different model do better here".
+    // A guest saw the rate cards and a dashed panel.
+    //
+    // WHY IT COULD NOT SIMPLY BE UNGATED, which is what the plan's bullet assumed.
+    // The replay is not a stored measurement, it is a COMPUTATION over
+    // embedding_cache — 7,788 cached vectors, 92 MB of wire, measured on the
+    // master 2026-08-25 — and it runs on PAGE RENDER. That is the third
+    // vector-shipping site in lib/demo/policy's egress list, and it is per visit.
+    // Cloning embedding_cache to make it cheap is worse: 107 MB a guest may not
+    // re-embed against anyway.
+    //
+    // So the publish carries the ANSWER instead of the inputs: 17 rows, ~2 KB,
+    // under PUBLISHED_REPLAY_FINGERPRINT. That is the sentinel the guest's
+    // read-only path (listPublishedReplays) addresses them by, and it is a
+    // sentinel rather than the master's own md5 because the real fingerprint
+    // hashes the config id and the owner's cache-row count — a copied one is a
+    // key nobody in the destination will ever compute, i.e. rows present but
+    // unreachable, the exact failure step 6 exists to prevent.
+    //
+    // UNSCORED ROWS TRAVEL TOO, deliberately. Six of the seventeen models have no
+    // cached vectors on the master and land as "0/236 chunks cached". Dropping
+    // them would publish a leaderboard of only the models the operator happened to
+    // have paid for, with nothing saying so; keeping them is what makes the table
+    // read as a real appraisal rather than a curated one.
+    //
+    // The dedupe is not defensive noise. `writeCached` evicts a config's other
+    // fingerprints, so a source normally holds one generation — but the snapshot
+    // account is BOTH a destination and the seed guests are cloned from, and
+    // opening the page there writes a second (unscorable) generation beside the
+    // published one. Preferring the published row keeps a guest cloned from the
+    // build rather than from the operator's page visit, and makes the rewrite to a
+    // single fingerprint incapable of colliding with itself.
+    const replayRows = await copyRows(tx, {
+      table: "replay_metrics",
+      joins: `join _map_config mc on mc.old_id = s.config_id`,
+      where: `true`,
+      overrides: {
+        config_id: "mc.new_id",
+        fingerprint: `'${PUBLISHED_REPLAY_FINGERPRINT}'`,
+      },
+      dedupe: {
+        on: `s.config_id, s.model`,
+        tieBreak: `(s.fingerprint = '${PUBLISHED_REPLAY_FINGERPRINT}') desc, s.computed_at desc`,
+      },
+      params: [],
+    });
+    // The count that decides whether the tab is worth opening. Seventeen rows of
+    // which zero are scored is exactly what the master held before this phase —
+    // a stale generation for a config that had since been re-chunked — and it
+    // renders as a full table of dashes, which is the failure this step is
+    // supposed to have fixed. Counted here so the publish can say so.
+    const [{ scored }] = await tx<{ scored: number }[]>`
+      select count(*)::int as scored
+        from replay_metrics r
+        join configs c on c.id = r.config_id
+       where c.user_id = ${guestId} and r.mrr is not null
+    `;
+
     // --- 6. REWRITE THE CACHE FINGERPRINTS, or step 5 was for nothing --------
     //
     // currentFingerprint hashes documentSignature, which is an md5 over the
@@ -1019,6 +1092,8 @@ export async function cloneSeedWorkspace(
       cachedAnswers,
       shadowEvents,
       shadowQueued: queued,
+      replayRows,
+      replayScored: scored,
     };
   }) as Promise<CloneSummary>;
 }
