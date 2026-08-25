@@ -20,6 +20,7 @@ import { config } from "@/lib/config";
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
+import { getConfig } from "@/lib/rag/configStore";
 import { meteredMessage } from "@/lib/rag/meter";
 import { judgeOne } from "@/lib/rag/semanticCacheCalibration";
 
@@ -501,19 +502,71 @@ export type PairStats = {
   // generated pairs are screened at write time, so this counts what the BATCH
   // generator wrote (plus anything generated before the screen existed).
   unjudged: number;
+  // WHOSE GAP `questionsRemaining` IS. Every other number above is ACCOUNT-wide
+  // (the pooled pair set is deliberately global — see this file's header), while
+  // the gap is scoped to the active config. Reporting the two side by side
+  // without naming the config is what made the panel claim "every eval question
+  // already has pairs" while sitting on a 442-question gap in another tab: the
+  // Appraise page carries no configId, so the gap silently described the Default
+  // config's empty bank.
+  //
+  // Mirrors EffectiveAcceptTarget (lib/rag/semanticCache.ts) field for field, so
+  // the two "whose config is this?" payloads read alike.
+  gap: PairGapScope;
 };
+
+// `labeledQuestions` is here to separate the two ways `questionsRemaining` can be
+// zero, because they have OPPOSITE fixes: nothing left to cover (generate more
+// eval questions) versus this config has no eval bank at all (you are looking at
+// the wrong config). One number cannot say which, and the sentence built from it
+// was wrong in the second case.
+export type PairGapScope = {
+  configId: string;
+  configLabel: string;
+  labeledQuestions: number;
+};
+
+// The active config's labeled-question count and label — everything about the gap
+// EXCEPT the gap itself, none of which touches semantic_cache_pairs. Split out so
+// a missing pairs table still yields a scope to name (see pairStats' fallback).
+//
+// The join is the one questionsNeedingPairs uses, for the same reason it uses it:
+// a question only counts once it is labeled against THIS config's corpus.
+async function gapScope(): Promise<PairGapScope> {
+  const { id } = activeConfig();
+  const [cfg, rows] = await Promise.all([
+    getConfig(id),
+    sql<{ n: number }[]>`
+      select count(distinct q.id)::int as n
+        from eval_questions q
+        join eval_labels l on l.eval_question_id = q.id
+        join document_embeddings de on de.id = l.document_embedding_id
+       where de.config_id = ${id}
+    `,
+  ]);
+  return {
+    configId: id,
+    configLabel: cfg?.label ?? "config",
+    labeledQuestions: rows[0]?.n ?? 0,
+  };
+}
 
 // Counts for the panel: what exists, and how much of the bank still has no
 // pairs (so "Generate" can say what it would cost before it's clicked).
 export async function pairStats(): Promise<PairStats> {
+  const gap = await gapScope();
+  // No pairs table means no pairs, so every labeled question in this config still
+  // needs them — which keeps the generate control offered rather than hidden
+  // behind a zero that only means "the table isn't there".
   const empty: PairStats = {
     total: 0,
     same: 0,
     different: 0,
     questionsCovered: 0,
-    questionsRemaining: 0,
+    questionsRemaining: gap.labeledQuestions,
     quarantined: 0,
     unjudged: 0,
+    gap,
   };
   try {
     const [row] = await sql<
@@ -549,6 +602,7 @@ export async function pairStats(): Promise<PairStats> {
       questionsRemaining: remaining,
       quarantined: row?.quarantined ?? 0,
       unjudged: row?.unjudged ?? 0,
+      gap,
     };
   } catch (err) {
     if (isMissingTable(err)) return empty;

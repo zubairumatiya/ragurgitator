@@ -25,6 +25,7 @@ import { resolveConfig, withConfig } from "../../lib/rag/activeConfig";
 import type { ResolvedConfig } from "../../lib/rag/activeConfig";
 import type { CachedResult } from "../../lib/rag/semanticCache";
 import { semanticCacheLookup, semanticCacheStore } from "../../lib/rag/semanticCache";
+import { pairStats } from "../../lib/rag/semanticCachePairs";
 import { adminClient, createUser, ensureAppRole, truncateAll } from "../support/harness";
 
 type Sql = ReturnType<typeof adminClient>;
@@ -314,5 +315,77 @@ describe("semanticCacheLookup over seeded similarities", () => {
     const probe = await lookup("q-tenant", { threshold: 0.5 });
     assert.equal(probe.hit, true);
     assert.equal(probe.hit && probe.matchedQuery, "mine", "matched across tenants");
+  });
+});
+
+// --- pairStats: the pooled set is account-wide, the GAP is not ---------------
+//
+// The regression this pins: pairStats returns ACCOUNT-scoped counts and a
+// CONFIG-scoped gap in one payload, and the Appraise page carries no configId, so
+// the gap silently described the Default config. With an empty Default the panel
+// read a zero gap as "every eval question already has pairs" and hid the generate
+// control on an account with hundreds of uncovered questions.
+describe("pairStats — the gap names the config it describes", () => {
+  // A labeled eval bank for one config: document → chunk generation → questions →
+  // labels. questionsNeedingPairs reaches questions through eval_labels →
+  // document_embeddings, so a question with no label counts for no config at all.
+  async function seedBank(cfgId: string, tag: string, questions: number) {
+    const [doc] = await admin<{ id: string }[]>`
+      insert into documents (file_name, content_hash, content, user_id)
+      values (${`${tag}.txt`}, ${`h-${tag}-${alice.id}`}, 'body', ${alice.id}) returning id`;
+    const [de] = await admin<{ id: string }[]>`
+      insert into document_embeddings
+        (document_id, config_id, model, dimension, chunk_size, chunk_overlap, chunk_count)
+      values (${doc.id}, ${cfgId}, ${KEY_MODEL}, 4, 500, 50, 1) returning id`;
+    const rows = await admin<{ id: string }[]>`
+      insert into eval_questions (document_id, question)
+      select ${doc.id}, ${`${tag}-q`} || g from generate_series(1, ${questions}) as g
+      returning id`;
+    await admin`
+      insert into eval_labels (eval_question_id, document_embedding_id, source_chunk_id)
+      select id, ${de.id}, gen_random_uuid()
+        from unnest(${rows.map((r) => r.id)}::uuid[]) as id`;
+    return rows.map((r) => r.id);
+  }
+
+  async function statsFor(cfgId: string) {
+    return withUser(alice, async () => {
+      const cfg = await resolveConfig(cfgId);
+      assert.ok(cfg, "config fixture did not resolve");
+      return withConfig(cfg, pairStats);
+    });
+  }
+
+  it("reports an empty bank as empty, not as fully covered", async () => {
+    // `configId` (the beforeEach fixture) stands in for Default: it exists, and it
+    // has no labeled questions. The second config carries the bank and the pair.
+    const [other] = await admin<{ id: string }[]>`
+      insert into configs (user_id, base_model, chunk_size, chunk_overlap, top_k, llm_model, name)
+      values (${alice.id}, ${KEY_MODEL}, 500, 50, 5, 'test-llm', 'with-bank') returning id`;
+    const questionIds = await seedBank(other.id, "bank", 3);
+    await admin`
+      insert into semantic_cache_pairs
+        (origin_question_id, text_a, text_b, hash_a, hash_b, label, difficulty, generated_by)
+      values (${questionIds[0]}, 'a', 'b', ${sha256("a")}, ${sha256("b")},
+              'same', 'paraphrase', 'test-model')`;
+
+    const empty = await statsFor(configId);
+    // The account-wide half still sees the pair, from a config it is not scoped to
+    // — that juxtaposition is the whole reading problem, and it is intended.
+    assert.equal(empty.total, 1, "pooled count should stay account-wide");
+    assert.equal(empty.questionsRemaining, 0);
+    assert.equal(
+      empty.gap.labeledQuestions,
+      0,
+      "an empty bank must be distinguishable from a covered one",
+    );
+    assert.equal(empty.gap.configId, configId, "the gap must name the config it used");
+
+    const covered = await statsFor(other.id);
+    assert.equal(covered.gap.configId, other.id);
+    assert.equal(covered.gap.labeledQuestions, 3);
+    // Two of the three questions have no pairs — the gap the panel prices.
+    assert.equal(covered.questionsRemaining, 2);
+    assert.equal(covered.gap.configLabel, "with-bank");
   });
 });
