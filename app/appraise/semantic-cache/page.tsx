@@ -112,7 +112,10 @@ export default async function SemanticCachePage() {
 
           <ShadowJudgePanel />
 
-          <KeyModelPanel />
+          {/* Same list, same order, as the collision floor above: its pair GAP is
+              config-scoped, and this page carries no configId of its own, so
+              without a picker the gap silently described the Default config. */}
+          <KeyModelPanel configs={configs} />
         </div>
       </main>
     </div>

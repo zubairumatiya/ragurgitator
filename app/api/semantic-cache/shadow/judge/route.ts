@@ -42,7 +42,16 @@ export async function POST(request: Request) {
   const body = parsed.data;
 
   return withRequestUser(async () => {
-    await assertDemoAllows("generate");
+    // ONE BOOLEAN IS THE WHOLE CARVE-OUT, and it is the same shape as
+    // bulk-generate's `cachedOnly` (phase 6.1): the two modes are already
+    // different levers wearing one route, and only one of them reaches a model.
+    // `human` is a single UPDATE on a row the caller already owns, so gating it
+    // bought no spend limit and cost the demo its calibration workbench.
+    //
+    // Widening this condition widens the demo's spend surface, which is why the
+    // condition itself — not merely the presence of a gate call — is pinned as a
+    // needle in scripts/guards.ts (sweep 6b).
+    if (body.mode !== "human") await assertDemoAllows("judge");
     try {
       if (body.mode === "human") {
         await setHumanVerdict(body.id, body.verdict);

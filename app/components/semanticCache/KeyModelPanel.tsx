@@ -30,6 +30,7 @@ import {
   selectFromCurve,
   type Attainability,
 } from "@/lib/rag/calibrationCurve";
+import type { ConfigSummary } from "@/lib/rag/configStore";
 import type { LeaderboardRow, SweepResult } from "@/lib/rag/keyModelSweep";
 import type { PairStats } from "@/lib/rag/semanticCachePairs";
 
@@ -39,6 +40,7 @@ import {
   BTN_PRIMARY,
   NOTE_AMBER,
   Panel,
+  SELECT,
   TABLE_HEAD,
   TABLE_WRAP,
   WarnDot,
@@ -62,7 +64,11 @@ const PAIRS_ABOUT =
   "under-counted.\n\n" +
   "Generated — paraphrases and HARD NEGATIVES written from your eval " +
   "questions. Hard negatives are the point: random distinct questions are " +
-  "separated near-perfectly by every model and grade nothing.";
+  "separated near-perfectly by every model and grade nothing.\n\n" +
+  "The counts above are ACCOUNT-WIDE — one pooled set, since a pair is a " +
+  "property of two question texts rather than of a config. Only the gap (and " +
+  "the generate run that fills it) is per-config, which is what the picker " +
+  "below selects.";
 
 const TARGET_ABOUT =
   "The precision every model's τ is held to, so their recall numbers are " +
@@ -261,9 +267,19 @@ type Status = {
   }[];
 };
 
-export function KeyModelPanel() {
+// `configs` comes from the page's server render, the same list (open tabs then
+// closed) the collision-floor panel gets.
+export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
   const [status, setStatus] = useState<Status | null>(null);
   const [pairs, setPairs] = useState<PairStats | null>(null);
+  // WHICH CONFIG THE PAIR GAP DESCRIBES — and nothing else on this panel. The
+  // sweep is global by design and the precision target below is resolved by the
+  // route, so this picker deliberately scopes only the two things that read the
+  // eval bank: the gap, and the generate run that fills it.
+  //
+  // Opens on configs[0] — identical to CollisionFloorPanel, so both panels
+  // describe the same config until one of them is moved.
+  const [gapConfigId, setGapConfigId] = useState(configs[0]?.id ?? "");
   const [sweep, setSweep] = useState<SweepResult | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [scope, setScope] = useState<"config" | "all">("config");
@@ -304,19 +320,27 @@ export function KeyModelPanel() {
   );
 
   const load = useCallback(() => {
+    // NOT scoped to the picker: the sweep pools every config's pairs into one
+    // set, so a configId here would suggest a leaderboard that narrows with it.
     apiFetch("/api/semantic-cache/key-model")
       .then((r) => r.json())
       .then((d: Status & { error?: string }) => {
         if (!d.error) setStatus(d);
       })
       .catch(() => {});
-    apiFetch("/api/semantic-cache/pairs")
+    if (!gapConfigId) return;
+    // Scoped, because the GAP inside this payload is. apiFetch adds no configId
+    // off a /c/<id> route, so this is the only one on the request.
+    apiFetch(`/api/semantic-cache/pairs?configId=${encodeURIComponent(gapConfigId)}`)
       .then((r) => r.json())
       .then((d: PairStats & { error?: string }) => {
-        if (!d.error) setPairs(d);
+        // Drop a response that landed after the picker moved on, rather than
+        // clearing state in an effect: `gap` carries the config it describes, so
+        // the check is on the payload itself.
+        if (!d.error && d.gap?.configId === gapConfigId) setPairs(d);
       })
       .catch(() => {});
-  }, []);
+  }, [gapConfigId]);
 
   useEffect(() => {
     load();
@@ -406,9 +430,15 @@ export function KeyModelPanel() {
     // Explicit every time. The route's own default is 25 questions, so the
     // unlimited-looking button used to quietly do a fraction of the gap and
     // report a number that looked like a failure.
-    const d = await post("pairs", "/api/semantic-cache/pairs", {
-      limit: genQuestions,
-    });
+    // Scoped like the GET above, and for the same reason: generatePairs fills the
+    // ACTIVE config's gap (so does the batch path — lib/batch/jobs/pairGeneration
+    // calls the same query), so a run left unscoped would top up the Default
+    // config's bank rather than the one the panel just priced.
+    const d = await post(
+      "pairs",
+      `/api/semantic-cache/pairs?configId=${encodeURIComponent(gapConfigId)}`,
+      { limit: genQuestions },
+    );
     if (!d) return;
     if (d.mode === "batch") {
       setNote(
@@ -676,10 +706,13 @@ export function KeyModelPanel() {
               ? `${pairs.total} generated (${pairs.same} same / ${pairs.different} different)`
               : "—"}
           </span>
+          {/* Named, because this is the ONE count on the line that isn't
+              account-wide — it belongs to the config in the picker below. */}
           {pairs && pairs.questionsRemaining > 0 && (
             <span className="text-zinc-400">
               · {pairs.questionsRemaining} eval question
-              {pairs.questionsRemaining === 1 ? "" : "s"} with none yet
+              {pairs.questionsRemaining === 1 ? "" : "s"} in{" "}
+              <span className="font-mono">{pairs.gap.configLabel}</span> with none yet
             </span>
           )}
           {/* Without this the count above reads as the set the sweep scores, which
@@ -703,6 +736,26 @@ export function KeyModelPanel() {
             step here, and it's per-question, so the size of the ask is a real
             decision — one button that took the route's invisible default meant
             the spend was neither chosen nor visible. */}
+        {/* WHOSE gap. On the heading row this would read as scoping the whole
+            panel, which it does not — the leaderboard and the threshold above are
+            account-wide — so it sits on the row whose numbers it actually moves. */}
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-zinc-500 dark:text-zinc-400">Gap for</span>
+          <select
+            value={gapConfigId}
+            onChange={(e) => setGapConfigId(e.target.value)}
+            aria-label="Config for the pair gap"
+            className={SELECT}
+          >
+            {configs.length === 0 && <option value="">No configs</option>}
+            {configs.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.label} · {c.baseModel}
+              </option>
+            ))}
+          </select>
+        </div>
+
         {genMax > 0 && (
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
             <input
@@ -759,12 +812,26 @@ export function KeyModelPanel() {
         {pairs === null && (
           <p className="text-xs text-zinc-400">Loading pair stats…</p>
         )}
-        {pairs !== null && pairs.questionsRemaining === 0 && (
-          <p className="text-xs text-zinc-400">
-            Every eval question already has pairs — add eval questions to grow
-            the set.
-          </p>
-        )}
+        {/* A ZERO GAP HAS TWO CAUSES WITH OPPOSITE FIXES, and saying only the
+            first one is what hid this control: the Appraise page carries no
+            configId, so the gap described the Default config's EMPTY bank while
+            the panel announced that every question was covered. `labeledQuestions`
+            is the field that tells them apart. */}
+        {pairs !== null &&
+          pairs.questionsRemaining === 0 &&
+          (pairs.gap.labeledQuestions === 0 ? (
+            <p className="text-xs text-zinc-400">
+              <span className="font-mono">{pairs.gap.configLabel}</span> has no labeled
+              eval questions — pairs are generated from a config&apos;s own eval bank,
+              so pick a config that has one.
+            </p>
+          ) : (
+            <p className="text-xs text-zinc-400">
+              Every eval question in{" "}
+              <span className="font-mono">{pairs.gap.configLabel}</span> already has
+              pairs — add eval questions to grow the set.
+            </p>
+          ))}
 
         {/* Only offered when there is something to screen. Batch-generated pairs
             chain their own screen on apply, so a non-zero count here means a run

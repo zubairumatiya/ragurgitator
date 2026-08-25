@@ -23,7 +23,7 @@
 import { createHash } from "node:crypto";
 
 import { activeUserId } from "@/lib/auth/userScope";
-import { sql } from "@/lib/db";
+import { fragment, sql } from "@/lib/db";
 import { EMBEDDING_MODELS } from "@/lib/rag/embeddingModels";
 import { ndcg } from "@/lib/rag/evalMetrics";
 import { goldRank, leaveOneOutIdeal, rankTexts, summarizeRanks } from "@/lib/rag/replayMetrics";
@@ -308,48 +308,86 @@ async function scoreModel(model: string, corpus: Corpus): Promise<ReplayRow> {
 
 // --- cache read/write -------------------------------------------------------
 
+// The one fingerprint that is NOT an md5 over the inputs (phase 6.3 of
+// docs/demo-analytics-plan.md).
+//
+// A guest cannot compute this replay: embedding_cache is deliberately not cloned
+// (it exists to avoid paying to RE-embed, which a guest may not do), so every
+// model would come back at 0/236 coverage and the tab would render seventeen
+// dashes. So the publish CARRIES the master's rows — lib/demo/clone step 5c —
+// and this sentinel is how they are addressed.
+//
+// It has to be a sentinel rather than the master's own md5 for a reason that is
+// not stylistic: the fingerprint hashes the config id and the owner's cache-row
+// count, so a cloned row's key is a value nobody in the destination account will
+// ever compute. Under a copied md5 the rows would be unreachable-but-present,
+// which is the exact failure mode step 6's fingerprint rewrite exists to stop.
+export const PUBLISHED_REPLAY_FINGERPRINT = "published";
+
+type MetricRow = {
+  model: string;
+  questions: number;
+  corpus_chunks: number;
+  coverage_chunks: number;
+  recall_at_1: string | null;
+  recall_at_3: string | null;
+  recall_at_5: string | null;
+  recall_at_10: string | null;
+  mrr: string | null;
+  ndcg: string | null;
+  ndcg_k: number | null;
+  ndcg_leave_one_out: boolean;
+  computed_at: Date;
+};
+
+// Qualified with `r.`, and every reader aliases replay_metrics to match: the
+// published read joins `configs`, which carries its own ndcg_k (the nDCG depth
+// setting), and an unqualified list resolves to "column reference is ambiguous".
+const METRIC_COLUMNS = fragment`
+  r.model, r.questions, r.corpus_chunks, r.coverage_chunks,
+  r.recall_at_1, r.recall_at_3, r.recall_at_5, r.recall_at_10, r.mrr,
+  r.ndcg, r.ndcg_k, r.ndcg_leave_one_out, r.computed_at
+`;
+
+function toRow(r: MetricRow): ReplayRow {
+  const num = (v: string | null) => (v === null ? null : Number(v));
+  return {
+    model: r.model,
+    questions: r.questions,
+    corpusChunks: r.corpus_chunks,
+    coverageChunks: r.coverage_chunks,
+    recallAt1: num(r.recall_at_1),
+    recallAt3: num(r.recall_at_3),
+    recallAt5: num(r.recall_at_5),
+    recallAt10: num(r.recall_at_10),
+    mrr: num(r.mrr),
+    ndcg: num(r.ndcg),
+    ndcgK: r.ndcg_k,
+    ndcgLeaveOneOut: r.ndcg_leave_one_out,
+    computedAt: r.computed_at.getTime(),
+  };
+}
+
+// MRR desc; unscorable models (null MRR) last, then by coverage so the
+// closest-to-usable sit highest among them. In place.
+function sortRows(rows: ReplayRow[]): ReplayRow[] {
+  return rows.sort((a, b) => {
+    if (a.mrr === null && b.mrr === null) return b.coverageChunks - a.coverageChunks;
+    if (a.mrr === null) return 1;
+    if (b.mrr === null) return -1;
+    return b.mrr - a.mrr;
+  });
+}
+
 async function readCached(configId: string, fp: string): Promise<ReplayRow[] | null> {
   try {
-    const rows = await sql<
-      {
-        model: string;
-        questions: number;
-        corpus_chunks: number;
-        coverage_chunks: number;
-        recall_at_1: string | null;
-        recall_at_3: string | null;
-        recall_at_5: string | null;
-        recall_at_10: string | null;
-        mrr: string | null;
-        ndcg: string | null;
-        ndcg_k: number | null;
-        ndcg_leave_one_out: boolean;
-        computed_at: Date;
-      }[]
-    >`
-      select model, questions, corpus_chunks, coverage_chunks,
-             recall_at_1, recall_at_3, recall_at_5, recall_at_10, mrr,
-             ndcg, ndcg_k, ndcg_leave_one_out, computed_at
-      from replay_metrics
-      where config_id = ${configId} and fingerprint = ${fp}
+    const rows = await sql<MetricRow[]>`
+      select ${METRIC_COLUMNS}
+      from replay_metrics r
+      where r.config_id = ${configId} and r.fingerprint = ${fp}
     `;
     if (rows.length === 0) return null;
-    const num = (v: string | null) => (v === null ? null : Number(v));
-    return rows.map((r) => ({
-      model: r.model,
-      questions: r.questions,
-      corpusChunks: r.corpus_chunks,
-      coverageChunks: r.coverage_chunks,
-      recallAt1: num(r.recall_at_1),
-      recallAt3: num(r.recall_at_3),
-      recallAt5: num(r.recall_at_5),
-      recallAt10: num(r.recall_at_10),
-      mrr: num(r.mrr),
-      ndcg: num(r.ndcg),
-      ndcgK: r.ndcg_k,
-      ndcgLeaveOneOut: r.ndcg_leave_one_out,
-      computedAt: r.computed_at.getTime(),
-    }));
+    return rows.map(toRow);
   } catch (err) {
     if (isMissingTable(err)) return null; // pre-migration: recompute every time
     throw err;
@@ -358,9 +396,22 @@ async function readCached(configId: string, fp: string): Promise<ReplayRow[] | n
 
 // Store this fingerprint's rows. Old fingerprints for the config are deleted —
 // this is a cache, not a history, and stale generations would only ever grow.
+//
+// EXCEPT the published generation, which is not a cache generation at all: it is
+// a BUILD ARTIFACT the publish carried in (step 5c), and nothing in the
+// destination account can recompute it. Without the carve-out, opening
+// /appraise/models as the snapshot account would evict the demo's model
+// comparison and replace it with seventeen unscorable rows — silently, since a
+// cold replay over an empty embedding_cache is not an error, and the next guest
+// would be cloned from the wreckage.
 async function writeCached(configId: string, fp: string, rows: ReplayRow[]): Promise<void> {
   try {
-    await sql`delete from replay_metrics where config_id = ${configId} and fingerprint <> ${fp}`;
+    await sql`
+      delete from replay_metrics
+       where config_id = ${configId}
+         and fingerprint <> ${fp}
+         and fingerprint <> ${PUBLISHED_REPLAY_FINGERPRINT}
+    `;
     for (const r of rows) {
       await sql`
         insert into replay_metrics (
@@ -429,14 +480,7 @@ export async function replayConfig(
     await writeCached(configId, fp, rows);
   }
 
-  // MRR desc; unscorable models (null MRR) last, then by coverage so the
-  // closest-to-usable sit highest among them.
-  rows.sort((a, b) => {
-    if (a.mrr === null && b.mrr === null) return b.coverageChunks - a.coverageChunks;
-    if (a.mrr === null) return 1;
-    if (b.mrr === null) return -1;
-    return b.mrr - a.mrr;
-  });
+  sortRows(rows);
 
   return {
     configId,
@@ -456,5 +500,66 @@ export async function listReplays(): Promise<ReplayReport[]> {
   for (const c of configs) {
     out.push(await replayConfig(c.id, c.baseModel, c.label, c.topK));
   }
+  return out;
+}
+
+// THE READ-ONLY TWIN, for an account that cannot compute a replay of its own:
+// the rows a publish carried in, addressed by the sentinel fingerprint.
+//
+// It is a separate function rather than a flag on listReplays, and that is the
+// safety property rather than a style preference. This one is INCAPABLE of the
+// thing the demo is protecting against: it touches no chunk table, no
+// embedding_cache and no vector column, so no future edit to the replay's
+// scoring path can turn a guest's page render into 92 MB of egress. It also
+// never writes, so a guest cannot overwrite the build they were handed.
+//
+// Everything the report needs is already in the row: `corpus_chunks` is the
+// pool the master scored over — which is the guest's pool too, since the clone
+// copies chunks byte for byte — and `questions` is what actually scored. Both
+// come back as a max() because unscorable models store zeros.
+export async function listPublishedReplays(): Promise<ReplayReport[]> {
+  let rows: (MetricRow & {
+    config_id: string;
+    name: string | null;
+    base_model: string;
+    chunk_size: number;
+    chunk_overlap: number;
+  })[];
+  try {
+    rows = await sql`
+      select r.config_id, c.name, c.base_model, c.chunk_size, c.chunk_overlap, ${METRIC_COLUMNS}
+        from replay_metrics r
+        join configs c on c.id = r.config_id
+       where c.user_id = ${activeUserId()}
+         and r.fingerprint = ${PUBLISHED_REPLAY_FINGERPRINT}
+       order by c.tab_order, c.created_at, r.model
+    `;
+  } catch (err) {
+    if (isMissingTable(err)) return []; // pre-migration: nothing was ever published
+    throw err;
+  }
+
+  const byConfig = new Map<string, ReplayReport>();
+  for (const r of rows) {
+    // The same label derivation replayableConfigs uses — `configs` has no label
+    // column, so an unnamed config is described by what makes it different.
+    const report =
+      byConfig.get(r.config_id) ??
+      {
+        configId: r.config_id,
+        configLabel: r.name ?? `${r.base_model} · ${r.chunk_size}/${r.chunk_overlap}`,
+        corpusChunks: 0,
+        questions: 0,
+        rows: [],
+        fromCache: true,
+      };
+    report.corpusChunks = Math.max(report.corpusChunks, r.corpus_chunks);
+    report.questions = Math.max(report.questions, r.questions);
+    report.rows.push(toRow(r));
+    byConfig.set(r.config_id, report);
+  }
+
+  const out = [...byConfig.values()];
+  for (const report of out) sortRows(report.rows);
   return out;
 }

@@ -57,3 +57,48 @@ export const PUBLISHED_RUN_NOTE = "as published";
 // It is applied in lib/demo/clone step 4e, at PUBLISH time, for the same reason
 // FROZEN_REASON is: the scope is data in the build, not a branch in the app.
 export const BANKED_QUESTION_CAP = 12;
+
+// HOW MUCH OF THE SHADOW LOG A PUBLISH CARRIES (phase 6.2).
+//
+// The calibration curve is the app's most distinctive measurement and the demo
+// shipped it empty, because semantic_cache_shadow was in neither the clone's copy
+// list nor its "deliberately not cloned" list — it was simply missed. These caps
+// are what lets it in without handing every guest the master's whole telemetry
+// table (335 rows, ~300 KB, and growing every time the operator asks a question).
+//
+// WHY TWO NUMBERS RATHER THAN ONE. The two origins are not two halves of one
+// sample, they are two different measurements that happen to share a table (0069),
+// and the demo needs both for opposite reasons:
+//
+//   traffic  what this account's REAL questions did — 91 judged, 91 accepted, and
+//            that census is the honest headline (F7). Its curve is one-class and
+//            therefore FLAT, which is the correct thing for a visitor to see by
+//            default: it is what the app recommends serving on.
+//   probe    engineered near-misses, half of them hard negatives (F1/F3). This is
+//            the only population with rejects in it, so it is the only one where
+//            precision visibly trades against recall — the thing phase 6.2 exists
+//            to put on screen. It is a WORST-CASE BOUND, never a setting, which is
+//            why the panel will not offer its τ to the apply box.
+//
+// Sized against the curve, not against the disk: below ~100 rows a stratum's
+// accept rate per similarity band gets noisy enough that the curve develops steps
+// the master's does not have, and a demo whose distinctive chart is visibly
+// wrong is worse than one that omits it. ~170 rows is ~150 KB per guest, against
+// the ~1 MB of chunk rows that dominate a clone.
+export const SHADOW_CURVE_CAP = { probe: 120, traffic: 40 } as const;
+
+// AND HOW MANY ARRIVE UNJUDGED, so the human Accept/Reject queue has something in
+// it on the first page load.
+//
+// This is the half that makes the panel a workbench rather than a poster. Judging
+// is otherwise a spend (an LLM pass the demo will not pay for), but a HUMAN
+// verdict is one UPDATE — so the queue is carved out of the gate and these rows
+// are what it serves. They are drawn from `probe` and copied with the verdict
+// CLEARED: the operator's own verdict is discarded on the way into a guest's
+// private clone, because the point is for the visitor to supply it and watch the
+// curve move.
+//
+// Above the shadow-log floor by construction (see clone step 5b). A sub-floor row
+// judged by hand changes no curve — calibrationCurve drops that band — so a queue
+// full of them would be a control that visibly does nothing.
+export const SHADOW_QUEUE_CAP = 12;

@@ -34,8 +34,15 @@ import "server-only";
 
 import type postgres from "postgres";
 
+import { config } from "@/lib/config";
 import { privilegedSql } from "@/lib/db";
-import { BANKED_QUESTION_CAP, FROZEN_REASON } from "@/lib/demo/frozen";
+import {
+  BANKED_QUESTION_CAP,
+  FROZEN_REASON,
+  SHADOW_CURVE_CAP,
+  SHADOW_QUEUE_CAP,
+} from "@/lib/demo/frozen";
+import { PUBLISHED_REPLAY_FINGERPRINT } from "@/lib/rag/replayStore";
 import { answerFingerprint } from "@/lib/rag/semanticCacheCore";
 import { chunksTable, modelDimension } from "@/lib/rag/vectorStore";
 
@@ -161,7 +168,19 @@ async function buildMap(
 //     Without them every question is one ~12 KB ANN. Leaving this out is worth
 //     ~40x, and it is also what gives a visitor an untuned corpus to autotune.
 //   embedding_cache   107 MB live, and it exists to avoid paying to RE-embed.
-//     Guests cannot re-embed, so it would be pure storage for zero saving.
+//     Guests cannot re-embed, so it would be pure storage for zero saving. ONE
+//     thing did read it — the full-corpus replay behind Appraise → Models — and
+//     the answer was to carry that measurement's RESULT rather than its inputs:
+//     17 rows against 107 MB. See step 5c.
+//   replay_metrics IS cloned now — step 5c — and, like the shadow log below, it
+//     spent this demo's whole life in neither list. The plan's own bullet for the
+//     phase that fixed it named the wrong table (eval_model_trials, which the
+//     replay REPLACED in 0043), which is what a table nobody has written down
+//     costs you.
+//   semantic_cache_shadow IS cloned now, as a SAMPLE — see step 5b. It is listed
+//     here because it spent two phases in neither list, which is how the demo
+//     shipped its most distinctive chart empty: a table that is merely unmentioned
+//     looks identical to one that was considered and rejected.
 //   user_provider_keys   Cannot be cloned even in principle: aadFor(userId,
 //     provider) binds the AAD to the user id, so a copied row fails its GCM tag
 //     check on first use. The key is re-sealed instead — see lib/demo/provision.
@@ -183,6 +202,10 @@ export type CloneSummary = {
   bankedQuestions: number; // spare wording "Add cached" can hand out for free (step 4e)
   bankedAvailable: number; // passages that HAD banked wording, before the cap
   cachedAnswers: number;
+  shadowEvents: number; // judged + queued shadow rows behind the calibration curve
+  shadowQueued: number; // of those, the ones arriving unjudged for the human queue
+  replayRows: number; // the published model comparison, one row per model (step 5c)
+  replayScored: number; // of those, the ones with metrics rather than "not scorable"
 };
 
 // THE PUBLISH OPTIONS — used by scripts/demo-snapshot.ts, never by a guest.
@@ -794,6 +817,193 @@ export async function cloneSeedWorkspace(
       params: ids,
     });
 
+    // --- 5b. the shadow log, so the calibration curve has a shape ------------
+    //
+    // Phase 6.2. The Appraise → Semantic caching page is the app's most
+    // distinctive measurement and the demo published it EMPTY, because this table
+    // was in neither list above — not copied, and not named as a deliberate
+    // omission either.
+    //
+    // WHAT MAKES THIS DIFFERENT FROM EVERY OTHER COPY HERE: it is the only one
+    // that SAMPLES. Everything else takes a set the publish already defines (the
+    // config's documents, the baseline generation, the twelve). The shadow log has
+    // no natural boundary — it is telemetry that grows every time the operator
+    // asks a question — so a copy of "all of it" would mean each guest's disk
+    // tracking the master's bookkeeping, which is the same objection step 4e's cap
+    // exists for.
+    //
+    // The sample is stride-taken within each (origin, verdict) stratum, in
+    // similarity order. That is not a flourish: the curve IS the accept rate per
+    // similarity band, so a sample that skewed either the accept:reject ratio or
+    // the sim range would produce a chart that is subtly not the one the operator
+    // sees. Striding at one rate per origin keeps both — each stratum contributes
+    // its own share, evenly spread across its own range.
+    //
+    // ONLY ROWS AT OR ABOVE THE SHADOW FLOOR. calibrationCurve drops the sub-floor
+    // band by default (it is a ~5% sample sitting next to a census, F5), so those
+    // rows would cost a guest disk to change no number on screen.
+    await tx.unsafe(
+      `create temp table _shadow_pick (
+         id uuid primary key,
+         judged boolean not null
+       ) on commit drop`,
+    );
+
+    // THE QUEUE IS RESERVED FIRST, and the order is the point rather than an
+    // accident of how this was written. Take the curve sample first and the queue
+    // gets whatever the caps happen to leave over — which is twelve rows on
+    // today's master (210 probe rows against a cap of 120) and NOTHING the moment
+    // the master's probe set drops below the cap. A publish would then ship a
+    // stocked-looking curve above an empty queue, i.e. the one control a guest is
+    // allowed to touch, silently gone. Reserving first makes the queue depend on
+    // the probe set existing at all, not on it being large.
+    //
+    // Drawn from `probe`: those are the engineered near-misses, so a verdict is a
+    // real judgement call rather than an obvious yes. `ntile` rather than the
+    // stride below because here the count is exact and small — one row from each
+    // of twelve equal slices of the similarity range, so the queue spans easy
+    // matches and obvious misses instead of twelve rows that all look alike.
+    await tx.unsafe(
+      `insert into _shadow_pick (id, judged)
+       select distinct on (t.slice) t.id, false
+         from (
+           select s.id, s.sim, ntile($1::int) over (order by s.sim, s.id) as slice
+             from semantic_cache_shadow s
+             join _map_config mc on mc.old_id = s.config_id
+            where s.origin = 'probe' and s.verdict is not null and s.sim >= $2::real
+         ) t
+        order by t.slice, t.sim, t.id`,
+      [SHADOW_QUEUE_CAP, config.semanticCache.shadowLogFloor] as never[],
+    );
+
+    // The curve's own rows, verdicts intact — everything above the floor that the
+    // queue did not claim, thinned to the caps.
+    await tx.unsafe(
+      `insert into _shadow_pick (id, judged)
+       select u.id, true
+         from (
+           select t.*, least(t.cap::numeric / t.tot, 1) as rate
+             from (
+               select s.id, s.origin,
+                      row_number() over (
+                        partition by s.origin, s.verdict order by s.sim, s.id
+                      ) as rn,
+                      count(*) over (partition by s.origin) as tot,
+                      (case s.origin when 'probe' then $1::int else $2::int end) as cap
+                 from semantic_cache_shadow s
+                 join _map_config mc on mc.old_id = s.config_id
+                where s.verdict is not null and s.sim >= $3::real
+                  and not exists (select 1 from _shadow_pick p where p.id = s.id)
+             ) t
+         ) u
+        -- Bresenham: floor(rn * rate) ticks over once every 1/rate rows, so a
+        -- stratum of m rows yields about m*rate picks and they are spread evenly
+        -- rather than clustered at either end of the similarity range.
+        where floor(u.rn * u.rate) > floor((u.rn - 1) * u.rate)`,
+      [SHADOW_CURVE_CAP.probe, SHADOW_CURVE_CAP.traffic, config.semanticCache.shadowLogFloor] as never[],
+    );
+
+    // The four judge columns move together or not at all: a row with a verdict but
+    // no `judged_at` reads as a bug in the judge rather than as a queue entry.
+    const clearIfQueued = (col: string) => `case when p.judged then s."${col}" else null end`;
+    const shadowEvents = await copyRows(tx, {
+      table: "semantic_cache_shadow",
+      joins: `join _map_config mc on mc.old_id = s.config_id
+              join _shadow_pick p on p.id = s.id`,
+      where: `true`,
+      overrides: {
+        config_id: "mc.new_id",
+        verdict: clearIfQueued("verdict"),
+        judge_source: clearIfQueued("judge_source"),
+        judge_model: clearIfQueued("judge_model"),
+        judge_reason: clearIfQueued("judge_reason"),
+        judged_at: clearIfQueued("judged_at"),
+      },
+      omit: ["id"],
+      // Same reason step 5 dedupes, and against the same rewrite: step 6 collapses
+      // every fingerprint in a config to one, so two source rows that differed
+      // only by corpus signature become one key under 0035's
+      // unique (config_id, fingerprint, new_query_hash) and would reject the
+      // insert wholesale.
+      dedupe: {
+        on: `s.config_id, s.new_query_hash`,
+        tieBreak: `s.created_at desc`,
+      },
+      params: [],
+    });
+    // Counted from what LANDED, not from the pick list: the dedupe above can drop
+    // a queue row whose question text also appears in the curve sample, and a
+    // publish summary that reported the intent rather than the outcome would be
+    // the one number here nobody could check.
+    const [{ queued }] = await tx<{ queued: number }[]>`
+      select count(*)::int as queued
+        from semantic_cache_shadow s
+        join configs c on c.id = s.config_id
+       where c.user_id = ${guestId} and s.verdict is null
+    `;
+
+    // --- 5c. the model comparison, which a guest cannot compute -------------
+    //
+    // Phase 6.3. Appraise → Models is two rate cards above a full-corpus replay:
+    // every embedding model ranking the SAME corpus on the SAME questions, which
+    // is the one place the app answers "would a different model do better here".
+    // A guest saw the rate cards and a dashed panel.
+    //
+    // WHY IT COULD NOT SIMPLY BE UNGATED, which is what the plan's bullet assumed.
+    // The replay is not a stored measurement, it is a COMPUTATION over
+    // embedding_cache — 7,788 cached vectors, 92 MB of wire, measured on the
+    // master 2026-08-25 — and it runs on PAGE RENDER. That is the third
+    // vector-shipping site in lib/demo/policy's egress list, and it is per visit.
+    // Cloning embedding_cache to make it cheap is worse: 107 MB a guest may not
+    // re-embed against anyway.
+    //
+    // So the publish carries the ANSWER instead of the inputs: 17 rows, ~2 KB,
+    // under PUBLISHED_REPLAY_FINGERPRINT. That is the sentinel the guest's
+    // read-only path (listPublishedReplays) addresses them by, and it is a
+    // sentinel rather than the master's own md5 because the real fingerprint
+    // hashes the config id and the owner's cache-row count — a copied one is a
+    // key nobody in the destination will ever compute, i.e. rows present but
+    // unreachable, the exact failure step 6 exists to prevent.
+    //
+    // UNSCORED ROWS TRAVEL TOO, deliberately. Six of the seventeen models have no
+    // cached vectors on the master and land as "0/236 chunks cached". Dropping
+    // them would publish a leaderboard of only the models the operator happened to
+    // have paid for, with nothing saying so; keeping them is what makes the table
+    // read as a real appraisal rather than a curated one.
+    //
+    // The dedupe is not defensive noise. `writeCached` evicts a config's other
+    // fingerprints, so a source normally holds one generation — but the snapshot
+    // account is BOTH a destination and the seed guests are cloned from, and
+    // opening the page there writes a second (unscorable) generation beside the
+    // published one. Preferring the published row keeps a guest cloned from the
+    // build rather than from the operator's page visit, and makes the rewrite to a
+    // single fingerprint incapable of colliding with itself.
+    const replayRows = await copyRows(tx, {
+      table: "replay_metrics",
+      joins: `join _map_config mc on mc.old_id = s.config_id`,
+      where: `true`,
+      overrides: {
+        config_id: "mc.new_id",
+        fingerprint: `'${PUBLISHED_REPLAY_FINGERPRINT}'`,
+      },
+      dedupe: {
+        on: `s.config_id, s.model`,
+        tieBreak: `(s.fingerprint = '${PUBLISHED_REPLAY_FINGERPRINT}') desc, s.computed_at desc`,
+      },
+      params: [],
+    });
+    // The count that decides whether the tab is worth opening. Seventeen rows of
+    // which zero are scored is exactly what the master held before this phase —
+    // a stale generation for a config that had since been re-chunked — and it
+    // renders as a full table of dashes, which is the failure this step is
+    // supposed to have fixed. Counted here so the publish can say so.
+    const [{ scored }] = await tx<{ scored: number }[]>`
+      select count(*)::int as scored
+        from replay_metrics r
+        join configs c on c.id = r.config_id
+       where c.user_id = ${guestId} and r.mrr is not null
+    `;
+
     // --- 6. REWRITE THE CACHE FINGERPRINTS, or step 5 was for nothing --------
     //
     // currentFingerprint hashes documentSignature, which is an md5 over the
@@ -836,6 +1046,18 @@ export async function cloneSeedWorkspace(
            set fingerprint = ${fingerprint}
          where user_id = ${guestId} and config_id = ${cfg.id}
       `;
+      // The shadow log carries the SAME validity key (0035 stores the fingerprint
+      // at capture time), and it is stale for the same reason. Nothing on the
+      // calibration path reads it — the sweep is keyed by space — so a stale value
+      // breaks no chart. It breaks recordShadow's `on conflict (config_id,
+      // fingerprint, new_query_hash)`: a guest re-asking one of the cloned
+      // questions would insert a SECOND row for it instead of colliding with the
+      // first, and the demo would slowly double-count its own traffic.
+      await tx`
+        update semantic_cache_shadow
+           set fingerprint = ${fingerprint}
+         where config_id = ${cfg.id}
+      `;
     }
 
     // --- 7. where to drop them ----------------------------------------------
@@ -868,6 +1090,10 @@ export async function cloneSeedWorkspace(
       bankedQuestions,
       bankedAvailable,
       cachedAnswers,
+      shadowEvents,
+      shadowQueued: queued,
+      replayRows,
+      replayScored: scored,
     };
   }) as Promise<CloneSummary>;
 }
