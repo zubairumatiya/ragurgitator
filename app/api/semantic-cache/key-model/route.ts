@@ -12,9 +12,15 @@
 //        • sweep    — score every candidate on the pooled pair set. Embedding-only
 //                     and cached, so a re-run is nearly free. NOT folded into GET:
 //                     the first run pays for real embeddings and a page load must
-//                     never do that silently.
+//                     never do that silently. For a GUEST this REPLAYS the
+//                     published row instead of running — see the gate below.
 //        • apply    — write the per-config override, for one config or all.
 //        • backfill — re-embed this config's cached questions under the key model.
+//
+// THE DEMO GATE IS PER-ACTION (phase 2 of docs/demo-cache-lab-plan.md). It used
+// to be one assertDemoAllows("sweep") over the whole handler, which blocked all
+// three — but only `sweep` has a banked answer to hand back, and only `sweep`
+// writes nothing.
 //
 // The UNCALIBRATED-SPACE REFUSAL lives on `apply` here exactly as on PATCH
 // /api/batch: switching key models moves a config into a new vector-space, and an
@@ -126,7 +132,40 @@ export async function POST(request: Request) {
   const data = body.data;
 
   return withRequestConfig(request, async () => {
-    await assertDemoAllows("sweep");
+    // THE WRITES STAY BLOCKED, under their own sentence. `apply` moves which
+    // vector-space every incoming question is matched in and `backfill`
+    // re-embeds this config's banked questions — a spend AND a write the next
+    // visitor would inherit — so neither has a replay to offer. They get
+    // DEMO_ACTIONS.keyModel rather than .sweep because since phase 2 that
+    // sentence answers a different question ("this build published no sweep"),
+    // and answering a question nobody asked is the failure lib/demo/policy's
+    // copy rule exists to prevent.
+    if (data.action !== "sweep") await assertDemoAllows("keyModel");
+    // THE CARVE-OUT, in the shape bulk-generate's `cachedOnly` established: one
+    // condition, greppable, pinned as a needle in scripts/guards.ts DEMO_SCOPED,
+    // because the difference between "a guest may read a sweep the operator paid
+    // for" and "a guest may spend ~510 texts × every candidate model of the
+    // operator's embedding key" is exactly this line.
+    //
+    // GATED ON GUEST, not on "a row exists" — the same rule the GET holds. The
+    // operator's own account owns a published_sweep row too (it is the account
+    // that wrote it), and serving that back instead of running the real sweep
+    // would be a MEASUREMENT implying a computation that did not happen.
+    //
+    // The response is TAGGED and PACKED: `{ published: true, sweep }` rather
+    // than a bare SweepResult, because the two are not interchangeable to the
+    // panel. It must unpackSweep before reading a curve, and it must render
+    // PUBLISHED_SWEEP_NOTE rather than let a visitor believe their click bought
+    // the numbers. A shape it cannot tell apart from a live run would make both
+    // of those depend on the panel remembering it is in a demo.
+    const replay =
+      data.action === "sweep" && (await demoBlocks()) ? await readPublishedSweep() : null;
+    if (replay) return Response.json({ published: true, sweep: replay });
+    // No banked row, so there is nothing to replay and DEMO_ACTIONS.sweep is the
+    // fallback sentence — exactly how `appraise` degrades on a build published
+    // without a warm replay. A no-op for a real account, which is what makes the
+    // line above the only thing separating the two.
+    if (data.action === "sweep") await assertDemoAllows("sweep");
     try {
       if (data.action === "sweep") {
         // A runId already in flight yields no channel rather than stealing the

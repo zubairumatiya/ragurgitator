@@ -16,7 +16,7 @@
 //      target space unless explicitly confirmed.
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Tooltip } from "@/app/components/Tooltip";
 import { config } from "@/lib/config";
@@ -88,6 +88,14 @@ const TARGET_ABOUT =
   "admits more wrong answers. Note a high target needs a big judged set to be " +
   "reachable at all: clearing 99% while carrying r false positives takes a " +
   "serve set of 100r, so on a small set 99% means “zero false positives”.";
+
+// The demo's sentences wear one look, borrowed from ModelReplayTable's published
+// note: quiet, bordered, never amber. None of them is a warning — they say where
+// a number came from — and dressing them as one would make the panel read as
+// four things going wrong.
+const DEMO_NOTE =
+  "rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed " +
+  "text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400";
 
 const pct = (n: number | null) =>
   n === null ? "—" : `${(n * 100).toFixed(1)}%`;
@@ -273,11 +281,68 @@ type Status = {
   }[];
 };
 
+// THE DEMO'S SENTENCES, handed down from the page rather than imported here.
+// lib/demo/policy is `import "server-only"` and this is a Client Component, so
+// the boundary is the page's (app/appraise/semantic-cache/page.tsx) — the same
+// crossing app/appraise/models/page.tsx makes for the replay's two notes.
+//
+// PRESENT ONLY FOR A GUEST, and all six together or none: every `notes &&` below
+// is therefore asking "is this the demo?", not "did this particular string get
+// passed?", which is what stops the panel rendering half an explanation.
+export type DemoNotes = {
+  sweep: string; // the leaderboard was measured on the operator's account
+  pairs: string; // "Generate" hands out pairs already paid for
+  revealed: string; // revealing pairs cannot move the frozen leaderboard
+  screen: string; // the screen resolves to audited verdicts, not a new judge run
+  probe: string; // one probe is one embedding, and it lands unjudged
+  live: string; // which half of this page is yours (phase 5)
+};
+
+// The pair counts as this panel holds them: pairStats' own fields plus the two
+// the GET adds for a guest (app/api/semantic-cache/pairs). Deliberately NOT
+// folded into PairStats — those two describe the BANK the publish left behind,
+// not the pair table, and every other reader of PairStats wants the table.
+//
+// Null rather than absent for a real account, which is the distinction the whole
+// reveal control is sized off: null means "there is no shelf here", 0 means "you
+// have emptied yours".
+type PairsState = PairStats & {
+  bankedRemaining?: number | null;
+  bankedVerdicts?: number | null;
+};
+
+// What ONE probe reports back (app/api/semantic-cache/probe). Held rather than
+// flattened into `note` because two of its fields are numbers a visitor reads
+// against the floor, and because `queued: false` is an outcome with its own
+// sentence rather than a failure.
+type ProbeResult = {
+  probed: boolean;
+  pair: {
+    pairId: string;
+    originText: string;
+    variantText: string;
+    difficulty: string | null;
+  } | null;
+  floor?: number;
+  queued?: boolean;
+  sim?: number | null;
+  matchedQuery?: string | null;
+  remaining?: number;
+  reason?: string;
+  note?: string | null;
+};
+
 // `configs` comes from the page's server render, the same list (open tabs then
 // closed) the collision-floor panel gets.
-export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
+export function KeyModelPanel({
+  configs,
+  notes,
+}: {
+  configs: ConfigSummary[];
+  notes?: DemoNotes;
+}) {
   const [status, setStatus] = useState<Status | null>(null);
-  const [pairs, setPairs] = useState<PairStats | null>(null);
+  const [pairs, setPairs] = useState<PairsState | null>(null);
   // WHICH CONFIG THE PAIR GAP DESCRIBES — and nothing else on this panel. The
   // sweep is global by design and the precision target below is resolved by the
   // route, so this picker deliberately scopes only the two things that read the
@@ -296,7 +361,7 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
     fallbackThreshold: number;
   } | null>(null);
   const [busy, setBusy] = useState<
-    null | "sweep" | "pairs" | "screen" | "apply" | "backfill" | "target"
+    null | "sweep" | "pairs" | "screen" | "apply" | "backfill" | "target" | "probe"
   >(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -314,12 +379,45 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
   // to travel outbound (see the route). Null whenever no sweep is running.
   const [sweepRunId, setSweepRunId] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  // Whether the leaderboard on screen was BANKED rather than computed here
+  // (phases 1 and 2). It drives one note, and it is tracked separately from
+  // `notes` because the two answer different questions: `notes` says "this is the
+  // demo", this says "these particular rows are a replay". A build published
+  // without a sweep row leaves a guest with notes and no table, and must not
+  // claim a published measurement it does not have.
+  const [sweepPublished, setSweepPublished] = useState(false);
+  // The last single probe (phase 4), or null before one is run. Kept beside
+  // `note` rather than inside it: a probe reports a similarity against a floor,
+  // and folding numbers into a sentence is how the one live thing on this page
+  // would end up reading like every other status line.
+  const [probe, setProbe] = useState<ProbeResult | null>(null);
+  // Whether a sweep this account COMPUTED is on screen. A ref because load()
+  // reads it from a callback that deliberately does not depend on the sweep, and
+  // because nothing renders off it — it only decides whether the published row
+  // may seed the table underneath.
+  const ownSweep = useRef(false);
+  // Whether a reveal has told us the leaderboard is banked. It only matters once
+  // the visitor has moved a count, which is exactly when it becomes true.
+  const [frozenSeen, setFrozenSeen] = useState(false);
 
   // The generate control's range and current position. Capped at the gap (asking
   // for more questions than exist just generates the gap) and at the inline
   // path's own ceiling, so the slider can never promise a run the server will
   // silently trim.
-  const genMax = Math.min(pairs?.questionsRemaining ?? 0, GEN_MAX);
+  //
+  // WHAT IT COUNTS DEPENDS ON WHOSE PANEL THIS IS. For an account it is ORIGIN
+  // QUESTIONS — the paid unit, each yielding PAIRS_PER_QUESTION pairs. A guest
+  // writes nothing: the slider picks how many already-generated pairs to UNCOVER,
+  // so its unit is PAIRS and its ceiling is the bank the publish left. It cannot
+  // be `questionsRemaining` there — the clone gives every cloned question its
+  // pairs, so that count is ~0 for a guest and the control would never render.
+  const banked = pairs?.bankedRemaining ?? null;
+  const genMax = Math.min(banked ?? pairs?.questionsRemaining ?? 0, GEN_MAX);
+  // Whether this control UNCOVERS rather than writes. Read from the bank being
+  // present at all, not from `notes`: the sentences say "this is the demo", the
+  // shelf says "there is something here to hand you", and a build published
+  // without a bank must fall back to the ordinary control and its ordinary 403.
+  const revealing = banked !== null;
   const genQuestions = Math.max(
     1,
     Math.min(genLimit ?? GEN_DEFAULT, genMax || 1),
@@ -342,9 +440,16 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
         // Seeded only when nothing is there. load() re-runs on every SC_CHANGED,
         // and a result the visitor produced — or one a later phase reveals
         // progressively — must never be replaced by the banked one underneath it.
-        if (d.publishedSweep) {
-          const unpacked = unpackSweep(d.publishedSweep);
-          setSweep((prev) => prev ?? unpacked);
+        //
+        // The ref, not the `sweep` state, is what "nothing is there" is read
+        // from: load() is a useCallback that must not re-create on every sweep,
+        // so the state it closes over is stale by definition. The ref is written
+        // in the same tick the result lands.
+        if (d.publishedSweep && !ownSweep.current) {
+          setSweep(unpackSweep(d.publishedSweep));
+          // These particular rows are a replay. Set here and cleared only by a
+          // sweep the visitor's own account actually computed.
+          setSweepPublished(true);
         }
       })
       .catch(() => {});
@@ -353,7 +458,7 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
     // off a /c/<id> route, so this is the only one on the request.
     apiFetch(`/api/semantic-cache/pairs?configId=${encodeURIComponent(gapConfigId)}`)
       .then((r) => r.json())
-      .then((d: PairStats & { error?: string }) => {
+      .then((d: PairsState & { error?: string }) => {
         // Drop a response that landed after the picker moved on, rather than
         // clearing state in an effect: `gap` carries the config it describes, so
         // the check is on the payload itself.
@@ -420,11 +525,51 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
       setCancelling(false);
     });
     if (!d) return;
-    setSweep(d as unknown as SweepResult);
+    // A GUEST'S CLICK REPLAYS RATHER THAN RUNS (phase 2). The route answers
+    // `{ published: true, sweep }` with the curves PACKED, so this is not a
+    // SweepResult and must be unpacked before anything reads a curve — and the
+    // table it fills has to say where the numbers came from, which is what
+    // `sweepPublished` carries to the note below.
+    if ("published" in d) {
+      setSweep(unpackSweep(d.sweep as PublishedSweep));
+      setSweepPublished(true);
+    } else {
+      setSweep(d as unknown as SweepResult);
+      setSweepPublished(false);
+      // This account computed what is on screen, so load() must stop seeding the
+      // banked rows over the top of it on the next SC_CHANGED.
+      ownSweep.current = true;
+    }
     // A fresh sweep always opens at the config's stored target — an exploratory
     // position carried over from the last one would silently reinterpret new
     // numbers.
     setTargetOverride(null);
+  };
+
+  // ONE PROBE — the live half of a published page (phase 4). It embeds a single
+  // question variant and looks it up, landing one UNJUDGED row in §3's queue
+  // above; the bulk replay job stays blocked in the demo, which is why this is a
+  // button rather than something that happens on its own.
+  //
+  // Scoped like the pair controls, and for a stronger reason: probe eligibility
+  // is a per-config question (an origin question has to have been ASKED under the
+  // current index), so an unscoped call would report "nothing eligible" about a
+  // config the panel is not showing.
+  const runProbe = async () => {
+    const d = await post(
+      "probe",
+      `/api/semantic-cache/probe?configId=${encodeURIComponent(gapConfigId)}`,
+      // NO BODY, deliberately, and the route parses none: the server picks the
+      // pair. JSON.stringify(undefined) is undefined, so fetch sends nothing —
+      // an empty object here would be the first byte of "one probe" becoming N.
+      undefined,
+    );
+    if (!d) return;
+    setProbe(d as unknown as ProbeResult);
+    // §3 renders the queue this row landed in. It reloads on SC_CHANGED, so
+    // without this the visitor is told a row is waiting and looks at a queue that
+    // does not have it yet.
+    window.dispatchEvent(new Event(SC_CHANGED));
   };
 
   // Cooperative: this flips a flag the sweep's loops read between embeddings, so
@@ -460,6 +605,32 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
       { limit: genQuestions },
     );
     if (!d) return;
+    // THE GUEST PATH REVEALS, IT DOES NOT GENERATE (phase 3). The pairs were
+    // written and audited on the operator's account and banked with the publish,
+    // so `limit` meant "how many to uncover" and the counts below are pairs
+    // rather than questions. Nothing was bought, and the note beside the slider
+    // says so — as does REVEALED_PAIRS_NOTE, because the leaderboard above these
+    // counts is banked and will not move however far the count climbs.
+    if (d.mode === "revealed") {
+      const revealed = Number(d.revealed);
+      if (d.frozenLeaderboard) setFrozenSeen(true);
+      setNote(
+        revealed === 0
+          ? "Nothing left to uncover — every published pair is already showing."
+          : `Uncovered ${revealed} pair${revealed === 1 ? "" : "s"}` +
+            `; ${d.remaining} still banked.`,
+      );
+      // The bank count rides in `remaining` rather than in `stats` (it describes
+      // the shelf, not the pair table), so it is carried across by hand — without
+      // it the slider would keep its old ceiling until the next GET.
+      if (d.stats)
+        setPairs({
+          ...(d.stats as PairStats),
+          bankedRemaining: Number(d.remaining),
+        });
+      load();
+      return;
+    }
     if (d.mode === "batch") {
       setNote(
         d.job
@@ -502,6 +673,26 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
   const screen = async () => {
     const d = await post("screen", "/api/batch/submit", { kind: "cache_pair_screen" });
     if (!d) return;
+    // A GUEST'S SCREEN RESOLVES RATHER THAN SUBMITS (phase 3b): `{ job: null,
+    // published: true, screened }`. Nothing lands on a later poll, so the wording
+    // must not send anyone to the Batch API panel to wait for a job that does not
+    // exist — the verdicts are already on the rows.
+    if (d.published) {
+      const s = d.screened as {
+        resolved: number;
+        quarantined: number;
+        remaining: number;
+      };
+      setNote(
+        `Filled in ${s.resolved} audited verdict${s.resolved === 1 ? "" : "s"}` +
+          (s.quarantined > 0
+            ? `; ${s.quarantined} pair${s.quarantined === 1 ? " was" : "s were"} labelled wrong and ${s.quarantined === 1 ? "is" : "are"} now quarantined out of the sweep.`
+            : " — the judge agreed with every label.") +
+          (s.remaining > 0 ? ` ${s.remaining} still banked.` : ""),
+      );
+      load();
+      return;
+    }
     setNote(
       d.job
         ? "Submitted a judge screen — verdicts land when it completes (Batch API panel tracks it). " +
@@ -715,6 +906,13 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
         </>
       }
     >
+      {/* PHASE 5 — WHICH HALF IS LIVE. First thing in the panel, because it is
+          the boundary itself: everything above this line (§3's queue, its curve)
+          moves when the visitor acts, and everything below was measured once on
+          the operator's account. A published page that never says which is which
+          leaves a visitor unable to tell a frozen table from a broken one. */}
+      {notes && <p className={DEMO_NOTE}>{notes.live}</p>}
+
       {/* --- the pair set ---------------------------------------------------- */}
       {/* The set and the control that grows it, in one bordered block: the two
           used to be loose rows floating between the heading and the table, which
@@ -789,19 +987,33 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
               max={genMax}
               value={genQuestions}
               onChange={(e) => setGenLimit(Number(e.target.value))}
-              aria-label="Questions to generate pairs for"
+              aria-label={
+                revealing ? "Pairs to uncover" : "Questions to generate pairs for"
+              }
               disabled={busy !== null}
               className="h-1 w-40 min-w-32 max-w-full cursor-pointer accent-zinc-900 dark:accent-zinc-100"
             />
+            {/* The two units are not interchangeable and the arithmetic between
+                them only holds on the generating side: a question BUYS ~3 pairs,
+                a reveal uncovers exactly the number asked for. Printing "→ ~N
+                pairs" over a reveal would promise three times what lands. */}
             <span className="text-xs text-zinc-500 dark:text-zinc-400">
               <span className="font-semibold tabular-nums text-zinc-800 dark:text-zinc-100">
                 {genQuestions}
               </span>{" "}
-              question{genQuestions === 1 ? "" : "s"} → ~
-              <span className="tabular-nums">
-                {genQuestions * PAIRS_PER_QUESTION}
-              </span>{" "}
-              pairs
+              {revealing ? (
+                <>
+                  of {banked} banked pair{banked === 1 ? "" : "s"}
+                </>
+              ) : (
+                <>
+                  question{genQuestions === 1 ? "" : "s"} → ~
+                  <span className="tabular-nums">
+                    {genQuestions * PAIRS_PER_QUESTION}
+                  </span>{" "}
+                  pairs
+                </>
+              )}
             </span>
             <div className="flex gap-1">
               {/* The two ends of the range are the answers you actually want —
@@ -827,10 +1039,28 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
               onClick={generate}
               disabled={busy !== null}
             >
-              {busy === "pairs" ? "Generating…" : "Generate pairs"}
+              {busy === "pairs"
+                ? revealing
+                  ? "Uncovering…"
+                  : "Generating…"
+                : revealing
+                  ? "Reveal pairs"
+                  : "Generate pairs"}
             </button>
           </div>
         )}
+        {/* WHAT THE BUTTON ABOVE ACTUALLY DOES IN THE DEMO, next to the button
+            rather than at the top of the panel: "Reveal" is not the word anyone
+            arrives expecting on a control that used to spend a model key, and the
+            reason it can be free is the whole point of the phase. */}
+        {notes && <p className={DEMO_NOTE}>{notes.pairs}</p>}
+        {/* And the consequence, once they have used it. A pair count climbing
+            above a leaderboard that never moves reads as a broken sweep — this is
+            the sentence that makes it read as a published one instead. Shown from
+            the first reveal, because that is when the count starts moving; the
+            route flags it (`frozenLeaderboard`) rather than the panel inferring
+            it, so the two cannot disagree about what was banked. */}
+        {notes && frozenSeen && <p className={DEMO_NOTE}>{notes.revealed}</p>}
         {/* The generate control is gated on knowing the gap, so say so rather
             than rendering nothing — an empty space where a button was reads as
             "the feature is gone", not "the count hasn't arrived". */}
@@ -842,7 +1072,13 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
             configId, so the gap described the Default config's EMPTY bank while
             the panel announced that every question was covered. `labeledQuestions`
             is the field that tells them apart. */}
-        {pairs !== null &&
+        {/* NOT WHILE REVEALING. Both sentences below diagnose an empty GAP, and a
+            guest's gap is empty for a third reason neither covers: the clone gave
+            every question it copied its pairs. "Add eval questions to grow the
+            set" would be advice about a control the demo does not offer, pointed
+            at a problem the visitor does not have. */}
+        {!revealing &&
+          pairs !== null &&
           pairs.questionsRemaining === 0 &&
           (pairs.gap.labeledQuestions === 0 ? (
             <p className="text-xs text-zinc-400">
@@ -875,10 +1111,49 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
               onClick={screen}
               disabled={busy !== null}
             >
-              {busy === "screen" ? "Submitting…" : "Screen pairs (batch)"}
+              {busy === "screen"
+                ? revealing
+                  ? "Screening…"
+                  : "Submitting…"
+                : revealing
+                  ? "Screen pairs"
+                  : "Screen pairs (batch)"}
             </button>
           </div>
         )}
+        {/* Why the demo's screen returns instantly and costs nothing: it fills in
+            verdicts F3 already obtained rather than asking a model. Beside the
+            control, and only while there is one — "(batch)" is dropped from the
+            label above for the same reason, since nothing is submitted and no
+            job will ever appear in the Batch API panel to track. */}
+        {notes && pairs !== null && pairs.unjudged > 0 && (
+          <p className={DEMO_NOTE}>{notes.screen}</p>
+        )}
+
+        {/* --- one probe: the live half (phase 4) ---------------------------- */}
+        {/* Sits at the foot of the pair block because that is what it draws from
+            — a pair, replayed as a question — even though what it produces lands
+            in §3's queue above. The bulk replay job stays blocked in the demo;
+            this is one embedding, on purpose and by hand. */}
+        <div className="flex flex-col gap-2 border-t border-zinc-100 pt-2 dark:border-zinc-800">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <button
+              type="button"
+              className={BTN}
+              onClick={runProbe}
+              disabled={busy !== null}
+              title="Embeds one pair's variant question and looks it up in the cache. A row lands in the shadow queue above, unjudged."
+            >
+              {busy === "probe" ? "Probing…" : "Probe one pair"}
+            </button>
+            <span className="text-xs text-zinc-400">
+              One embedding — stocks the Accept / Reject queue above with a row
+              nothing has judged.
+            </span>
+          </div>
+          {notes && <p className={DEMO_NOTE}>{notes.probe}</p>}
+          {probe && <ProbeReport probe={probe} />}
+        </div>
 
         <div className="flex flex-wrap items-center gap-2 border-t border-zinc-100 pt-2 dark:border-zinc-800">
           <button
@@ -887,11 +1162,19 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
             onClick={runSweep}
             disabled={busy !== null}
           >
+            {/* NOTHING IS SCORED IN THE DEMO, so nothing may say it is. The
+                click fetches a row the operator's account measured; a spinner
+                reading "Scoring…" would be the panel claiming the spend the
+                whole phase exists to avoid. */}
             {busy === "sweep"
-              ? "Scoring…"
-              : sweep
-                ? "Re-run sweep"
-                : "Run sweep"}
+              ? notes
+                ? "Fetching…"
+                : "Scoring…"
+              : notes
+                ? "Show the published sweep"
+                : sweep
+                  ? "Re-run sweep"
+                  : "Run sweep"}
           </button>
           {busy === "sweep" && sweepRunId && (
             <button
@@ -905,12 +1188,16 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
             </button>
           )}
           <span className="text-xs text-zinc-400">
-            {busy === "sweep"
-              ? // The first run on a cold cache is the expensive one in
-                // WALL-CLOCK, not money, and saying so is what stops it being
-                // killed half-way for a third time.
-                "Sequential over models — the first run on a cold cache takes ~an hour. Cancelling keeps everything embedded so far."
-              : "Embedding-only — no LLM calls, and cached, so re-runs are nearly free."}
+            {notes
+              ? // Neither half of the sentence beside it is true here: nothing is
+                // sequential, nothing is embedded, and there is no hour to wait.
+                "Replays the published measurement — nothing is embedded."
+              : busy === "sweep"
+                ? // The first run on a cold cache is the expensive one in
+                  // WALL-CLOCK, not money, and saying so is what stops it being
+                  // killed half-way for a third time.
+                  "Sequential over models — the first run on a cold cache takes ~an hour. Cancelling keeps everything embedded so far."
+                : "Embedding-only — no LLM calls, and cached, so re-runs are nearly free."}
           </span>
         </div>
       </div>
@@ -956,6 +1243,14 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
               Re-running resumes cheaply: every vector already embedded is
               cached.
             </p>
+          )}
+
+          {/* WHERE THESE ROWS CAME FROM, above the numbers rather than below
+              them. Gated on `sweepPublished`, not on `notes`: a build published
+              without a sweep row leaves a guest with the sentences and no table,
+              and this must never claim a measurement that was not banked. */}
+          {sweepPublished && notes && (
+            <p className={DEMO_NOTE}>{notes.sweep}</p>
           )}
 
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -1144,6 +1439,74 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
         </div>
       )}
     </Panel>
+  );
+}
+
+// What one probe did, in the terms the route reports it — and no others.
+//
+// THE COPY RULE THIS COMPONENT EXISTS TO HOLD: the matched question is the
+// NEAREST one in the cache, which is not guaranteed to be the pair's origin
+// (replayPairs' own caveat, and F1's dead-origin lesson). So it is labelled
+// "nearest match" wherever it appears, and nothing here says "your pair,
+// replayed" — a sentence that would be true most of the time and quietly wrong
+// the rest of it.
+//
+// `queued: false` is an OUTCOME, not a failure: the nearest match fell below the
+// shadow floor, so there was nothing worth logging. It gets a sentence of its
+// own for the reason the floor exists — a 0.4 near-miss in the queue would be a
+// row about the demo rather than about the cache.
+function ProbeReport({ probe }: { probe: ProbeResult }) {
+  if (!probe.probed || !probe.pair)
+    return <p className="text-xs text-zinc-400">{probe.reason}</p>;
+  const { pair } = probe;
+  return (
+    <div className="flex flex-col gap-1 rounded-md border border-zinc-200 p-2 text-xs dark:border-zinc-800">
+      <p className="text-zinc-600 dark:text-zinc-300">
+        Asked:{" "}
+        <span className="italic">&ldquo;{pair.variantText}&rdquo;</span>
+        {pair.difficulty && (
+          <span className="ml-1.5 rounded bg-zinc-100 px-1 text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+            {pair.difficulty}
+          </span>
+        )}
+      </p>
+      {probe.queued ? (
+        <p className="text-zinc-500 dark:text-zinc-400">
+          Nearest cached question matched at{" "}
+          <span className="tabular-nums text-zinc-800 dark:text-zinc-100">
+            {probe.sim?.toFixed(4)}
+          </span>
+          {probe.matchedQuery && (
+            <>
+              {" "}
+              — <span className="italic">&ldquo;{probe.matchedQuery}&rdquo;</span>
+            </>
+          )}
+          . It&apos;s in the queue above with no verdict: nothing has judged it
+          but you.
+        </p>
+      ) : (
+        <p className="text-zinc-500 dark:text-zinc-400">
+          Nothing cached came within the shadow floor
+          {probe.floor !== undefined && (
+            <>
+              {" "}
+              (
+              <span className="tabular-nums">{probe.floor.toFixed(2)}</span>)
+            </>
+          )}
+          , so no row was logged — a match this far off says nothing about the
+          threshold.
+        </p>
+      )}
+      {probe.remaining !== undefined && (
+        <p className="text-zinc-400">
+          {probe.remaining === 0
+            ? "No more pairs are eligible to probe."
+            : `${probe.remaining} more pair${probe.remaining === 1 ? "" : "s"} eligible.`}
+        </p>
+      )}
+    </div>
   );
 }
 

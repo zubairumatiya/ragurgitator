@@ -84,6 +84,36 @@ export const DEMO_BLOCKED = "demo_blocked";
 // question. That path is carved out of this gate in the route itself
 // (app/api/eval/bulk-generate), because `cachedOnly` is the one form of that
 // request that calls nothing.
+//
+// `sweep` IS NOW A FALLBACK TOO, for exactly `appraise`'s reason (phase 2 of
+// docs/demo-cache-lab-plan.md). Clone step 5d copies the published_sweep row
+// (0077), so a guest's Appraise → Semantic caching §4 renders the real
+// leaderboard under PUBLISHED_SWEEP_NOTE below, and pressing "Run sweep" replays
+// that row instead of buying ~510 texts × every candidate model of embeddings on
+// keys the demo does not hold. This sentence is what a build published WITHOUT a
+// sweep row says, so like `appraise` it still has to work standing alone on a
+// blank panel — which is why it consoles with the live answer cache, the one
+// thing that is true either way.
+//
+// `keyModel` IS NEW, and it exists because `sweep` stopped covering the whole
+// route. POST /api/semantic-cache/key-model has three actions and one gate used
+// to blanket all of them; phase 2 splits them, because only `sweep` has a
+// published answer to hand back. `apply` and `backfill` both WRITE — one moves
+// which vector-space every incoming question is matched in, the other re-embeds
+// this config's banked questions under the new model — so they stay blocked,
+// and they need their own sentence: telling a visitor who pressed Apply that
+// "its results weren't published" would be answering a question they did not
+// ask.
+//
+// `pairs` IS THE FOURTH SENTENCE THAT POINTS AT A BUTTON, on the same terms as
+// `generate` and for the same structural reason: phase 3 of
+// docs/demo-cache-lab-plan.md clones semantic_cache_pairs, so "Generate pairs"
+// can hand a guest pairs that were generated and audited on the operator's
+// account rather than writing new ones with an answer-model key the demo does
+// not carry. The reveal is real; the writing is not. That carve-out lives in
+// app/api/semantic-cache/pairs, exactly as `cachedOnly` lives in
+// bulk-generate — and this sentence, again, is the fallback for a build
+// published without a bank of them.
 export const DEMO_ACTIONS = {
   ingest:
     "Uploading and ingesting documents is off in the demo — it would spend the " +
@@ -135,10 +165,22 @@ export const DEMO_ACTIONS = {
     "yours: this workspace was published with real events waiting for a verdict, " +
     "and each one you decide redraws the calibration curve above it.",
   sweep:
-    "The cache-key sweep re-embeds the whole question bank in several models, " +
-    "so it's off in the demo and its results weren't published with this " +
-    "workspace. The cache it was measuring is live: ask a banked question two " +
-    "different ways and watch the second one hit.",
+    "The cache-key sweep re-embeds the whole question bank in every candidate " +
+    "model, so it's off in the demo, and this build was published without the " +
+    "sweep's result. The cache it was measuring is live: ask a banked question " +
+    "two different ways and watch the second one hit.",
+  keyModel:
+    "Switching the cache-key model changes which vector-space every incoming " +
+    "question is matched in, and backfilling re-embeds this config's banked " +
+    "questions under it — spend the demo doesn't carry, and a write the next " +
+    "visitor would inherit. The cache it would be changing is live either way: " +
+    "ask a banked question two different ways and watch the second one hit.",
+  pairs:
+    "Writing NEW question pairs needs an answer model to phrase each variant, " +
+    "which the demo doesn't carry a key for, and this build was published " +
+    "without a bank of them. The Accept / Reject queue is stocked either way: " +
+    "this workspace carries a sample of real shadow events waiting for a " +
+    "verdict, which is what pairs are generated to produce.",
   probeReplay:
     "Stocking the queue replays generated question variants through the cache, " +
     "embedding each one — a spend the demo doesn’t carry. It also isn’t " +
@@ -173,6 +215,93 @@ export const PUBLISHED_REPLAY_NOTE =
   "workspace was cloned for you. Re-running it needs each model's cached " +
   "vectors for every chunk — 92 MB the demo doesn't hand out — so these rows " +
   "are fixed. The Eval tab is the part you can move.";
+
+// THE OTHER HALF OF `sweep` (phase 2 of docs/demo-cache-lab-plan.md), and the
+// exact analogue of PUBLISHED_REPLAY_NOTE above one panel over.
+//
+// A guest's §4 is not three disabled buttons any more: clone step 5d copies the
+// sweep's RESULT (0077), so the leaderboard renders real rankings. Two things
+// then need saying at once, and they pull in opposite directions — which is why
+// this is a note rather than a refusal.
+//
+// The TABLE is a published measurement and cannot move: re-deriving it means
+// re-embedding the pooled pair set under every candidate, on keys the demo does
+// not hold. The SLIDER, though, genuinely is live, and understating that would
+// be its own kind of dishonesty — selectFromCurve runs client-side over the
+// banked curves, and lib/rag/publishedSweep thins them to precisely the 101
+// positions the slider can reach, so every number it displays is the number a
+// real run would have displayed. Exact, not approximated; see thinCurve.
+export const PUBLISHED_SWEEP_NOTE =
+  "Published measurement: this sweep ran once on the operator's account, " +
+  "before the workspace was cloned for you — re-running it would re-embed " +
+  "the whole pair set under every candidate model. The precision slider is " +
+  "live and exact: each row is re-derived here from the curves the sweep " +
+  "banked, at every position the slider can reach. The table itself is fixed.";
+
+// PHASE 3's reveal, beside the pair counts. The sibling of PUBLISHED_SWEEP_NOTE:
+// same "the reveal is real, the writing is not" split that `generate` makes for
+// the question bank, pointed at semantic_cache_pairs.
+export const PUBLISHED_PAIRS_NOTE =
+  "These pairs were generated and audited on the operator's account and " +
+  "published with this workspace, so \u201cGenerate\u201d hands you ones that " +
+  "were already paid for instead of writing new ones. The pairs are real; only " +
+  "the writing is skipped.";
+
+// PHASE 3's warning, and it is not decoration. The leaderboard is banked, so it
+// is fixed no matter what the pair count does — and a rising pair count sitting
+// above a table that never moves reads as a bug in the sweep rather than as the
+// deliberate design of the publish. Left unsaid, the demo's most distinctive
+// measurement looks broken at precisely the moment a visitor interacts with it.
+export const REVEALED_PAIRS_NOTE =
+  "Revealing more pairs doesn't move the leaderboard — that sweep was " +
+  "scored once, on the operator's account, over the full pooled set. This " +
+  "workspace carries a capped sample of it, and the count here is how much of " +
+  "that sample you've uncovered, not the input to a fresh scoring run.";
+
+// PHASE 3b, beside the pair screen. No second published table exists or is
+// needed: the screen verdict and the quarantine flag are COLUMNS on
+// semantic_cache_pairs, so cloning the pair table is the publish. The clone
+// blanks them on the rows the guest is meant to act on (clearIfQueued's move in
+// step 5b), which is what makes the panel's "unscreened" count mean something
+// for a guest and makes pressing the button resolve to F3's audited answer
+// rather than to a guess.
+export const PUBLISHED_SCREEN_NOTE =
+  "Screening asks a model whether each pair is labelled correctly, which the " +
+  "demo doesn't carry a key for — and doesn't need to here. These pairs " +
+  "were screened on the operator's account and their verdicts published " +
+  "alongside them, quarantine included, so this fills in the audited answer " +
+  "rather than a guess.";
+
+// PHASE 4, and the ONE sentence on this page that promises something live.
+//
+// The bulk job stays blocked with DEMO_ACTIONS.probeReplay unchanged — its cap
+// is 40 probes fired automatically, i.e. 40 embeddings nobody asked for. A
+// SINGLE probe is one embedQueryCached plus one indexed single-row lookup: the
+// same ~25 KB budget as a guest asking a question, which the table at the top of
+// this file already calls "the demo".
+//
+// The unjudged part is the point, not a limitation to apologise for. Probe rows
+// land verdict = null and the curve counts judged rows only (lib/rag/probeReplay's
+// central rule), which is exactly what makes a guest-authored probe honest: their
+// question sits in the queue with nothing claiming to have judged it.
+export const GUEST_PROBE_NOTE =
+  "This part is live. A probe embeds one question variant and looks it up in " +
+  "the cache — a single embedding, the same budget as asking a question, " +
+  "which the demo does pay for. It lands in the queue below with no verdict on " +
+  "purpose: nothing has judged it but you. Stocking the queue in bulk is the " +
+  "part that stays off.";
+
+// PHASE 5 — one line at the top of the page, because the page is now half
+// published and half live and a visitor has no way to tell which half they are
+// touching. The demo's copy rule applies as everywhere else: every clause here
+// points at something lib/demo/clone actually carries — the shadow queue and
+// its curve (step 5b), the sweep (step 5d).
+export const LIVE_HALF_NOTE =
+  "Which half is live: the Accept / Reject queue and the calibration curve " +
+  "above it are yours — this workspace was published with real events " +
+  "waiting, and every verdict you give redraws the curve. The cache-key " +
+  "leaderboard below was measured on the operator's account and is fixed. " +
+  "Generating anything new needs an account with its own keys.";
 
 export class DemoBlockedError extends Error {
   readonly action: DemoAction;

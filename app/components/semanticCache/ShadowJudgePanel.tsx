@@ -22,7 +22,7 @@ import type {
   ShadowSpace,
 } from "@/lib/rag/semanticCacheCalibration";
 
-import { emitRecommendation } from "./events";
+import { emitRecommendation, SC_CHANGED } from "./events";
 import { BTN, NOTE_AMBER, Panel, SELECT } from "./Panel";
 
 // Deliberately does NOT name the target: it's a per-config setting now
@@ -171,6 +171,17 @@ export function ShadowJudgePanel() {
   const refresh = useCallback(() => {
     loadSpaces(space).then((next) => next && loadSpaceData(next, origin));
   }, [loadSpaces, loadSpaceData, space, origin]);
+
+  // A ROW CAN NOW ARRIVE FROM ANOTHER PANEL. §4's single probe (phase 4 of
+  // docs/demo-cache-lab-plan.md) writes an unjudged shadow row and broadcasts
+  // SC_CHANGED; without this listener it tells the visitor a row is waiting in
+  // this queue and the queue does not have it until a reload. Harmless on the
+  // event's other senders — a threshold write is a reason to re-read the curve
+  // anyway.
+  useEffect(() => {
+    window.addEventListener(SC_CHANGED, refresh);
+    return () => window.removeEventListener(SC_CHANGED, refresh);
+  }, [refresh]);
 
   const runJudge = (label: string, body: Record<string, unknown>) => {
     setBusy(label);

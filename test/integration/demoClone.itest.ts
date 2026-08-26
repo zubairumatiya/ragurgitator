@@ -29,7 +29,12 @@ import { withUser } from "../../lib/auth/userScope";
 import { config } from "../../lib/config";
 import { fragment, privilegedSql } from "../../lib/db";
 import { cloneSeedWorkspace } from "../../lib/demo/clone";
-import { SHADOW_QUEUE_CAP } from "../../lib/demo/frozen";
+import {
+  PAIR_BANK_CAP,
+  PAIR_BLANK_CAP,
+  PAIR_VISIBLE_CAP,
+  SHADOW_QUEUE_CAP,
+} from "../../lib/demo/frozen";
 import { resolveConfig, withConfig } from "../../lib/rag/activeConfig";
 import {
   PUBLISHED_SWEEP_FINGERPRINT,
@@ -1196,5 +1201,239 @@ describe("cloneSeedWorkspace published sweep", () => {
     const rows = await admin<{ config_id: string }[]>`
       select config_id from published_sweep where config_id = ${seedConfigId}`;
     assert.equal(rows.length, 1, "the rewrite happens on the COPY, never in place");
+  });
+});
+
+// THE GENERATED PAIR SET (step 5e) — phases 3 and 3b of docs/demo-cache-lab-plan.
+//
+// Unlike the sweep above, this copy is WITHHELD in two directions at once: a
+// tranche never reaches the pair table at all (demo_pair_bank, kind='pair'), and
+// a handful of the rows that do reach it arrive with their verdicts stripped
+// (kind='verdict'). Both are reveals of work the publish already paid for, so
+// both failure modes are quiet ones — a bank that leaked into the pair table
+// would move the panel's counts before the guest pressed anything, and a blanked
+// verdict with no bank row behind it would make "Screen pairs" resolve an
+// unscreened count to nothing.
+describe("cloneSeedWorkspace generated pairs", () => {
+  // 100 pairs in three strata, sized so the caps divide them exactly: the whole
+  // point of the stride is that each stratum contributes its own share, and a
+  // fixture with ragged arithmetic could not tell a preserved mix from a lucky
+  // one. created_at is explicit and ascending so the stride is deterministic —
+  // ties on created_at would fall through to a random uuid.
+  const STRATA = [
+    { label: "same", difficulty: "paraphrase", n: 50 },
+    { label: "different", difficulty: "hard-negative", n: 40 },
+    { label: "different", difficulty: "paraphrase", n: 10 },
+  ] as const;
+
+  async function seedPairs() {
+    let n = 0;
+    for (const stratum of STRATA) {
+      for (let i = 0; i < stratum.n; i++) {
+        const a = `origin question ${n}`;
+        const b = `variant ${n}`;
+        // Rejects first inside the hard-negative stratum, then accepts, then a
+        // tail of unjudged rows — F3's shape, where the quarantine is the
+        // minority and some of the set was never audited at all.
+        let verdict: string | null = null;
+        if (stratum.difficulty === "hard-negative") {
+          verdict = i < 16 ? "reject" : i < 30 ? "accept" : null;
+        } else if (stratum.label === "same") {
+          verdict = "accept";
+        }
+        await admin`
+          insert into semantic_cache_pairs
+            (origin_question_id, text_a, text_b, hash_a, hash_b, label, difficulty,
+             generated_by, created_at, verdict, verdict_source, judge_model,
+             judge_reason, judged_at)
+          select q.id, ${a}, ${b}, ${sha256(a)}, ${sha256(b)},
+                 ${stratum.label}, ${stratum.difficulty}, 'test-judge',
+                 ${`2026-01-01T00:00:00Z`}::timestamptz + ${n} * interval '1 minute',
+                 ${verdict},
+                 ${verdict ? "llm" : null},
+                 ${verdict ? "judge-model" : null},
+                 ${verdict ? `because ${n}` : null},
+                 ${verdict ? new Date("2026-02-01T00:00:00Z") : null}
+            from eval_questions q
+            join documents d on d.id = q.document_id
+           where d.user_id = ${seed.id} and q.question = 'what?'`;
+        n++;
+      }
+    }
+  }
+
+  type Pair = {
+    label: string;
+    difficulty: string;
+    text_b: string;
+    verdict: string | null;
+    verdict_source: string | null;
+    judge_model: string | null;
+    judge_reason: string | null;
+    judged_at: Date | null;
+  };
+
+  async function guestPairs(userId = guest.id): Promise<Pair[]> {
+    return admin<Pair[]>`
+      select s.label, s.difficulty, s.text_b, s.verdict, s.verdict_source,
+             s.judge_model, s.judge_reason, s.judged_at
+        from semantic_cache_pairs s
+        join eval_questions q on q.id = s.origin_question_id
+        join documents d on d.id = q.document_id
+       where d.user_id = ${userId}
+       order by s.created_at`;
+  }
+
+  type BankRow = { kind: string; pair_id: string | null; payload: Record<string, unknown> };
+
+  async function bank(userId = guest.id): Promise<BankRow[]> {
+    return admin<BankRow[]>`
+      select kind, pair_id, payload from demo_pair_bank where user_id = ${userId}`;
+  }
+
+  it("takes a capped sample that keeps the master's (label, difficulty) mix", async () => {
+    await seedPairs();
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    const got = await guestPairs();
+
+    assert.equal(got.length, PAIR_VISIBLE_CAP, "the cap is a ceiling and this fixture exceeds it");
+    assert.equal(summary.pairRows, got.length, "summary must count what landed");
+
+    // THE MIX IS THE ASSERTION. A flat 60-row cut off the top of the set would
+    // satisfy a count check and still hand the guest a pair set whose
+    // same:different and paraphrase:hard-negative ratios are not the ones the
+    // banked leaderboard was measured on — and hard negatives are the entire
+    // discriminating power of the set (0040).
+    const count = (label: string, difficulty: string) =>
+      got.filter((p) => p.label === label && p.difficulty === difficulty).length;
+    const rate = PAIR_VISIBLE_CAP / 100;
+    for (const s of STRATA) {
+      assert.equal(count(s.label, s.difficulty), s.n * rate, `${s.label}/${s.difficulty} share`);
+    }
+  });
+
+  it("carries the quarantine — an audited reject keeps its verdict and its reason", async () => {
+    await seedPairs();
+    await cloneSeedWorkspace(seed.id, guest.id);
+    const got = await guestPairs();
+
+    // F3 proved 15 of the master's pairs mislabelled, and the quarantine is what
+    // keeps the sweep from consuming them. A clone that dropped the verdict would
+    // hand a guest exactly those rows as truth.
+    const rejects = got.filter((p) => p.verdict === "reject");
+    assert.ok(rejects.length > 0, "the sample must keep rejects or the quarantine is decorative");
+    for (const r of rejects) {
+      assert.equal(r.verdict_source, "llm");
+      assert.ok(r.judge_reason, "the reason is the sentence explaining the quarantine");
+      assert.ok(r.judged_at, "a verdict with no judged_at reads as a bug in the judge");
+    }
+    // The unjudged tail travels as it is: those rows were never audited on the
+    // master either, and inventing a verdict for them would be the one thing the
+    // screen button must not do.
+    assert.ok(got.some((p) => p.verdict === null), "the master's unaudited rows come too");
+  });
+
+  it("blanks a slice and stashes its true verdicts, rejects included", async () => {
+    await seedPairs();
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    const rows = await bank();
+    const verdicts = rows.filter((r) => r.kind === "verdict");
+
+    assert.equal(verdicts.length, PAIR_BLANK_CAP, "the unscreened slice is capped");
+    assert.equal(summary.blankedVerdicts, verdicts.length, "summary must count what landed");
+    // At least one reject, so pressing screen actually quarantines something. Safe
+    // only because the guest's leaderboard is banked (0077) and never recomputed,
+    // so an unjudged reject cannot reach a sweep.
+    assert.ok(
+      verdicts.some((r) => r.payload.verdict === "reject"),
+      "a screen pass that quarantines nothing teaches the wrong thing",
+    );
+
+    // EVERY BLANKED ROW HAS ITS ANSWER BEHIND IT. The pair the bank names must be
+    // the guest's own, and it must be genuinely unscreened — all five columns, or
+    // the panel's count is wrong in the other direction.
+    for (const r of verdicts) {
+      assert.ok(r.pair_id, "a verdict row with no pair resolves nothing");
+      const [pair] = await admin<Pair[]>`
+        select s.label, s.difficulty, s.text_b, s.verdict, s.verdict_source,
+               s.judge_model, s.judge_reason, s.judged_at
+          from semantic_cache_pairs s
+          join eval_questions q on q.id = s.origin_question_id
+          join documents d on d.id = q.document_id
+         where s.id = ${r.pair_id} and d.user_id = ${guest.id}`;
+      assert.ok(pair, "the banked verdict must point at a pair the guest owns");
+      assert.equal(pair.verdict, null);
+      assert.equal(pair.verdict_source, null);
+      assert.equal(pair.judge_model, null);
+      assert.equal(pair.judge_reason, null);
+      assert.equal(pair.judged_at, null);
+      assert.ok(r.payload.judge_reason, "…and must hold the reason back, not lose it");
+    }
+  });
+
+  it("holds the reveal tranche OUT of the pair table", async () => {
+    await seedPairs();
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    const rows = await bank();
+    const banked = rows.filter((r) => r.kind === "pair");
+    const got = await guestPairs();
+
+    assert.equal(banked.length, PAIR_BANK_CAP, "the reveal tranche is capped too");
+    assert.equal(summary.bankedPairs, banked.length, "summary must count what landed");
+
+    // If a banked pair were also in the pair table, every reader of that table —
+    // pooledPairs, listPairs, the unscreened count — would already be counting a
+    // row "Generate pairs" has not handed over, and the slider would move a number
+    // that was never wrong.
+    const visible = new Set(got.map((p) => p.text_b));
+    for (const r of banked) {
+      assert.ok(!visible.has(r.payload.text_b as string), "a banked pair is not visible yet");
+      // Remapped on the way IN, because the id map is a temp table that dies with
+      // the clone's transaction: the master's question id would be a foreign key
+      // nobody downstream could resolve.
+      const [q] = await admin<{ id: string }[]>`
+        select q.id from eval_questions q
+          join documents d on d.id = q.document_id
+         where d.user_id = ${guest.id} and q.question = 'what?'`;
+      assert.equal(r.payload.origin_question_id, q.id, "banked payloads carry the GUEST's question");
+      assert.equal(r.payload.id, undefined, "an insertable payload carries no id");
+    }
+  });
+
+  it("clones a second guest from the same master", async () => {
+    // 0050 made the pair key (origin_question_id, hash_a, hash_b) per ORIGIN
+    // QUESTION, and every guest gets freshly-minted question ids — so two guests
+    // holding the same text pair cannot collide. If they could, the second
+    // provisioning of the day would abort with a unique violation and the demo
+    // would be a one-visitor demo.
+    await seedPairs();
+    const first = await cloneSeedWorkspace(seed.id, guest.id);
+    const other = await createUser(admin);
+    const second = await cloneSeedWorkspace(seed.id, other.id);
+
+    assert.equal(second.pairRows, first.pairRows, "the second guest gets the same publish");
+    assert.equal(second.bankedPairs, first.bankedPairs);
+    assert.equal(second.blankedVerdicts, first.blankedVerdicts);
+    assert.equal((await guestPairs(other.id)).length, PAIR_VISIBLE_CAP);
+    assert.equal((await bank(other.id)).length, PAIR_BANK_CAP + PAIR_BLANK_CAP);
+    // And neither guest can see the other's bank: it is root-owned by user_id
+    // (0078), the one table in this step with no config or question above it.
+    assert.equal((await bank()).length, PAIR_BANK_CAP + PAIR_BLANK_CAP);
+  });
+
+  it("leaves the seed's own pair set untouched", async () => {
+    await seedPairs();
+    await cloneSeedWorkspace(seed.id, guest.id);
+    const [{ n, unjudged }] = await admin<{ n: number; unjudged: number }[]>`
+      select count(*)::int as n,
+             count(*) filter (where s.verdict is null)::int as unjudged
+        from semantic_cache_pairs s
+        join eval_questions q on q.id = s.origin_question_id
+        join documents d on d.id = q.document_id
+       where d.user_id = ${seed.id}`;
+    assert.equal(n, 100, "the master keeps its whole set");
+    // 20 unjudged in the fixture and not one more: blanking happens on the COPY,
+    // exactly as the shadow queue's does.
+    assert.equal(unjudged, 20, "clearing a verdict never happens in place");
   });
 });

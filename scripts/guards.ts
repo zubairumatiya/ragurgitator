@@ -472,6 +472,57 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
     needles: ['if (body.mode !== "human") await assertDemoAllows("judge")'],
     why: "the carve-out is exactly the human verdict mode and nothing wider",
   },
+  // Phase 2 of docs/demo-cache-lab-plan.md SPLIT one gate into three lines, and
+  // the split is the only thing separating "a guest may read a sweep the operator
+  // paid for" from "a guest may re-embed ~510 texts under every candidate model".
+  // Sweep 6 cannot see any of it: the file keeps calling assertDemoAllows
+  // whatever these three lines say. Each is pinned:
+  //   1. the WRITES stay blocked, and under their own sentence;
+  //   2. the replay is gated on being a GUEST, not on a row existing — the
+  //      operator's own account owns a published_sweep row, and handing that back
+  //      instead of running the sweep would be a measurement implying a
+  //      computation that did not happen;
+  //   3. the fallback for a build published WITHOUT a row is still a refusal.
+  {
+    file: "app/api/semantic-cache/key-model/route.ts",
+    needles: [
+      'if (data.action !== "sweep") await assertDemoAllows("keyModel");',
+      'data.action === "sweep" && (await demoBlocks()) ? await readPublishedSweep() : null;',
+      'if (data.action === "sweep") await assertDemoAllows("sweep");',
+    ],
+    why: "the per-action gate: only `sweep` replays, and only for a guest",
+  },
+  // Phases 3 and 3b, and their needles are shaped differently from cachedOnly's
+  // on purpose: there is no body flag to pin, because THE CARVE-OUT IS THE
+  // FUNCTION. revealBankedPairs and applyBankedVerdicts each return null for
+  // anyone who is not a guest, so both routes keep an UNCONDITIONAL
+  // assertDemoAllows after the branch (sweep 6 keeps meaning what it says) and
+  // both fail closed — delete the line and a guest is simply refused, as before
+  // phase 3.
+  {
+    file: "app/api/semantic-cache/pairs/route.ts",
+    needles: [
+      "const reveal = await revealBankedPairs(body.data.limit ?? DEFAULT_REVEAL);",
+      'await assertDemoAllows("pairs")',
+    ],
+    why: "the reveal carve-out, with the gate still unconditional behind it",
+  },
+  {
+    file: "app/api/batch/submit/route.ts",
+    needles: [
+      'const banked = kind === "cache_pair_screen" ? await applyBankedVerdicts() : null;',
+      'await assertDemoAllows("batch")',
+    ],
+    why: "the pair-screen carve-out is one named kind, and no other",
+  },
+  // The needle that matters most of the three. Both carve-outs above are safe
+  // only because these functions refuse everyone who is not a guest; lose this
+  // and the bank becomes a shelf any account can insert from.
+  {
+    file: "lib/demo/pairBank.ts",
+    needles: ["if (!(await isGuest())) return null;"],
+    why: "the bank's readers are guest-only, which is what stops both carve-outs widening",
+  },
 ];
 
 function sweepDemoScope() {
@@ -547,7 +598,35 @@ const PROBE_FILES = [
   "lib/rag/probeReplayCore.ts",
   "lib/rag/probeReplayTrigger.ts",
   "lib/jobs/steps/probeReplay.ts",
+  // Phase 4 of docs/demo-cache-lab-plan.md: a SECOND entry into the same work,
+  // one probe at a time and by hand. It shares the path's rails for the same
+  // reason the job does — it lands rows in the queue a live τ is swept from.
+  "app/api/semantic-cache/probe/route.ts",
 ];
+
+// 7f's requirements on that route, which is the one place in the path a guest
+// reaches directly.
+//
+// The floor is the load-bearing one. A research pass records everything (F2's
+// origin split), but this route stocks a queue whose other rows came from
+// lib/demo/clone step 5b, which strides a sample at the CONFIGURED floor — so a
+// 0.4 near-miss landing among them would be a row about the demo rather than
+// about the cache, judged by a visitor who cannot tell the difference.
+const REQUIRED_IN_PROBE_ROUTE: Record<string, string> = {
+  "config.semanticCache.shadowLogFloor":
+    "the probe must record at the CONFIGURED floor, not PROBE_LOOKUP's 0",
+  poolSafeProbes: "quarantined pairs are dropped before the choice, not after",
+  selectOneProbe: "the F3 collision assertion is what makes the choice safe",
+};
+
+// What this route may never become. The bulk job stays blocked in the demo
+// (DEMO_ACTIONS.probeReplay, 40 probes nobody pressed a button for); a route
+// that grew a cap or reached launchJob would be a second door into exactly what
+// the gate refuses, opened from the side that has no gate at all.
+const FORBIDDEN_IN_PROBE_ROUTE: Record<string, string> = {
+  launchJob: "one probe by hand is the whole point — the bulk job stays blocked",
+  PROBE_CAP: "a cap means this route is running more than one probe",
+};
 
 // Symbols that BANK an answer or WRITE a verdict. Neither belongs anywhere in the
 // probe path: probe rows stock the queue, and a human or the metered judge fills
@@ -644,6 +723,33 @@ function sweepProbeReplay() {
       `lib/rag/semanticCache.ts — ${bankers} writers of semantic_cache, expected 2 ` +
         "(semanticCacheStore, backfillKeyModel); a new one needs adding to " +
         "FORBIDDEN_IN_PROBE_PATH before a probe can reach it",
+    );
+  }
+
+  // 7f. The single-probe route: the demo's one live action, checked from both
+  // ends — what it must do, and what it must never grow into.
+  const route = codeOnly(read(join(ROOT, "app/api/semantic-cache/probe/route.ts")));
+  for (const [symbol, why] of Object.entries(REQUIRED_IN_PROBE_ROUTE)) {
+    if (!route.includes(symbol)) {
+      fail(`app/api/semantic-cache/probe/route.ts — lost ${symbol}: ${why}`);
+    }
+  }
+  for (const [symbol, why] of Object.entries(FORBIDDEN_IN_PROBE_ROUTE)) {
+    if (new RegExp(`\\b${symbol}\\b`).test(route)) {
+      fail(`app/api/semantic-cache/probe/route.ts — references ${symbol}: ${why}`);
+    }
+  }
+
+  // 7g. The floor stays the ONLY key the caller can override. replayPairs takes
+  // it as a parameter, and it spreads PROBE_LOOKUP.shadow underneath — so a
+  // caller can move where rows start being recorded and nothing else. Written as
+  // a fresh object literal, that same parameter becomes a way to drop origin:
+  // "probe" or serve: false from the outside, which 7a/7b cannot see because the
+  // constant they check is still there.
+  if (!source.includes("shadow: { ...PROBE_LOOKUP.shadow, floor }")) {
+    fail(
+      "lib/rag/probeReplay.ts — the shadow options are no longer PROBE_LOOKUP.shadow " +
+        "with only `floor` overridden; a literal here lets a caller drop origin/serve",
     );
   }
 

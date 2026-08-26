@@ -102,3 +102,28 @@ export const SHADOW_CURVE_CAP = { probe: 120, traffic: 40 } as const;
 // judged by hand changes no curve — calibrationCurve drops that band — so a queue
 // full of them would be a control that visibly does nothing.
 export const SHADOW_QUEUE_CAP = 12;
+
+// HOW MANY GENERATED PAIRS A PUBLISH CARRIES, AND HOW MANY IT HOLDS BACK
+// (phases 3 and 3b of docs/demo-cache-lab-plan.md, applied in clone step 5e).
+//
+// semantic_cache_pairs is the third table that spent the demo's life in neither
+// of clone.ts's lists, and it is the one §4's two remaining buttons read. The
+// caps split the master's set into three parts, and each number answers a
+// different question:
+//
+//   PAIR_VISIBLE_CAP  what the panel's pair counts SAY on first load. Sized like
+//     SHADOW_CURVE_CAP — big enough that the (same/different) × (paraphrase/
+//     hard-negative) mix is recognisably the operator's, small enough that a
+//     two-hour workspace is not carrying the master's whole generation history.
+//   PAIR_BANK_CAP     what "Generate pairs" can still reveal. It is the ceiling
+//     on the slider the same way BANKED_QUESTION_CAP is the ceiling on "Add
+//     cached": the guest's reveal is real, the writing is not, so the run-out
+//     point has to be a number written down here rather than whatever the master
+//     happened to have generated.
+//   PAIR_BLANK_CAP    how many cloned rows arrive UNSCREENED, verdicts stashed
+//     in demo_pair_bank (0078). The exact analogue of SHADOW_QUEUE_CAP: the queue
+//     that makes a button do something. Small, because every blanked row is a
+//     row whose audited label is off the table until the guest presses screen.
+export const PAIR_VISIBLE_CAP = 60;
+export const PAIR_BANK_CAP = 20;
+export const PAIR_BLANK_CAP = 6;

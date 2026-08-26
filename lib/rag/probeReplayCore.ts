@@ -22,6 +22,11 @@ export type ProbePair = {
   // measured the generator's hard-negative labels at 80% correct, and probe rows
   // land unjudged precisely so an unaudited label cannot reach a serving threshold.
   difficulty: ProbeDifficulty;
+  // Whether F3's audit CONTRADICTED this pair's constructed label — the quarantine
+  // flag listPairs derives from (verdict, label) in semanticCachePairs.ts:255.
+  // Carried on the probe rather than left in SQL because the rule it feeds is a
+  // property of three lists (poolPairs) and belongs where a test can state it.
+  quarantined: boolean;
 };
 
 // THE OPTIONS EVERY PROBE IS MADE WITH. One frozen value rather than an object
@@ -74,7 +79,8 @@ export const PROBE_CAP = 40;
 // origin is represented, the remainder fills the cap in the same priority order.
 export function selectProbes(pairs: ProbePair[], cap = PROBE_CAP): ProbePair[] {
   const priority = [...pairs].sort((a, b) => {
-    if (a.difficulty !== b.difficulty) return a.difficulty === "hard-negative" ? -1 : 1;
+    if (a.difficulty !== b.difficulty)
+      return a.difficulty === "hard-negative" ? -1 : 1;
     return a.pairId < b.pairId ? -1 : a.pairId > b.pairId ? 1 : 0;
   });
 
@@ -89,4 +95,57 @@ export function selectProbes(pairs: ProbePair[], cap = PROBE_CAP): ProbePair[] {
     }
   }
   return [...first, ...rest].slice(0, cap);
+}
+
+// --- the pool-collision rail (docs/demo-cache-lab-plan.md, Phase 4) ----------
+//
+// THE COLLISION, RESTATED. keyModelSweepCore's poolPairs drops a probe shadow row
+// that duplicates a generated pair — including a QUARANTINED one — because a
+// probe is the generated pair meeting itself, carrying the very label F3
+// disproved. That rule is what stopped 8 audited-wrong rows re-entering the pool.
+//
+// The demo cache lab makes the collision live again in a way the merged module
+// never had to face: the clone copies semantic_cache_pairs INTO a guest account
+// (Phase 3) and Phase 4 lets that guest author probe rows in the same account. So
+// both halves of the collision now exist in one workspace, and the only reason it
+// cannot bite today is that the guest's leaderboard is banked and never
+// recomputed — a fact about a UI, not about the data.
+//
+// The plan calls that "worth an assertion rather than a comment", so: a
+// quarantined pair is FILTERED out of the guest's candidates, and the chosen pair
+// is then ASSERTED not to be one. Two layers on purpose — the filter is the
+// behaviour and the assertion is what fails loudly if a future eligibility query
+// forgets it, rather than quietly stocking the queue with F3's 15 bad rows.
+export class QuarantinedProbeError extends Error {
+  constructor(pairId: string) {
+    super(
+      `pair ${pairId} was quarantined by the label audit and must never be probed: ` +
+        "its shadow row would duplicate a generated pair carrying the label F3 disproved",
+    );
+    this.name = "QuarantinedProbeError";
+  }
+}
+
+// The post-screen survivors — Phase 3b's "screen → quarantine → probe" order,
+// enforced here rather than assumed upstream.
+export const poolSafeProbes = (pairs: ProbePair[]): ProbePair[] =>
+  pairs.filter((p) => !p.quarantined);
+
+export function assertPoolSafe(pair: ProbePair): ProbePair {
+  if (pair.quarantined) throw new QuarantinedProbeError(pair.pairId);
+  return pair;
+}
+
+// ONE probe, chosen by the same rule a capped run uses — selectProbes with a cap
+// of 1, not a second ordering. A guest's single probe should be the same probe
+// the bulk job would have started with (hard negative first, since F7 left the
+// reject side of the queue empty), and re-deriving "the best one" here is how the
+// two would drift apart.
+//
+// Null rather than a throw: "nothing is eligible" is the ordinary outcome on an
+// account whose banked questions have no pairs, and the caller has a sentence for
+// it (docs/probe-replay-plan.md's fingerprint note).
+export function selectOneProbe(pairs: ProbePair[]): ProbePair | null {
+  const [chosen] = selectProbes(poolSafeProbes(pairs), 1);
+  return chosen ? assertPoolSafe(chosen) : null;
 }

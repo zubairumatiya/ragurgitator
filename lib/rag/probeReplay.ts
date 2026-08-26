@@ -27,7 +27,7 @@
 import { createHash } from "node:crypto";
 
 import { activeUserId } from "@/lib/auth/userScope";
-import { sql } from "@/lib/db";
+import { fragment, sql } from "@/lib/db";
 import { NEVER_STOP, type ShouldStop } from "@/lib/http/cancelRegistry";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { PROBE_LOOKUP, type ProbePair } from "@/lib/rag/probeReplayCore";
@@ -44,10 +44,34 @@ const isMissingTable = (err: unknown): boolean =>
 const sha256 = (text: string): string =>
   createHash("sha256").update(text, "utf8").digest("hex");
 
+// THE QUARANTINE PREDICATE, and it is deliberately the SAME expression listPairs
+// and quarantinedPairs filter on (semanticCachePairs.ts:255, :299) rather than a
+// second reading of (verdict, label): a probe path that disagreed with the sweep
+// about which pairs are audited-wrong would put F3's 15 disproved rows into §3's
+// queue while the leaderboard excluded them, and nothing would look broken.
+//
+// Read as a COLUMN, not a WHERE clause, because the bulk job and the guest's
+// single probe want different things from it — the job replays whatever is
+// eligible (its rows are dropped by poolPairs downstream anyway), while
+// docs/demo-cache-lab-plan.md Phase 4 refuses to probe a quarantined pair at all.
+// One query, one flag, two policies applied in the pure core.
+const QUARANTINED = fragment`(
+  p.verdict is not null
+  and p.verdict <> case when p.label = 'same' then 'accept' else 'reject' end
+)`;
+
 // The shape of a probe and the rule for choosing a capped sample of them live in
 // the dependency-free core, so they can be tested without a database. Re-exported
 // here because this module is the one callers reach for.
-export { PROBE_CAP, selectProbes, type ProbePair } from "@/lib/rag/probeReplayCore";
+export {
+  PROBE_CAP,
+  QuarantinedProbeError,
+  assertPoolSafe,
+  poolSafeProbes,
+  selectOneProbe,
+  selectProbes,
+  type ProbePair,
+} from "@/lib/rag/probeReplayCore";
 
 // The core restates the generator's difficulty labels rather than importing them —
 // it imports nothing, by design. The two are held in agreement by the queries below,
@@ -96,9 +120,11 @@ export async function eligiblePairs(limit = 500): Promise<ProbePair[]> {
         difficulty: PairDifficulty;
         question_id: string;
         question: string;
+        quarantined: boolean;
       }[]
     >`
-      select p.id, p.text_a, p.text_b, p.difficulty, q.id as question_id, q.question
+      select p.id, p.text_a, p.text_b, p.difficulty, q.id as question_id, q.question,
+             ${QUARANTINED} as quarantined
       from semantic_cache_pairs p
       join eval_questions q on q.id = p.origin_question_id
       join documents d on d.id = q.document_id
@@ -139,6 +165,7 @@ export async function eligiblePairs(limit = 500): Promise<ProbePair[]> {
           originText: r.question,
           variantText,
           difficulty: r.difficulty,
+          quarantined: r.quarantined,
         },
       ];
     });
@@ -170,9 +197,11 @@ export async function probePairsByIds(ids: string[]): Promise<ProbePair[]> {
         difficulty: PairDifficulty;
         question_id: string;
         question: string;
+        quarantined: boolean;
       }[]
     >`
-      select p.id, p.text_a, p.text_b, p.difficulty, q.id as question_id, q.question
+      select p.id, p.text_a, p.text_b, p.difficulty, q.id as question_id, q.question,
+             ${QUARANTINED} as quarantined
       from semantic_cache_pairs p
       join eval_questions q on q.id = p.origin_question_id
       join documents d on d.id = q.document_id
@@ -188,6 +217,7 @@ export async function probePairsByIds(ids: string[]): Promise<ProbePair[]> {
         originText: r.question,
         variantText,
         difficulty: r.difficulty,
+        quarantined: r.quarantined,
       });
     }
     // Returned in the FROZEN order, not the database's: the cursor indexes into
@@ -225,6 +255,18 @@ export async function replayPairs(
   // it. Attempts rather than successes because a failed probe still consumed its
   // place in a capped run — see the step's cursor.
   onProgress: (attempted: number, failure?: string) => void = () => {},
+  // The shadow-log floor these probes record at, defaulted to PROBE_LOOKUP's own
+  // 0 so every existing caller behaves EXACTLY as before — a research pass chooses
+  // its own floor and "below the floor" is meaningless for it (F2).
+  //
+  // A parameter rather than a second function, because the alternative is two code
+  // paths through the one call site scripts/guards.ts sweep 7 pins to PROBE_LOOKUP,
+  // and the second one is where serve:true gets in. The guest's single probe
+  // (docs/demo-cache-lab-plan.md Phase 4) passes config.semanticCache.shadowLogFloor
+  // so its row lands in the same band as the clone's sample around it: a visitor
+  // who judges a 0.4 near-miss nobody else in the queue could have produced is
+  // judging an artefact of the demo, not of the cache.
+  floor: number = PROBE_LOOKUP.shadow.floor,
 ): Promise<ReplayResult> {
   let probed = 0;
   let failed = 0;
@@ -238,7 +280,15 @@ export async function replayPairs(
       // silent loss turns a calibration pass into a cache-poisoning pass, so it
       // is defined once in the pure core, asserted by a test, and pinned to this
       // call site by scripts/guards.ts sweep 7.
-      await semanticCacheLookup(pair.variantText, PROBE_LOOKUP);
+      // Spread rather than replaced: every other key here is a rail, and the
+      // floor is the only one a caller may choose. Written inline so the guard's
+      // "exactly one call site, and PROBE_LOOKUP appears in it" still reads the
+      // real options — a helper returning the merged object would move the four
+      // decisions out of the place the sweep looks.
+      await semanticCacheLookup(pair.variantText, {
+        ...PROBE_LOOKUP,
+        shadow: { ...PROBE_LOOKUP.shadow, floor },
+      });
       probed++;
       onProgress(probed + failed);
     } catch (err) {
@@ -248,9 +298,53 @@ export async function replayPairs(
         `[rag:probe-replay] probe failed for pair ${pair.pairId}: ${(err as Error).message}`,
       );
       failed++;
-      onProgress(probed + failed, err instanceof Error ? err.message : "Probe failed.");
+      onProgress(
+        probed + failed,
+        err instanceof Error ? err.message : "Probe failed.",
+      );
     }
   }
 
   return { probed, failed, stopped: false };
+}
+
+// --- reading a probe back ----------------------------------------------------
+
+// The shadow row a probe just wrote, or null when it wrote none.
+//
+// Keyed on (config_id, fingerprint, new_query_hash) — recordShadow's on-conflict
+// target, the same key eligiblePairs dedupes against, so this cannot disagree
+// with either about which row belongs to which variant.
+//
+// NULL MEANS BELOW THE FLOOR, and that is a real answer rather than a failure:
+// eligibility already proved the origin is banked and reachable, so there was a
+// nearest match — it simply did not clear the floor the caller chose. A UI may
+// say so plainly (docs/demo-cache-lab-plan.md, Phase 4). It must NOT say "this
+// pair, replayed": the nearest match is not guaranteed to be the origin, which is
+// the F1 dead-origin mistake replayPairs' own comment warns about.
+//
+// Two columns, both original to 0035. `origin` and `guard_blocked` are in
+// SHADOW_OPTIONAL_COLUMNS (semanticCache.ts:594) precisely because a deployment
+// can run ahead of its migrations, and selecting one of those here would turn
+// that tolerated state into a 42703 on the guest's probe.
+export type ProbeRow = { sim: number; matchedQuery: string };
+
+export async function probeRow(variantText: string): Promise<ProbeRow | null> {
+  const cfg = activeConfig();
+  try {
+    const fingerprint = await currentFingerprint(cfg);
+    const [row] = await sql<{ sim: number; matched_query: string }[]>`
+      select sim, matched_query
+        from semantic_cache_shadow
+       where config_id = ${cfg.id}
+         and fingerprint = ${fingerprint}
+         and new_query_hash = ${sha256(variantText)}
+    `;
+    return row
+      ? { sim: Number(row.sim), matchedQuery: row.matched_query }
+      : null;
+  } catch (err) {
+    if (isMissingTable(err)) return null;
+    throw err;
+  }
 }

@@ -41,6 +41,20 @@ import { KeyModelPanel } from "@/app/components/semanticCache/KeyModelPanel";
 import { ShadowJudgePanel } from "@/app/components/semanticCache/ShadowJudgePanel";
 import { ThresholdsPanel } from "@/app/components/semanticCache/ThresholdsPanel";
 import { withPageUser } from "@/lib/auth/dal";
+import { isGuest } from "@/lib/demo/guest";
+// THE DEMO COPY CROSSES HERE, and it has to: lib/demo/policy is `import
+// "server-only"`, and KeyModelPanel is a Client Component. Same boundary
+// app/appraise/models/page.tsx:29 uses for the replay's two sentences — the
+// sentences are read on the server and handed down as props, so the panel never
+// imports the policy table it is quoting.
+import {
+  GUEST_PROBE_NOTE,
+  LIVE_HALF_NOTE,
+  PUBLISHED_PAIRS_NOTE,
+  PUBLISHED_SCREEN_NOTE,
+  PUBLISHED_SWEEP_NOTE,
+  REVEALED_PAIRS_NOTE,
+} from "@/lib/demo/policy";
 import { resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { readCollisionFloorState } from "@/lib/rag/collisionFloorStore";
 import { listClosedConfigs, listConfigs } from "@/lib/rag/configStore";
@@ -73,12 +87,19 @@ async function preloadFirstFloor(
 }
 
 export default async function SemanticCachePage() {
-  const { configs, preload } = await withPageUser(async () => {
+  const { configs, preload, guest } = await withPageUser(async () => {
     // Same list, in the same order, the panel's picker used to fetch for itself:
     // open tabs then closed ones.
     const [open, closed] = await Promise.all([listConfigs(), listClosedConfigs()]);
     const configs = [...open, ...closed];
-    return { configs, preload: await preloadFirstFloor(configs[0]?.id) };
+    return {
+      configs,
+      preload: await preloadFirstFloor(configs[0]?.id),
+      // Read once here rather than per-note: every sentence below is either all
+      // present or all absent, and a page that resolved them independently could
+      // render half a story.
+      guest: await isGuest(),
+    };
   });
 
   return (
@@ -115,7 +136,26 @@ export default async function SemanticCachePage() {
           {/* Same list, same order, as the collision floor above: its pair GAP is
               config-scoped, and this page carries no configId of its own, so
               without a picker the gap silently described the Default config. */}
-          <KeyModelPanel configs={configs} />
+          {/* The demo copy travels as ONE prop rather than six, so the panel
+              cannot render the published-sweep note while missing the one that
+              says the leaderboard is frozen — the two only make sense together
+              (phase 5 of docs/demo-cache-lab-plan.md). Undefined for a real
+              account, which is what every `notes &&` in the panel tests. */}
+          <KeyModelPanel
+            configs={configs}
+            notes={
+              guest
+                ? {
+                    sweep: PUBLISHED_SWEEP_NOTE,
+                    pairs: PUBLISHED_PAIRS_NOTE,
+                    revealed: REVEALED_PAIRS_NOTE,
+                    screen: PUBLISHED_SCREEN_NOTE,
+                    probe: GUEST_PROBE_NOTE,
+                    live: LIVE_HALF_NOTE,
+                  }
+                : undefined
+            }
+          />
         </div>
       </main>
     </div>

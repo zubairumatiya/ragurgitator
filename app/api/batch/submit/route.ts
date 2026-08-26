@@ -7,6 +7,10 @@
 //   • build() returns nothing  → 200 { job: null } (no pending work, not an error).
 //   • otherwise                → 200 { job } (submitted; poll to see it land).
 //
+// ONE KIND HAS A GUEST PATH: `cache_pair_screen` resolves verdicts the publish
+// already banked instead of submitting anything (phase 3b of
+// docs/demo-cache-lab-plan.md). Every other kind is blocked as before.
+//
 // Additive: this never touches the existing synchronous flows — it's a separate
 // entry the UI offers when the config's preference selects "batch" for the kind.
 import { z } from "zod";
@@ -18,6 +22,7 @@ import { handlerFor } from "@/lib/batch/jobs/registry";
 import { hasOpenJobOfKind } from "@/lib/rag/batchStore";
 import { submitBatch } from "@/lib/batch/orchestrator";
 import { assertDemoAllows } from "@/lib/demo/policy";
+import { applyBankedVerdicts } from "@/lib/demo/pairBank";
 
 const Body = z.object({
   kind: z.enum([
@@ -36,8 +41,27 @@ export async function POST(request: Request) {
   if (body.response) return body.response;
 
   return withRequestConfig(request, async () => {
-    await assertDemoAllows("batch");
     const { kind, scope } = body.data;
+    // THE DEMO GATE, WITH ONE CARVE-OUT — phase 3b of docs/demo-cache-lab-plan.md.
+    // The pair screen asks a model whether each generated pair is labelled
+    // correctly, and the quarantine drops the ones it catches. A guest cannot buy
+    // that answer, and does not have to: F3 already obtained it on the operator's
+    // account and lib/demo/clone step 5e banks it, blanked on the rows the guest is
+    // meant to act on. So the screen RESOLVES those rows rather than judging them.
+    //
+    // Narrow by construction, on both halves. The kind is named literally, and
+    // applyBankedVerdicts returns null for anyone who is not a guest — so no other
+    // batch kind and no real account can reach this branch, and the gate below
+    // stays unconditional, which is what keeps scripts/guards.ts sweep 6 honest.
+    // Fails closed: without these two lines a guest is simply refused, as before.
+    const banked = kind === "cache_pair_screen" ? await applyBankedVerdicts() : null;
+    if (banked) {
+      // `job: null` in the same field a submission fills, plus a discriminator the
+      // panel can branch on: nothing was submitted, nothing will land on a later
+      // poll, and a UI that waited for a job here would wait forever.
+      return Response.json({ job: null, published: true, screened: banked });
+    }
+    await assertDemoAllows("batch");
     const handler = handlerFor(kind);
     if (!handler) {
       return Response.json(
