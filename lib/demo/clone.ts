@@ -42,6 +42,7 @@ import {
   SHADOW_CURVE_CAP,
   SHADOW_QUEUE_CAP,
 } from "@/lib/demo/frozen";
+import { PUBLISHED_SWEEP_FINGERPRINT } from "@/lib/rag/publishedSweep";
 import { PUBLISHED_REPLAY_FINGERPRINT } from "@/lib/rag/replayStore";
 import { answerFingerprint } from "@/lib/rag/semanticCacheCore";
 import { chunksTable, modelDimension } from "@/lib/rag/vectorStore";
@@ -177,6 +178,17 @@ async function buildMap(
 //     phase that fixed it named the wrong table (eval_model_trials, which the
 //     replay REPLACED in 0043), which is what a table nobody has written down
 //     costs you.
+//   published_sweep IS cloned now — step 5d. It is the same trade as
+//     replay_metrics: the sweep's INPUTS are ~510 texts under eleven models of
+//     embedding spend a guest cannot make, so the publish carries one jsonb
+//     answer instead. Unlike every other entry in either list, the master does
+//     not keep this row on its own — scripts/demo-snapshot writes it at publish
+//     time, because runKeyModelSweep stores nothing.
+//   semantic_cache_pairs is in NEITHER list, which is the gap phase 3 of
+//     docs/demo-cache-lab-plan.md exists to close. Naming it here rather than
+//     leaving it unmentioned, because an unmentioned table looks exactly like a
+//     considered one — which is how the shadow log below shipped empty for two
+//     phases.
 //   semantic_cache_shadow IS cloned now, as a SAMPLE — see step 5b. It is listed
 //     here because it spent two phases in neither list, which is how the demo
 //     shipped its most distinctive chart empty: a table that is merely unmentioned
@@ -206,6 +218,8 @@ export type CloneSummary = {
   shadowQueued: number; // of those, the ones arriving unjudged for the human queue
   replayRows: number; // the published model comparison, one row per model (step 5c)
   replayScored: number; // of those, the ones with metrics rather than "not scorable"
+  sweepRows: number; // the published cache-key sweep — 0 or 1 (step 5d)
+  sweepModels: number; // leaderboard rows inside it, i.e. whether §4 has a table
 };
 
 // THE PUBLISH OPTIONS — used by scripts/demo-snapshot.ts, never by a guest.
@@ -1004,6 +1018,66 @@ export async function cloneSeedWorkspace(
        where c.user_id = ${guestId} and r.mrr is not null
     `;
 
+    // --- 5d. the cache-key sweep, which a guest cannot run either ------------
+    //
+    // Phase 1 of docs/demo-cache-lab-plan.md, and the same move as 5c one panel
+    // over: publish the ANSWER instead of the inputs.
+    //
+    // WHAT IT BUYS. Appraise → Semantic caching's §4 renders inside `{sweep &&
+    // …}`, so a guest gets three disabled buttons and no table — including the
+    // PRECISION SLIDER, which costs nothing and never did: it re-derives every
+    // row from the curves the sweep already shipped, using the same
+    // selectFromCurve the server picks tau with. It is dark only because `sweep`
+    // is client state set by a POST a guest may not make. Carrying the row makes
+    // the whole control live on page load, with zero requests.
+    //
+    // WHY IT COULD NOT SIMPLY BE UNGATED. The sweep is ~510 texts under eleven
+    // candidate models of real embedding spend, on a guest's cold cache, for
+    // models the demo has no key for beyond Voyage. Not affordable and mostly
+    // not possible.
+    //
+    // WHY THIS ONE IS A SINGLE ROW AND NOT A TABLE OF THEM. runKeyModelSweep
+    // computes on demand and returns to the response; nothing stores it. So
+    // unlike replay_metrics there is nothing here to clone until the publish
+    // puts it there — 0077 is that shelf, and scripts/demo-snapshot is the only
+    // writer. The whole SweepResult travels as one jsonb, thinned to the 101
+    // positions the slider can reach (lib/rag/publishedSweep).
+    //
+    // The fingerprint is rewritten to the sentinel for exactly 5c's reason: the
+    // read path addresses it by that constant, and any other value would be a
+    // key nobody in the destination will ever compute.
+    const sweepRows = await copyRows(tx, {
+      table: "published_sweep",
+      joins: `join _map_config mc on mc.old_id = s.config_id`,
+      where: `true`,
+      overrides: {
+        config_id: "mc.new_id",
+        fingerprint: `'${PUBLISHED_SWEEP_FINGERPRINT}'`,
+      },
+      // One row per destination config. A publish carries one config today, but
+      // the master may hold a published row under an older fingerprint beside
+      // the sentinel one, and the rewrite would collide them on 0077's primary
+      // key. Preferring the sentinel keeps a guest cloned from the build.
+      dedupe: {
+        on: `mc.new_id`,
+        tieBreak: `(s.fingerprint = '${PUBLISHED_SWEEP_FINGERPRINT}') desc, s.computed_at desc`,
+      },
+      params: [],
+    });
+    // The count that decides whether §4 renders at all — a guest with no row
+    // here sees the same three disabled buttons the demo shipped before this
+    // phase, which is a working fallback but not the one being published.
+    // Counted from what landed, like the shadow queue above.
+    const [landed] = await tx<{ models: number }[]>`
+      select coalesce(jsonb_array_length(s.result -> 'rows'), 0)::int as models
+        from published_sweep s
+        join configs c on c.id = s.config_id
+       where c.user_id = ${guestId}
+       order by s.computed_at desc
+       limit 1
+    `;
+    const sweepModels = landed?.models ?? 0;
+
     // --- 6. REWRITE THE CACHE FINGERPRINTS, or step 5 was for nothing --------
     //
     // currentFingerprint hashes documentSignature, which is an md5 over the
@@ -1094,6 +1168,8 @@ export async function cloneSeedWorkspace(
       shadowQueued: queued,
       replayRows,
       replayScored: scored,
+      sweepRows,
+      sweepModels,
     };
   }) as Promise<CloneSummary>;
 }

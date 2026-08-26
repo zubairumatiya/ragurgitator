@@ -5,7 +5,9 @@
 //
 // GET  — the model in force for the scoped config, where it came from, what its
 //        space serves at, and the full candidate list. Every REGISTERED model is a
-//        candidate: the key vector never touches a chunks_* table.
+//        candidate: the key vector never touches a chunks_* table. For a GUEST it
+//        also carries `publishedSweep`, the leaderboard the publish banked (0077),
+//        because the POST that would produce one is a spend the demo won't make.
 // POST — three actions:
 //        • sweep    — score every candidate on the pooled pair set. Embedding-only
 //                     and cached, so a re-run is nearly free. NOT folded into GET:
@@ -49,7 +51,8 @@ import {
   scopedAcceptTarget,
   uncalibratedKeyModelSpace,
 } from "@/lib/rag/semanticCache";
-import { assertDemoAllows } from "@/lib/demo/policy";
+import { assertDemoAllows, demoBlocks } from "@/lib/demo/policy";
+import { readPublishedSweep } from "@/lib/rag/publishedSweep";
 
 const msg = (err: unknown, fallback: string) =>
   err instanceof Error ? err.message : fallback;
@@ -58,7 +61,24 @@ export async function GET(request: Request) {
   return withRequestConfig(request, async () => {
     try {
       const savings = await getBatchSavings(activeConfig().id);
-      return Response.json(await keyModelStatus(savings.semanticCache.keyModel));
+      return Response.json({
+        ...(await keyModelStatus(savings.semanticCache.keyModel)),
+        // THE PUBLISHED SWEEP, for a guest only (phase 1 of
+        // docs/demo-cache-lab-plan.md). It seeds the panel's `sweep` state, which
+        // is the whole unlock: §4's leaderboard and its precision slider render
+        // inside `{sweep && …}` and cost nothing to re-derive, so handing the
+        // panel a result turns three disabled buttons into a live control with
+        // zero further requests.
+        //
+        // GATED ON GUEST, not on "a row exists", and the reason is the same rule
+        // lib/demo/policy holds everywhere: a MEASUREMENT may not imply a
+        // computation that did not happen. The operator's own account can run
+        // the real sweep, and pre-filling their table with a banked one — with
+        // no note saying so, since PUBLISHED_SWEEP_NOTE is phase 2's — would be
+        // exactly that. Null for everyone else, and the panel opens empty as it
+        // always has.
+        publishedSweep: (await demoBlocks()) ? await readPublishedSweep() : null,
+      });
     } catch (err) {
       return Response.json(
         { error: msg(err, "Failed to load the cache-key model.") },

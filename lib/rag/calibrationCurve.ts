@@ -193,3 +193,82 @@ export function selectFromCurve(
     },
   };
 }
+
+// --- the slider's grid, and thinning a curve down to it ---------------------
+
+// THE PRECISION SLIDER'S REACHABLE POSITIONS. The panel renders an
+// `<input type="range">` with exactly these bounds, and reads it as
+// `value / 100`, so a curve only ever has to answer 101 questions.
+//
+// It lives here rather than in the panel because the thinning below is only
+// lossless if the two agree: widen the slider's range or halve its step and a
+// published curve silently starts approximating positions it was never thinned
+// for. The panel spreads these onto the input, so there is one definition.
+export const TARGET_SLIDER = { min: 50, max: 100, step: 0.5 } as const;
+
+// Every target the slider can produce, ascending. 101 of them at today's bounds.
+export function sliderTargets(): number[] {
+  const out: number[] = [];
+  const steps = Math.round((TARGET_SLIDER.max - TARGET_SLIDER.min) / TARGET_SLIDER.step);
+  for (let i = 0; i <= steps; i++) {
+    out.push((TARGET_SLIDER.min + i * TARGET_SLIDER.step) / 100);
+  }
+  return out;
+}
+
+// THIN A CURVE TO THE POINTS THAT CAN EVER BE READ — losslessly, which is the
+// whole design rather than a tolerance being accepted.
+//
+// A CalibrationResult holds one curve point per judged pair, so eleven models
+// over a ~510-pair pooled set is ~5,600 points (~500 KB) — a page-load payload
+// for something the demo wants to hand out on first render. But the panel never
+// reads a curve directly: it calls selectFromCurve at one of 101 slider targets
+// and renders what comes back. So keep, per model, only the points that function
+// can actually return, and every number the slider can ever display stays exact.
+//
+// WHAT HAS TO SURVIVE, and why each one:
+//   • the point selected at each target — the τ, precision and recall rows.
+//   • the argmax of `bestRate` — the "best attainable" operating point shown for
+//     a model that missed the target, and the one the attainability report is
+//     built from. Kept once and it is still the argmax of the subset, because
+//     selectFromCurve takes the FIRST strict maximum, so every earlier eligible
+//     point is strictly below it.
+//   • the LAST point of the full curve — selectFromCurve reads totalAccepts and
+//     totalRejects off it, which is recall's denominator and the one-class test.
+//
+// WHAT MAY BE DROPPED WITHOUT CHANGING AN ANSWER: everything else. A dropped
+// point can never become a selection in the thinned curve, since selection takes
+// the LAST point clearing the target — so if a surviving later point cleared it,
+// the full curve would have chosen that one too.
+//
+// Ties are safe by construction: only tie-boundary points are ever selected, so
+// no two kept points share a sim and every kept point stays a tie boundary.
+export function thinCurve(
+  curve: CurvePoint[],
+  targets: number[],
+  minSamples: number,
+): CurvePoint[] {
+  if (curve.length === 0) return [];
+  // Indices, not points: a curve can hold two points with the same sim, and a
+  // by-value key would collapse them.
+  const keep = new Set<number>([curve.length - 1]);
+  const boundaryAt = new Map<number, number>();
+  for (let i = 0; i < curve.length; i++) {
+    const isTieBoundary = i === curve.length - 1 || curve[i + 1].sim !== curve[i].sim;
+    if (isTieBoundary) boundaryAt.set(curve[i].sim, i);
+  }
+
+  for (const target of targets) {
+    const sel = selectFromCurve(curve, target, minSamples);
+    for (const sim of [sel.recommended, sel.attainability.bestRateAt?.sim ?? null]) {
+      if (sim === null) continue;
+      const i = boundaryAt.get(sim);
+      // Both sims come back FROM a tie boundary, so the lookup cannot miss —
+      // guarded rather than asserted because a miss here would silently publish
+      // a curve that reads differently from the one measured.
+      if (i !== undefined) keep.add(i);
+    }
+  }
+
+  return [...keep].sort((a, b) => a - b).map((i) => curve[i]);
+}

@@ -423,6 +423,7 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
       "SHADOW_CURVE_CAP.probe",
       "SHADOW_QUEUE_CAP",
       "PUBLISHED_REPLAY_FINGERPRINT",
+      "PUBLISHED_SWEEP_FINGERPRINT",
     ],
     why:
       "the publish hop that writes the frozen set, the cap on the banked " +
@@ -433,7 +434,10 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
       "guest's disk tracking the master's bookkeeping), and the sentinel step 5c " +
       "rewrites the replay's fingerprint to (copied under the master's own md5, " +
       "the rows are present but unreachable and the demo's model comparison " +
-      "renders empty while the table says it is populated)",
+      "renders empty while the table says it is populated), and the same sentinel " +
+      "for the cache-key sweep step 5d carries (0077 has no other reader, so a " +
+      "copied real fingerprint would leave a guest's §4 dark with the row sitting " +
+      "right there)",
   },
   // Phase 6.3 makes the demo's model comparison a BUILD ARTIFACT living in a
   // cache table. The read path can only find it under the sentinel, and

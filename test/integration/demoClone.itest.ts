@@ -32,6 +32,10 @@ import { cloneSeedWorkspace } from "../../lib/demo/clone";
 import { SHADOW_QUEUE_CAP } from "../../lib/demo/frozen";
 import { resolveConfig, withConfig } from "../../lib/rag/activeConfig";
 import {
+  PUBLISHED_SWEEP_FINGERPRINT,
+  readPublishedSweep,
+} from "../../lib/rag/publishedSweep";
+import {
   listPublishedReplays,
   PUBLISHED_REPLAY_FINGERPRINT,
   replayConfig,
@@ -1014,5 +1018,133 @@ describe("cloneSeedWorkspace published replay", () => {
       rows.every((r) => r.fingerprint === "seed-md5"),
       "the rewrite happens on the COPY, never in place — the master keeps a live cache",
     );
+  });
+});
+
+// THE PUBLISHED CACHE-KEY SWEEP (step 5d) — phase 1 of docs/demo-cache-lab-plan.
+//
+// Same shape as the replay above and the same two silent failures, but one more
+// thing can go wrong here: this row has NO other writer. Nothing in a request
+// path creates it and nothing recomputes it, so if the copy misses, a guest's §4
+// is dark and every other panel on the page still works — which is precisely the
+// state the phase set out to fix, wearing the same appearance.
+describe("cloneSeedWorkspace published sweep", () => {
+  const MODELS_SWEPT = ["voyage-4-lite", "voyage-4"];
+
+  // A SweepResult reduced to the fields the panel actually reads: two models,
+  // each with a curve, since a curve is what the precision slider re-derives from.
+  const result = (models: number) => ({
+    cancelled: false,
+    target: 0.95,
+    targetSource: { target: 0.95, source: "config", configId: seedConfigId, configLabel: "seed" },
+    minSamples: 2,
+    pairs: { total: 6, shadow: 2, generated: 4, same: 3, different: 3 },
+    rows: Array.from({ length: models }, (_, i) => ({
+      model: MODELS_SWEPT[i],
+      space: "voyage",
+      dimension: 4,
+      provider: "voyage",
+      available: true,
+      reason: null,
+      threshold: 0.9,
+      recallAtThreshold: 0.5,
+      auc: 0.8,
+      precisionAtThreshold: 1,
+      pairsScored: 6,
+      samePairs: 3,
+      differentPairs: 3,
+      calibration: {
+        recommended: 0.9,
+        target: 0.95,
+        minSamples: 2,
+        totalJudged: 3,
+        overallAcceptRate: 0.667,
+        totalAccepts: 2,
+        coverageAtRecommended: 0.5,
+        precisionAtRecommended: 1,
+        curve: [
+          { sim: 0.95, acceptRateAtOrAbove: 1, coverageAtOrAbove: 0.5, n: 1 },
+          { sim: 0.9, acceptRateAtOrAbove: 1, coverageAtOrAbove: 1, n: 2 },
+          { sim: 0.4, acceptRateAtOrAbove: 0.667, coverageAtOrAbove: 1, n: 3 },
+        ],
+        attainability: {
+          blocker: null,
+          bestRate: 1,
+          bestRateAt: { sim: 0.9, n: 2 },
+          coverageAtBest: 1,
+          rejectsInBest: 0,
+          requiredN: null,
+        },
+      },
+      error: null,
+    })),
+  });
+
+  async function seedSweep(fingerprint = PUBLISHED_SWEEP_FINGERPRINT, models = 2) {
+    await admin`
+      insert into published_sweep (config_id, fingerprint, result)
+      values (${seedConfigId}, ${fingerprint}, ${admin.json(result(models) as never)})
+      on conflict (config_id, fingerprint)
+        do update set result = excluded.result, computed_at = now()`;
+  }
+
+  it("carries the sweep under the sentinel, remapped to the guest's config", async () => {
+    await seedSweep();
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+
+    const rows = await admin<{ config_id: string; fingerprint: string }[]>`
+      select s.config_id, s.fingerprint
+        from published_sweep s
+        join configs c on c.id = s.config_id
+       where c.user_id = ${guest.id}`;
+    assert.equal(rows.length, 1, "one published sweep for the cloned config");
+    assert.equal(summary.sweepRows, 1, "the summary must count what landed");
+    assert.equal(summary.sweepModels, MODELS_SWEPT.length, "…and the models inside it");
+    assert.notEqual(rows[0].config_id, seedConfigId, "remapped to the guest's own config");
+    assert.equal(rows[0].fingerprint, PUBLISHED_SWEEP_FINGERPRINT);
+  });
+
+  it("is reachable through the guest's own read path", async () => {
+    // Rows existing is not the claim. The claim is that the panel finds them —
+    // readPublishedSweep addresses them by the sentinel and by ownership, and a
+    // sweep the guest cannot read is a §4 that stays dark with the row in place.
+    await seedSweep();
+    await cloneSeedWorkspace(seed.id, guest.id);
+
+    const got = await withUser(guest, () => readPublishedSweep());
+    assert.ok(got, "the guest's panel must find a sweep");
+    assert.equal(got.rows.length, MODELS_SWEPT.length);
+    assert.equal(got.target, 0.95);
+    // The curve is the payload that matters: without it the leaderboard renders
+    // and the precision slider still has nothing to re-derive.
+    assert.equal(got.rows[0].calibration?.curve.length, 3);
+  });
+
+  it("prefers the published row when the seed holds another generation", async () => {
+    // Both rows collapse onto one primary key under the rewrite, so without the
+    // dedupe this does not pick the wrong row — it aborts the whole publish.
+    await seedSweep();
+    await seedSweep("some-other-generation", 1);
+
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    assert.equal(summary.sweepRows, 1, "one row per destination config");
+    assert.equal(summary.sweepModels, MODELS_SWEPT.length, "the published generation won");
+  });
+
+  it("reports nothing when the seed has no sweep, without failing the publish", async () => {
+    // The demo shipped for its whole life in this state, and it must stay a valid
+    // build: §4 falls back to the disabled buttons it always had.
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    assert.equal(summary.sweepRows, 0);
+    assert.equal(summary.sweepModels, 0);
+    assert.equal(await withUser(guest, () => readPublishedSweep()), null);
+  });
+
+  it("leaves the seed's own row untouched", async () => {
+    await seedSweep();
+    await cloneSeedWorkspace(seed.id, guest.id);
+    const rows = await admin<{ config_id: string }[]>`
+      select config_id from published_sweep where config_id = ${seedConfigId}`;
+    assert.equal(rows.length, 1, "the rewrite happens on the COPY, never in place");
   });
 });

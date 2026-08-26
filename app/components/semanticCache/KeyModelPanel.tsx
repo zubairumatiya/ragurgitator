@@ -28,6 +28,7 @@ import { apiFetch } from "@/lib/http/client";
 // arithmetically the number that would be applied.
 import {
   selectFromCurve,
+  TARGET_SLIDER,
   type Attainability,
 } from "@/lib/rag/calibrationCurve";
 import type { ConfigSummary } from "@/lib/rag/configStore";
@@ -324,8 +325,19 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
     // set, so a configId here would suggest a leaderboard that narrows with it.
     apiFetch("/api/semantic-cache/key-model")
       .then((r) => r.json())
-      .then((d: Status & { error?: string }) => {
-        if (!d.error) setStatus(d);
+      .then((d: Status & { publishedSweep?: SweepResult | null; error?: string }) => {
+        if (d.error) return;
+        setStatus(d);
+        // THE PUBLISHED SWEEP — a guest's whole §4, arriving with the status
+        // rather than from a button they may not press (phase 1 of
+        // docs/demo-cache-lab-plan.md). The route sends it to guests only, so
+        // this is null for an ordinary account and the panel opens empty as it
+        // always has.
+        //
+        // Seeded only when nothing is there. load() re-runs on every SC_CHANGED,
+        // and a result the visitor produced — or one a later phase reveals
+        // progressively — must never be replaced by the banked one underneath it.
+        if (d.publishedSweep) setSweep((prev) => prev ?? d.publishedSweep!);
       })
       .catch(() => {});
     if (!gapConfigId) return;
@@ -958,11 +970,16 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
             <span className="text-lg font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
               {pct(target)}
             </span>
+            {/* Bounds from the shared constant, not literals: the published
+                sweep's curves are thinned to exactly the positions this input
+                can produce (lib/rag/publishedSweep), so a widened range or a
+                finer step here would silently start reading positions those
+                curves were never thinned for. */}
             <input
               type="range"
-              min={50}
-              max={100}
-              step={0.5}
+              min={TARGET_SLIDER.min}
+              max={TARGET_SLIDER.max}
+              step={TARGET_SLIDER.step}
               value={target * 100}
               onChange={(e) => setTargetOverride(Number(e.target.value) / 100)}
               aria-label="Precision target"

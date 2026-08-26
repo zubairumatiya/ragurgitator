@@ -26,6 +26,12 @@
 //                                          92 MB of egress; the build is valid
 //                                          without it, that tab just ships stale
 //                                          or empty)
+//   … --yes --sweep                        RE-run the cache-key sweep even though
+//                                          one is already published (it is only
+//                                          run automatically when there is none —
+//                                          on a cold embedding cache it is ~an
+//                                          hour of sequential embedding)
+//   … --yes --skip-sweep                   publish without one at all
 //
 // Env: DEMO_MASTER_USER_ID (the account you work in), DEMO_SNAPSHOT_USER_ID (the
 // published one), DEMO_SNAPSHOT_EMAIL (only for --create; must be a real address,
@@ -35,8 +41,17 @@ import { privilegedSql } from "../lib/db";
 import { createSnapshotAccount } from "../lib/demo/admin";
 import { cloneSeedWorkspace } from "../lib/demo/clone";
 import { BANKED_QUESTION_CAP } from "../lib/demo/frozen";
+import { resolveConfig, withConfig } from "../lib/rag/activeConfig";
 import { ndcg } from "../lib/rag/evalMetrics";
+import { runKeyModelSweep } from "../lib/rag/keyModelSweep";
+import {
+  PUBLISHED_SWEEP_MAX_BYTES,
+  sweepBytes,
+  thinSweep,
+  writePublishedSweep,
+} from "../lib/rag/publishedSweep";
 import { replayConfig } from "../lib/rag/replayStore";
+import { scopedAcceptTarget } from "../lib/rag/semanticCache";
 import { answerFingerprint } from "../lib/rag/semanticCacheCore";
 import { chunksTable, modelDimension } from "../lib/rag/vectorStore";
 
@@ -108,6 +123,40 @@ async function replayCensus(configId: string, baseModel: string) {
       )[0].n
     : 0;
   return { ...row, pool, warm: row.scored >= 2 && row.corpus === pool };
+}
+
+// IS THE CACHE-KEY SWEEP PUBLISHED, and does it hold a table worth rendering?
+//
+// Phase 1 of docs/demo-cache-lab-plan.md. Unlike every other census here this
+// one reads a row THIS SCRIPT wrote: 0077 has no other writer, because
+// runKeyModelSweep computes on demand and returns to the response. So "warm"
+// means "a previous publish left one", not "the app kept one up to date".
+//
+// `models` is counted as rows with a non-empty CURVE rather than as rows, and
+// that is the number that decides whether the phase worked. A leaderboard row
+// with no curve renders as a dash and, more to the point, gives the precision
+// slider nothing to re-derive — and the slider is the entire reason this row is
+// published.
+async function sweepCensus(configId: string) {
+  const [row] = await privilegedSql<
+    { models: number; bytes: number; pairs: number | null; computed: Date | null }[]
+  >`
+    select
+      (select count(*) from jsonb_array_elements(s.result -> 'rows') r
+        where jsonb_array_length(coalesce(r -> 'calibration' -> 'curve', '[]'::jsonb)) > 0)::int
+        as models,
+      octet_length(s.result::text) as bytes,
+      (s.result -> 'pairs' ->> 'total')::int as pairs,
+      s.computed_at as computed
+    from published_sweep s
+    where s.config_id = ${configId}
+    order by s.computed_at desc
+    limit 1
+  `;
+  if (!row) return { models: 0, bytes: 0, pairs: null, computed: null, warm: false };
+  // Two scored models is the same bar the replay census uses, and for the same
+  // reason: one row is not a comparison.
+  return { ...row, warm: row.models >= 2 };
 }
 
 // WHAT WOULD BE PUBLISHED — measured through the config, which is what makes it
@@ -591,6 +640,7 @@ async function main() {
   const to = await destCensus(snapshot);
   const tunable = await selectTunable(configId);
   const replay = await replayCensus(configId, cfg.base_model);
+  const sweep = await sweepCensus(configId);
 
   console.log(`\nmaster    ${master}`);
   console.log(`snapshot  ${snapshot}  (${profile.email})\n`);
@@ -627,6 +677,22 @@ async function main() {
           : `stale — ${replay.scored}/${replay.rows} scored over ${replay.corpus} chunks, ` +
             `but this config pools ${replay.pool}`
     }${replay.warm || has("--skip-replay") ? "" : " → will be computed before the copy (~92 MB)"}`,
+  );
+  // The cache-key sweep, on the same terms and before the same exit. Its cost is
+  // the one number an operator most needs in advance: on a warm embedding cache a
+  // re-run is minutes, on a cold one it is ~an hour of sequential embedding, and
+  // nothing on screen distinguishes those two until it is running.
+  const willSweep = !has("--skip-sweep") && (has("--sweep") || !sweep.warm);
+  console.log(
+    `  cache-key sweep: ${
+      sweep.warm
+        ? `${sweep.models} models with curves over ${sweep.pairs ?? "?"} pairs, ` +
+          `${(sweep.bytes / 1024).toFixed(0)} KB, computed ` +
+          `${sweep.computed?.toISOString().slice(0, 10)}`
+        : sweep.computed === null
+          ? "never published for this config"
+          : `published but only ${sweep.models} models carry a curve`
+    }${willSweep ? " → will be run before the copy (embedding spend)" : ""}`,
   );
 
   // Before the dry-run exit, so an operator sees the refusal without having to
@@ -682,6 +748,64 @@ async function main() {
     );
   }
 
+  // RUN THE CACHE-KEY SWEEP ON THE MASTER, AND SHELVE IT (phase 1 of
+  // docs/demo-cache-lab-plan.md).
+  //
+  // The second place the publish deliberately spends, and the first that spends
+  // on a PROVIDER rather than on egress: every pooled pair text embedded under
+  // every candidate model. It buys the thing a guest cannot buy — §4's
+  // leaderboard, and with it the precision slider, which re-derives every row
+  // client-side from the curves this produces and therefore costs a visitor
+  // nothing at all.
+  //
+  // Like the replay above it runs in the MASTER's own scope, before the clone,
+  // because runKeyModelSweep is an ordinary user- and config-scoped call: the
+  // pooled pair set is the master's, and scopedAcceptTarget reads the config's
+  // stored precision target. Step 5d then copies whatever is on the shelf.
+  //
+  // NOT re-run when one is already published, unlike the replay's "warm" check
+  // which is about staleness. Here it is about cost: embedQueryCached makes a
+  // re-run nearly free ONLY once every text is banked, and the first run on a
+  // cold cache is ~an hour. `--sweep` forces it when the pair set has moved.
+  if (willSweep) {
+    const [me] = await privilegedSql<{ email: string }[]>`
+      select email from user_profiles where id = ${master}
+    `;
+    if (!me) die(`no user_profiles row for the master account ${master}.`);
+    console.log("running the cache-key sweep on the master (embedding spend)…");
+    const started = Date.now();
+    const result = await withUser({ id: master, email: me.email }, async () => {
+      const scoped = await resolveConfig(configId);
+      if (!scoped) die(`config ${configId} did not resolve in the master's scope.`);
+      return withConfig(scoped, async () => {
+        const out = await runKeyModelSweep(await scopedAcceptTarget());
+        await writePublishedSweep(configId, out);
+        return out;
+      });
+    });
+    const withCurves = result.rows.filter((r) => (r.calibration?.curve.length ?? 0) > 0).length;
+    // Raw vs thinned, reported rather than assumed — the plan's own sizing was
+    // out by 10x (it sketched ~50 KB for what measures ~500), and this is the
+    // number that decides whether the published row is something to hand out on
+    // page load at all.
+    const raw = sweepBytes(result);
+    const thin = sweepBytes(thinSweep(result));
+    console.log(
+      `  ${withCurves}/${result.rows.length} models with curves over ${result.pairs.total} pairs ` +
+        `in ${((Date.now() - started) / 1000).toFixed(0)}s — ` +
+        `${(raw / 1024).toFixed(0)} KB thinned to ${(thin / 1024).toFixed(0)} KB` +
+        `${result.cancelled ? " (CANCELLED — partial)" : ""}\n`,
+    );
+    if (thin > PUBLISHED_SWEEP_MAX_BYTES) {
+      console.log(
+        `⚠ the published sweep is ${(thin / 1024).toFixed(0)} KB, over the ` +
+          `${(PUBLISHED_SWEEP_MAX_BYTES / 1024).toFixed(0)} KB this is meant to stay under.\n` +
+          "  It is still valid and the build still works — but it rides in the panel's first\n" +
+          "  payload, so at this size fetching it on demand starts to beat handing it out.\n",
+      );
+    }
+  }
+
   const summary = await cloneSeedWorkspace(master, snapshot, {
     onlyConfigId: configId,
     replaceDestination: true,
@@ -696,7 +820,8 @@ async function main() {
       `${summary.cachedAnswers} cached answers, ` +
       `${summary.bankedQuestions} banked questions, ` +
       `${summary.shadowEvents} shadow events (${summary.shadowQueued} unjudged), ` +
-      `${summary.replayRows} model rows (${summary.replayScored} scored)\n`,
+      `${summary.replayRows} model rows (${summary.replayScored} scored), ` +
+      `${summary.sweepRows === 0 ? "no cache-key sweep" : `a cache-key sweep (${summary.sweepModels} models)`}\n`,
   );
   // The one thing a guest can ADD without a key: "Bulk actions → Add question →
   // Add cached" reads question_cache, which step 4e of the clone now carries
@@ -757,6 +882,25 @@ async function main() {
         "  table will render as dashes. A model is scored only at 100% chunk coverage in\n" +
         "  the master's embedding_cache, so this means the cache no longer covers this\n" +
         "  corpus. Re-publish without --skip-replay.\n",
+    );
+  }
+
+  // The cache-key sweep (phase 1 of docs/demo-cache-lab-plan.md). Same shape as
+  // the two above: the count that reads as success is the one with CURVES, since
+  // a curve is what the precision slider re-derives from and the slider is the
+  // whole point of publishing this. A row of models with no curves is §4 wearing
+  // the layout of a measurement and holding none.
+  if (summary.sweepRows === 0) {
+    console.log(
+      "⚠ no cache-key sweep published — Appraise → Semantic caching's §4 will show its\n" +
+        "  three disabled buttons and no table, which is the state this phase exists to fix.\n" +
+        "  Re-publish without --skip-sweep, or check the master's published_sweep row.\n",
+    );
+  } else if (summary.sweepModels < 2) {
+    console.log(
+      `⚠ a cache-key sweep was published but only ${summary.sweepModels} model(s) carry a curve — the\n` +
+        "  leaderboard renders as dashes and the precision slider has nothing to re-derive.\n" +
+        "  Check the master's pair set is populated, then re-publish with --sweep.\n",
     );
   }
 
