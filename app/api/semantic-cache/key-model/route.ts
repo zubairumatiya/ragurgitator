@@ -70,6 +70,10 @@ export async function GET(request: Request) {
         // panel a result turns three disabled buttons into a live control with
         // zero further requests.
         //
+        // PACKED, and handed on untouched (phase 1.5): the panel calls
+        // unpackSweep before it reads a curve. Unpacking here would put back on
+        // the wire exactly what packing took off the Postgres hop.
+        //
         // GATED ON GUEST, not on "a row exists", and the reason is the same rule
         // lib/demo/policy holds everywhere: a MEASUREMENT may not imply a
         // computation that did not happen. The operator's own account can run

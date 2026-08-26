@@ -31,6 +31,7 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { sliderTargets, thinCurve } from "@/lib/rag/calibrationCurve";
 import type { SweepResult } from "@/lib/rag/keyModelSweep";
+import { packSweep, type PublishedSweep } from "@/lib/rag/publishedSweepCore";
 
 // See the module header, and 0077's column comment.
 export const PUBLISHED_SWEEP_FINGERPRINT = "published";
@@ -45,8 +46,15 @@ export const PUBLISHED_SWEEP_MAX_BYTES = 150_000;
 const isMissingTable = (err: unknown): boolean =>
   (err as { code?: string }).code === "42P01";
 
-export const sweepBytes = (result: SweepResult): number =>
+export const sweepBytes = (result: SweepResult | PublishedSweep): number =>
   Buffer.byteLength(JSON.stringify(result), "utf8");
+
+// THE PUBLISHED FORM, whole: thinned to the slider's grid, then packed. One
+// function so the size scripts/demo-snapshot reports is the size that is stored
+// — the two used to be the same call and a reported number that is not the
+// stored one is worse than no number.
+export const publishedForm = (result: SweepResult): PublishedSweep =>
+  packSweep(thinSweep(result));
 
 // THIN THE CURVES, LOSSLESSLY — see thinCurve for the argument, and
 // calibrationCurve.test.ts for the assertion that it holds at all 101 slider
@@ -89,13 +97,55 @@ export async function writePublishedSweep(
 ): Promise<void> {
   await sql`
     insert into published_sweep (config_id, fingerprint, result)
-    values (${configId}, ${PUBLISHED_SWEEP_FINGERPRINT}, ${sql.json(thinSweep(result) as unknown as Parameters<typeof sql.json>[0])})
+    values (${configId}, ${PUBLISHED_SWEEP_FINGERPRINT}, ${sql.json(publishedForm(result) as unknown as Parameters<typeof sql.json>[0])})
     on conflict (config_id, fingerprint)
       do update set result = excluded.result, computed_at = now()
   `;
+  // The publish script is its own process, so this drops nothing that is
+  // actually held — it is here so that the memo below never has to be reasoned
+  // about separately from the only write there is.
+  forgetPublishedSweep();
 }
 
-// READ — the build's sweep for the scoped account, or null.
+// --- the read, and the memo in front of it ----------------------------------
+
+// PER-PROCESS, PER-USER MEMO — phase 1.5 of docs/demo-cache-lab-plan.md.
+//
+// The row is re-read on every panel mount, and Supabase bills the Postgres →
+// app-server hop uncompressed. It is safe to memo for the reason the module
+// header already states: `published_sweep` has NO writer in any request path
+// (scripts/demo-snapshot is the only one), so within a guest's ~2-hour life the
+// row is immutable and a second read can only return what the first one did.
+//
+// NEGATIVE RESULTS ARE NOT CACHED, and that is the one asymmetry worth stating.
+// The clone writes the guest's row DURING provisioning, in this same process —
+// so "no sweep yet" is a state that legitimately changes, while "here is the
+// sweep" is not. Caching the miss would be the one way this memo could serve a
+// guest a permanently dark §4.
+//
+// Keyed by user rather than by build, deliberately. Every guest's row is a
+// byte-for-byte copy of the same publish, so one entry could in principle serve
+// all of them — but "identical by construction" is exactly the kind of
+// assumption that rots quietly, and the per-user form already removes the repeat
+// reads.
+const memo = new Map<string, PublishedSweep>();
+
+// Enough for every guest a process sees before it is recycled, with eviction
+// only as a backstop against a long-lived one — oldest first, since a guest that
+// has not been seen in that many users is gone.
+const MEMO_MAX = 200;
+
+// Exported for the tests and for anything that ever gains a writer: a memo whose
+// only invalidation story is "there is no writer" needs the door to exist the
+// day that stops being true.
+export function forgetPublishedSweep(userId?: string): void {
+  if (userId === undefined) memo.clear();
+  else memo.delete(userId);
+}
+
+// READ — the build's sweep for the scoped account, or null, in its PACKED form.
+// Callers hand it to the client as-is and the panel unpacks; unpacking here
+// would put the 50 KB back on the wire that packing took off it.
 //
 // NOT config-scoped, deliberately, and the join is ownership rather than
 // selection: the sweep pools every config's pairs into one set (a pair is a
@@ -103,18 +153,24 @@ export async function writePublishedSweep(
 // it happens to hang off. A guest workspace holds exactly one config, so the
 // distinction only shows up if a publish ever carries more than one — and then
 // the newest row is the right answer, since both were the same sweep.
-export async function readPublishedSweep(): Promise<SweepResult | null> {
+export async function readPublishedSweep(): Promise<PublishedSweep | null> {
+  const userId = activeUserId();
+  const memoed = memo.get(userId);
+  if (memoed) return memoed;
   try {
-    const [row] = await sql<{ result: SweepResult }[]>`
+    const [row] = await sql<{ result: PublishedSweep }[]>`
       select s.result
         from published_sweep s
         join configs c on c.id = s.config_id
-       where c.user_id = ${activeUserId()}
+       where c.user_id = ${userId}
          and s.fingerprint = ${PUBLISHED_SWEEP_FINGERPRINT}
        order by s.computed_at desc
        limit 1
     `;
-    return row?.result ?? null;
+    if (!row) return null;
+    if (memo.size >= MEMO_MAX) memo.delete(memo.keys().next().value as string);
+    memo.set(userId, row.result);
+    return row.result;
   } catch (err) {
     if (isMissingTable(err)) return null; // pre-migration: nothing was ever published
     throw err;

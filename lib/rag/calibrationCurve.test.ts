@@ -16,9 +16,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  packCurve,
   selectFromCurve,
   sliderTargets,
   thinCurve,
+  unpackCurve,
   type CurvePoint,
 } from "@/lib/rag/calibrationCurve";
 
@@ -112,4 +114,64 @@ test("a curve shorter than minSamples thins to something that still says so", ()
 
 test("an empty curve thins to an empty curve", () => {
   assert.deepEqual(thinCurve([], sliderTargets(), MIN_SAMPLES), []);
+});
+
+// --- packing, phase 1.5 -----------------------------------------------------
+//
+// The stored form drops the two long float fields and keeps `accepts` instead.
+// The claim is the same one thinning makes and it has to be checked the same
+// way: not "close enough to plot", but the same τ, precision, recall and
+// attainability at every position the slider can reach. The rounding variant of
+// this idea (sims to 6dp) fails exactly that test, which is why the packing is
+// arithmetic rather than approximation.
+
+test("packing round-trips a curve bit-for-bit", () => {
+  for (const seed of [1, 7, 99, 12345]) {
+    const full = curveOf(sample(510, seed));
+    assert.deepEqual(unpackCurve(packCurve(full)), full, `seed ${seed} did not round-trip`);
+  }
+});
+
+test("packing is lossless at every slider position, on the thinned curve", () => {
+  // The composition that actually ships: thin, then pack, then read on the
+  // client. Checked end to end because either step alone being lossless would
+  // not prove the pair is.
+  for (const seed of [1, 7, 99, 12345]) {
+    const full = curveOf(sample(510, seed));
+    const shipped = unpackCurve(packCurve(thinCurve(full, sliderTargets(), MIN_SAMPLES)));
+    for (const target of sliderTargets()) {
+      assert.deepEqual(
+        selectFromCurve(shipped, target, MIN_SAMPLES),
+        selectFromCurve(full, target, MIN_SAMPLES),
+        `seed ${seed} disagreed at target ${target}`,
+      );
+    }
+  }
+});
+
+test("packing is smaller than the form it replaces", () => {
+  // The whole reason for the encoding. Asserted rather than measured once in a
+  // commit message, because a future field added to CurvePoint could quietly
+  // make the packed form the larger one.
+  const thin = thinCurve(curveOf(sample(510, 1)), sliderTargets(), MIN_SAMPLES);
+  const packed = JSON.stringify(packCurve(thin)).length;
+  assert.ok(packed * 2 < JSON.stringify(thin).length, `packed ${packed} bytes is not much smaller`);
+});
+
+test("an all-reject curve keeps its zero recall through the round trip", () => {
+  // totalAccepts is 0, so unpacking must reproduce the literal 0 that
+  // calibrateFromJudged writes rather than dividing and getting NaN.
+  const full = curveOf(
+    Array.from({ length: 30 }, (_, i) => ({
+      sim: Number((0.9 - i * 0.001).toFixed(3)),
+      verdict: "reject" as const,
+    })),
+  );
+  const back = unpackCurve(packCurve(full));
+  assert.deepEqual(back, full);
+  assert.ok(back.every((p) => p.coverageAtOrAbove === 0));
+});
+
+test("an empty curve packs and unpacks to an empty curve", () => {
+  assert.deepEqual(unpackCurve(packCurve([])), []);
 });

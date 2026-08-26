@@ -33,6 +33,11 @@ import {
 } from "@/lib/rag/calibrationCurve";
 import type { ConfigSummary } from "@/lib/rag/configStore";
 import type { LeaderboardRow, SweepResult } from "@/lib/rag/keyModelSweep";
+// The published sweep arrives with its curves PACKED as [sim, n, accepts] —
+// phase 1.5 of docs/demo-cache-lab-plan.md. Precision and recall are exactly
+// accepts/n and accepts/totalAccepts, so they are divided back here rather than
+// stored, on the same operands and therefore bit-for-bit.
+import { unpackSweep, type PublishedSweep } from "@/lib/rag/publishedSweepCore";
 import type { PairStats } from "@/lib/rag/semanticCachePairs";
 
 import { SC_CHANGED } from "./events";
@@ -325,7 +330,7 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
     // set, so a configId here would suggest a leaderboard that narrows with it.
     apiFetch("/api/semantic-cache/key-model")
       .then((r) => r.json())
-      .then((d: Status & { publishedSweep?: SweepResult | null; error?: string }) => {
+      .then((d: Status & { publishedSweep?: PublishedSweep | null; error?: string }) => {
         if (d.error) return;
         setStatus(d);
         // THE PUBLISHED SWEEP — a guest's whole §4, arriving with the status
@@ -337,7 +342,10 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
         // Seeded only when nothing is there. load() re-runs on every SC_CHANGED,
         // and a result the visitor produced — or one a later phase reveals
         // progressively — must never be replaced by the banked one underneath it.
-        if (d.publishedSweep) setSweep((prev) => prev ?? d.publishedSweep!);
+        if (d.publishedSweep) {
+          const unpacked = unpackSweep(d.publishedSweep);
+          setSweep((prev) => prev ?? unpacked);
+        }
       })
       .catch(() => {});
     if (!gapConfigId) return;

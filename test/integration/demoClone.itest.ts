@@ -33,6 +33,7 @@ import { SHADOW_QUEUE_CAP } from "../../lib/demo/frozen";
 import { resolveConfig, withConfig } from "../../lib/rag/activeConfig";
 import {
   PUBLISHED_SWEEP_FINGERPRINT,
+  forgetPublishedSweep,
   readPublishedSweep,
 } from "../../lib/rag/publishedSweep";
 import {
@@ -1062,10 +1063,14 @@ describe("cloneSeedWorkspace published sweep", () => {
         totalAccepts: 2,
         coverageAtRecommended: 0.5,
         precisionAtRecommended: 1,
+        // PACKED as [sim, n, accepts] — phase 1.5. This is the form
+        // writePublishedSweep stores and the form the panel unpacks, so the
+        // fixture is written in it rather than in the fuller shape: a fixture
+        // that did not match the writer would test a row nothing produces.
         curve: [
-          { sim: 0.95, acceptRateAtOrAbove: 1, coverageAtOrAbove: 0.5, n: 1 },
-          { sim: 0.9, acceptRateAtOrAbove: 1, coverageAtOrAbove: 1, n: 2 },
-          { sim: 0.4, acceptRateAtOrAbove: 0.667, coverageAtOrAbove: 1, n: 3 },
+          [0.95, 1, 1],
+          [0.9, 2, 2],
+          [0.4, 3, 2],
         ],
         attainability: {
           blocker: null,
@@ -1118,6 +1123,51 @@ describe("cloneSeedWorkspace published sweep", () => {
     // The curve is the payload that matters: without it the leaderboard renders
     // and the precision slider still has nothing to re-derive.
     assert.equal(got.rows[0].calibration?.curve.length, 3);
+    // And it comes back PACKED, which is what the panel is written against —
+    // unpacking on the server would put the bytes packing removed straight back
+    // on the wire.
+    assert.deepEqual(got.rows[0].calibration?.curve[0], [0.95, 1, 1]);
+  });
+
+  it("memoises the read, and lets it be forgotten", async () => {
+    // Phase 1.5. The row has NO writer in any request path, so within a guest's
+    // life it is immutable and a second read can only return what the first did
+    // — which is what makes a per-user memo safe in front of a hop Supabase
+    // bills on every panel mount. Deleting the row underneath the memo is how
+    // the test tells a cached answer from a fresh query.
+    await seedSweep();
+    await cloneSeedWorkspace(seed.id, guest.id);
+    assert.ok(await withUser(guest, () => readPublishedSweep()), "the first read must find it");
+
+    await admin`
+      delete from published_sweep s
+        using configs c
+       where c.id = s.config_id and c.user_id = ${guest.id}`;
+    assert.ok(
+      await withUser(guest, () => readPublishedSweep()),
+      "the second read must not have gone back to Postgres",
+    );
+
+    forgetPublishedSweep(guest.id);
+    assert.equal(
+      await withUser(guest, () => readPublishedSweep()),
+      null,
+      "forgetting must put the truth back",
+    );
+  });
+
+  it("does not memoise a miss, so provisioning can still fill it in", async () => {
+    // The one asymmetry: the clone writes the guest's row DURING provisioning,
+    // in this same process. "No sweep yet" legitimately changes; "here is the
+    // sweep" does not. Caching the miss would be the one way this memo could
+    // leave a guest's §4 permanently dark.
+    await seedSweep();
+    assert.equal(await withUser(guest, () => readPublishedSweep()), null);
+    await cloneSeedWorkspace(seed.id, guest.id);
+    assert.ok(
+      await withUser(guest, () => readPublishedSweep()),
+      "a miss cached before provisioning would never be revisited",
+    );
   });
 
   it("prefers the published row when the seed holds another generation", async () => {

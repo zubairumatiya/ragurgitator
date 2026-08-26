@@ -272,3 +272,52 @@ export function thinCurve(
 
   return [...keep].sort((a, b) => a - b).map((i) => curve[i]);
 }
+
+// --- packing a curve for storage --------------------------------------------
+
+// A curve point as it is PUBLISHED: `[sim, n, accepts]`.
+//
+// Phase 1.5 of docs/demo-cache-lab-plan.md. Thinning already cut the payload
+// from ~500 KB to ~50 KB, which is comfortable for a page load — but the meter
+// that matters is not the page load. `published_sweep` is re-read from Postgres
+// on every panel mount, over the app-server hop Supabase bills and does not
+// compress, so the row's own size is the recurring cost.
+//
+// The two long float fields are DERIVABLE rather than storable:
+//   acceptRateAtOrAbove = accepts / n
+//   coverageAtOrAbove   = accepts / totalAccepts
+// and calibrateFromJudged computes them with exactly those two divisions. So
+// storing `accepts` — a small integer — and dividing on the way out is the SAME
+// IEEE operation on the same operands, not a re-derivation that happens to land
+// close. 50 KB becomes 18 KB with nothing given up.
+//
+// THE CHEAPER-LOOKING TRICK WAS TRIED AND REJECTED: rounding sims to 6dp is
+// smaller still and does NOT reproduce every reading, and a threshold that
+// displays a number other than the one that would be applied is the single
+// failure this file exists to prevent. Measure before assuming this class of
+// saving is free.
+export type PackedCurvePoint = [sim: number, n: number, accepts: number];
+
+// Accepts inside a prefix, recovered from its precision — see `acceptsIn`, which
+// is the same inversion the selection uses. Exact at any n a pair set reaches.
+export const packCurve = (curve: CurvePoint[]): PackedCurvePoint[] =>
+  curve.map((p) => [p.sim, p.n, Math.round(p.acceptRateAtOrAbove * p.n)]);
+
+// PRECONDITION, and the only one: the LAST point must be the widest prefix of
+// the curve it came from, because recall's denominator is read off it. Both
+// producers hold that — calibrateFromJudged emits every prefix, and thinCurve
+// keeps the last point explicitly for this same reason — so the round trip is
+// closed over everything that is ever published. Packing an arbitrary slice
+// would silently rescale coverage.
+export function unpackCurve(packed: PackedCurvePoint[]): CurvePoint[] {
+  if (packed.length === 0) return [];
+  const totalAccepts = packed[packed.length - 1][2];
+  return packed.map(([sim, n, accepts]) => ({
+    sim,
+    acceptRateAtOrAbove: accepts / n,
+    // The zero case is reproduced rather than divided: calibrateFromJudged
+    // writes a literal 0 when nothing was accepted, and 0/0 is NaN.
+    coverageAtOrAbove: totalAccepts === 0 ? 0 : accepts / totalAccepts,
+    n,
+  }));
+}

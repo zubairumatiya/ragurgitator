@@ -46,6 +46,7 @@ import { ndcg } from "../lib/rag/evalMetrics";
 import { runKeyModelSweep } from "../lib/rag/keyModelSweep";
 import {
   PUBLISHED_SWEEP_MAX_BYTES,
+  publishedForm,
   sweepBytes,
   thinSweep,
   writePublishedSweep,
@@ -790,15 +791,20 @@ async function main() {
     // page load at all.
     const raw = sweepBytes(result);
     const thin = sweepBytes(thinSweep(result));
+    // What is actually STORED, and therefore what every panel mount re-reads
+    // over the hop Supabase bills — thinning answered the page-load question,
+    // packing answers this one (phase 1.5).
+    const stored = sweepBytes(publishedForm(result));
     console.log(
       `  ${withCurves}/${result.rows.length} models with curves over ${result.pairs.total} pairs ` +
         `in ${((Date.now() - started) / 1000).toFixed(0)}s — ` +
-        `${(raw / 1024).toFixed(0)} KB thinned to ${(thin / 1024).toFixed(0)} KB` +
+        `${(raw / 1024).toFixed(0)} KB thinned to ${(thin / 1024).toFixed(0)} KB, ` +
+        `stored packed at ${(stored / 1024).toFixed(0)} KB` +
         `${result.cancelled ? " (CANCELLED — partial)" : ""}\n`,
     );
-    if (thin > PUBLISHED_SWEEP_MAX_BYTES) {
+    if (stored > PUBLISHED_SWEEP_MAX_BYTES) {
       console.log(
-        `⚠ the published sweep is ${(thin / 1024).toFixed(0)} KB, over the ` +
+        `⚠ the published sweep is ${(stored / 1024).toFixed(0)} KB, over the ` +
           `${(PUBLISHED_SWEEP_MAX_BYTES / 1024).toFixed(0)} KB this is meant to stay under.\n` +
           "  It is still valid and the build still works — but it rides in the panel's first\n" +
           "  payload, so at this size fetching it on demand starts to beat handing it out.\n",
