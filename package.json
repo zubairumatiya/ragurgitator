@@ -25,6 +25,7 @@
     "f6": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f6-order.ts",
     "f7": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f7-prior.ts",
     "demo:snapshot": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/demo-snapshot.ts",
+    "demo:warm": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/demo-warm-answers.ts",
     "cache:equiv": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/cache-probe-equiv.ts",
     "migrate": "node --import tsx scripts/migrate.ts",
     "itest": "node --conditions=react-server --import tsx --import ./test/support/env.ts --test --test-concurrency=1 \"test/integration/**/*.itest.ts\"",

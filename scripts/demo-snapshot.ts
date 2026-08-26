@@ -41,6 +41,13 @@ import { privilegedSql } from "../lib/db";
 import { createSnapshotAccount } from "../lib/demo/admin";
 import { cloneSeedWorkspace } from "../lib/demo/clone";
 import { BANKED_QUESTION_CAP } from "../lib/demo/frozen";
+import {
+  QUOTAS,
+  selectTunable,
+  tunableAnswerCensus,
+  tunableCacheKey,
+  type Tunable,
+} from "../lib/demo/tunable";
 import { resolveConfig, withConfig } from "../lib/rag/activeConfig";
 import { ndcg } from "../lib/rag/evalMetrics";
 import { runKeyModelSweep } from "../lib/rag/keyModelSweep";
@@ -227,6 +234,41 @@ async function destCensus(userId: string) {
   return { configs: cfgs.length, chunks, ...row };
 }
 
+// HOW MANY DOCUMENTS THE PUBLISHED BANK OF SPARE WORDING SPREADS OVER.
+//
+// A latent defect in clone step 4e, reported rather than fixed here because the
+// selection is deliberate and changing it is a separate decision: it picks
+// `distinct on (text_hash) … order by text_hash`, which spreads the twelve over
+// twelve distinct CHUNKS but says nothing about which documents those chunks come
+// from. Hash order is effectively random, so the spread is usually fine — but it
+// is not guaranteed, and a bank drawn entirely from one file gives "Add cached"
+// twelve questions about one document. The publish printed a count and nothing
+// else, so that build would look identical to a good one.
+//
+// Joined on the chunk text's own hash because question_cache is content-addressed
+// (0055) and carries no document_id — the same property that lets the bank clone
+// byte for byte is why the document has to be recovered this way.
+async function bankedSpread(userId: string): Promise<number> {
+  const cfgs = await privilegedSql<{ id: string; base_model: string }[]>`
+    select id, base_model from configs where user_id = ${userId}
+  `;
+  const docs = new Set<string>();
+  for (const cfg of cfgs) {
+    const table = tableFor(cfg.base_model);
+    if (!table) continue;
+    const rows = await privilegedSql.unsafe<{ document_id: string }[]>(
+      `select distinct c.document_id::text as document_id
+         from "${table}" c
+         join question_cache q
+           on q.text_hash = encode(sha256(convert_to(c."text", 'UTF8')), 'hex')
+        where c.config_id = $1 and q.user_id = $2`,
+      [cfg.id, userId] as never[],
+    );
+    for (const r of rows) docs.add(r.document_id);
+  }
+  return docs.size;
+}
+
 // THE CHECK THAT MATTERS AFTER A PUBLISH. semantic_cache rows are found by
 // `fingerprint`, which hashes the config's DOCUMENT IDS; the copy mints new ones
 // and rewrites the fingerprint to match (clone.ts step 6). If that ever stopped
@@ -268,89 +310,6 @@ async function verifyFingerprints(userId: string): Promise<boolean> {
     );
   }
   return ok;
-}
-
-// --- THE TWELVE ---------------------------------------------------------------
-//
-// Which questions get a graded-nDCG drilldown in the published demo, and — once
-// phase 4 lands — which ones a visitor may re-score and autotune.
-//
-// SELECTED BY QUERY, NOT BY HAND, so a re-publish after the master has moved
-// re-rolls the set against the corpus as it now scores rather than pinning twelve
-// uuids that quietly stopped being interesting. The trade is that a re-publish can
-// silently produce a duller set, which is what assertSpread below is for.
-//
-// THE COMPOSITION IS THE WHOLE POINT. Autotune only has work to do on questions
-// that are FAILING: twelve rank-1 hits give the demo's most interesting button
-// nothing to search for. So the quota is weighted at the hard tail of the
-// distribution the demo actually publishes (measured 2026-08-22, the no-override
-// generation): 355 at rank 1, 62 at 2, 16 at 3, 11 at 4, none at 5, 28 missed.
-//
-// A couple of comfortable questions are in the set deliberately — a drilldown
-// showing what a rank-1 ideal ordering looks like is what makes the failures
-// legible as failures.
-const QUOTAS: { tier: number; n: number; label: string }[] = [
-  { tier: 99, n: 4, label: "missed" }, // 99 = not found in the top k
-  { tier: 4, n: 3, label: "rank 4" },
-  { tier: 3, n: 3, label: "rank 3" },
-  { tier: 2, n: 1, label: "rank 2" },
-  { tier: 1, n: 1, label: "rank 1" },
-];
-
-type Tunable = { id: string; tier: number; chunk: string; document: string };
-
-// ONE QUESTION PER SOURCE CHUNK. Autotune reshapes CHUNKS, so twelve questions
-// hanging off one chunk is one candidate search wearing twelve hats — the plan's
-// "several distinct chunks" requirement, enforced rather than hoped for.
-//
-// Ordered by md5(id) inside every bucket, not by id or created_at: those correlate
-// with ingest order, which correlates with document, and the top of the list would
-// be four questions from whichever file was uploaded first. md5 is stable, so the
-// same corpus re-rolls the same twelve.
-async function selectTunable(configId: string): Promise<Tunable[]> {
-  // The quota table, inlined as a CASE rather than joined in as a VALUES list, so
-  // QUOTAS above stays the single place the composition is written down.
-  const quotaCase =
-    QUOTAS.map((q) => `when ${q.tier} then ${q.n}`).join(" ") + " else 0";
-  return privilegedSql.unsafe<Tunable[]>(
-    `with latest as (
-       select distinct on (r.eval_label_id, r.k)
-              r.eval_question_id as id,
-              coalesce(r.found_rank, 99) as tier,
-              l.source_chunk_id::text as chunk,
-              q.document_id::text as document
-         from eval_results r
-         join eval_labels l on l.id = r.eval_label_id
-         join document_embeddings de on de.id = l.document_embedding_id
-         join eval_questions q on q.id = r.eval_question_id
-        where de.config_id = $1
-          and r.retrieval_state = 'baseline' and not r.is_baseline
-          -- Ungradable without one: this selection decides which truth rows get
-          -- cloned, and a question with none cannot supply one.
-          and exists (select 1 from eval_rankings er
-                       join document_embeddings de2 on de2.id = er.document_embedding_id
-                      where er.eval_question_id = q.id and er.is_truth
-                        and de2.config_id = $1)
-          -- Ignored on the master (0014), holdout rows (0061) included: the
-          -- operator took these out of the live aggregate, so they are not the
-          -- questions to hand a visitor.
-          and not exists (select 1 from config_question_ignores i
-                           where i.config_id = $1 and i.eval_question_id = q.id)
-        order by r.eval_label_id, r.k, r.scored_at desc
-     ),
-     per_chunk as (
-       select distinct on (chunk) * from latest order by chunk, md5(id::text)
-     ),
-     ranked as (
-       select *, row_number() over (partition by tier order by md5(id::text)) as rn
-         from per_chunk
-     )
-     select id::text as id, tier::int as tier, chunk, document
-       from ranked
-      where rn <= case tier ${quotaCase} end
-      order by tier desc, md5(id::text)`,
-    [configId] as never[],
-  );
 }
 
 // REFUSE A DULL BUILD. The set drifts on purpose, so the failure mode is not a
@@ -664,6 +623,31 @@ async function main() {
       `${new Set(tunable.map((t) => t.chunk)).size} chunks in ` +
       `${new Set(tunable.map((t) => t.document)).size} documents`,
   );
+  // CAN A GUEST ACTUALLY ASK THE TWELVE? A guest carries a Voyage key and no
+  // answer-model key, so a tunable question with no banked answer under the
+  // lookup's exact key is a dead end (/api/chat → DEMO_BLOCKED). The total on the
+  // line above reads as plenty — 252 answers — while the twelve that the chips,
+  // the drilldown and the autotune button all point at can be uncovered, and
+  // until this line existed nothing said so.
+  //
+  // Reported before the dry-run exit, and named individually, because the fix is
+  // a SPEND on the master (`npm run demo:warm`) that has to happen before the
+  // publish rather than after it.
+  const answers = await tunableAnswerCensus(configId, tunable);
+  const dead = answers.filter((a) => !a.cached);
+  const key = await tunableCacheKey(configId);
+  console.log(
+    `  ${answers.length - dead.length}/${answers.length} of them have a banked answer` +
+      (key === null ? "" : ` (${key.keyModel} / ${key.llmModel} / ${key.fingerprint.slice(0, 12)}…)`),
+  );
+  if (dead.length > 0) {
+    console.log(
+      `\n⚠ ${dead.length} tunable question(s) have NO banked answer — a guest asking one\n` +
+        `  gets "the demo has no answer-model key" and nothing else:\n` +
+        dead.map((d) => `    - ${d.question}`).join("\n") +
+        `\n\n  Run \`npm run demo:warm\` on the master to buy them, then re-publish.\n`,
+    );
+  }
   // The model comparison, before the dry-run exit for the same reason the spread
   // assertion is: an operator deciding whether to publish should see that this
   // run is about to spend 92 MB warming it, or that it is about to publish a
@@ -850,6 +834,19 @@ async function main() {
         `${BANKED_QUESTION_CAP} — a guest's tunable set tops out at ` +
         `${tunable.length + summary.bankedQuestions}, which is what autotune runs over.)\n`,
     );
+  }
+  // …and the half of that count the number itself cannot show: WHICH documents
+  // the bank came from. See bankedSpread — step 4e spreads by chunk, not by
+  // document, so a one-file bank is possible and was previously invisible.
+  if (summary.bankedQuestions > 0) {
+    const spread = await bankedSpread(snapshot);
+    if (spread < 2) {
+      console.log(
+        `⚠ all ${summary.bankedQuestions} banked questions come from ${spread} document(s) — ` +
+          `\u201cAdd cached\u201d\n  would hand a guest twelve questions about one file. clone.ts step 4e ` +
+          `spreads by\n  CHUNK, not by document; re-publishing will not change it on its own.\n`,
+      );
+    }
   }
   // The calibration curve (phase 6.2). Two failure modes, both silent from the
   // outside, and the second is the one that bites: a build can carry plenty of
