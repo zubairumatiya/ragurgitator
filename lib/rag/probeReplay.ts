@@ -30,7 +30,7 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { NEVER_STOP, type ShouldStop } from "@/lib/http/cancelRegistry";
 import { activeConfig } from "@/lib/rag/activeConfig";
-import type { ProbePair } from "@/lib/rag/probeReplayCore";
+import { PROBE_LOOKUP, type ProbePair } from "@/lib/rag/probeReplayCore";
 import {
   currentFingerprint,
   resolveKeyModel,
@@ -234,19 +234,11 @@ export async function replayPairs(
     // simply breaks, per the house rule.
     if (shouldStop()) return { probed, failed, stopped: true };
     try {
-      await semanticCacheLookup(pair.variantText, {
-        // serve:false is the parameter whose silent loss turns a calibration pass
-        // into a cache-poisoning pass. scripts/guards.ts pins it.
-        serve: false,
-        threshold: null,
-        keyModel: null,
-        // floor 0: a probe pass chooses its own floor, and "below the floor" is
-        // meaningless for it (semanticCache.ts's subFloorSample is live-path only).
-        // origin 'probe' keeps these rows out of the live recommendation (0069) —
-        // emitRecommendation fires for 'traffic' alone, so that is inherited here
-        // rather than re-implemented.
-        shadow: { floor: 0, origin: "probe" },
-      });
+      // PROBE_LOOKUP, never an object literal: serve:false is the parameter whose
+      // silent loss turns a calibration pass into a cache-poisoning pass, so it
+      // is defined once in the pure core, asserted by a test, and pinned to this
+      // call site by scripts/guards.ts sweep 7.
+      await semanticCacheLookup(pair.variantText, PROBE_LOOKUP);
       probed++;
       onProgress(probed + failed);
     } catch (err) {

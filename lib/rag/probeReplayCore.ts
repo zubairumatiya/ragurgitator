@@ -24,6 +24,38 @@ export type ProbePair = {
   difficulty: ProbeDifficulty;
 };
 
+// THE OPTIONS EVERY PROBE IS MADE WITH. One frozen value rather than an object
+// literal at the call site, because three of these four keys are the difference
+// between a calibration pass and a destructive one, and all three fail SILENTLY:
+//
+//   serve: false     — the load-bearing one. A probe that serves would let the
+//                      caller bank the variant it just replayed, and the next
+//                      pass would self-match it at cosine 1.0 (f1-negatives.ts:25).
+//                      Nothing downstream would look wrong; the numbers would
+//                      just quietly become meaningless.
+//   threshold: null  — the config's own τ, not one this pass invents. A probe is
+//                      supposed to measure what the cache WOULD do.
+//   keyModel: null   — likewise: the live key model, since eligibility was
+//                      computed against it.
+//   shadow           — floor 0 because a probe pass chooses its own floor and
+//                      "below the floor" is meaningless for it; origin 'probe'
+//                      because that is what keeps these rows out of the live
+//                      recommendation (0069) and out of §4's pool (the F3
+//                      dedupe rule).
+//
+// Living here means it is a VALUE a test can assert on, not a shape a reviewer
+// has to eyeball — and scripts/guards.ts pins the call site to this constant so
+// nobody can reintroduce a literal beside it. `as const` is what makes the seam
+// real: probeReplay.ts passes this to semanticCacheLookup, so the compiler
+// checks `origin: "probe"` against ShadowOrigin there, and this file still
+// imports nothing.
+export const PROBE_LOOKUP = {
+  serve: false,
+  threshold: null,
+  keyModel: null,
+  shadow: { floor: 0, origin: "probe" },
+} as const;
+
 // How many probes one run may add to the queue. A fresh account with a full pair
 // bank has ~186 eligible (docs/probe-replay-plan.md, Phase 1's measurement), and 186
 // unjudged rows would bury the real traffic queue — 7 rows on this account — under
