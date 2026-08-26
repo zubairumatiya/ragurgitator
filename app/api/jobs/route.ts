@@ -16,8 +16,9 @@ import { activeConfig } from "@/lib/rag/activeConfig";
 import { assertDemoAllows, type DemoAction } from "@/lib/demo/policy";
 
 // Which sentence a guest sees per job kind, or null for a kind the demo runs.
-// Exhaustive by type, so a fourth kind cannot be added without deciding whether
-// the demo may run it.
+// Exhaustive by type, so a new kind cannot be added without deciding whether the
+// demo may run it — which is the whole reason it is a Record and not a lookup with
+// a default.
 //
 // re-score and autotune are null because phase 4 scopes them rather than blocking
 // them (lib/demo/frozen): whichever driver runs the step, the step's question set
@@ -28,6 +29,12 @@ const DEMO_ACTION_FOR_JOB: Record<JobKind, DemoAction | null> = {
   rescore: null,
   bulk_ndcg: "rank",
   autotune: null,
+  // Blocked, unlike re-score and autotune, because there is no scoped version of
+  // it: every probe is an embedding a guest did not pay for, and a background job
+  // that spends is precisely what this table exists to stop. A guest's shadow
+  // queue is stocked by lib/demo/clone step 5b instead, which is what the sentence
+  // points at.
+  probe_replay: "probeReplay",
 };
 
 export async function GET() {
@@ -47,10 +54,11 @@ export async function POST(request: Request) {
   const kind = body.data.kind as JobKind;
 
   return withRequestConfig(request, async () => {
-    // THE ONE GATE THAT COVERS THREE LEVERS. Every background job is one of the
-    // long bulk actions — re-score, bulk nDCG, autotune — and each has an NDJSON
-    // twin that is gated at its own route. This is the other door into the same
-    // work, and it would be the one nobody remembered.
+    // THE ONE GATE THAT COVERS EVERY LEVER. Re-score, bulk nDCG and autotune each
+    // have an NDJSON twin gated at its own route; this is the other door into the
+    // same work, and it would be the one nobody remembered. Probe replay has no
+    // twin at all — its only doors are this one and pair generation — so for that
+    // kind this is not the second gate but the first.
     const demoAction = DEMO_ACTION_FOR_JOB[kind];
     if (demoAction) await assertDemoAllows(demoAction);
     if (!isWired(kind)) {

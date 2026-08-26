@@ -30,6 +30,7 @@ import {
   parsePairs,
   questionsNeedingPairs,
 } from "@/lib/rag/semanticCachePairs";
+import { triggerProbeReplay } from "@/lib/rag/probeReplayTrigger";
 import { bankLlmBatchSaving } from "@/lib/batch/savings";
 import { llmProviderOf } from "@/lib/llm/llmModels";
 import { batchCustomId, type BatchResultRow } from "@/lib/batch/types";
@@ -94,6 +95,17 @@ export const pairGenerationHandler: JobHandler = {
       applied += await insertPairs(origin.questionId, pairs, generatedBy);
     }
     await bankLlmBatchSaving(results);
+    // The batch path's half of Phase 3 (docs/probe-replay-plan.md). This is the
+    // moment the batch's pairs exist, so it is this path's "end of generation" —
+    // the inline path fires from its route for the same reason.
+    //
+    // NOT in chain(), which can only ask for another provider batch; a probe run
+    // is a background job, a different mechanism. And AFTER bankLlmBatchSaving,
+    // so an unexpected failure in the trigger cannot cost the savings ledger the
+    // discount this batch actually earned — though triggerProbeReplay swallows
+    // its own errors, since orchestrator.applyJob would otherwise mark a batch
+    // whose rows are already in the table as failed.
+    if (applied > 0) await triggerProbeReplay();
     return applied;
   },
 

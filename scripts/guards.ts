@@ -1,9 +1,10 @@
-// Six greppable invariants, none of which a typecheck, a unit test or a page that
+// Seven greppable invariants, none of which a typecheck, a unit test or a page that
 // renders one account's data can see. The first three have each already been
 // violated once; the fourth guards a column that fails silently; the fifth guards
 // a package whose mere presence in the module graph broke every background job in
 // production; the sixth stands between an unauthenticated endpoint and someone
-// else's provider bill.
+// else's provider bill; the seventh keeps a calibration pass from becoming a
+// cache-poisoning one.
 //
 //   1. .expose() appears only where a provider client is constructed.
 //   2. Every app entry point that touches the store enters a request scope.
@@ -11,6 +12,7 @@
 //   4. Every read of eval_results has a view on is_baseline (0057).
 //   5. @huggingface/transformers is never imported for its VALUE at module scope.
 //   6. Every route that spends or ships vectors calls the guest-demo gate.
+//   7. The probe replay path never serves, banks or judges.
 //
 // WHY GREP AND NOT THE TYPE SYSTEM. All six are properties of where a call (or a
 // column) APPEARS, not of what it returns, so no signature could encode them. The
@@ -514,6 +516,140 @@ function sweepDemoGates() {
   console.log(`   ${Object.keys(DEMO_GATED).length} routes named, all gated`);
 }
 
+// 7. The probe path cannot poison the cache it measures
+//
+// Probe replay pushes generated pair texts back through the REAL lookup. That is
+// the point of it — a probe has to be what the cache would have done — and it is
+// also why the pass is one wrong option away from being destructive:
+//
+//   • serve:true would let the caller bank the variant just replayed, and the
+//     next pass would self-match it at cosine 1.0 (scripts/f1-negatives.ts:25).
+//   • a missing origin 'probe' would file synthetic near-misses as traffic, which
+//     is what the live threshold recommendation reads (0069) and what the
+//     key-model sweep trusts over the audited pair label (the F3 defect).
+//   • a verdict written from the pair's own label would let a generator F3
+//     measured at 80% correct move a LIVE serving threshold.
+//
+// None of the three fails loudly. A typecheck cannot see them either: they are
+// properties of which VALUE reaches a call and which symbols appear in a file,
+// which is exactly what this file is for. The unit half — that PROBE_LOOKUP holds
+// the right four options — is in lib/rag/probeReplayCore.test.ts; this sweep is
+// what stops someone passing something else.
+
+// Every module in the probe-replay path. Named rather than globbed: a new file
+// here is a decision, and it should have to be added deliberately.
+const PROBE_FILES = [
+  "lib/rag/probeReplay.ts",
+  "lib/rag/probeReplayCore.ts",
+  "lib/rag/probeReplayTrigger.ts",
+  "lib/jobs/steps/probeReplay.ts",
+];
+
+// Symbols that BANK an answer or WRITE a verdict. Neither belongs anywhere in the
+// probe path: probe rows stock the queue, and a human or the metered judge fills
+// the verdict in.
+const FORBIDDEN_IN_PROBE_PATH: Record<string, string> = {
+  semanticCacheStore: "banks an answer — a probe must leave semantic_cache untouched",
+  backfillKeyModel: "the other writer of semantic_cache — same rule as banking",
+  setPairVerdict: "writes a pair verdict — probe rows land unjudged by design",
+  judgeOne: "spends on the judge — the probe pass only stocks the queue for it",
+  judgeShadowEvents: "spends on the judge — the probe pass only stocks the queue for it",
+};
+
+// These files explain at length what they do NOT do, and the prose must not trip
+// the sweep that checks the code.
+const codeOnly = (text: string): string =>
+  text
+    .split("\n")
+    .map((line) => line.replace(/\/\/.*$/, ""))
+    .join("\n");
+
+function sweepProbeReplay() {
+  console.log("\n7. the probe replay path cannot poison the cache\n");
+
+  const source = codeOnly(read(join(ROOT, "lib/rag/probeReplay.ts")));
+
+  // 7a. The lookup is called with the frozen constant, never a literal. An inline
+  // object literal is how the next caller quietly drops serve:false.
+  const calls = [...source.matchAll(/semanticCacheLookup\(([^)]*)/g)];
+  if (calls.length !== 1) {
+    fail(
+      `lib/rag/probeReplay.ts — expected exactly 1 semanticCacheLookup call, found ${calls.length}`,
+    );
+  }
+  for (const call of calls) {
+    if (!/\bPROBE_LOOKUP\b/.test(call[1])) {
+      fail(
+        "lib/rag/probeReplay.ts — semanticCacheLookup called with something other than " +
+          "PROBE_LOOKUP; the options must stay a single asserted value",
+      );
+    }
+  }
+
+  // 7b. The constant itself still says serve:false. The unit test asserts this
+  // too; the sweep repeats it because `npm run guard` is the one check that runs
+  // over a diff touching nothing else.
+  const core = read(join(ROOT, "lib/rag/probeReplayCore.ts"));
+  const decl = core.slice(core.indexOf("export const PROBE_LOOKUP"));
+  const body = decl.slice(0, decl.indexOf("} as const"));
+  if (!/serve:\s*false/.test(body)) {
+    fail("lib/rag/probeReplayCore.ts — PROBE_LOOKUP no longer passes serve: false");
+  }
+  if (!/origin:\s*"probe"/.test(body)) {
+    fail('lib/rag/probeReplayCore.ts — PROBE_LOOKUP no longer stamps origin: "probe"');
+  }
+
+  // 7c. Nothing anywhere in the probe path banks or judges.
+  for (const path of PROBE_FILES) {
+    let text: string;
+    try {
+      text = read(join(ROOT, path));
+    } catch {
+      fail(`${path} — named in the probe path but the file does not exist`);
+      continue;
+    }
+    const code = codeOnly(text);
+    for (const [symbol, why] of Object.entries(FORBIDDEN_IN_PROBE_PATH)) {
+      if (new RegExp(`\\b${symbol}\\b`).test(code)) {
+        fail(`${path} — references ${symbol}: ${why}`);
+      }
+    }
+  }
+
+  // 7d. RAIL 1 AT RUNTIME, structurally. The lookup's only write is recordShadow,
+  // and recordShadow builds its insert from an object literal — so "no probe ever
+  // writes a verdict" is true of every code path through the lookup iff that
+  // literal has no verdict key. Which is greppable, where the runtime claim would
+  // need a live database. (SHADOW_OPTIONAL_COLUMNS only ever DELETES keys from
+  // this row, so a column absent here cannot reappear downstream.)
+  const cache = codeOnly(read(join(ROOT, "lib/rag/semanticCache.ts")));
+  const shadowRow = cache.slice(cache.indexOf("const row: Record<string, unknown> = {"));
+  if (/\bverdict\b/.test(shadowRow.slice(0, shadowRow.indexOf("};")))) {
+    fail(
+      "lib/rag/semanticCache.ts — recordShadow's insert now carries a verdict; probe " +
+        "rows must land unjudged (the generator is 80% correct and \u03c4 is a live threshold)",
+    );
+  }
+
+  // 7e. RAIL 3 AT RUNTIME, structurally. Banking is `insert into semantic_cache`,
+  // and it may only appear inside the two functions 7c already bars from the probe
+  // path. A third one would be a writer no rail covers.
+  const bankers = [...cache.matchAll(/insert into semantic_cache\b/g)].length;
+  if (bankers !== 2) {
+    fail(
+      `lib/rag/semanticCache.ts — ${bankers} writers of semantic_cache, expected 2 ` +
+        "(semanticCacheStore, backfillKeyModel); a new one needs adding to " +
+        "FORBIDDEN_IN_PROBE_PATH before a probe can reach it",
+    );
+  }
+
+  console.log(
+    `   1 lookup call site on PROBE_LOOKUP; ${PROBE_FILES.length} probe modules free of ` +
+      `${Object.keys(FORBIDDEN_IN_PROBE_PATH).length} banking/judging symbols; ` +
+      `${bankers} banking sites, none of them reachable; shadow inserts carry no verdict`,
+  );
+}
+
 sweepExpose();
 sweepScopes();
 sweepApiGates();
@@ -521,12 +657,14 @@ sweepBaselineReads();
 sweepTransformersBarrel();
 sweepDemoGates();
 sweepDemoScope();
+sweepProbeReplay();
 
 console.log(
   failures === 0
     ? "\nOK — keys stay wrapped, scopes are entered, every handler is gated, " +
         "baseline rows stay out of live reads, no guest can spend outside the "
-        + "demo's frozen scope, and the transformers barrel is unimported."
+        + "demo's frozen scope, the transformers barrel is unimported, and the "
+        + "probe path neither serves nor judges."
     : `\nFAILED — ${failures} violation(s).`,
 );
 if (failures) process.exitCode = 1;

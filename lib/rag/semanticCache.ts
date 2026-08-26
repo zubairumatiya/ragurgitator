@@ -133,7 +133,10 @@ async function documentSignature(cfg: ResolvedConfig): Promise<string> {
 // `sc-vN` in answerFingerprint in the same commit. That manual bump is the whole
 // invalidation mechanism for the prompt; there is deliberately no derived
 // prompt_version.
-async function currentFingerprint(cfg: ResolvedConfig): Promise<string> {
+// Exported for probe replay (lib/rag/probeReplay.ts): eligibility has to scope by
+// the SAME fingerprint the lookup will use, and a second hand-rolled copy of this
+// is how the guest-clone collision happened.
+export async function currentFingerprint(cfg: ResolvedConfig): Promise<string> {
   return answerFingerprint({
     cascadeEnabled: cfg.cascadeEnabled,
     documents: await documentSignature(cfg),

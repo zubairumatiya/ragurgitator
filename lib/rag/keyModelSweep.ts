@@ -39,25 +39,19 @@ import {
   spaceOf,
   type CalibrationResult,
 } from "@/lib/rag/semanticCacheCore";
+import { poolPairs, type SweepPair } from "@/lib/rag/keyModelSweepCore";
 import {
   listPairs,
   quarantinedPairs,
-  type PairDifficulty,
   type PairLabel,
 } from "@/lib/rag/semanticCachePairs";
 
-// A scored pair, source-tagged so the leaderboard can show the split — a row
-// carried entirely by shadow rows means something different from one built on
-// generated hard negatives, and the plan is explicit that neither source is
-// sufficient alone.
-export type SweepPair = {
-  textA: string;
-  textB: string;
-  label: PairLabel;
-  source: "shadow" | "generated";
-  origin?: "traffic" | "probe"; // shadow only
-  difficulty: PairDifficulty | null; // generated only
-};
+// The scored-pair shape and the pooling rule both live in the DB-free core now.
+// Re-exported here because this module is the one callers reach for, and because
+// the assignments in shadowPairs/pooledPairs below are the seam where the core's
+// restated label vocabularies meet the real PairLabel and PairDifficulty — add a
+// third label to either and those assignments stop compiling.
+export type { SweepPair } from "@/lib/rag/keyModelSweepCore";
 
 export type LeaderboardRow = {
   model: string;
@@ -139,25 +133,14 @@ async function shadowPairs(): Promise<SweepPair[]> {
   }
 }
 
-// The union, deduped on the unordered text pair so a question that appears in
-// both sources is scored once.
+// The union of the two pair sources, deduped on the unordered text pair.
 //
-// COLLISION RULE, and it is load-bearing — see F3. `traffic` shadow still wins:
-// it is a verdict on a question a person actually asked, against a synthesized
-// label. A `probe` shadow row does NOT, because a probe is not independent
-// evidence: F1 and F2 replayed these very pair texts through the lookup path, so
-// 146 of the 147 collisions here are a generated pair meeting ITSELF. Letting the
-// replay win meant the pair table's audited verdict was discarded in favour of
-// the label that replay was carrying — and since F3 wrote its verdicts to the
-// pair table only, the quarantine was inert for every pair that had been probed:
-// 8 rows F3 proved mislabelled re-entered the pool with the disproved label, and
-// the generated set the sweep scored collapsed from 165 to 32.
-//
-// So a probe row that duplicates a generated pair is DROPPED, whether that pair
-// survived the quarantine or was removed by it. `includeQuarantined` (the
-// before/after read) puts the quarantined pairs back in the generated set, which
-// suppresses the same probes for the same reason — the comparison is between two
-// label sets, not between two dedupe rules.
+// THREE reads, not two: `quarantinedPairs` is separate because listPairs has
+// already dropped those rows, and they are exactly the set a probe row must not
+// be allowed to speak for — the F3 defect, where 146 of 147 collisions were a
+// generated pair meeting ITSELF and the quarantine went inert for every pair
+// that had been probed. The rule that fixes it is poolPairs in
+// lib/rag/keyModelSweepCore.ts, which is where it is explained and tested.
 export async function pooledPairs(
   opts: { includeQuarantined?: boolean } = {},
 ): Promise<SweepPair[]> {
@@ -166,35 +149,10 @@ export async function pooledPairs(
     listPairs(opts),
     quarantinedPairs(),
   ]);
-  const byKey = new Map<string, SweepPair>();
-  // NUL as the separator, written as an ESCAPE rather than a literal control
-  // character: a raw \x00 in the source makes git treat this whole file as
-  // binary, so every change to it lands as an unreviewable "Bin" diff. Behaviour
-  // is identical -- NUL cannot occur in question text, so it can't forge a key.
-  const key = (a: string, b: string) =>
-    a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`;
-  for (const p of generated) {
-    byKey.set(key(p.textA, p.textB), {
-      textA: p.textA,
-      textB: p.textB,
-      label: p.label,
-      source: "generated",
-      difficulty: p.difficulty,
-    });
-  }
-  // Every pair the generator produced, INCLUDING the quarantined ones — the set a
-  // probe row is not allowed to speak for. Quarantined keys have to be listed
-  // separately because listPairs has already dropped them.
-  const generatedKeys = new Set([
-    ...generated.map((p) => key(p.textA, p.textB)),
-    ...quarantined.map((p) => key(p.textA, p.textB)),
-  ]);
-  for (const p of shadow) {
-    const k = key(p.textA, p.textB);
-    if (p.origin === "probe" && generatedKeys.has(k)) continue;
-    byKey.set(k, p);
-  }
-  return [...byKey.values()].filter((p) => p.textA !== p.textB);
+  // The rule itself is in the pure core, where a test can state the F3 defect as
+  // an assertion rather than a paragraph (lib/rag/keyModelSweepCore.test.ts).
+  // This function is now only the three reads it pools.
+  return poolPairs(generated, quarantined, shadow);
 }
 
 // --- the sweep ---------------------------------------------------------------

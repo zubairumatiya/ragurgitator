@@ -139,6 +139,12 @@ export const DEMO_ACTIONS = {
     "so it's off in the demo and its results weren't published with this " +
     "workspace. The cache it was measuring is live: ask a banked question two " +
     "different ways and watch the second one hit.",
+  probeReplay:
+    "Stocking the queue replays generated question variants through the cache, " +
+    "embedding each one — a spend the demo doesn’t carry. It also isn’t " +
+    "needed here: this workspace was published with a sample of real shadow " +
+    "events already waiting, which is what a signed-up account uses this to " +
+    "build for itself. The Accept / Reject queue below is the result either way.",
   // Not an action anyone takes — the outcome of taking enough of them. It shares
   // this table because it shares the transport: a 403 with a sentence, from the
   // one catch site.

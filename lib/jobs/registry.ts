@@ -12,6 +12,7 @@ import { type JobKind } from "@/lib/jobs/types";
 import { rescoreStep } from "@/lib/jobs/steps/rescore";
 import { bulkNdcgStep } from "@/lib/jobs/steps/bulkNdcg";
 import { autotuneStep } from "@/lib/jobs/steps/autotune";
+import { probeReplayStep } from "@/lib/jobs/steps/probeReplay";
 import { getActiveCriteria } from "@/lib/rag/evalSettingsStore";
 
 // Each step is precisely typed where it is defined; the registry is the one place
@@ -34,6 +35,7 @@ const STEPS: Partial<Record<JobKind, AnyStep>> = {
   // background nothing is. The launch and estimate routes refuse it by name rather
   // than letting a job run that would silently apply nothing.
   autotune: autotuneStep,
+  probe_replay: probeReplayStep,
 };
 
 export function stepFor(kind: JobKind): AnyStep | null {

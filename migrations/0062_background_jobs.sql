@@ -69,7 +69,7 @@ create table background_jobs (
   config_id     uuid        not null references configs(id) on delete cascade,
   config_label  text        not null,   -- captured at launch; survives a rename
 
-  kind          text        not null,   -- rescore | bulk_ndcg | autotune (lib/jobs/types.ts owns the list)
+  kind          text        not null,   -- lib/jobs/types.ts owns the list (no CHECK, same reason as status below)
   -- queued -> running -> succeeded
   --              |  \-> failed
   --              \-(cancel)-> cancelling -> cancelled
