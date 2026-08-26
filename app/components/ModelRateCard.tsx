@@ -8,18 +8,17 @@
 // before you've run a single eval.
 import { InfoDot } from "@/app/components/InfoDot";
 import type { RateCardRow } from "@/lib/rag/modelAppraisal";
-import { RATES_VERIFIED_ON } from "@/lib/rag/pricing";
+import { BATCH_DISCOUNT, RATES_VERIFIED_ON } from "@/lib/rag/pricing";
 
 const ABOUT =
   "List price per 1M tokens for every embedding model the app knows about, so " +
   "you don't have to go to the provider's site.\n\n" +
-  "A dash means we won't quote a figure, and there are two reasons a row gets " +
-  "one. The OpenAI models sit on a source conflict: the model card and the " +
-  "pricing page disagree ($0.13 vs $0.065 for 3-large). The Cohere v3 models " +
-  "sit on a withdrawn rate: Cohere used to publish $0.10/1M for the whole v3 " +
-  "family and has since removed per-token Embed v3 pricing from its site " +
-  "entirely, keeping only Embed 4 and capacity plans — while still serving the " +
-  "v3 models.\n\n" +
+  "These are STANDARD rates. Where a provider runs a Batch API, hovering the " +
+  "price shows what the same model costs through it.\n\n" +
+  "A dash means we won't quote a figure. Only the Cohere v3 models carry one: " +
+  "Cohere used to publish $0.10/1M for the whole v3 family and has since " +
+  "removed per-token Embed v3 pricing from its site entirely, keeping only " +
+  "Embed 4 and capacity plans — while still serving the v3 models.\n\n" +
   "Cost accounting charges every dashed row at its underlying number anyway, so " +
   "the ledger never under-counts. The dash is about what we'll claim, not what " +
   "we count.";
@@ -33,6 +32,21 @@ function fmtRate(usdPerM: number | null): string {
   if (usdPerM === null) return "—";
   if (usdPerM === 0) return "free";
   return `$${usdPerM.toFixed(2)}`;
+}
+
+// What this model costs through the provider's Batch API, DERIVED from the
+// standard rate by the same BATCH_DISCOUNT the batch lever banks its savings
+// with — never a second stored figure that could drift from the first. A
+// provider with no batch entry (Cohere, local) gets no note.
+//
+// Enough decimals to be exact: half of $0.13 is $0.065, and a 2dp "$0.07" would
+// be the card rounding a price it claims to be quoting.
+function batchNote(provider: string, usdPerM: number | null): string | undefined {
+  if (usdPerM === null || usdPerM === 0) return undefined;
+  const saved = (BATCH_DISCOUNT as Record<string, number>)[provider];
+  if (saved === undefined) return undefined;
+  const batch = Number((usdPerM * (1 - saved)).toFixed(4));
+  return `Batch API: $${batch} per 1M tokens, ${Math.round(saved * 100)}% off this standard rate.`;
 }
 
 export function ModelRateCard({
@@ -86,8 +100,8 @@ export function ModelRateCard({
                   className="px-3 py-2 text-right tabular-nums text-zinc-700 dark:text-zinc-300"
                   title={
                     r.usdPerM === null
-                      ? "No price we can stand behind — either the provider's own pages disagree (OpenAI) or the published rate has been withdrawn (Cohere v3). Still costed at the underlying figure."
-                      : undefined
+                      ? "No price we can stand behind — the published rate has been withdrawn (Cohere v3). Still costed at the underlying figure."
+                      : batchNote(r.provider, r.usdPerM)
                   }
                 >
                   {fmtRate(r.usdPerM)}

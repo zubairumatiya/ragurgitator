@@ -75,6 +75,17 @@ const ORIGINS: { value: CurveOrigin; label: string; note: string }[] = [
 ];
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 
+// What this curve's population is called mid-sentence. Every count the curve
+// reports is scoped to ONE origin and to rows at or above the shadow floor,
+// while the space picker on the heading row counts every judged row in the
+// space — so a sentence quoting a curve count and read against that picker
+// looks like a contradiction unless it says which set it is counting.
+const POPULATION: Record<CurveOrigin, string> = {
+  traffic: "real-traffic",
+  probe: "probe",
+  all: "pooled",
+};
+
 export function ShadowJudgePanel() {
   const [spaces, setSpaces] = useState<ShadowSpace[]>([]);
   const [space, setSpace] = useState("");
@@ -447,9 +458,9 @@ export function ShadowJudgePanel() {
             <p className={NOTE_AMBER}>
               {curve.attainability.blocker === "below-min-samples" ? (
                 <>
-                  No τ yet: {curve.totalJudged} judged never fills a serve set of{" "}
-                  {curve.minSamples}, so {pctOf(curve.target)} was never tested. Judge more
-                  events.
+                  No τ yet: {curve.totalJudged} judged {POPULATION[curve.origin]} events
+                  never fill a serve set of {curve.minSamples}, so {pctOf(curve.target)} was
+                  never tested. Judge more events.
                 </>
               ) : curve.attainability.blocker === "one-class-sample" ? (
                 <>
@@ -475,27 +486,45 @@ export function ShadowJudgePanel() {
                 </>
               ) : (
                 <>
-                  No τ at {pctOf(curve.target)}: the closest serve set held{" "}
-                  <span className="tabular-nums">{curve.attainability.bestRateAt!.n}</span> events
-                  at <span className="tabular-nums">{pctOf(curve.attainability.bestRate!)}</span>{" "}
+                  {/* TWO COUNTS IN ONE SENTENCE, and both were unlabelled: the
+                      population (this curve is one origin, above the floor —
+                      not the space picker's tally) and the SERVE SET (the
+                      events at or above a candidate τ, a prefix of that
+                      population, not all of it). Read against the picker, a
+                      bare "held 21 events" looks like the panel contradicting
+                      its own judged count. */}
+                  No τ at {pctOf(curve.target)} over this curve&apos;s{" "}
+                  <span className="tabular-nums">{curve.totalJudged}</span> judged{" "}
+                  {POPULATION[curve.origin]} events: the best serve set — the events at or
+                  above a candidate τ, not all{" "}
+                  <span className="tabular-nums">{curve.totalJudged}</span> — held{" "}
+                  <span className="tabular-nums">{curve.attainability.bestRateAt!.n}</span> at{" "}
+                  <span className="tabular-nums">{pctOf(curve.attainability.bestRate!)}</span>{" "}
                   ({curve.attainability.rejectsInBest} rejected).
+                  {/* WHERE THE TARGET IS SET, corrected: it left Settings →
+                      Savings when it stopped being a cosine's neighbour (see
+                      EvalSettings.tsx) and now lives beside the slider that
+                      shows what each precision costs. Both halves of this
+                      advice are things a guest can also do — human verdicts
+                      are carved out of the judge gate and the target write is
+                      not gated at all — so no demo branch is owed here. */}
                   {curve.attainability.requiredN !== null ? (
                     <>
                       {" "}
                       Clearing {pctOf(curve.target)} with {curve.attainability.rejectsInBest}{" "}
                       rejected needs{" "}
                       <span className="tabular-nums">{curve.attainability.requiredN}</span> events
-                      at or above τ — judge more, or lower the target for{" "}
-                      <span className="font-mono">{curve.targetSource.configLabel}</span> in
-                      Settings → Savings.
+                      at or above τ — judge more in the queue below, or lower{" "}
+                      <span className="font-mono">{curve.targetSource.configLabel}</span>&apos;s
+                      precision target beside the slider in step 4, Cache key model.
                     </>
                   ) : (
                     <>
                       {" "}
                       At {pctOf(curve.target)} no serve set size forgives a single reject, so only
-                      a perfectly clean prefix yields a τ. Lower the target for{" "}
-                      <span className="font-mono">{curve.targetSource.configLabel}</span> in
-                      Settings → Savings.
+                      a perfectly clean prefix yields a τ. Lower{" "}
+                      <span className="font-mono">{curve.targetSource.configLabel}</span>&apos;s
+                      precision target beside the slider in step 4, Cache key model.
                     </>
                   )}
                 </>

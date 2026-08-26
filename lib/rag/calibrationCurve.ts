@@ -89,6 +89,23 @@ export type CurveSelection = {
 // loss at any n a pair set will ever reach.
 const acceptsIn = (p: CurvePoint): number => Math.round(p.acceptRateAtOrAbove * p.n);
 
+// The smallest prefix size that clears `target` while still carrying `r` rejects.
+//
+// n ≥ r / (1 − target) is the algebra but NOT the answer: `1 - 0.9` is
+// 0.09999999999999998 in IEEE, so the quotient lands a hair above the true
+// minimum and `ceil` rounds a whole event up — 11 where 10 serves, 6 where 5
+// does at 0.8. The panel prints this as "judge this many more", so it has to be
+// settled against the same comparison the sweep makes — (n − r) / n ≥ target,
+// the identical division `acceptRateAtOrAbove` is built from — rather than
+// against the algebra that approximates it. One step in either direction is
+// enough: the quotient is off by at most an ulp.
+function smallestPassingN(r: number, target: number): number {
+  let n = Math.ceil(r / (1 - target));
+  while (n > r + 1 && (n - 1 - r) / (n - 1) >= target) n--;
+  while ((n - r) / n < target) n++;
+  return n;
+}
+
 // Pick τ: walk the curve from the strictest cut point downward and take the LAST
 // one that still clears `target` — the most inclusive threshold whose served set
 // keeps the false-hit rate under (1 − target).
@@ -157,13 +174,13 @@ export function selectFromCurve(
   }
 
   // requiredN inverts the acceptance test: accepts/n ≥ target with r rejects
-  // means (n − r)/n ≥ target, i.e. n ≥ r / (1 − target). At target = 1 the
-  // denominator is 0 — no prefix size ever forgives a single reject — so the
-  // honest answer is "not statable" rather than Infinity. Only meaningful when
-  // the best prefix actually FAILED, which is why it's gated on rejects > 0.
+  // means (n − r)/n ≥ target. At target = 1 no prefix size ever forgives a
+  // single reject, so the honest answer is "not statable" rather than Infinity.
+  // Only meaningful when the best prefix actually FAILED, which is why it's
+  // gated on rejects > 0.
   const requiredN =
     bestRateAt !== null && rejectsInBest > 0 && target < 1
-      ? Math.ceil(rejectsInBest / (1 - target))
+      ? smallestPassingN(rejectsInBest, target)
       : null;
 
   const blocker: AttainabilityBlocker =

@@ -61,12 +61,24 @@ test("costEmbed: a local (free) model is 0 without tripping the unknown path", (
 
 test("costEmbed: an UNVERIFIED rate still costs at its number, it does not dash to 0", () => {
   // The display/costing split (EmbedRate.verified): the Appraise → Models rate
-  // card renders "—" for text-embedding-3-large because OpenAI's own pages
-  // disagree, but accounting must keep using 0.13. If this ever returns 0, the
-  // rate card's caution has leaked into the ledger and embed spend under that
-  // model silently vanishes.
-  assert.equal(EMBED_RATES["text-embedding-3-large"].verified, false);
+  // card renders "—" for the Cohere v3 family because Cohere withdrew the
+  // published figure, but accounting must keep using 0.10. If this ever returns
+  // 0, the rate card's caution has leaked into the ledger and embed spend under
+  // those models silently vanishes.
+  assert.equal(EMBED_RATES["embed-english-v3"].verified, false);
+  assert.equal(costEmbed("embed-english-v3", 1_000_000), 0.1);
+});
+
+test("costEmbed: the OpenAI embedding rows are standard rates, and verified", () => {
+  // These were once unverified over a "sources disagree" reading of OpenAI's
+  // $0.13 and $0.065 for large. Those are the standard and Batch API rates for
+  // one model — BATCH_DISCOUNT.openai territory, not a conflict. The batch price
+  // must stay DERIVED, so a second row appearing here at 0.065 (or small at
+  // 0.01) is the mistake this guards.
+  assert.equal(EMBED_RATES["text-embedding-3-large"].verified, true);
   assert.equal(costEmbed("text-embedding-3-large", 1_000_000), 0.13);
+  assert.equal(EMBED_RATES["text-embedding-3-small"].verified, true);
+  assert.equal(costEmbed("text-embedding-3-small", 1_000_000), 0.02);
 });
 
 test("EMBED_RATES: every registered embedding model has a rate", () => {

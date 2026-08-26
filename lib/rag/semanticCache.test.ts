@@ -450,6 +450,33 @@ test("attainability: requiredN scales with the reject count, not the set size", 
   assert.equal(r.attainability.requiredN, 300);
 });
 
+test("attainability: requiredN is the n that actually passes, not ceil(r/(1−t))", () => {
+  // The algebra and IEEE disagree at these targets: `1 - 0.9` is
+  // 0.09999999999999998, so ceil(1/(1−0.9)) is 11 — while 10 events with 1
+  // reject score 9/10 = 0.9 and clear the target. The panel renders this as
+  // "judge this many more", so an event of slop is a wrong instruction.
+  const oneReject = [
+    { sim: 0.99, verdict: "accept" as const },
+    { sim: 0.98, verdict: "accept" as const },
+    { sim: 0.97, verdict: "accept" as const },
+    { sim: 0.96, verdict: "accept" as const },
+    { sim: 0.5, verdict: "reject" as const },
+  ];
+  const at90 = calibrateFromJudged(oneReject, 0.9, 5);
+  assert.equal(at90.attainability.blocker, "target-unreachable");
+  assert.equal(at90.attainability.rejectsInBest, 1);
+  assert.equal(at90.attainability.requiredN, 10);
+  // And the number it names has to pass the sweep's OWN comparison, which is
+  // the property the fix is really about.
+  const n = at90.attainability.requiredN!;
+  assert.ok((n - 1) / n >= 0.9);
+
+  // 0.8 slips the same way (ceil says 6, 4/5 = 0.8 clears it).
+  const at80 = calibrateFromJudged(oneReject.slice(0, 2).concat(oneReject[4]), 0.8, 3);
+  assert.equal(at80.attainability.rejectsInBest, 1);
+  assert.equal(at80.attainability.requiredN, 5);
+});
+
 test("attainability: target 1.0 states no requiredN — no prefix forgives a reject", () => {
   // At target 1 the inversion n ≥ r/(1−target) divides by zero. Infinity would be
   // arithmetically true but useless to render, so it's reported as unstatable.

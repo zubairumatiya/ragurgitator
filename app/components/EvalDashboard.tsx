@@ -1049,6 +1049,75 @@ export function EvalDashboard() {
     return merged;
   }, [summary]);
 
+  // Split the chunk cards into the ones a visitor can move and the ones they can
+  // only read. A demo is a dozen tunable questions scattered through ~460 frozen
+  // ones, so an unsplit list buries the entire point of the page under cards
+  // whose every control is either absent or a 403.
+  //
+  // DERIVED FROM `frozen === 0`, like DemoScope: a real account has no frozen
+  // rows, so this is null and the list renders exactly as it always did — one
+  // ungrouped sequence, no headers — rather than because anything asked who is
+  // logged in. A card counts as tunable when it holds a question that is not
+  // frozen, which is also what makes a question a visitor ADDS pull its chunk up
+  // into the top section.
+  const split = useMemo(() => {
+    if (summary === null) return null;
+    const tunableCount = summary.questions.filter((q) => !q.frozen).length;
+    const frozenCount = summary.questions.length - tunableCount;
+    if (frozenCount === 0) return null;
+    const tunable: ChunkGroup[] = [];
+    const frozen: ChunkGroup[] = [];
+    for (const g of groups) {
+      (g.questions.some((q) => !q.frozen) ? tunable : frozen).push(g);
+    }
+    return { tunable, frozen, tunableCount, frozenCount };
+  }, [groups, summary]);
+
+  // One chunk card. A function because the demo split renders the same card in
+  // two sections, and a card that drifted between them would make the page mean
+  // two different things depending on which half you were reading. `summary` is
+  // passed in rather than closed over so the call sites keep their non-null
+  // narrowing.
+  const renderGroup = (group: ChunkGroup, s: EvalSummary) => (
+    <ChunkGroupCard
+      key={group.chunkId}
+      group={group}
+      summary={s}
+      busy={busy}
+      // Each "which row is open" prop is narrowed to this group, so opening a
+      // row in one card leaves the other 79 cards' props referentially equal
+      // and memo skips re-rendering them.
+      editingId={idInGroup(group, editingId)}
+      expandedId={idInGroup(group, expandedId)}
+      explain={
+        idInGroup(group, expandedId) === null
+          ? undefined
+          : explains[expandedId as string]
+      }
+      rankingOpenId={idInGroup(group, rankingOpenId)}
+      addOpen={addingChunkId === group.chunkId}
+      genDifficulty={addingChunkId === group.chunkId ? genDifficulty : null}
+      trials={trialsByChunk?.[group.chunkId] ?? NO_TRIALS}
+      trialsLoading={trialsLoading}
+      onTrialRemoved={onTrialRemoved}
+      onTrialSaved={onTrialSaved}
+      onStartEdit={startEdit}
+      onCancelEdit={cancelEdit}
+      onSaveEdit={saveEdit}
+      onRemove={remove}
+      onToggleIgnore={toggleIgnore}
+      onToggleExpand={toggleExpand}
+      onToggleRanking={toggleRanking}
+      onCloseRanking={closeRanking}
+      onRankingChange={refreshSummary}
+      onOpenAdd={openAdd}
+      onCloseAdd={closeAdd}
+      onAddQuestion={addQuestion}
+      onGenerate={generateQuestion}
+      onDelegateChange={reload}
+    />
+  );
+
   // Disable the actions when they'd be no-ops. "Score pending" scores whatever
   // has no fresh result (new, edited, or retrieval-stale); "Re-score" re-runs
   // every labeled question. While the summary is still loading we leave them
@@ -1348,7 +1417,9 @@ export function EvalDashboard() {
 
           {/* One card per chunk under the config, carrying whatever questions are
               labeled to it. Keyed off `groups` rather than `summary.questions`
-              because a chunk with no questions still gets a card. */}
+              because a chunk with no questions still gets a card — which is also
+              why an empty chunk sits with the frozen ones under a demo: it holds
+              nothing a visitor can move either. */}
           {groups.length > 0 && (
             <section className="flex flex-col gap-2">
               <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
@@ -1358,47 +1429,36 @@ export function EvalDashboard() {
                 </span>
               </h2>
               <div className="flex flex-col gap-3">
-                {groups.map((group) => (
-                  <ChunkGroupCard
-                    key={group.chunkId}
-                    group={group}
-                    summary={summary}
-                    busy={busy}
-                    // Each "which row is open" prop is narrowed to this group, so
-                    // opening a row in one card leaves the other 79 cards' props
-                    // referentially equal and memo skips re-rendering them.
-                    editingId={idInGroup(group, editingId)}
-                    expandedId={idInGroup(group, expandedId)}
-                    explain={
-                      idInGroup(group, expandedId) === null
-                        ? undefined
-                        : explains[expandedId as string]
-                    }
-                    rankingOpenId={idInGroup(group, rankingOpenId)}
-                    addOpen={addingChunkId === group.chunkId}
-                    genDifficulty={
-                      addingChunkId === group.chunkId ? genDifficulty : null
-                    }
-                    trials={trialsByChunk?.[group.chunkId] ?? NO_TRIALS}
-                    trialsLoading={trialsLoading}
-                    onTrialRemoved={onTrialRemoved}
-                    onTrialSaved={onTrialSaved}
-                    onStartEdit={startEdit}
-                    onCancelEdit={cancelEdit}
-                    onSaveEdit={saveEdit}
-                    onRemove={remove}
-                    onToggleIgnore={toggleIgnore}
-                    onToggleExpand={toggleExpand}
-                    onToggleRanking={toggleRanking}
-                    onCloseRanking={closeRanking}
-                    onRankingChange={refreshSummary}
-                    onOpenAdd={openAdd}
-                    onCloseAdd={closeAdd}
-                    onAddQuestion={addQuestion}
-                    onGenerate={generateQuestion}
-                    onDelegateChange={reload}
-                  />
-                ))}
+                {split === null ? (
+                  groups.map((group) => renderGroup(group, summary))
+                ) : (
+                  <>
+                    <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                      Demo — {split.tunableCount}
+                    </h3>
+                    {split.tunable.map((group) => renderGroup(group, summary))}
+                    {/* Closed on open: these cards are here to be read, and a
+                        few hundred of them between a visitor and the rest of
+                        the page is the clutter the split exists to remove. */}
+                    <details className="group">
+                      {/* list-none alone leaves Safari's marker in place, and
+                          the "show"/"hide" hint is the affordance instead. */}
+                      <summary className="cursor-pointer list-none text-xs font-semibold uppercase tracking-wide text-zinc-500 hover:text-zinc-700 [&::-webkit-details-marker]:hidden dark:hover:text-zinc-300">
+                        Frozen — {split.frozenCount}
+                        <span
+                          aria-hidden
+                          className="ml-1 font-sans normal-case text-zinc-400"
+                        >
+                          <span className="group-open:hidden">— show</span>
+                          <span className="hidden group-open:inline">— hide</span>
+                        </span>
+                      </summary>
+                      <div className="mt-3 flex flex-col gap-3">
+                        {split.frozen.map((group) => renderGroup(group, summary))}
+                      </div>
+                    </details>
+                  </>
+                )}
               </div>
             </section>
           )}
@@ -1724,8 +1784,8 @@ const QuestionRow = memo(function QuestionRow({
               its own word. "ignored" on a held-out question would read as a
               judgement about the question rather than as membership of the test
               set; "ignored" on one of a demo's frozen questions would be worse
-              still, since nobody ignored it — the publish froze it so that one
-              visitor's experiment cannot cost the next one their demo. */}
+              still, since nobody ignored it — a publish did, and the row's own
+              badge is the only place that distinction is visible. */}
           {q.ignored && (
             <span
               title={
@@ -2686,6 +2746,10 @@ function BulkActions({
 // (nothing writes FROZEN_REASON but a publish), which is exactly the promise
 // this paragraph makes.
 //
+// IT NAMES ONLY THE LIVE HALF. The frozen set is counted by the "Frozen" section
+// the chunk list collapses it into, where a visitor meets it; saying it twice
+// made the banner argue a case the page below was already making.
+//
 // IT IS NOT AN isGuest() BRANCH, for the reason lib/demo/frozen.ts gives at
 // length: a real account has no frozen rows, so `frozen === 0` and this renders
 // nothing — by construction rather than by a test of who is asking. That also
@@ -2704,8 +2768,7 @@ function DemoScope({ summary }: { summary: EvalSummary }) {
         {summary.asPublished ? " — that is the “As published” row, and it never moves." : "."}{" "}
         <strong className="font-semibold">{tunable} of them are live</strong>,
         picked to span a first-place hit through to a complete miss: re-score
-        them, autotune them, add your own. The other {frozen} are frozen, so one
-        visitor’s experiment cannot cost the next one their demo.
+        them, autotune them, add your own.
       </p>
     </section>
   );

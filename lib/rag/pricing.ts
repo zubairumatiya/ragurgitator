@@ -119,10 +119,13 @@ const LLM_PRICES: Record<string, LlmPrice> = {
 // It's policy, not an API-readable value, so it goes stale silently —
 // RATES_VERIFIED_ON dates it, and the rate card footnotes that date.
 //
-// The exception is text-embedding-3-large, where OpenAI's own two pages disagree
-// (model card $0.13/1M, pricing page $0.065/1M). A conflict between primary
-// sources is a stronger reason to withhold a number than a missing one, so it's
-// unverified; we keep costing at 0.13 so accounting stays conservative.
+// This table is STANDARD (synchronous) rates only. A provider's batch rate is not
+// a second entry here — it's BATCH_DISCOUNT below, applied as a fraction off the
+// standard number. The OpenAI embedding rows were once marked unverified over a
+// supposed source conflict; there was none. $0.13 and $0.065 for
+// text-embedding-3-large are its standard and Batch API rates for the SAME model,
+// which is the discount convention working, not two pages contradicting each
+// other. Both OpenAI rows are verified.
 export type EmbedRate = {
   usdPerM: number; // what costEmbed uses — always a number
   verified: boolean; // false ⇒ rate card shows "—"
@@ -154,12 +157,11 @@ export const EMBED_RATES: Record<string, EmbedRate> = {
   "voyage-code-2": { usdPerM: 0.12, verified: true, freeTierM: 200 },
   "voyage-finance-2": { usdPerM: 0.12, verified: true, freeTierM: 50 },
   "voyage-law-2": { usdPerM: 0.12, verified: true, freeTierM: 50 },
-  // OpenAI — see the note above; unverified on a source conflict, not absence.
-  // The same model-card-vs-pricing-page conflict affects the embedding rows
-  // generally, so `small` inherits `large`'s unverified status rather than being
-  // trusted just because nobody has noticed a second number for it yet.
-  "text-embedding-3-large": { usdPerM: 0.13, verified: false, freeTierM: null },
-  "text-embedding-3-small": { usdPerM: 0.02, verified: false, freeTierM: null },
+  // OpenAI, standard rates. Batch API halves both (BATCH_DISCOUNT.openai), so
+  // large is $0.065/1M and small $0.01/1M through that path — derived, never a
+  // second row. No free tier on embeddings.
+  "text-embedding-3-large": { usdPerM: 0.13, verified: true, freeTierM: null },
+  "text-embedding-3-small": { usdPerM: 0.02, verified: true, freeTierM: null },
   // Cohere. embed-v4 is the one embed figure Cohere still publishes, and it's
   // corroborated — it stays verified. The 1024 row is the SAME MODEL at a
   // narrower Matryoshka width, so it bills at the same rate by construction; it
