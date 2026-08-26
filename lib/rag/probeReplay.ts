@@ -145,10 +145,20 @@ export async function eligiblePairs(limit = 500): Promise<ProbePair[]> {
     // VARIANT, and which of text_a/text_b that is takes variantOf to decide. Keyed on
     // (config_id, fingerprint, new_query_hash) — recordShadow's on-conflict target
     // exactly, so this check and the constraint cannot disagree.
+    //
+    // BOTH TABLES, because "recorded" and "attempted" stopped being the same thing
+    // when the single-probe route (phase 4) raised its floor. A probe below
+    // shadowLogFloor writes no shadow row on purpose, so the shadow log alone
+    // leaves it eligible and the next call re-selects it — and selectProbes is a
+    // total order, so that is the same pair every time, forever. probe_attempts
+    // (0079) is keyed identically and carries the attempts the floor swallowed.
     const probed = new Set(
       (
         await sql<{ new_query_hash: string }[]>`
           select new_query_hash from semantic_cache_shadow
+          where config_id = ${cfg.id} and fingerprint = ${fingerprint}
+          union
+          select new_query_hash from probe_attempts
           where config_id = ${cfg.id} and fingerprint = ${fingerprint}
         `
       ).map((r) => r.new_query_hash),
@@ -345,6 +355,37 @@ export async function probeRow(variantText: string): Promise<ProbeRow | null> {
       : null;
   } catch (err) {
     if (isMissingTable(err)) return null;
+    throw err;
+  }
+}
+
+// Remember that this variant was probed, whatever the lookup made of it.
+//
+// WHY IT IS NOT CONDITIONAL ON THE PROBE HAVING QUEUED. The below-floor case is
+// the only one that needs remembering — a probe that recorded a shadow row is
+// already excluded by eligiblePairs' first arm — but writing unconditionally is
+// what keeps the two arms from disagreeing. A caller that recorded the attempt
+// only on the miss would have to reproduce the floor test, and a floor test in
+// two places is a floor test that eventually differs from itself.
+//
+// IDEMPOTENT on 0079's primary key, which is recordShadow's on-conflict target,
+// so a re-probe of the same variant under the same index updates nothing and
+// raises nothing.
+//
+// BEST-EFFORT for the reason probeRow is: a deployment can run ahead of its
+// migrations, and a missing table here must cost a visitor a repeated pair
+// rather than fail a probe that already spent its embedding.
+export async function recordProbeAttempt(variantText: string): Promise<void> {
+  const cfg = activeConfig();
+  try {
+    const fingerprint = await currentFingerprint(cfg);
+    await sql`
+      insert into probe_attempts (config_id, fingerprint, new_query_hash)
+      values (${cfg.id}, ${fingerprint}, ${sha256(variantText)})
+      on conflict do nothing
+    `;
+  } catch (err) {
+    if (isMissingTable(err)) return;
     throw err;
   }
 }

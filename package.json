@@ -17,6 +17,7 @@
     "jobs:smoke": "node --env-file=.env.local --import tsx scripts/jobs-smoke.ts",
     "resume:7b": "node --env-file=.env.local --import tsx scripts/resume-7b.ts",
     "phase8": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/phase8.ts",
+    "phase10": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/phase10.ts",
     "probe:eligibility": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/probe-eligibility.ts",
   "f1": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f1-negatives.ts",
     "f2": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f2-floor.ts",

@@ -1260,6 +1260,61 @@ export async function cloneSeedWorkspace(
       [guestId] as never[],
     );
 
+    // AND THE SEED'S OWN BANK, FORWARDED — without which phase 3 cannot survive a
+    // second hop, and the demo has exactly two.
+    //
+    // The tranche above is drawn from what the visible sample LEFT OVER, which
+    // works once: the master holds 186 pairs, the sample takes 60 and the bank
+    // takes 20 of the remaining 126. It cannot work twice. The snapshot's pair
+    // TABLE holds only the 58 that were made visible — its own 20 banked rows live
+    // in demo_pair_bank, which the select above never reads — so on the
+    // snapshot→guest hop the visible cap (60) swallows all 58 and `p.banked`
+    // matches nothing. Every guest then opens with an empty bank, and "Generate
+    // pairs" renders a slider bounded by zero, i.e. does not render at all.
+    //
+    // That is not a shortfall that shows up as a smaller number: PAIR_VISIBLE_CAP
+    // is what caps the seed's visible set in the first place, so the seed's pair
+    // table is ALWAYS at or under the cap on the next hop and the leftover pool is
+    // ALWAYS empty. Phase 3 ships invisible in production and only in production —
+    // an itest cloning straight from a fixture master sees the one hop that works.
+    //
+    // So the bank is forwarded as a bank. origin_question_id is re-remapped out of
+    // the payload (the seed's ids → the guest's) exactly as the insert above maps
+    // it out of the row, and for the same reason: _map_question dies with this
+    // transaction, so a payload that kept the seed's question id would name a row
+    // the guest does not have.
+    const carried = await tx.unsafe(
+      `insert into demo_pair_bank (user_id, kind, payload)
+       select $1, 'pair',
+              b.payload || jsonb_build_object('origin_question_id', mq.new_id)
+         from demo_pair_bank b
+         join _map_question mq
+           on mq.old_id = (b.payload->>'origin_question_id')::uuid
+        where b.user_id = $2 and b.kind = 'pair'`,
+      [guestId, seedId] as never[],
+    );
+
+    // The seed's banked VERDICTS, forwarded for the same reason and with the same
+    // consequence if they are not. Each hop blanks a fresh PAIR_BLANK_CAP rows, but
+    // the previous hop's answers stay behind in the seed's bank — so a guest
+    // arrived with 12 unjudged pairs and only 6 verdicts to resolve them, and
+    // "Screen pairs" left 6 permanently unscreenable. There is no way for the guest
+    // to ever learn those six, because the only copy of the audited answer was the
+    // seed's bank row.
+    //
+    // Keyed through _map_pair rather than _map_question: a verdict names the PAIR it
+    // describes. A seed verdict whose pair was banked rather than made visible has
+    // no clone to point at and is dropped by the join — correctly, since the pair it
+    // describes will arrive through the bank above carrying its verdict in-payload.
+    const carriedVerdicts = await tx.unsafe(
+      `insert into demo_pair_bank (user_id, kind, pair_id, payload)
+       select $1, 'verdict', mp.new_id, b.payload
+         from demo_pair_bank b
+         join _map_pair mp on mp.old_id = b.pair_id
+        where b.user_id = $2 and b.kind = 'verdict'`,
+      [guestId, seedId] as never[],
+    );
+
     // --- 6. REWRITE THE CACHE FINGERPRINTS, or step 5 was for nothing --------
     //
     // currentFingerprint hashes documentSignature, which is an md5 over the
@@ -1353,8 +1408,10 @@ export async function cloneSeedWorkspace(
       sweepRows,
       sweepModels,
       pairRows,
-      bankedPairs: banked.count ?? 0,
-      blankedVerdicts: blanked.count ?? 0,
+      // Freshly withheld PLUS forwarded: from the guest's side these are one bank,
+      // and on the hop that matters (snapshot→guest) the first term is always 0.
+      bankedPairs: (banked.count ?? 0) + (carried.count ?? 0),
+      blankedVerdicts: (blanked.count ?? 0) + (carriedVerdicts.count ?? 0),
     };
   }) as Promise<CloneSummary>;
 }

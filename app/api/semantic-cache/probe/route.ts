@@ -38,6 +38,7 @@ import {
   eligiblePairs,
   poolSafeProbes,
   probeRow,
+  recordProbeAttempt,
   replayPairs,
   selectOneProbe,
 } from "@/lib/rag/probeReplay";
@@ -110,6 +111,13 @@ export async function POST(request: Request) {
     // The panel can say that; what it may not say is "your pair, replayed", since
     // the nearest match is not guaranteed to be the origin (replayPairs' own
     // caveat, and F1's dead-origin lesson).
+    // BEFORE the read-back, so the pair leaves the eligible pool whichever way the
+    // lookup went. Above the floor a shadow row already excludes it; below the
+    // floor nothing was written, and without this the next call re-selects this
+    // very pair — selectProbes is a total order, so the button would hand out
+    // 003ea129 forever while `remaining` never moved.
+    await recordProbeAttempt(pair.variantText);
+
     const row = await probeRow(pair.variantText);
     return Response.json({
       probed: true,

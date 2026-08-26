@@ -1421,6 +1421,89 @@ describe("cloneSeedWorkspace generated pairs", () => {
     assert.equal((await bank()).length, PAIR_BANK_CAP + PAIR_BLANK_CAP);
   });
 
+  it("carries the bank across a SECOND hop, which is the one production runs", async () => {
+    // THE HOP THE OTHER TESTS DO NOT MAKE, and the reason phase 3 shipped
+    // invisible. Every test above clones master→guest once, which is the hop that
+    // works: the master holds 100 pairs, the visible sample takes 60 and the bank
+    // tranche takes 20 of the 40 left over.
+    //
+    // Production never makes that hop. It makes master→SNAPSHOT (demo:snapshot)
+    // and then snapshot→guest (every visitor), and the second one has no leftovers
+    // to draw on: the snapshot's pair TABLE holds only the 60 that were made
+    // visible, its own 20 banked rows living in demo_pair_bank. PAIR_VISIBLE_CAP
+    // swallows all 60, `p.banked` matches nothing, and the guest opens with an
+    // empty bank — so "Generate pairs" is sized off zero and never renders.
+    //
+    // This cannot be caught by a one-hop test at any fixture size, because the cap
+    // that empties the pool is the same cap that filled it.
+    await seedPairs();
+    const snapshot = await createUser(admin);
+    const published = await cloneSeedWorkspace(seed.id, snapshot.id);
+    assert.equal(published.bankedPairs, PAIR_BANK_CAP, "the first hop banks from leftovers");
+
+    const provisioned = await cloneSeedWorkspace(snapshot.id, guest.id);
+
+    assert.equal(
+      provisioned.bankedPairs,
+      PAIR_BANK_CAP,
+      "the second hop must FORWARD the bank, having no leftovers of its own",
+    );
+    const banked = (await bank()).filter((r) => r.kind === "pair");
+    assert.equal(banked.length, PAIR_BANK_CAP, "and the rows must actually land");
+
+    // Forwarded payloads must name the GUEST's questions, not the snapshot's —
+    // _map_question dies with each transaction, so a payload that kept the
+    // previous hop's id would be a foreign key nobody downstream can resolve.
+    const guestQuestions = new Set(
+      (
+        await admin<{ id: string }[]>`
+          select q.id from eval_questions q
+            join documents d on d.id = q.document_id
+           where d.user_id = ${guest.id}`
+      ).map((r) => r.id),
+    );
+    for (const r of banked) {
+      assert.ok(
+        guestQuestions.has(r.payload.origin_question_id as string),
+        "a forwarded payload must be remapped onto the guest's own question",
+      );
+    }
+
+    // And the verdicts, for the symptom that hid behind the same cause: each hop
+    // blanks a fresh PAIR_BLANK_CAP rows, so without forwarding the guest arrives
+    // holding two hops' worth of unscreened pairs and one hop's worth of answers —
+    // leaving PAIR_BLANK_CAP of them permanently unscreenable, since the only copy
+    // of the audited verdict stayed in the snapshot's bank.
+    // BOTH HOPS' WORTH, not one. Deliberately not compared against the guest's
+    // total unjudged count: the fixture also carries pairs that were never judged
+    // in the first place, and those correctly have no banked answer — only a row
+    // whose verdict was CLEARED on the way in is owed one.
+    const verdicts = (await bank()).filter((r) => r.kind === "verdict");
+    assert.equal(
+      verdicts.length,
+      PAIR_BLANK_CAP * 2,
+      "without forwarding this is PAIR_BLANK_CAP, and the first hop's six are unscreenable forever",
+    );
+    // Each one must point at a pair the guest actually holds, and at one that is
+    // genuinely blanked — a verdict aimed at a row that already has its answer
+    // would resolve nothing and inflate the screen's count.
+    const blankedIds = new Set(
+      (
+        await admin<{ id: string }[]>`
+          select s.id from semantic_cache_pairs s
+            join eval_questions q on q.id = s.origin_question_id
+            join documents d on d.id = q.document_id
+           where d.user_id = ${guest.id} and s.verdict is null`
+      ).map((r) => r.id),
+    );
+    for (const v of verdicts) {
+      assert.ok(
+        v.pair_id && blankedIds.has(v.pair_id),
+        "a forwarded verdict must name a blanked pair of the guest's own",
+      );
+    }
+  });
+
   it("leaves the seed's own pair set untouched", async () => {
     await seedPairs();
     await cloneSeedWorkspace(seed.id, guest.id);
