@@ -104,6 +104,27 @@ export function payoffAt(econ: CacheEconomics, tau: number): Payoff | null {
   };
 }
 
+// THE CEILING, and why the slider stops well short of the published band.
+//
+// The sum of the bins: the most any τ AT OR ABOVE THE CENSUS FLOOR could serve.
+// Worth stating on screen because the two rates beside it move in opposite ways —
+// recall@τ hits 100% while the hit rate sits at a fifth — and without it that
+// reads as a contradiction rather than as "most questions arrived near nothing".
+//
+// NOT A TRUE CEILING, and the UI must not call it one. A row is in the bins only
+// because its nearest match cleared shadowLogFloor at lookup time; a question
+// whose best match was 0.6 was never logged, so a τ of 0.6 would serve it and
+// nothing here can count it. Below the floor this number under-states, which is
+// the same blind spot `belowCensusFloor` flags on the served count. Lowering τ
+// past the floor therefore buys real hits — of unmeasured precision, which is
+// exactly why the floor is where it is.
+export function censusCeiling(econ: CacheEconomics): { matched: number; rate: number } | null {
+  const questionsSeen = econ.entries + servedAt(econ.bins, econ.liveThreshold);
+  if (questionsSeen === 0) return null;
+  const matched = econ.bins.reduce((n, [, count]) => n + count, 0);
+  return { matched, rate: matched / questionsSeen };
+}
+
 // Published hit rates, for scale. Production semantic caches report 30–70%
 // (GPTCache; GPT Semantic Cache measures 61–69% fewer calls) — see
 // docs/long-term-savings-research.md §5.2. Quoted as a RANGE and never as a

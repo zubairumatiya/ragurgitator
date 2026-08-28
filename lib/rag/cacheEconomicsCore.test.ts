@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { payoffAt, servedAt, type CacheEconomics } from "./cacheEconomicsCore";
+import {
+  censusCeiling,
+  payoffAt,
+  servedAt,
+  type CacheEconomics,
+} from "./cacheEconomicsCore";
 
 const econ = (over: Partial<CacheEconomics> = {}): CacheEconomics => ({
   space: "voyage-4",
@@ -70,4 +75,21 @@ test("payoffAt: a τ under the census floor is flagged", () => {
 
 test("payoffAt: nothing seen at all is null, not a 0/0 rate", () => {
   assert.equal(payoffAt(econ({ entries: 0, bins: [] }), 0.95), null);
+});
+
+// The ceiling is a fact about the traffic, so it must be the one number on the
+// readout that a slider position cannot move — that is the whole reason it is
+// shown beside a rate that does.
+test("censusCeiling: every logged match, over the same fixed denominator", () => {
+  const c = censusCeiling(econ())!;
+  assert.equal(c.matched, 20); // all five bins, not just those above the live τ
+  assert.equal(c.rate, 0.2); // over the 100 questions seen
+  // No τ can serve more than the ceiling.
+  for (const tau of [0.8, 0.9, 0.95, 0.99]) {
+    assert.ok(payoffAt(econ(), tau)!.served <= c.matched);
+  }
+});
+
+test("censusCeiling: nothing seen at all is null, matching payoffAt", () => {
+  assert.equal(censusCeiling(econ({ entries: 0, bins: [] })), null);
 });

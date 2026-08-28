@@ -24,6 +24,7 @@
 
 import { Tooltip } from "@/app/components/Tooltip";
 import {
+  censusCeiling,
   payoffAt,
   REFERENCE_HIT_RATE,
   type CacheEconomics,
@@ -38,6 +39,9 @@ const usd = (v: number) => (v > 0 && v < 0.005 ? "<$0.01" : `$${v.toFixed(2)}`);
 const ABOUT =
   "What this precision target costs in served questions, for the space the " +
   "cache actually serves from.\n\n" +
+  "REAL TRAFFIC ONLY — questions someone actually asked, counted from the " +
+  "shadow census. The pair bank never enters it, so this shares no population " +
+  "with the recall and precision columns in the table above.\n\n" +
   "HIT RATE — of every question this cache has seen, the share τ would serve. " +
   "The denominator is banked answers (questions that missed) plus the " +
   "questions served at today's threshold, so it counts each question once and " +
@@ -68,6 +72,10 @@ export function PayoffReadout({
 }) {
   const now = payoffAt(econ, econ.liveThreshold);
   const at = tau === null ? null : payoffAt(econ, tau);
+  // The most any τ could serve — see censusCeiling. Read once, not per position:
+  // it is a property of the traffic, and the whole point of showing it is that
+  // dragging the slider does not move it.
+  const ceiling = censusCeiling(econ);
 
   // No questions have reached this cache in this space — every rate below would
   // be 0/0. Says which of the two halves is empty, since "nothing banked" and
@@ -89,8 +97,12 @@ export function PayoffReadout({
     <div className="flex flex-col gap-2 border-t border-zinc-200 pt-2 dark:border-zinc-800">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs">
         <Tooltip align="left" text={ABOUT}>
+          {/* NAMES ITS POPULATION, because the numbers either side of it do not
+              share one: recall@τ and precision in the table are over the labeled
+              pair set, and this is over traffic. Unlabelled, a 100% recall above
+              a 21% hit rate reads as the panel contradicting itself. */}
           <span className="text-zinc-500 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
-            Which serves
+            Which serves <span className="text-zinc-400 dark:text-zinc-500">(real traffic)</span>
           </span>
         </Tooltip>
 
@@ -127,6 +139,25 @@ export function PayoffReadout({
       </div>
 
       <Band rate={shown.hitRate} />
+
+      {/* THE CEILING. Without it the panel looks broken at the bottom of the
+          slider: recall@τ reads 100% while the hit rate stalls around a fifth,
+          and the two are over different populations — recall over the labeled
+          pairs, this over traffic. The reconciling fact is that most questions
+          never arrived near anything cached — within the measured range, since
+          the census itself starts at the floor. */}
+      {ceiling !== null && (
+        <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+          Ceiling <span className="tabular-nums">{pct(ceiling.rate)}</span> above the
+          floor — only{" "}
+          <span className="tabular-nums">{ceiling.matched.toLocaleString()}</span> of{" "}
+          <span className="tabular-nums">{shown.questionsSeen.toLocaleString()}</span>{" "}
+          questions arrived within{" "}
+          <span className="tabular-nums">{econ.censusFloor.toFixed(2)}</span> of a
+          cached one, so no τ in the swept range reaches the rest. A τ under the
+          floor would serve more, unmeasured.
+        </p>
+      )}
 
       {/* WHAT MOVING THE SLIDER DID, in questions. The absolute rate answers "is
           this cache any good"; only the delta answers "what did that drag just
