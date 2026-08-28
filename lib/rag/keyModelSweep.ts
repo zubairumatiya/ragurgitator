@@ -53,6 +53,29 @@ import {
 // third label to either and those assignments stop compiling.
 export type { SweepPair } from "@/lib/rag/keyModelSweepCore";
 
+// A SINK FOR THE SWEEP'S RAW ARITHMETIC — phase 2 of
+// docs/demo-cache-replay-plan.md.
+//
+// Everything the leaderboard prints is a pure function of `scored`, one
+// `{sim, label}[]` per candidate over one pooled pair set. The embeddings that
+// produce those cosines are what a guest cannot afford; the cosines themselves
+// are ~30 kB, which is why the demo banks them and replays the arithmetic rather
+// than banking the answer. This is how the publish gets at them.
+//
+// OFFLINE ONLY, exactly like `includeQuarantined` beside it: no route passes an
+// observer, and the only caller is lib/demo/captureMatrix at publish time. It is
+// a sink and not a return value so that a cancelled sweep still hands over what
+// it managed to score, and so the ordinary path allocates nothing.
+//
+// `onScored` fires ONLY for a model that scored the whole set — an unavailable
+// provider, a failure and a cancellation each push a leaderboard row without
+// ever calling it, which is what lets the capture record that model as null
+// rather than as a row of zeros.
+export type SweepObserver = {
+  onPairs?(pairs: SweepPair[]): void;
+  onScored?(model: string, scored: { sim: number; label: PairLabel }[]): void;
+};
+
 export type LeaderboardRow = {
   model: string;
   space: string;
@@ -239,10 +262,15 @@ export async function runKeyModelSweep(
   candidates: string[] = [...config.semanticCache.keyModelSweep.candidates],
   shouldStop: ShouldStop = NEVER_STOP,
   // `includeQuarantined` is an OFFLINE READ ONLY — the F3 before/after. No route
-  // passes it; see listPairs.
-  opts: { includeQuarantined?: boolean } = {},
+  // passes it; see listPairs. `observe` is offline-only for the same reason and
+  // is documented on SweepObserver.
+  opts: { includeQuarantined?: boolean; observe?: SweepObserver } = {},
 ): Promise<SweepResult> {
   const pairs = await pooledPairs(opts);
+  // Before anything is scored, so that a CANCELLED sweep still tells the observer
+  // which pairs the scores it did see were aligned to. The array and the per-model
+  // `scored` arrays are parallel, and that is the whole contract.
+  opts.observe?.onPairs?.(pairs);
   const counts = {
     total: pairs.length,
     shadow: pairs.filter((p) => p.source === "shadow").length,
@@ -321,6 +349,7 @@ export async function runKeyModelSweep(
         });
         continue;
       }
+      opts.observe?.onScored?.(model, s.scored);
       rows.push({
         ...base,
         available: true,

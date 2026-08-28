@@ -50,6 +50,9 @@ import {
 } from "../lib/demo/tunable";
 import { resolveConfig, withConfig } from "../lib/rag/activeConfig";
 import { ndcg } from "../lib/rag/evalMetrics";
+import { captureReplayMatrix } from "../lib/demo/captureMatrix";
+import { writeMatrix } from "../lib/demo/replay";
+import { DEMO_MATRIX_MAX_BYTES } from "../lib/demo/replayCore";
 import { runKeyModelSweep } from "../lib/rag/keyModelSweep";
 import {
   PUBLISHED_SWEEP_MAX_BYTES,
@@ -763,6 +766,28 @@ async function main() {
       const scoped = await resolveConfig(configId);
       if (!scoped) die(`config ${configId} did not resolve in the master's scope.`);
       return withConfig(scoped, async () => {
+        // THE MATRIX FIRST, then the published sweep — phase 2 of
+        // docs/demo-cache-replay-plan.md, and the order is the cost argument.
+        // This run pools the quarantined pairs as well, so it is the one that
+        // buys their vectors; every text the published sweep then needs is
+        // already banked and content-addressed, so it runs warm. Reverse the two
+        // and the operator pays the cold-cache hour twice.
+        const capture = await captureReplayMatrix(await scopedAcceptTarget());
+        await writeMatrix(master, capture.matrix);
+        console.log(
+          `  banked a ${capture.matrix.pairs.length}×${capture.matrix.models.length} similarity matrix ` +
+            `(${capture.scoredModels} models scored, ${capture.quarantined} pairs quarantined) ` +
+            `at ${(capture.bytes / 1024).toFixed(0)} KB`,
+        );
+        // Soft, and reported for PUBLISHED_SWEEP_MAX_BYTES' reason exactly: the
+        // matrix rides in a guest's first payload, so the alternative to
+        // noticing here is noticing on a visitor's connection.
+        if (capture.bytes > DEMO_MATRIX_MAX_BYTES) {
+          console.log(
+            `⚠ the replay matrix is ${(capture.bytes / 1024).toFixed(0)} KB, over the ` +
+              `${(DEMO_MATRIX_MAX_BYTES / 1024).toFixed(0)} KB this is meant to stay under.`,
+          );
+        }
         const out = await runKeyModelSweep(await scopedAcceptTarget());
         await writePublishedSweep(configId, out);
         return out;
@@ -811,8 +836,18 @@ async function main() {
       `${summary.bankedQuestions} banked questions, ` +
       `${summary.shadowEvents} shadow events (${summary.shadowQueued} unjudged), ` +
       `${summary.replayRows} model rows (${summary.replayScored} scored), ` +
-      `${summary.sweepRows === 0 ? "no cache-key sweep" : `a cache-key sweep (${summary.sweepModels} models)`}\n`,
+      `${summary.sweepRows === 0 ? "no cache-key sweep" : `a cache-key sweep (${summary.sweepModels} models)`}, ` +
+      `${summary.matrixPairs === 0 ? "NO replay matrix" : `a replay matrix over ${summary.matrixPairs} pairs`}\n`,
   );
+  // Louder than the count above, because a build with no matrix is the one
+  // failure of this phase that looks like a working publish: every other number
+  // on the line is unchanged, and §4 goes back to being a poster.
+  if (summary.matrixPairs === 0) {
+    console.log(
+      "⚠ no similarity matrix reached the snapshot, so the semantic-cache page has nothing\n" +
+        "  to replay. Re-run with --sweep, which is what captures it.\n",
+    );
+  }
   // The one thing a guest can ADD without a key: "Bulk actions → Add question →
   // Add cached" reads question_cache, which step 4e of the clone now carries
   // (phase 6.1 of docs/demo-analytics-plan.md).

@@ -29,6 +29,7 @@ import { withUser } from "../../lib/auth/userScope";
 import { config } from "../../lib/config";
 import { fragment, privilegedSql } from "../../lib/db";
 import { cloneSeedWorkspace } from "../../lib/demo/clone";
+import { forgetMatrix, readMatrix } from "../../lib/demo/replay";
 import {
   PAIR_BANK_CAP,
   PAIR_BLANK_CAP,
@@ -49,7 +50,7 @@ import {
 import { chunksTable, modelDimension, vectorLiteral } from "../../lib/rag/vectorStore";
 import type { CachedResult } from "../../lib/rag/semanticCache";
 import { semanticCacheLookup, semanticCacheStore } from "../../lib/rag/semanticCache";
-import { adminClient, createUser, ensureAppRole, truncateAll } from "../support/harness";
+import { adminClient, createUser, deleteUser, ensureAppRole, truncateAll } from "../support/harness";
 
 type Sql = ReturnType<typeof adminClient>;
 
@@ -122,6 +123,10 @@ after(async () => {
 // exactly, which is why the counts below are literals rather than derived.
 beforeEach(async () => {
   await truncateAll(admin);
+  // The replay matrix is memoed per process and per user (lib/demo/replay), on
+  // the argument that no request path writes it. A truncate IS a write, and the
+  // only one that argument does not cover.
+  forgetMatrix();
   seed = await createUser(admin);
   guest = await createUser(admin);
 
@@ -1518,5 +1523,140 @@ describe("cloneSeedWorkspace generated pairs", () => {
     // 20 unjudged in the fixture and not one more: blanking happens on the COPY,
     // exactly as the shadow queue's does.
     assert.equal(unjudged, 20, "clearing a verdict never happens in place");
+  });
+});
+
+// THE SIMILARITY MATRIX (step 5g) — phase 2 of docs/demo-cache-replay-plan.md.
+//
+// The demo's semantic-cache page replays the master's own arithmetic rather than
+// shipping a sample of its inputs, and the matrix is that arithmetic: one cosine
+// per pair per candidate model, plus each pair's label and a hash of its two
+// texts. Three properties are asserted here and none of them is visible on a
+// page that renders:
+//
+//   1. IT SURVIVES BOTH HOPS. The publish is master → snapshot → guest, and the
+//      last banked artifact to cross this seam (demo_pair_bank, phase 3 of the
+//      lab plan) shipped INVISIBLE in production for exactly this reason: the
+//      first hop worked, the second found nothing to forward, and an itest that
+//      clones once could not see it. So this one clones twice.
+//   2. A REPUBLISH REPLACES IT. demo_replay hangs off user_profiles alone, so no
+//      cascade in step 0's list reaches it, and 0080's primary key would keep the
+//      OLD payload on a conflict — the previous build's matrix under the new
+//      build's pairs, arriving as a perfectly successful copy.
+//   3. THE COUNT IS OUT OF THE PAYLOAD. `matrixPairs` reports pairs, not rows: a
+//      matrix over nothing is a leaderboard with nothing to score and it copies
+//      just as successfully as a full one.
+describe("cloneSeedWorkspace replay matrix", () => {
+  const matrix = (pairs: number, models = ["voyage-4-lite", "voyage-4"]) => ({
+    version: 1,
+    models,
+    pairs: Array.from({ length: pairs }, (_, i) => ({
+      hash: `hash-${i}`,
+      label: i % 2 === 0 ? "same" : "different",
+      source: i < pairs - 1 ? "generated" : "shadow",
+      difficulty: i % 2 === 0 ? "paraphrase" : "hard-negative",
+      quarantined: false,
+    })),
+    // A model that did not score is null rather than a row of zeros; the copy
+    // must carry that distinction through unchanged.
+    sims: [Array.from({ length: pairs }, (_, i) => 0.5 + i / 100), null],
+    target: 0.95,
+    minSamples: 2,
+  });
+
+  async function bankMatrix(userId: string, pairs = 4) {
+    await admin`
+      insert into demo_replay (user_id, kind, key, payload)
+      values (${userId}, 'matrix', 'pooled', ${admin.json(matrix(pairs))})
+      on conflict (user_id, kind, key)
+        do update set payload = excluded.payload`;
+  }
+
+  const banked = (userId: string) =>
+    admin<{ kind: string; key: string; payload: Record<string, unknown> }[]>`
+      select kind, key, payload from demo_replay where user_id = ${userId} order by kind, key`;
+
+  it("forwards the matrix byte for byte, with no remapping at all", async () => {
+    await bankMatrix(seed.id);
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+
+    const rows = await banked(guest.id);
+    assert.equal(rows.length, 1, "one matrix, and nothing else banked yet");
+    assert.equal(rows[0].kind, "matrix");
+    // The whole payload, not a field of it. A matrix names no row in either
+    // account — pairs are identified by a hash of their own text — so unlike
+    // every other banked thing the clone carries there is nothing here to
+    // rewrite, and any difference at all would be a bug rather than a remap.
+    assert.deepEqual(rows[0].payload, matrix(4));
+    assert.equal(summary.matrixPairs, 4, "counted out of the payload");
+  });
+
+  it("survives the second hop, which is the one that has shipped broken before", async () => {
+    await bankMatrix(seed.id);
+    await cloneSeedWorkspace(seed.id, guest.id);
+
+    const second = await createUser(admin);
+    await cloneSeedWorkspace(guest.id, second.id);
+
+    const rows = await banked(second.id);
+    assert.equal(rows.length, 1, "the snapshot forwards what it was given");
+    assert.deepEqual(rows[0].payload, matrix(4), "and forwards it unchanged");
+    await deleteUser(admin, second.id);
+  });
+
+  it("replaces the previous build's matrix on a republish", async () => {
+    await bankMatrix(seed.id, 4);
+    await cloneSeedWorkspace(seed.id, guest.id, { replaceDestination: true });
+    await bankMatrix(seed.id, 7);
+    const summary = await cloneSeedWorkspace(seed.id, guest.id, { replaceDestination: true });
+
+    const rows = await banked(guest.id);
+    assert.equal(rows.length, 1, "not two, and not the first one kept by the primary key");
+    assert.deepEqual(rows[0].payload, matrix(7));
+    assert.equal(summary.matrixPairs, 7);
+  });
+
+  it("reports nothing when the seed has no matrix, without failing the publish", async () => {
+    // Every build published before this phase is in this state, and it must stay
+    // a valid one: the page falls back to what it does for a real account.
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    assert.equal(summary.matrixPairs, 0);
+    assert.equal((await banked(guest.id)).length, 0);
+  });
+
+  it("carries only the matrix — progress and verdicts belong to the destination", async () => {
+    // The visitor's walk into the matrix is theirs, and a forwarded `progress`
+    // would open a fresh workspace part-way through someone else's session. The
+    // banked verdicts name the destination's own shadow rows, so they are written
+    // by the step that mints those rows and cannot be copied by key.
+    await bankMatrix(seed.id);
+    await admin`
+      insert into demo_replay (user_id, kind, key, payload)
+      values (${seed.id}, 'progress', 'pairs', ${admin.json({ generated: 3, screened: true })}),
+             (${seed.id}, 'shadow_verdict', 'some-shadow-id', ${admin.json({ verdict: "accept" })})`;
+
+    await cloneSeedWorkspace(seed.id, guest.id);
+    assert.deepEqual([...(await banked(guest.id))].map((r) => r.kind), ["matrix"]);
+  });
+
+  it("is read back only by a guest, so a real account still computes its own", async () => {
+    await bankMatrix(seed.id);
+    await cloneSeedWorkspace(seed.id, guest.id);
+
+    // The carve-out is the function (lib/demo/replay), which is what lets a route
+    // call it unconditionally and still fail closed.
+    assert.equal(await withUser(guest, () => readMatrix()), null, "not a guest yet");
+    await admin`
+      update user_profiles set is_guest = true, expires_at = now() + interval '2 hours'
+       where id = ${guest.id}`;
+    const read = await withUser(guest, () => readMatrix());
+    assert.equal(read?.pairs.length, 4);
+    assert.equal(read?.sims[1], null, "an unscored model stays unscored");
+  });
+
+  it("leaves the seed's own matrix untouched", async () => {
+    await bankMatrix(seed.id);
+    await cloneSeedWorkspace(seed.id, guest.id);
+    assert.equal((await banked(seed.id)).length, 1);
   });
 });

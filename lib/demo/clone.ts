@@ -230,6 +230,7 @@ export type CloneSummary = {
   pairRows: number; // generated pairs visible in the guest's own pair table (step 5e)
   bankedPairs: number; // of the master's rest, the ones "Generate pairs" may reveal
   blankedVerdicts: number; // cloned pairs arriving unscreened, verdict held in the bank
+  matrixPairs: number; // pairs in the banked similarity matrix the demo replays (step 5g)
 };
 
 // THE PUBLISH OPTIONS — used by scripts/demo-snapshot.ts, never by a guest.
@@ -332,6 +333,14 @@ export async function cloneSeedWorkspace(
       // this list reaches them, and a republish would stack a second build's
       // reveals on top of the last one's.
       await tx`delete from demo_pair_bank where user_id = ${guestId}`;
+      // demo_replay (0080) hangs off user_profiles alone for demo_pair_bank's
+      // reason exactly — a banked measurement describes work no row in the
+      // guest's workspace performed — so no cascade in this list reaches it, and
+      // a republish would leave the last build's matrix under the new build's
+      // pairs. The primary key would silently keep the OLD payload on a conflict
+      // the copy below does not resolve, which is the quietest possible version
+      // of that failure.
+      await tx`delete from demo_replay where user_id = ${guestId}`;
       await tx`delete from semantic_cache where user_id = ${guestId}`;
       await tx`delete from semantic_cache_thresholds where user_id = ${guestId}`;
       await tx`delete from documents where user_id = ${guestId}`;
@@ -1315,6 +1324,48 @@ export async function cloneSeedWorkspace(
       [guestId, seedId] as never[],
     );
 
+    // --- 5g. the similarity matrix, which every hop copies unchanged ---------
+    //
+    // Phase 2 of docs/demo-cache-replay-plan.md. The demo's §4 replays the
+    // master's own arithmetic over the first `n` pairs a visitor has reached, and
+    // this is the arithmetic: one cosine per pair per candidate model, ~30 kB,
+    // with each pair's label and a hash of its two texts and NOTHING ELSE — no
+    // question, no pair text, nothing that could be read.
+    //
+    // THE SIMPLEST COPY IN THIS FUNCTION, and that is a property of the artifact
+    // rather than luck. Every other banked thing here needs a remap (5d rewrites
+    // config_id and the fingerprint; 5e rewrites origin_question_id twice over,
+    // once per hop) because it names rows in the destination. A matrix names
+    // nothing: pairs are identified by a hash of their own text, which is
+    // invariant across every clone and both hops, which is exactly why phase 1
+    // made identity text-derived rather than positional.
+    //
+    // So the same statement serves the master→seed hop and the seed→guest one,
+    // and the seed forwards what it was given rather than having to re-derive it
+    // — the failure mode 5e's `carried` had to be taught the hard way, where the
+    // second hop found nothing to bank and phase 3 shipped invisible.
+    //
+    // MATRIX ONLY. `progress` is the visitor's own walk into it and starts fresh
+    // in every workspace; `shadow_verdict` names the destination's shadow rows
+    // and is written by the step that mints them (phase 4).
+    const matrixRows = await tx.unsafe(
+      `insert into demo_replay (user_id, kind, key, payload)
+       select $1, r.kind, r.key, r.payload
+         from demo_replay r
+        where r.user_id = $2 and r.kind = 'matrix'`,
+      [guestId, seedId] as never[],
+    );
+    // Counted out of the payload rather than from the insert, because "one row
+    // landed" is not the fact §4 depends on — a matrix of zero pairs is a
+    // leaderboard with nothing to score, and it would arrive as a perfectly
+    // successful copy.
+    const [bankedMatrix] = await tx<{ pairs: number }[]>`
+      select coalesce(jsonb_array_length(r.payload -> 'pairs'), 0)::int as pairs
+        from demo_replay r
+       where r.user_id = ${guestId} and r.kind = 'matrix'
+       limit 1
+    `;
+
     // --- 6. REWRITE THE CACHE FINGERPRINTS, or step 5 was for nothing --------
     //
     // currentFingerprint hashes documentSignature, which is an md5 over the
@@ -1412,6 +1463,7 @@ export async function cloneSeedWorkspace(
       // and on the hop that matters (snapshot→guest) the first term is always 0.
       bankedPairs: (banked.count ?? 0) + (carried.count ?? 0),
       blankedVerdicts: (blanked.count ?? 0) + (carriedVerdicts.count ?? 0),
+      matrixPairs: matrixRows.count > 0 ? (bankedMatrix?.pairs ?? 0) : 0,
     };
   }) as Promise<CloneSummary>;
 }
