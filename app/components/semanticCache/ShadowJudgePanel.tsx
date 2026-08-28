@@ -286,12 +286,26 @@ export function ShadowJudgePanel() {
               stacks of controls and rows. */}
           <div className="flex flex-col gap-1.5">
             <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-              <span className="flex items-baseline gap-2">
-                <span className="text-xs text-zinc-500 dark:text-zinc-400">Recommended τ</span>
-                <span className="text-lg font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
-                  {rec === null ? "—" : rec.toFixed(4)}
+              {/* ONE STATEMENT ABOUT τ, not two. There used to be a "Recommended
+                  τ —" tile here AND a blocker paragraph under it, and on any
+                  account without rejects both said the same nothing: the dash
+                  announced the absence and the sentence explained it, stacked.
+                  So the number renders when there IS one, and when there isn't
+                  the reason takes its place on the same line. */}
+              {rec !== null ? (
+                <span className="flex items-baseline gap-2">
+                  <span className="text-xs text-zinc-500 dark:text-zinc-400">Recommended τ</span>
+                  <span className="text-lg font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
+                    {rec.toFixed(4)}
+                  </span>
                 </span>
-              </span>
+              ) : curve && curve.attainability.blocker !== "no-events" ? (
+                <NoTau curve={curve} />
+              ) : (
+                <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                  No τ yet — nothing judged in this space.
+                </span>
+              )}
               {curve && (
                 <span className="text-xs text-zinc-400">
                   {curve.totalJudged} judged
@@ -336,13 +350,6 @@ export function ShadowJudgePanel() {
               </p>
             )}
           </div>
-
-          {/* WHY there's no τ. Without this the panel shows a dash and nothing
-              else, leaving "is my data too small or my target too strict?" to be
-              worked out by hand — and those have opposite fixes. */}
-          {curve && rec === null && curve.attainability.blocker !== "no-events" && (
-            <NoTau curve={curve} />
-          )}
 
           {/* THE QUEUE, in the space the calibration curve used to take. It is
               what this section is named for: every verdict above and below comes
