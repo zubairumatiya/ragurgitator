@@ -31,11 +31,12 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import { withUser } from "../../lib/auth/userScope";
 import { config } from "../../lib/config";
 import { fragment, privilegedSql } from "../../lib/db";
-import { forgetMatrix, writeMatrix } from "../../lib/demo/replay";
+import { forgetMatrix, writeMatrix, writeShadowVerdicts } from "../../lib/demo/replay";
 import { packMatrix, pairIdentity, type ReplayPair } from "../../lib/demo/replayCore";
 import {
   advanceReplay,
   replayBankCounts,
+  replayJudgeQueue,
   replayPairsFloor,
   replaySweepResult,
   screenReplay,
@@ -116,14 +117,16 @@ async function inScope<T>(user: { id: string }, fn: () => Promise<T>): Promise<T
 // One shadow row in the guest's log, judged or not. `verdict is null` is the
 // queued state §2 hands a visitor, which is exactly what the clone's blanking
 // leaves behind.
-async function shadowRow(i: number, verdict: string | null) {
+async function shadowRow(i: number, verdict: string | null): Promise<string> {
   const [newQuery, matched] = SHADOW_TEXTS[i];
-  await admin`
+  const [row] = await admin<{ id: string }[]>`
     insert into semantic_cache_shadow
       (config_id, embedding_model, space, fingerprint, new_query, new_query_hash,
        matched_query, served_answer, sim, verdict, origin)
     values (${configId}, ${KEY_MODEL}, 'test-space', 'fp', ${newQuery}, ${sha256(newQuery)},
-            ${matched}, 'an answer', 0.9, ${verdict}, 'traffic')`;
+            ${matched}, 'an answer', 0.9, ${verdict}, 'traffic')
+    returning id`;
+  return row.id;
 }
 
 const progressRow = () =>
@@ -318,6 +321,107 @@ describe("a real account", () => {
       assert.equal(await replayBankCounts(), null);
       assert.equal(await advanceReplay(5), null);
       assert.equal(await replaySweepResult(), null);
+    });
+  });
+});
+
+// --- phase 4: the judge that doesn't call a judge ---------------------------
+//
+// The bulk pass over the queue is the last paid step on this page, and it is the
+// one whose replay has a rule the others do not: a HUMAN verdict outranks it.
+// What is asserted is the causal chain the plan turns on — a banked answer lands
+// on the guest's own row, the leaderboard moves because of it, and the visitor's
+// own decision is never overwritten by the operator's.
+describe("replayJudgeQueue", () => {
+  const bank = (ids: Record<string, "accept" | "reject">) =>
+    withUser(guest, () =>
+      writeShadowVerdicts(
+        guest.id,
+        new Map(
+          Object.entries(ids).map(([id, verdict]) => [
+            id,
+            { verdict, judge_source: "llm", judge_model: "banked-judge", judge_reason: "because" },
+          ]),
+        ),
+      ),
+    );
+
+  const judge = () =>
+    inScope(guest, () => replayJudgeQueue({ space: "test-space", model: "some-judge-model" }));
+
+  it("applies the operator's own verdicts, spending nothing", async () => {
+    const queued = await shadowRow(0, null);
+    await bank({ [queued]: "accept" });
+
+    const run = await judge();
+    assert.deepEqual(run, {
+      judged: 1,
+      accepted: 1,
+      rejected: 0,
+      skipped: 0,
+      // The model REPORTED is the one that produced the verdict, not the one the
+      // request happened to name: the panel prints it, and printing the visitor's
+      // selection would claim a call that never went out.
+      model: "banked-judge",
+    });
+    const [row] = await admin<{ verdict: string; judge_model: string; judge_reason: string }[]>`
+      select verdict, judge_model, judge_reason from semantic_cache_shadow where id = ${queued}`;
+    assert.deepEqual(row, { verdict: "accept", judge_model: "banked-judge", judge_reason: "because" });
+  });
+
+  it("moves the leaderboard, which is the whole point of the queue", async () => {
+    await inScope(guest, () => advanceReplay(4));
+    await inScope(guest, () => screenReplay());
+    const queued = await shadowRow(0, null);
+    assert.equal((await inScope(guest, () => replaySweepResult()))?.pairs.shadow, 0);
+
+    await bank({ [queued]: "accept" });
+    await judge();
+    const after = await inScope(guest, () => replaySweepResult());
+    assert.equal(after?.pairs.shadow, 1);
+    assert.equal(after?.rows.find((r) => r.model === KEY_MODEL)!.pairsScored, 4);
+  });
+
+  it("never overwrites a verdict the visitor reached themselves", async () => {
+    const own = await shadowRow(0, "reject");
+    await admin`update semantic_cache_shadow set judge_source = 'human' where id = ${own}`;
+    // Banked the OPPOSITE answer, so a silent overwrite would be visible.
+    await bank({ [own]: "accept" });
+
+    // A bulk pass does not even look at it (it is judged), and a boundary re-judge
+    // looks and refuses.
+    assert.equal((await judge())?.judged, 0);
+    await inScope(guest, () =>
+      replayJudgeQueue({ space: "test-space", model: "some-judge-model", rejudge: true }),
+    );
+    const [row] = await admin<{ verdict: string }[]>`
+      select verdict from semantic_cache_shadow where id = ${own}`;
+    assert.equal(row.verdict, "reject");
+  });
+
+  it("skips a queued row nothing was banked for rather than inventing one", async () => {
+    const orphan = await shadowRow(1, null);
+    const run = await judge();
+    assert.deepEqual(run, {
+      judged: 0,
+      accepted: 0,
+      rejected: 0,
+      skipped: 1,
+      // Nothing banked, so there is no model to name and the request's own is the
+      // only honest fallback.
+      model: "some-judge-model",
+    });
+    assert.equal(
+      (await admin`select 1 from semantic_cache_shadow where id = ${orphan} and verdict is null`)
+        .length,
+      1,
+    );
+  });
+
+  it("returns null for a real account, so their pass still costs what it costs", async () => {
+    await admin`update configs set user_id = ${real.id} where id = ${configId}`;
+    await inScope(real, async () => {
+      assert.equal(await replayJudgeQueue({ space: "test-space", model: "m" }), null);
     });
   });
 });

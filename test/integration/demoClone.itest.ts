@@ -29,7 +29,8 @@ import { withUser } from "../../lib/auth/userScope";
 import { config } from "../../lib/config";
 import { fragment, privilegedSql } from "../../lib/db";
 import { cloneSeedWorkspace } from "../../lib/demo/clone";
-import { forgetMatrix, readMatrix } from "../../lib/demo/replay";
+import { forgetMatrix, readMatrix, writeMatrix } from "../../lib/demo/replay";
+import { packMatrix, pairIdentity, type ReplayPair } from "../../lib/demo/replayCore";
 import {
   PAIR_BANK_CAP,
   PAIR_BLANK_CAP,
@@ -861,6 +862,91 @@ describe("cloneSeedWorkspace shadow sample", () => {
       "queue rows come from the probe population",
     );
     assert.ok(queued.every((r) => r.sim >= FLOOR), "a sub-floor verdict would move no curve");
+  });
+
+  // --- phase 4: the queue's verdicts, and which rows earn a place in it -----
+
+  // Bank a matrix on the SEED whose shadow half is exactly the probe rows named,
+  // which is what "in the pooled set" means at clone time: `poolPairs` decided
+  // this on the master, and a pair it dropped has no cosine here to be moved.
+  async function seedMatrixOver(questionNumbers: number[]) {
+    const pairs: ReplayPair[] = questionNumbers.map((n) => ({
+      hash: pairIdentity(`shadow question ${n}`, "the banked question"),
+      label: "same",
+      source: "shadow",
+      origin: "probe",
+      difficulty: null,
+      quarantined: false,
+    }));
+    await withUser(seed, () =>
+      writeMatrix(
+        seed.id,
+        packMatrix({
+          models: [KEY_MODEL],
+          pairs,
+          sims: [pairs.map(() => 0.9)],
+          target: 0.9,
+          minSamples: 2,
+        }),
+      ),
+    );
+  }
+
+  it("banks the verdicts it blanks, pointed at the guest's own rows", async () => {
+    await seedShadow();
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+
+    const banked = await admin<{ key: string; payload: { verdict: string; judge_model: string } }[]>`
+      select key, payload from demo_replay
+       where user_id = ${guest.id} and kind = 'shadow_verdict'`;
+    assert.equal(banked.length, summary.shadowQueued, "every queued row keeps its answer");
+    assert.equal(summary.shadowVerdicts, banked.length, "summary must count what landed");
+
+    // KEYED BY THE GUEST'S ROW, not the seed's — the join back is the whole of
+    // phase 4, and a key from the wrong id space would look like a full bank and
+    // apply to nothing.
+    const queued = await admin<{ id: string }[]>`
+      select s.id from semantic_cache_shadow s
+       join configs c on c.id = s.config_id
+       where c.user_id = ${guest.id} and s.verdict is null`;
+    assert.deepEqual(
+      banked.map((b) => b.key).sort(),
+      queued.map((q) => q.id).sort(),
+      "a banked verdict names a row in the destination",
+    );
+    // And it is the operator's real answer, not a placeholder.
+    assert.ok(banked.every((b) => ["accept", "reject"].includes(b.payload.verdict)));
+    assert.ok(banked.every((b) => b.payload.judge_model === "judge-model"));
+  });
+
+  it("prefers queueing rows a verdict would actually move", async () => {
+    await seedShadow();
+    // Twelve poolable rows, all of them in the top third of the range — a blind
+    // ntile spreads across the whole band and would pick at most a few.
+    const poolable = [45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56];
+    await seedMatrixOver(poolable);
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+
+    assert.equal(summary.shadowQueued, SHADOW_QUEUE_CAP);
+    assert.equal(summary.shadowPoolable, SHADOW_QUEUE_CAP, "every queued row is poolable");
+    const queued = await admin<{ new_query: string }[]>`
+      select s.new_query from semantic_cache_shadow s
+       join configs c on c.id = s.config_id
+       where c.user_id = ${guest.id} and s.verdict is null`;
+    assert.deepEqual(
+      queued.map((q) => q.new_query).sort(),
+      poolable.map((n) => `shadow question ${n}`).sort(),
+    );
+  });
+
+  it("tops the queue up from the rest rather than shipping a short one", async () => {
+    await seedShadow();
+    // Only three poolable rows exist, so nine come from the general probe set: a
+    // queue with some inert rows in it is a better demo than a queue of three.
+    await seedMatrixOver([10, 11, 12]);
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    assert.equal(summary.shadowQueued, SHADOW_QUEUE_CAP, "the cap is still filled");
+    assert.equal(summary.shadowPoolable, 3, "and the census says how many of them count");
   });
 
   it("rewrites the fingerprint, so a guest's own traffic dedupes against the sample", async () => {

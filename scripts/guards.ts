@@ -469,8 +469,16 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
   // this one line, and so is the promise lib/demo/policy's `judge` sentence makes.
   {
     file: "app/api/semantic-cache/shadow/judge/route.ts",
-    needles: ['if (body.mode !== "human") await assertDemoAllows("judge")'],
-    why: "the carve-out is exactly the human verdict mode and nothing wider",
+    needles: [
+      'if (body.mode !== "human") await assertDemoAllows("judge")',
+      // Phase 4 of docs/demo-cache-replay-plan.md turned the OTHER mode from a
+      // refusal into a replay: the bulk pass applies the verdicts the operator's
+      // judge really returned. The gate above still stands unconditionally behind
+      // it — replayJudgeQueue answers only a guest — so this needle is what keeps
+      // the two lines in that order, which is the whole of the spend argument.
+      "const replayed = body.mode === \"llm\" ? await replayJudgeQueue(body) : null;",
+    ],
+    why: "the carve-out is exactly the human verdict mode, plus a replay that spends nothing",
   },
   // Phase 2 of docs/demo-cache-lab-plan.md SPLIT one gate into three lines, and
   // the split is the only thing separating "a guest may read a sweep the operator

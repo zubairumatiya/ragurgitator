@@ -45,6 +45,8 @@ import {
   SHADOW_CURVE_CAP,
   SHADOW_QUEUE_CAP,
 } from "@/lib/demo/frozen";
+import { MATRIX_KEY, pairIdentity, type ReplayMatrix } from "@/lib/demo/replayCore";
+import { writeShadowVerdicts } from "@/lib/demo/replay";
 import { PUBLISHED_SWEEP_FINGERPRINT } from "@/lib/rag/publishedSweep";
 import { PUBLISHED_REPLAY_FINGERPRINT } from "@/lib/rag/replayStore";
 import { answerFingerprint } from "@/lib/rag/semanticCacheCore";
@@ -223,6 +225,8 @@ export type CloneSummary = {
   cachedAnswers: number;
   shadowEvents: number; // judged + queued shadow rows behind the calibration curve
   shadowQueued: number; // of those, the ones arriving unjudged for the human queue
+  shadowVerdicts: number; // banked answers "Run judge over queue" replays (phase 4)
+  shadowPoolable: number; // queued rows whose verdict actually moves the leaderboard
   replayRows: number; // the published model comparison, one row per model (step 5c)
   replayScored: number; // of those, the ones with metrics rather than "not scorable"
   sweepRows: number; // the published cache-key sweep — 0 or 1 (step 5d)
@@ -266,6 +270,47 @@ export type CloneOptions = {
   // complement, [] freezes the whole bank rather than thawing it.
   tunableQuestionIds?: string[];
 };
+
+// WHICH OF THE SOURCE'S PROBE ROWS ARE IN THE POOLED SET — step 5b's queue
+// preference, phase 4 of docs/demo-cache-replay-plan.md.
+//
+// A queued row is worth queueing only if judging it MOVES something. It moves the
+// leaderboard when its pair has a banked cosine, and `poolPairs` already decided
+// which do: a probe row that merely replayed a generated pair is dropped (the F3
+// self-collision rule), so it never reached the matrix and a verdict on it
+// re-derives nothing. The matrix's shadow hashes are therefore the exact list of
+// probe rows a verdict is live on.
+//
+// Returns [] when the source banked no matrix, which is not a failure — it is a
+// build published before phase 1, and the caller reads [] as "no preference".
+async function pooledShadowIds(tx: Tx, sourceId: string): Promise<string[]> {
+  const [banked] = await tx<{ payload: ReplayMatrix }[]>`
+    select payload from demo_replay
+     where user_id = ${sourceId} and kind = 'matrix' and key = ${MATRIX_KEY}
+  `.catch((err: unknown) => {
+    // Same 42P01 tolerance every other reader of this store holds: a deploy
+    // predating 0080 has no shelf, which takes the same path as an empty one.
+    if ((err as { code?: string }).code === "42P01") return [];
+    throw err;
+  });
+  if (!banked) return [];
+  const shadowHashes = new Set(
+    banked.payload.pairs.filter((p) => p.source === "shadow").map((p) => p.hash),
+  );
+  if (shadowHashes.size === 0) return [];
+  // The candidates the pick itself considers, and no more — the texts are read
+  // here and hashed here, and nothing but the ids leaves this function.
+  const rows = await tx.unsafe<{ id: string; new_query: string; matched_query: string }[]>(
+    `select s.id, s.new_query, s.matched_query
+       from semantic_cache_shadow s
+       join _map_config mc on mc.old_id = s.config_id
+      where s.origin = 'probe' and s.verdict is not null and s.sim >= $1::real`,
+    [config.semanticCache.shadowLogFloor] as never[],
+  );
+  return rows
+    .filter((r) => shadowHashes.has(pairIdentity(r.new_query, r.matched_query)))
+    .map((r) => r.id);
+}
 
 // Freeze every question in the DESTINATION account except the ones the publisher
 // selected — step 4d's publish half.
@@ -902,18 +947,45 @@ export async function cloneSeedWorkspace(
     // stride below because here the count is exact and small — one row from each
     // of twelve equal slices of the similarity range, so the queue spans easy
     // matches and obvious misses instead of twelve rows that all look alike.
-    await tx.unsafe(
-      `insert into _shadow_pick (id, judged)
-       select distinct on (t.slice) t.id, false
-         from (
-           select s.id, s.sim, ntile($1::int) over (order by s.sim, s.id) as slice
-             from semantic_cache_shadow s
-             join _map_config mc on mc.old_id = s.config_id
-            where s.origin = 'probe' and s.verdict is not null and s.sim >= $2::real
-         ) t
-        order by t.slice, t.sim, t.id`,
-      [SHADOW_QUEUE_CAP, config.semanticCache.shadowLogFloor] as never[],
-    );
+    const pickQueue = (cap: number, only: string[] | null) =>
+      tx.unsafe(
+        `insert into _shadow_pick (id, judged)
+         select distinct on (t.slice) t.id, false
+           from (
+             select s.id, s.sim, ntile($1::int) over (order by s.sim, s.id) as slice
+               from semantic_cache_shadow s
+               join _map_config mc on mc.old_id = s.config_id
+              where s.origin = 'probe' and s.verdict is not null and s.sim >= $2::real
+                and ($3::uuid[] is null or s.id = any($3::uuid[]))
+                and not exists (select 1 from _shadow_pick p where p.id = s.id)
+           ) t
+          order by t.slice, t.sim, t.id`,
+        [cap, config.semanticCache.shadowLogFloor, only] as never[],
+      );
+
+    // POOLED ROWS FIRST — what the phase 3 browser pass found and phase 4 owes it.
+    // Judging a queued row is supposed to move the leaderboard, and it can only do
+    // that if the row is IN the pooled set: `poolPairs` drops a probe row that
+    // merely replayed a generated pair (the F3 self-collision rule), so 73 of the
+    // master's 119 judged probe rows have no shadow entry in the matrix at all and
+    // a verdict on one of them re-derives nothing. Picking blind, exactly one of
+    // twelve queued rows was poolable.
+    //
+    // The membership test is the matrix's own, computed here rather than in SQL
+    // because `pairIdentity` is a sha256 over `pairKey`'s canonical form and a
+    // second implementation of that in Postgres is a second thing to keep in step.
+    // ~240 rows of two short texts, once per clone.
+    //
+    // A PREFERENCE, NOT A FILTER. If the pooled candidates cannot fill the cap the
+    // rest of the probe set tops it up, because a shorter queue is a worse demo
+    // than a queue with some inert rows in it — and on a build published without a
+    // matrix there are no pooled ids at all, which must still yield twelve.
+    const pooled = await pooledShadowIds(tx, seedId);
+    if (pooled.length > 0) await pickQueue(SHADOW_QUEUE_CAP, pooled);
+    const [{ picked }] = await tx<{ picked: number }[]>`
+      select count(*)::int as picked from _shadow_pick where not judged
+    `;
+    if (picked < SHADOW_QUEUE_CAP) await pickQueue(SHADOW_QUEUE_CAP - picked, null);
 
     // The curve's own rows, verdicts intact — everything above the floor that the
     // queue did not claim, thinned to the caps.
@@ -980,6 +1052,63 @@ export async function cloneSeedWorkspace(
         join configs c on c.id = s.config_id
        where c.user_id = ${guestId} and s.verdict is null
     `;
+
+    // THE VERDICTS clearIfQueued JUST BLANKED, banked instead of thrown away —
+    // phase 4. The demo's "Run judge over queue" is a button pointing at an LLM
+    // pass the demo carries no key for; what the operator's judge really answered
+    // for these exact rows is a measurement already made, and this is the last
+    // moment it exists in this transaction.
+    //
+    // KEYED BY THE GUEST'S OWN ROW ID, which is why this is here and not in the
+    // matrix: unlike a cosine, a verdict names a row in the destination. The join
+    // back is (config_id, new_query_hash) — 0035's unique key, and the same pair
+    // of columns the copy's own dedupe is expressed in, so it cannot match two.
+    //
+    // `g.verdict is null` is the guard that keeps this honest across the dedupe:
+    // when a queue row collapsed into a curve row, the row that landed is judged
+    // already, and banking a second verdict for it would be banking an answer to
+    // a question nobody is going to ask.
+    const discarded = await tx.unsafe<{
+      id: string;
+      source_id: string;
+      verdict: string;
+      judge_source: string | null;
+      judge_model: string | null;
+      judge_reason: string | null;
+      judged_at: string | null;
+    }[]>(
+      `select g.id, s.id as source_id, s.verdict, s.judge_source, s.judge_model, s.judge_reason,
+              s.judged_at::text as judged_at
+         from semantic_cache_shadow s
+         join _shadow_pick p on p.id = s.id and not p.judged
+         join _map_config mc on mc.old_id = s.config_id
+         join semantic_cache_shadow g
+           on g.config_id = mc.new_id and g.new_query_hash = s.new_query_hash
+        where g.verdict is null`,
+      [],
+    );
+    await writeShadowVerdicts(
+      guestId,
+      new Map(
+        discarded.map((r) => [
+          r.id,
+          {
+            verdict: r.verdict,
+            judge_source: r.judge_source,
+            judge_model: r.judge_model,
+            judge_reason: r.judge_reason,
+            judged_at: r.judged_at,
+          },
+        ]),
+      ),
+      tx,
+    );
+    // WHAT THE PREFERENCE ACHIEVED, counted from the rows that LANDED. The publish
+    // census is where a silently-degraded queue would show up first: a build whose
+    // probe set has drifted away from the pooled one ships twelve rows that judge
+    // to nothing, and every number on the page still looks right.
+    const pooledSet = new Set(pooled);
+    const poolableQueued = discarded.filter((r) => pooledSet.has(r.source_id)).length;
 
     // --- 5c. the model comparison, which a guest cannot compute -------------
     //
@@ -1454,6 +1583,8 @@ export async function cloneSeedWorkspace(
       cachedAnswers,
       shadowEvents,
       shadowQueued: queued,
+      shadowVerdicts: discarded.length,
+      shadowPoolable: poolableQueued,
       replayRows,
       replayScored: scored,
       sweepRows,

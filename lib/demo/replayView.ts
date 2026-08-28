@@ -27,7 +27,7 @@ import "server-only";
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { pairIdentity, type ReplayProgress } from "@/lib/demo/replayCore";
-import { readMatrix, readProgress, writeProgress } from "@/lib/demo/replay";
+import { readMatrix, readProgress, readShadowVerdicts, writeProgress } from "@/lib/demo/replay";
 import {
   replayPairFloor,
   replaySweep,
@@ -36,6 +36,12 @@ import {
   type ReplaySelection,
 } from "@/lib/demo/replayViewCore";
 import type { SweepResult } from "@/lib/rag/keyModelSweep";
+import {
+  JUDGE_DEFAULT_LIMIT,
+  JUDGE_MAX_LIMIT,
+  ownedConfigs,
+  type JudgeRunResult,
+} from "@/lib/rag/semanticCacheCalibration";
 import type { PairLabelLike } from "@/lib/rag/keyModelSweepCore";
 import type { ReplayMatrix } from "@/lib/demo/replayCore";
 import { scopedAcceptTarget, type EffectiveAcceptTarget } from "@/lib/rag/semanticCache";
@@ -188,4 +194,94 @@ export async function replayPairsFloor(
   const current = await currentSelection();
   if (!current) return null;
   return replayPairFloor(current.matrix, current.selection, model);
+}
+
+// --- §2, the queue's bulk judge ---------------------------------------------
+
+// THE JUDGE THAT DOESN'T CALL A JUDGE — phase 4 of the plan.
+//
+// Clone step 5b blanks the queued rows' five judge columns so a visitor has
+// something real to decide, and it used to THROW the operator's answers away.
+// It banks them now, keyed by the guest's own shadow id, and this applies them:
+// instant, free, and every verdict is the one the operator's judge actually
+// returned over that exact pair.
+//
+// WHY NOT NULL FOR AN EMPTY BANK, which is where this parts company with
+// replaySweepResult. A missing matrix means "this build published no sweep" and
+// falling through to the ordinary refusal is the honest answer. A missing
+// VERDICT is not that: the rows are here, the button is live, and returning null
+// would hand the request back to a path that spends the operator's judge key on
+// a guest's workspace. So a guest with nothing banked gets a truthful zero —
+// judged 0, every row skipped — and the fallthrough stays reserved for the one
+// case readShadowVerdicts itself calls null: not a guest, or no store at all.
+//
+// A HUMAN VERDICT IS NEVER OVERWRITTEN, which is `runJudgePass`'s own rule and
+// holds here for a stronger reason: the visitor's own call is the only thing on
+// this page that is not a replay.
+export async function replayJudgeQueue(opts: {
+  space: string;
+  model: string;
+  simMin?: number;
+  simMax?: number;
+  limit?: number;
+  rejudge?: boolean;
+}): Promise<JudgeRunResult | null> {
+  const banked = await readShadowVerdicts();
+  if (!banked) return null;
+
+  // The same rows `runJudgePass` would have read, under the same predicate and
+  // the same order, so the two passes disagree about nothing except who paid.
+  const target = opts.rejudge
+    ? sql`judge_source is distinct from 'human'`
+    : sql`verdict is null`;
+  const rows = await sql<{ id: string }[]>`
+    select id
+      from semantic_cache_shadow
+     where space = ${opts.space}
+       and ${ownedConfigs()}
+       and sim >= ${opts.simMin ?? 0} and sim <= ${opts.simMax ?? 1}
+       and ${target}
+     order by sim desc
+     limit ${Math.min(opts.limit ?? JUDGE_DEFAULT_LIMIT, JUDGE_MAX_LIMIT)}
+  `;
+
+  let accepted = 0;
+  let rejected = 0;
+  let skipped = 0;
+  let model: string | null = null;
+  for (const row of rows) {
+    const verdict = banked.get(row.id);
+    // Nothing banked for this row — a curve row swept in by a wide sim band, or a
+    // queue row the clone's dedupe dropped. It is skipped, exactly as a row the
+    // real judge declined to label is skipped, and for the same reason: this pass
+    // has no verdict for it and will not invent one.
+    if (!verdict || (verdict.verdict !== "accept" && verdict.verdict !== "reject")) {
+      skipped++;
+      continue;
+    }
+    // `judged_at` IS NOW, not the banked timestamp, and it is the one field here
+    // that is deliberately not the operator's. The other four say what the
+    // verdict is and who reached it; this one says when THIS row was decided, and
+    // a guest's row stamped before their workspace existed would be a lie about
+    // their own queue rather than a faithful copy of a measurement.
+    await sql`
+      update semantic_cache_shadow
+         set verdict = ${verdict.verdict},
+             judge_source = ${verdict.judge_source ?? "llm"},
+             judge_model = ${verdict.judge_model ?? null},
+             judge_reason = ${verdict.judge_reason ?? null},
+             judged_at = now()
+       where id = ${row.id}
+         and ${ownedConfigs()}
+         and judge_source is distinct from 'human'`;
+    model ??= verdict.judge_model ?? null;
+    if (verdict.verdict === "accept") accepted++;
+    else rejected++;
+  }
+
+  // The MODEL REPORTED is the one that really produced these verdicts, read off
+  // the bank rather than echoed back from the request: the panel prints it under
+  // "judged by", and printing the model the visitor happened to have selected
+  // would be the single sentence on this page claiming a call that never went out.
+  return { judged: accepted + rejected, accepted, rejected, skipped, model: model ?? opts.model };
 }

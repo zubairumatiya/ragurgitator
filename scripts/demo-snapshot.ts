@@ -834,7 +834,8 @@ async function main() {
       `${summary.rankings} graded rankings, ${summary.frozen} frozen, ` +
       `${summary.cachedAnswers} cached answers, ` +
       `${summary.bankedQuestions} banked questions, ` +
-      `${summary.shadowEvents} shadow events (${summary.shadowQueued} unjudged), ` +
+      `${summary.shadowEvents} shadow events (${summary.shadowQueued} unjudged, ` +
+      `${summary.shadowVerdicts} verdicts banked, ${summary.shadowPoolable} poolable), ` +
       `${summary.replayRows} model rows (${summary.replayScored} scored), ` +
       `${summary.sweepRows === 0 ? "no cache-key sweep" : `a cache-key sweep (${summary.sweepModels} models)`}, ` +
       `${summary.matrixPairs === 0 ? "NO replay matrix" : `a replay matrix over ${summary.matrixPairs} pairs`}\n`,
@@ -900,6 +901,23 @@ async function main() {
       "⚠ every published shadow event is already judged — the Accept / Reject queue\n" +
         "  will be empty, so the one calibration control a guest is allowed to touch\n" +
         "  does nothing. It needs unjudged probe rows above the shadow floor.\n",
+    );
+  } else if (summary.shadowPoolable === 0) {
+    // THE QUIET ONE, and the reason phase 4 counts this at all. A queue can be
+    // full, its verdicts banked, the button instant — and judging every row move
+    // nothing, because `poolPairs` drops a probe row that replayed a generated
+    // pair (F3) and those rows have no cosine in the matrix. That is a demo whose
+    // central claim is false and whose every visible number still looks right.
+    console.log(
+      "⚠ none of the queued rows are in the pooled set — judging them will not move\n" +
+        "  the leaderboard. The queue preferred poolable rows and found none, so the\n" +
+        "  master's probe rows are all F3 self-collisions. Re-run the probe replay.\n",
+    );
+  } else if (summary.shadowVerdicts < summary.shadowQueued) {
+    console.log(
+      `⚠ ${summary.shadowQueued - summary.shadowVerdicts} queued row(s) have no banked ` +
+        "verdict — \"Run judge over queue\" will skip them\n  rather than judge them. " +
+        "They are rows the copy's dedupe collapsed.\n",
     );
   }
 

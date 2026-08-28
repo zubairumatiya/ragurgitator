@@ -158,6 +158,10 @@ export function ShadowJudgePanel() {
     return () => window.removeEventListener(SC_CHANGED, refresh);
   }, [refresh]);
 
+  // A judged row is a pooled pair, so §4 re-derives from it. PairBankPanel sends
+  // the same event for the same reason after a reveal.
+  const announce = () => window.dispatchEvent(new Event(SC_CHANGED));
+
   const runJudge = (label: string, body: Record<string, unknown>) => {
     setBusy(label);
     setError(null);
@@ -173,6 +177,14 @@ export function ShadowJudgePanel() {
         else {
           setLastRun(d.result ?? null);
           refresh();
+          // AND TELL §4, which is the half of this button nobody can see from
+          // inside this panel: a verdict enters the pooled pair set, so every
+          // row of the cache-key leaderboard is re-derived by it. The panel
+          // reloads on SC_CHANGED and has always been able to; until phase 4 of
+          // docs/demo-cache-replay-plan.md nothing on the judging path sent it,
+          // so the table sat at its old pair count until a reload and the causal
+          // chain the queue exists for was invisible.
+          announce();
         }
       })
       .catch((e) => setError(String(e)))
@@ -194,6 +206,9 @@ export function ShadowJudgePanel() {
         // Refresh the curve/counts; leave the (already-trimmed) queue as is.
         loadSpaceData(space);
         loadSpaces(space);
+        // One hand verdict moves the leaderboard exactly as the bulk pass does —
+        // it is the same row entering the same pool.
+        announce();
       })
       .catch((e) => setError(String(e)));
   };

@@ -487,8 +487,11 @@ export class JudgeAlreadyRunningError extends Error {
 // outlives a serverless request wall-clock (~10–60s) and 504s mid-loop, leaving
 // some rows judged and a retry re-judging the survivors. The 500 hard max is
 // still available for an explicit opt-in from a long-lived local process.
-const JUDGE_DEFAULT_LIMIT = 50;
-const JUDGE_MAX_LIMIT = 500;
+// EXPORTED so the demo's replay of this pass (lib/demo/replayView) reads exactly
+// the rows this one would have read. Two copies of "50" is how the free pass and
+// the paid one start describing different queues.
+export const JUDGE_DEFAULT_LIMIT = 50;
+export const JUDGE_MAX_LIMIT = 500;
 
 // On-demand batch LLM judge over a space. Default targets UNJUDGED rows (the
 // bulk pass); `rejudge: true` also re-labels prior LLM verdicts within the band
