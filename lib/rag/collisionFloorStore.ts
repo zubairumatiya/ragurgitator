@@ -67,6 +67,12 @@ export async function getSavedCollisionFloor(): Promise<SavedCollisionFloor | nu
         space: r.space,
         embeddingModel: r.embedding_model,
         floor: r.floor,
+        // NOT PERSISTED. The boundary pairs are two question texts each — they
+        // would double the row for a display aid, and they are exactly
+        // recomputable from the same sweep that produced the floor. A restored
+        // report therefore shows the number without its cause, and the panel
+        // says so and offers Recompute.
+        topDistinct: [],
         sameAnswerMin: r.same_answer_min,
         sameAnswerMedian: r.same_answer_median,
         recommended: r.recommended,

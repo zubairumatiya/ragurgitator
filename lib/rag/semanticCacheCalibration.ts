@@ -58,7 +58,7 @@ async function safe<T>(fn: () => Promise<T[]>, fallback: T[]): Promise<T[]> {
 // user_id of its own, so it filters on activeUserId() directly. Using this
 // fragment on it would still work but would silently drop every row whose banking
 // config was deleted — rows that are live and servable.
-const ownedConfigs = () =>
+export const ownedConfigs = () =>
   sql`config_id in (select id from configs where user_id = ${activeUserId()})`;
 
 export type CollisionFloorReport = CollisionFloorResult & {
@@ -123,7 +123,13 @@ export async function computeCollisionFloor(): Promise<CollisionFloorReport> {
   const vectors = await getCachedQueryEmbeddings(ids, keyModel);
   await recordEvalEmbedReuse(keyModel, questionText, vectors);
   const result = collisionFloor(
-    labels.map((l) => ({ questionId: l.questionId, sourceChunkId: l.sourceChunkId })),
+    // The question TEXT rides along so the report can name the pairs its floor
+    // rests on; nothing in the arithmetic reads it.
+    labels.map((l) => ({
+      questionId: l.questionId,
+      sourceChunkId: l.sourceChunkId,
+      text: l.question,
+    })),
     vectors,
     config.semanticCache.collisionMargin,
   );

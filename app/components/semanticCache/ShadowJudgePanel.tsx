@@ -432,18 +432,16 @@ export function ShadowJudgePanel() {
               {ORIGINS.find((o) => o.value === origin)!.note}
             </p>
 
-            {/* Points UP to the apply box, in the Collision floor panel's footer
-                at the top of the page — but ONLY for traffic, because only traffic
-                is emitted (see the guard in loadSpaceData). A sentence promising
-                the number had been sent while nothing was sent is the exact lie
-                phase 5 of the demo plan is about, and it is just as wrong for the
-                operator as for a visitor. */}
+            {/* Points at the apply box in the Threshold section's footer — but
+                ONLY for traffic, because only traffic is emitted (see the guard in
+                loadSpaceData). A sentence promising the number had been sent while
+                nothing was sent is the exact lie phase 5 of the demo plan is about,
+                and it is just as wrong for the operator as for a visitor. */}
             {rec !== null &&
               (origin === "traffic" ? (
                 <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                  Sent to the <strong className="font-medium">Set threshold</strong> box at the
-                  bottom of the Collision floor panel — nothing is live until you apply it
-                  there.
+                  Sent to the <strong className="font-medium">Set threshold</strong> box in
+                  the Threshold section — nothing is live until you apply it there.
                 </p>
               ) : (
                 <p className={NOTE_AMBER}>

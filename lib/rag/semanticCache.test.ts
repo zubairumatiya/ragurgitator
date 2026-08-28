@@ -275,6 +275,55 @@ test("collisionFloor: reports overlap when a distinct pair is closer than a same
   assert.ok(r.recommended !== null && r.recommended > r.floor!); // stays above the floor
 });
 
+test("collisionFloor: topDistinct names the pairs the floor rests on, closest first", () => {
+  // Three distinct-chunk questions at three separations, so the boundary list has
+  // an order to get wrong.
+  const vectors = new Map<string, number[]>([
+    ["q1", [1, 0]],
+    ["q2", [0.99, 0.14]], // closest to q1
+    ["q3", [0.8, 0.6]], // further
+    ["q4", [0, 1]], // furthest
+  ]);
+  const labels = [
+    { questionId: "q1", sourceChunkId: "A", text: "how much PTO do I get" },
+    { questionId: "q2", sourceChunkId: "B", text: "how much PTO do contractors get" },
+    { questionId: "q3", sourceChunkId: "C", text: "how do I request PTO" },
+    { questionId: "q4", sourceChunkId: "D", text: "who runs payroll" },
+  ];
+  const r = collisionFloor(labels, vectors, 0.01);
+
+  // The floor IS the first boundary pair — that identity is the whole reason the
+  // list exists, and a floor whose top pair disagreed with it would be worse than
+  // no list at all.
+  assert.equal(r.topDistinct[0].sim, r.floor);
+  assert.deepEqual(
+    [r.topDistinct[0].a, r.topDistinct[0].b],
+    ["how much PTO do I get", "how much PTO do contractors get"],
+  );
+  // Descending, and capped — six distinct pairs here, five carried.
+  assert.equal(r.distinctPairs, 6);
+  assert.equal(r.topDistinct.length, 5);
+  for (let i = 1; i < r.topDistinct.length; i++) {
+    assert.ok(r.topDistinct[i - 1].sim >= r.topDistinct[i].sim);
+  }
+});
+
+test("collisionFloor: a label with no text falls back to its question id", () => {
+  const vectors = new Map<string, number[]>([
+    ["q1", [1, 0]],
+    ["q2", [0.99, 0.14]],
+  ]);
+  const r = collisionFloor(
+    [
+      { questionId: "q1", sourceChunkId: "A" },
+      { questionId: "q2", sourceChunkId: "B" },
+    ],
+    vectors,
+    0.01,
+  );
+  assert.deepEqual([r.topDistinct[0].a, r.topDistinct[0].b], ["q1", "q2"]);
+});
+
 test("collisionFloor: questions without a cached vector are skipped", () => {
   const vectors = new Map<string, number[]>([["q1", [1, 0]]]);
   const labels = [

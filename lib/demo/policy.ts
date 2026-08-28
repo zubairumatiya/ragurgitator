@@ -161,9 +161,9 @@ export const DEMO_ACTIONS = {
     "workspace no longer exists. Sign up to use it.",
   judge:
     "The LLM judge grades shadow events in bulk against an answer model, which " +
-    "the demo doesn’t carry a key for. The Accept / Reject queue below is " +
-    "yours: this workspace was published with real events waiting for a verdict, " +
-    "and each one you decide redraws the calibration curve above it.",
+    "the demo doesn’t carry a key for. The would-hit queue is yours: this " +
+    "workspace was published with real events waiting for a verdict, and each " +
+    "one you decide re-sweeps the threshold it recommends.",
   sweep:
     "The cache-key sweep re-embeds the whole question bank in every candidate " +
     "model, so it's off in the demo, and this build was published without the " +
@@ -178,7 +178,7 @@ export const DEMO_ACTIONS = {
   pairs:
     "Writing NEW question pairs needs an answer model to phrase each variant, " +
     "which the demo doesn't carry a key for, and this build was published " +
-    "without a bank of them. The Accept / Reject queue is stocked either way: " +
+    "without a bank of them. The would-hit queue is stocked either way: " +
     "this workspace carries a sample of real shadow events waiting for a " +
     "verdict, which is what pairs are generated to produce.",
   probeReplay:
@@ -186,7 +186,7 @@ export const DEMO_ACTIONS = {
     "embedding each one — a spend the demo doesn’t carry. It also isn’t " +
     "needed here: this workspace was published with a sample of real shadow " +
     "events already waiting, which is what a signed-up account uses this to " +
-    "build for itself. The Accept / Reject queue below is the result either way.",
+    "build for itself. The would-hit queue is the result either way.",
   // Not an action anyone takes — the outcome of taking enough of them. It shares
   // this table because it shares the transport: a 403 with a sentence, from the
   // one catch site.
@@ -297,10 +297,11 @@ export const GUEST_PROBE_NOTE =
 // points at something lib/demo/clone actually carries — the shadow queue and
 // its curve (step 5b), the sweep (step 5d).
 export const LIVE_HALF_NOTE =
-  "Which half is live: the Accept / Reject queue and the calibration curve " +
-  "above it are yours — this workspace was published with real events " +
-  "waiting, and every verdict you give redraws the curve. The cache-key " +
-  "leaderboard below was measured on the operator's account and is fixed. " +
+  "Which half is live: the would-hit queue is yours — this workspace was " +
+  "published with real events waiting, and every verdict you give re-sweeps " +
+  "the threshold it recommends. Probing one pair is live too, and lands a new " +
+  "row in that queue. The pair bank hands you pairs already generated, and the " +
+  "cache-key leaderboard was measured on the operator's account and is fixed. " +
   "Generating anything new needs an account with its own keys.";
 
 export class DemoBlockedError extends Error {
