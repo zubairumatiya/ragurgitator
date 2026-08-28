@@ -60,8 +60,9 @@ import {
   scopedAcceptTarget,
   uncalibratedKeyModelSpace,
 } from "@/lib/rag/semanticCache";
-import { assertDemoAllows, demoBlocks } from "@/lib/demo/policy";
-import { readPublishedSweep } from "@/lib/rag/publishedSweep";
+import { assertDemoAllows } from "@/lib/demo/policy";
+import { replaySweepResult } from "@/lib/demo/replayView";
+import { publishedForm } from "@/lib/rag/publishedSweep";
 
 const msg = (err: unknown, fallback: string) =>
   err instanceof Error ? err.message : fallback;
@@ -71,6 +72,7 @@ export async function GET(request: Request) {
     try {
       const savings = await getBatchSavings(activeConfig().id);
       const status = await keyModelStatus(savings.semanticCache.keyModel);
+      const replay = await replaySweepResult();
       return Response.json({
         ...status,
         // WHAT THE PRECISION TARGET COSTS, for the space the key model actually
@@ -83,25 +85,29 @@ export async function GET(request: Request) {
           status.threshold.space,
           status.threshold.threshold,
         ),
-        // THE PUBLISHED SWEEP, for a guest only (phase 1 of
-        // docs/demo-cache-lab-plan.md). It seeds the panel's `sweep` state, which
-        // is the whole unlock: §4's leaderboard and its precision slider render
-        // inside `{sweep && …}` and cost nothing to re-derive, so handing the
-        // panel a result turns three disabled buttons into a live control with
-        // zero further requests.
+        // THE REPLAYED SWEEP, for a guest only (phase 3 of
+        // docs/demo-cache-replay-plan.md). It seeds the panel's `sweep` state,
+        // which is the whole unlock: §4's leaderboard and its precision slider
+        // render inside `{sweep && …}` and cost nothing to re-derive, so handing
+        // the panel a result turns three disabled buttons into a live control
+        // with zero further requests.
         //
-        // PACKED, and handed on untouched (phase 1.5): the panel calls
-        // unpackSweep before it reads a curve. Unpacking here would put back on
-        // the wire exactly what packing took off the Postgres hop.
+        // AND IT MOVES. The panel re-runs this GET on every SC_CHANGED, so a
+        // visitor who generates pairs or judges a queued row gets a leaderboard
+        // re-derived over the set they now hold — the same rows a real sweep at
+        // that size would have printed, because it is the same calibration over
+        // the same cosines.
         //
-        // GATED ON GUEST, not on "a row exists", and the reason is the same rule
-        // lib/demo/policy holds everywhere: a MEASUREMENT may not imply a
-        // computation that did not happen. The operator's own account can run
-        // the real sweep, and pre-filling their table with a banked one — with
-        // no note saying so, since PUBLISHED_SWEEP_NOTE is phase 2's — would be
-        // exactly that. Null for everyone else, and the panel opens empty as it
-        // always has.
-        publishedSweep: (await demoBlocks()) ? await readPublishedSweep() : null,
+        // PACKED on the way out, as the banked row used to arrive: the panel
+        // calls unpackSweep before it reads a curve, and thinning the curves to
+        // the slider's own grid is what keeps ~11 models off the wire whole.
+        //
+        // GATED ON GUEST — replaySweepResult returns null for everyone else — and
+        // the reason is the rule lib/demo/policy holds everywhere: a MEASUREMENT
+        // may not imply a computation that did not happen. The operator's own
+        // account can run the real sweep, and pre-filling their table with a
+        // replay would be exactly that.
+        publishedSweep: replay && publishedForm(replay),
       });
     } catch (err) {
       return Response.json(
@@ -161,10 +167,12 @@ export async function POST(request: Request) {
     // for" and "a guest may spend ~510 texts × every candidate model of the
     // operator's embedding key" is exactly this line.
     //
-    // GATED ON GUEST, not on "a row exists" — the same rule the GET holds. The
-    // operator's own account owns a published_sweep row too (it is the account
-    // that wrote it), and serving that back instead of running the real sweep
-    // would be a MEASUREMENT implying a computation that did not happen.
+    // GATED ON GUEST BY THE FUNCTION, which is the shape lib/demo/replayView
+    // holds throughout: replaySweepResult returns null for a real account, so the
+    // operator still runs the real sweep. Serving them a replay instead would be
+    // a MEASUREMENT implying a computation that did not happen — and the operator
+    // is the one account whose matrix describes their own workspace, so it would
+    // be the hardest one to catch.
     //
     // The response is TAGGED and PACKED: `{ published: true, sweep }` rather
     // than a bare SweepResult, because the two are not interchangeable to the
@@ -172,10 +180,9 @@ export async function POST(request: Request) {
     // PUBLISHED_SWEEP_NOTE rather than let a visitor believe their click bought
     // the numbers. A shape it cannot tell apart from a live run would make both
     // of those depend on the panel remembering it is in a demo.
-    const replay =
-      data.action === "sweep" && (await demoBlocks()) ? await readPublishedSweep() : null;
-    if (replay) return Response.json({ published: true, sweep: replay });
-    // No banked row, so there is nothing to replay and DEMO_ACTIONS.sweep is the
+    const replay = data.action === "sweep" ? await replaySweepResult() : null;
+    if (replay) return Response.json({ published: true, sweep: publishedForm(replay) });
+    // No banked matrix, so there is nothing to replay and DEMO_ACTIONS.sweep is the
     // fallback sentence — exactly how `appraise` degrades on a build published
     // without a warm replay. A no-op for a real account, which is what makes the
     // line above the only thing separating the two.

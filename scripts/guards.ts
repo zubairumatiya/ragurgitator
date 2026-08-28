@@ -478,50 +478,51 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
   // Sweep 6 cannot see any of it: the file keeps calling assertDemoAllows
   // whatever these three lines say. Each is pinned:
   //   1. the WRITES stay blocked, and under their own sentence;
-  //   2. the replay is gated on being a GUEST, not on a row existing — the
-  //      operator's own account owns a published_sweep row, and handing that back
-  //      instead of running the sweep would be a measurement implying a
-  //      computation that did not happen;
-  //   3. the fallback for a build published WITHOUT a row is still a refusal.
+  //   2. the replay is gated on being a GUEST — replaySweepResult refuses every
+  //      other account — because the operator's own workspace owns a matrix too
+  //      (it is the account that captured it), and handing that back instead of
+  //      running the sweep would be a measurement implying a computation that did
+  //      not happen;
+  //   3. the fallback for a build published WITHOUT a matrix is still a refusal.
   {
     file: "app/api/semantic-cache/key-model/route.ts",
     needles: [
       'if (data.action !== "sweep") await assertDemoAllows("keyModel");',
-      'data.action === "sweep" && (await demoBlocks()) ? await readPublishedSweep() : null;',
+      'const replay = data.action === "sweep" ? await replaySweepResult() : null;',
       'if (data.action === "sweep") await assertDemoAllows("sweep");',
     ],
     why: "the per-action gate: only `sweep` replays, and only for a guest",
   },
-  // Phases 3 and 3b, and their needles are shaped differently from cachedOnly's
-  // on purpose: there is no body flag to pin, because THE CARVE-OUT IS THE
-  // FUNCTION. revealBankedPairs and applyBankedVerdicts each return null for
-  // anyone who is not a guest, so both routes keep an UNCONDITIONAL
-  // assertDemoAllows after the branch (sweep 6 keeps meaning what it says) and
-  // both fail closed — delete the line and a guest is simply refused, as before
-  // phase 3.
+  // The generate and screen carve-outs, whose needles are shaped differently from
+  // cachedOnly's on purpose: there is no body flag to pin, because THE CARVE-OUT
+  // IS THE FUNCTION. Every read in lib/demo/replayView returns null for anyone who
+  // is not a guest, so both routes keep an UNCONDITIONAL assertDemoAllows after
+  // the branch (sweep 6 keeps meaning what it says) and both fail closed — delete
+  // the line and a guest is simply refused, as they were before the demo had a
+  // matrix to replay.
   {
     file: "app/api/semantic-cache/pairs/route.ts",
     needles: [
-      "const reveal = await revealBankedPairs(body.data.limit ?? DEFAULT_REVEAL);",
+      "const advanced = await advanceReplay(body.data.limit ?? DEFAULT_REVEAL);",
       'await assertDemoAllows("pairs")',
     ],
-    why: "the reveal carve-out, with the gate still unconditional behind it",
+    why: "the generate carve-out walks the banked matrix, with the gate still unconditional behind it",
   },
   {
     file: "app/api/batch/submit/route.ts",
     needles: [
-      'const banked = kind === "cache_pair_screen" ? await applyBankedVerdicts() : null;',
+      'const banked = kind === "cache_pair_screen" ? await screenReplay() : null;',
       'await assertDemoAllows("batch")',
     ],
     why: "the pair-screen carve-out is one named kind, and no other",
   },
-  // The needle that matters most of the three. Both carve-outs above are safe
-  // only because these functions refuse everyone who is not a guest; lose this
-  // and the bank becomes a shelf any account can insert from.
+  // The needle that matters most of the four. Every carve-out above is safe only
+  // because the matrix's readers refuse everyone who is not a guest; lose this and
+  // a replayed measurement can be served to the account that made it.
   {
-    file: "lib/demo/pairBank.ts",
+    file: "lib/demo/replay.ts",
     needles: ["if (!(await isGuest())) return null;"],
-    why: "the bank's readers are guest-only, which is what stops both carve-outs widening",
+    why: "the matrix's readers are guest-only, which is what stops every carve-out on that page widening",
   },
 ];
 

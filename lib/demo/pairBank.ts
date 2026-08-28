@@ -1,5 +1,14 @@
 // THE PAIR BANK — phases 3 and 3b of docs/demo-cache-lab-plan.md.
 //
+// SUPERSEDED, AND WAITING ON ONE THING. Phase 3 of docs/demo-cache-replay-plan.md
+// moved both carve-outs below onto the banked similarity matrix, so nothing in a
+// route calls this module any more: the demo ships the SIMILARITIES now, and a
+// reveal that inserted pair rows would be handing a guest inputs whose numbers
+// the leaderboard no longer reads. What keeps the module (and 0078, and clone
+// step 5e) alive for the moment is the single probe, which is the one live thing
+// left that needs real pair TEXT to embed. It goes in the copy pass, and this
+// goes with it.
+//
 // §4's two remaining buttons, "Generate pairs" and the LLM pair screen, both buy
 // answer-model tokens the demo carries no key for. Neither is ungatable and
 // neither is worth leaving dead, because the ANSWER to both already exists: the

@@ -1,11 +1,17 @@
-// THE KEY-MODEL SWEEP'S PURE HALF — currently one decision, and it is the one
-// that has already been got wrong once: how the generated pair set and the shadow
-// log are pooled into a single scored set.
+// THE KEY-MODEL SWEEP'S PURE HALF: how the pair sources are POOLED, and what a
+// leaderboard row is once the cosines exist. The first has already been got wrong
+// once (F3, below); the second is the arithmetic the demo replays.
 //
-// Dependency-free on purpose, like semanticCacheCore.ts and probeReplayCore.ts.
-// The collision rule below is a property of three lists, not of a database, and
-// keeping it here is what lets a test state the F3 defect as an assertion instead
-// of a paragraph.
+// Database-free on purpose, like semanticCacheCore.ts and probeReplayCore.ts —
+// semanticCacheCore is its one import and is the same kind of module. Both
+// decisions here are properties of a few lists rather than of a database, which
+// is what lets a test state the F3 defect as an assertion instead of a paragraph.
+
+import {
+  auc,
+  calibrateFromJudged,
+  type CalibrationResult,
+} from "@/lib/rag/semanticCacheCore";
 
 // The label and difficulty vocabularies, restated rather than imported so this
 // file stays free of anything that touches a database. keyModelSweep.ts is where
@@ -95,4 +101,50 @@ export function poolPairs(
   }
   // A pair of identical texts scores nothing and calibrates nothing.
   return [...byKey.values()].filter((p) => p.textA !== p.textB);
+}
+
+// EVERY NUMBER ON A LEADERBOARD ROW, FROM THE COSINES ALONE — extracted for
+// phase 3 of docs/demo-cache-replay-plan.md.
+//
+// This was the tail of scoreModel, which is where it still runs for a real
+// account. It is here because the demo replays it: a guest holds the master's
+// banked cosines and nothing else, and re-running THIS function over the first
+// `n` of them is what makes their leaderboard byte-identical to a real sweep at
+// that size. Two copies of this arithmetic would be two answers to the same
+// question, and the whole claim of the replay is that there is one.
+//
+// Pure, and pure of the embedding step in particular: `scored` is what the
+// vectors were FOR, so everything downstream of them lives here and the paid
+// half stays in keyModelSweep.
+export function scoreFromSims(
+  scored: { sim: number; label: PairLabelLike }[],
+  target: number,
+  minSamples: number,
+): {
+  threshold: number | null;
+  recall: number | null;
+  precision: number | null;
+  aucValue: number | null;
+  calibration: CalibrationResult;
+} {
+  // calibrateFromJudged speaks accept/reject; 'same' IS 'accept' here — both mean
+  // "one answer serves both", which is why the pair labels were defined
+  // answer-level in the first place.
+  const calibration = calibrateFromJudged(
+    scored.map((s) => ({ sim: s.sim, verdict: s.label === "same" ? "accept" : "reject" })),
+    target,
+    minSamples,
+  );
+  return {
+    threshold: calibration.recommended,
+    recall: calibration.coverageAtRecommended,
+    // Straight off the calibration. This used to re-find the curve point by
+    // `sim === at`, which returns the FIRST point carrying that sim — but τ is
+    // chosen at the LAST one (the tie boundary), and the two have different n and
+    // so different rates whenever sims tie. Serving `sim >= τ` admits the whole
+    // tie group, so the boundary's rate is the one that describes it.
+    precision: calibration.precisionAtRecommended,
+    aucValue: auc(scored),
+    calibration,
+  };
 }

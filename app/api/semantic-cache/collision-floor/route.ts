@@ -24,6 +24,7 @@
 // The eval save is BEST-EFFORT and deliberately after the fact: a computed report is
 // the expensive thing here, and a persistence problem must never turn a successful
 // calibration into a 500.
+import { replayBoundFloor } from "@/lib/rag/floorPopulations";
 import { withRequestConfig } from "@/lib/http/configScope";
 import { readCollisionFloorState, saveCollisionFloor } from "@/lib/rag/collisionFloorStore";
 import { computeBoundFloor, isFloorPopulation } from "@/lib/rag/floorPopulations";
@@ -64,7 +65,19 @@ export async function POST(request: Request) {
   return withRequestConfig(request, async () => {
     try {
       if (population !== "eval") {
-        return Response.json({ bound: await computeBoundFloor(population) });
+        // THE PAIR-BANK FLOOR, REPLAYED for a guest — phase 3 of
+        // docs/demo-cache-replay-plan.md, and the carve-out is the function as
+        // everywhere else in lib/demo/replayView: null for a real account, which
+        // falls through to the real arithmetic below unchanged.
+        //
+        // This pill reads 0 for every guest today, and it is the clearest sign
+        // the demo shipped the wrong artifact: the floor needs a banked vector
+        // per hard negative, and `embedding_cache` is the 107 MB the clone
+        // deliberately leaves behind. The matrix has the cosines instead, so the
+        // floor is one column of it subsetted to the pairs the visitor holds.
+        return Response.json({
+          bound: (await replayBoundFloor(population)) ?? (await computeBoundFloor(population)),
+        });
       }
       const report = await computeCollisionFloor();
       await saveCollisionFloor(report);

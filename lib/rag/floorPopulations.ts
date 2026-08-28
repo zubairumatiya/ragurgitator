@@ -26,6 +26,7 @@
 // key model this account has never swept under must yield an honest empty, not a
 // surprise embedding bill from opening a panel. `missingVectors` reports what that
 // cost, so an empty floor is legible rather than mysterious.
+import { replayPairsFloor } from "@/lib/demo/replayView";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { getBatchSavings } from "@/lib/rag/batchStore";
 import { sql } from "@/lib/db";
@@ -175,5 +176,38 @@ async function trafficFloor(
     comparisons: rows[0]?.total ?? 0,
     missingVectors: 0,
     top: rows.map((r) => ({ a: r.new_query, b: r.matched_query, sim: Number(r.sim) })),
+  };
+}
+
+// --- the same bound, replayed (the demo) -------------------------------------
+
+// A GUEST'S PAIR-BANK FLOOR comes out of the banked similarity matrix rather than
+// out of `embedding_cache`, which the clone does not copy — see
+// lib/demo/replayView. Null for a real account and for the `traffic` population,
+// which needs no help: it reads similarities the serving path already stored, so
+// it is as live for a guest as for anyone.
+//
+// It lives HERE, beside computeBoundFloor, so the two forms of one number share a
+// return shape and a header. The route asks for the replay first and falls
+// through to the real thing on null, which is the same carve-out shape every
+// other demo read on this page uses.
+export async function replayBoundFloor(
+  population: "pairs" | "traffic",
+): Promise<BoundFloorReport | null> {
+  if (population === "traffic") return null;
+  const model = await keyModelForActiveConfig();
+  const replayed = await replayPairsFloor(model);
+  if (!replayed) return null;
+  return {
+    population,
+    space: spaceOf(model),
+    embeddingModel: model,
+    computedAt: new Date().toISOString(),
+    ...replayed,
+    // No `top`: the matrix ships no pair TEXT — that is what lets the demo carry
+    // it at all — so the two questions behind the number are not something a
+    // guest is given. The panel renders nothing for an empty list, which is the
+    // honest outcome rather than a fabricated one.
+    top: [],
   };
 }

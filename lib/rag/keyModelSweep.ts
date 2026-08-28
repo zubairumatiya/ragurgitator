@@ -32,14 +32,8 @@ import { embedQueriesCached } from "@/lib/rag/embedCache";
 import { EMBEDDING_MODELS } from "@/lib/rag/embeddingModels";
 import { availableProviders } from "@/lib/rag/providerAvailability";
 import type { EffectiveAcceptTarget } from "@/lib/rag/semanticCache";
-import {
-  auc,
-  calibrateFromJudged,
-  cosine,
-  spaceOf,
-  type CalibrationResult,
-} from "@/lib/rag/semanticCacheCore";
-import { poolPairs, type SweepPair } from "@/lib/rag/keyModelSweepCore";
+import { cosine, spaceOf, type CalibrationResult } from "@/lib/rag/semanticCacheCore";
+import { poolPairs, scoreFromSims, type SweepPair } from "@/lib/rag/keyModelSweepCore";
 import {
   listPairs,
   quarantinedPairs,
@@ -230,27 +224,11 @@ async function scoreModel(
     label: p.label,
   }));
 
-  // calibrateFromJudged speaks accept/reject; 'same' IS 'accept' here — both
-  // mean "one answer serves both", which is why the pair labels were defined
-  // answer-level in the first place.
-  const calibration = calibrateFromJudged(
-    scored.map((s) => ({ sim: s.sim, verdict: s.label === "same" ? "accept" : "reject" })),
-    target,
-    config.semanticCache.minCalibrationSamples,
-  );
-  return {
-    threshold: calibration.recommended,
-    recall: calibration.coverageAtRecommended,
-    // Straight off the calibration now. This used to re-find the curve point by
-    // `sim === at`, which returns the FIRST point carrying that sim — but τ is
-    // chosen at the LAST one (the tie boundary), and the two have different n
-    // and so different rates whenever sims tie. Serving `sim >= τ` admits the
-    // whole tie group, so the boundary's rate is the one that describes it.
-    precision: calibration.precisionAtRecommended,
-    aucValue: auc(scored),
-    calibration,
-    scored,
-  };
+  // The rest of this model's row is a pure function of `scored`, and it lives in
+  // the core because the demo re-runs exactly it over the master's banked cosines
+  // (phase 3 of docs/demo-cache-replay-plan.md). The embedding above is the half
+  // a guest cannot afford; this half is the half they replay.
+  return { ...scoreFromSims(scored, target, config.semanticCache.minCalibrationSamples), scored };
 }
 
 // Run the sweep over `candidates` (defaults to the configured list). Models
