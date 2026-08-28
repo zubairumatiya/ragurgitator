@@ -99,7 +99,7 @@ export function probeTriggerNote(t: ProbeTrigger): string | null {
   const n = t.job.totalUnits;
   if (n === 0) return null;
   return (
-    `Queued ${n} probe${n === 1 ? "" : "s"} for the shadow judge` +
+    `Queued ${n} probe${n === 1 ? "" : "s"} for the would-hit queue` +
     (t.eligible > n ? ` (${t.eligible} eligible; the rest wait for the next run)` : "") +
     " — they land unjudged, so the calibration curve moves only as you accept or reject them."
   );

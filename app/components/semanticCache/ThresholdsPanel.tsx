@@ -47,7 +47,6 @@ export function ThresholdsPanel() {
 
   return (
     <Panel
-      step={2}
       title="Thresholds by vector-space"
       about={ABOUT}
       subtitle="What every space serves at right now. Read-only."
@@ -83,7 +82,7 @@ export function ThresholdsPanel() {
               <tr>
                 <td colSpan={8} className="px-4 py-6 text-center text-xs text-zinc-400">
                   No spaces yet — populate a cache, then calibrate with the collision
-                  floor above or the shadow judge below.
+                  floor above or the would-hit queue below.
                 </td>
               </tr>
             )}

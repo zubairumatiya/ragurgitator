@@ -1,11 +1,15 @@
-// Appraise → Semantic caching: shadow-judge calibration. Per vector-space, judge
-// recorded would-hit events — a bulk LLM pass, a boundary re-judge, and a human
-// Accept/Reject queue — then sweep the labels into a threshold. Judging is
-// on-demand, never inline.
+// Appraise → Semantic caching: the WOULD-HIT QUEUE. Per vector-space, the matches
+// the cache would have served, waiting on a verdict — did the stored answer
+// acceptably answer the new question? Verdicts come from an LLM pass (bulk, then a
+// boundary re-judge) or from the Accept/Reject buttons on a row; either way they are
+// the same choice about the same queue, and they are taken on demand, never inline.
 //
-// Last panel on the page: it needs real would-hit traffic to have accrued and costs
-// judge tokens to run, so it refines a threshold the collision floor already put in
-// the right neighbourhood.
+// The section is named for the QUEUE and not for the judge: "shadow judge" named the
+// agent, and the thing on screen is the evidence — hypothetical hits nobody actually
+// received. Its verdicts are then swept into a recommended τ.
+//
+// It needs real would-hit traffic to have accrued and costs judge tokens to run, so
+// it refines a threshold the collision floor already put in the right neighbourhood.
 //
 // Judging writes VERDICTS, never a threshold: the swept recommendation is broadcast
 // to ApplyThresholdPanel, which owns every threshold write.
@@ -28,7 +32,7 @@ import { BTN, NOTE_AMBER, Panel, SELECT } from "./Panel";
 // Deliberately does NOT name the target: it's a per-config setting now
 // (batch_savings.semanticCache.acceptTarget), so a number baked in here would be
 // wrong for any config holding an override. The live value — and whose it is —
-// travels on the report and is rendered below the curve.
+// travels on the report and is rendered beside the τ readout.
 const ABOUT =
   "Judge recorded would-hit events — does the stored answer acceptably answer " +
   "the new question? — then sweep the labels for the lowest threshold whose " +
@@ -42,7 +46,7 @@ const MODELS = config.semanticCache.judgeModelOptions;
 // The three populations the sweep can be run over, in the order they should be
 // TRIED, not in the order they were built: what really happened, then the bound,
 // then both at once. Each carries the sentence that keeps its number honest —
-// rendered under the curve, because "τ = 0.81" and "τ = 0.95" look like the same
+// rendered under the readout, because "τ = 0.81" and "τ = 0.95" look like the same
 // kind of fact and are not.
 type CurveOrigin = "traffic" | "probe" | "all";
 
@@ -75,10 +79,10 @@ const ORIGINS: { value: CurveOrigin; label: string; note: string }[] = [
 ];
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 
-// What this curve's population is called mid-sentence. Every count the curve
+// What the swept population is called mid-sentence. Every count the sweep
 // reports is scoped to ONE origin and to rows at or above the shadow floor,
 // while the space picker on the heading row counts every judged row in the
-// space — so a sentence quoting a curve count and read against that picker
+// space — so a sentence quoting a sweep count and read against that picker
 // looks like a contradiction unless it says which set it is counting.
 const POPULATION: Record<CurveOrigin, string> = {
   traffic: "real-traffic",
@@ -91,7 +95,7 @@ export function ShadowJudgePanel() {
   const [space, setSpace] = useState("");
   const [events, setEvents] = useState<ShadowEvent[]>([]);
   const [curve, setCurve] = useState<CalibrationReport | null>(null);
-  // WHICH POPULATION THE CURVE IS DRAWN FROM (0069). Not a filter on one set —
+  // WHICH POPULATION THE SWEEP RUNS OVER (0069). Not a filter on one set —
   // two different measurements that share a table, and the difference between
   // them is the difference between "what this account's traffic does" and "what
   // an adversary could make it do".
@@ -99,9 +103,9 @@ export function ShadowJudgePanel() {
   // Opens on `traffic`, matching the route's own default, because that is the
   // only one a serving threshold may be set from. The other two are here so the
   // bound is LOOKABLE-AT: this account's traffic is one-class (91 judged, 91
-  // accepted), so the traffic curve is flat and shows nothing about where matches
-  // start failing. The probe rows are the only place precision visibly trades
-  // against recall.
+  // accepted), so it yields no τ at all and shows nothing about where matches start
+  // failing. The probe rows are the only place precision visibly trades against
+  // recall.
   const [origin, setOrigin] = useState<CurveOrigin>("traffic");
   const [bulkModel, setBulkModel] = useState<string>(config.semanticCache.judgeBulkModel);
   const [boundaryModel, setBoundaryModel] = useState<string>(
@@ -160,7 +164,7 @@ export function ShadowJudgePanel() {
           emitRecommendation({
             value: report.recommended,
             space: s,
-            origin: "Shadow judge",
+            origin: "Would-hit queue",
             notes: `shadow-judge n=${report.totalJudged} target=${report.target} rows=${report.origin}`,
             sampleSize: report.totalJudged,
           });
@@ -239,8 +243,7 @@ export function ShadowJudgePanel() {
 
   return (
     <Panel
-      step={3}
-      title="Shadow judge"
+      title="Would-hit queue"
       about={ABOUT}
       subtitle="Costs judge tokens — refines a floor that's already in the right neighbourhood."
       // The space picker doubles as this panel's scope AND its progress readout
@@ -285,7 +288,7 @@ export function ShadowJudgePanel() {
                   runJudge("bulk", { mode: "llm", space, model: bulkModel, limit: 100 })
                 }
               >
-                {busy === "bulk" ? "Judging…" : "Run judge (bulk)"}
+                {busy === "bulk" ? "Judging…" : "Run judge over queue"}
               </button>
               <span className="text-xs text-zinc-400">with</span>
               <select
@@ -352,20 +355,23 @@ export function ShadowJudgePanel() {
 
           {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
 
-          {/* The curve and the number it produces, in one block: the τ readout
-              was floating as a bare sentence under the chart, reading as a
-              caption rather than as the panel's output. */}
+          {/* The swept τ and everything needed to read it, in one block.
+              THE CURVE THAT USED TO HEAD IT IS GONE: it drew acceptance-vs-sim
+              with no y-axis, no labels and preserveAspectRatio="none", so its
+              one real message — where acceptance falls off — was carried better
+              by the numbers under it, and on this account's traffic it was a
+              flat line at 1.0 (91 judged, 91 accepted) saying nothing at all. */}
           <div className="flex flex-col gap-3 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-            {/* The population picker sits ON the curve block, not on the heading
-                row: it changes what this one chart means and nothing else about
-                the panel — the judging controls above it and the queue below it
-                are per-space, not per-origin. */}
+            {/* The population picker sits ON the readout block, not on the
+                heading row: it changes what this one number means and nothing
+                else about the panel — the judging controls above it and the
+                queue below it are per-space, not per-origin. */}
             <div className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="text-zinc-500 dark:text-zinc-400">Curve over</span>
+              <span className="text-zinc-500 dark:text-zinc-400">Swept over</span>
               <select
                 value={origin}
                 onChange={(e) => setOrigin(e.target.value as CurveOrigin)}
-                aria-label="Population the curve is drawn from"
+                aria-label="Population the sweep runs over"
                 className={SELECT}
               >
                 {ORIGINS.map((o) => (
@@ -407,7 +413,7 @@ export function ShadowJudgePanel() {
                   {/* The F5 sample of the band below the shadow floor. Shown
                       because collecting it is only worth anything if someone
                       notices it growing a servable region; it stays out of the
-                      curve because it's a fraction of its band beside a census. */}
+                      sweep because it's a fraction of its band beside a census. */}
                   {!curve.includesSubFloor && curve.subFloorJudged > 0 && (
                     <>
                       {" "}
@@ -418,8 +424,6 @@ export function ShadowJudgePanel() {
                 </span>
               )}
             </div>
-
-            <CalibrationCurve curve={curve} />
 
             {/* WHAT THIS POPULATION IS, always — a τ is not interpretable without
                 it, and the two the picker offers differ by more than their sample
@@ -451,9 +455,9 @@ export function ShadowJudgePanel() {
               ))}
           </div>
 
-          {/* WHY there's no τ. Without this the panel shows a dash and the target
-              line on the chart, leaving "is my data too small or my target too
-              strict?" to be worked out by hand — and those have opposite fixes. */}
+          {/* WHY there's no τ. Without this the panel shows a dash and nothing
+              else, leaving "is my data too small or my target too strict?" to be
+              worked out by hand — and those have opposite fixes. */}
           {curve && rec === null && curve.attainability.blocker !== "no-events" && (
             <p className={NOTE_AMBER}>
               {curve.attainability.blocker === "below-min-samples" ? (
@@ -478,7 +482,7 @@ export function ShadowJudgePanel() {
                       BE one-class here, so the other branches lose nothing. */}
                   {origin === "traffic" && curve.excludedByOrigin > 0
                     ? ` — the ${curve.excludedByOrigin} excluded probe rows do. Switch ` +
-                      `“Curve over” to them to see where, remembering that a curve built ` +
+                      `“Swept over” to them to see where, remembering that a τ swept ` +
                       `from engineered near-misses is a worst-case bound and not this ` +
                       `account's traffic`
                     : null}
@@ -516,7 +520,7 @@ export function ShadowJudgePanel() {
                       <span className="tabular-nums">{curve.attainability.requiredN}</span> events
                       at or above τ — judge more in the queue below, or lower{" "}
                       <span className="font-mono">{curve.targetSource.configLabel}</span>&apos;s
-                      precision target beside the slider in step 4, Cache key model.
+                      precision target beside the slider in Cache key model.
                     </>
                   ) : (
                     <>
@@ -524,7 +528,7 @@ export function ShadowJudgePanel() {
                       At {pctOf(curve.target)} no serve set size forgives a single reject, so only
                       a perfectly clean prefix yields a τ. Lower{" "}
                       <span className="font-mono">{curve.targetSource.configLabel}</span>&apos;s
-                      precision target beside the slider in step 4, Cache key model.
+                      precision target beside the slider in Cache key model.
                     </>
                   )}
                 </>
@@ -532,6 +536,10 @@ export function ShadowJudgePanel() {
             </p>
           )}
 
+          {/* THE QUEUE, in the space the calibration curve used to take. It is
+              what this section is named for: every verdict above and below comes
+              from these rows, and while the curve sat on top of them the panel's
+              actual evidence opened below the fold. */}
           <HumanQueue events={events} onVerdict={humanVerdict} />
         </>
       )}
@@ -539,80 +547,9 @@ export function ShadowJudgePanel() {
   );
 }
 
-// A compact acceptance-rate-vs-sim sparkline. x = similarity, y = P(accept | sim
-// ≥ x); a dashed line marks the target and a vertical rule marks the recommended
-// τ. Single-series, monochrome, theme-aware — kept intentionally minimal.
-function CalibrationCurve({ curve }: { curve: CalibrationReport | null }) {
-  if (!curve || curve.curve.length < 2) {
-    return (
-      <p className="text-xs text-zinc-400">
-        Calibration curve appears once there are at least two judged events.
-      </p>
-    );
-  }
-  const W = 640;
-  const H = 120;
-  const pad = 4;
-  const sims = curve.curve.map((p) => p.sim);
-  const minSim = Math.min(...sims);
-  const maxSim = Math.max(...sims);
-  const span = maxSim - minSim || 1;
-  const x = (sim: number) => pad + ((sim - minSim) / span) * (W - 2 * pad);
-  const y = (rate: number) => pad + (1 - rate) * (H - 2 * pad);
-  const points = [...curve.curve]
-    .sort((a, b) => a.sim - b.sim)
-    .map((p) => `${x(p.sim).toFixed(1)},${y(p.acceptRateAtOrAbove).toFixed(1)}`)
-    .join(" ");
-  const targetY = y(curve.target);
-
-  return (
-    <div className="overflow-x-auto">
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
-        className="h-28 w-full min-w-[420px] text-zinc-400"
-        preserveAspectRatio="none"
-      >
-        {/* target line */}
-        <line
-          x1={pad}
-          x2={W - pad}
-          y1={targetY}
-          y2={targetY}
-          stroke="currentColor"
-          strokeDasharray="4 4"
-          strokeWidth={1}
-          opacity={0.5}
-        />
-        {/* recommended τ marker */}
-        {curve.recommended !== null && (
-          <line
-            x1={x(curve.recommended)}
-            x2={x(curve.recommended)}
-            y1={pad}
-            y2={H - pad}
-            className="text-green-600 dark:text-green-400"
-            stroke="currentColor"
-            strokeWidth={1.5}
-          />
-        )}
-        {/* acceptance curve */}
-        <polyline
-          points={points}
-          fill="none"
-          className="text-zinc-700 dark:text-zinc-200"
-          stroke="currentColor"
-          strokeWidth={1.5}
-        />
-      </svg>
-      <div className="flex justify-between text-[10px] text-zinc-400">
-        <span>sim {minSim.toFixed(2)} (more inclusive)</span>
-        <span>target {curve.target}</span>
-        <span>sim {maxSim.toFixed(2)}</span>
-      </div>
-    </div>
-  );
-}
-
+// The unjudged rows themselves. Wears the same bordered block as the judging
+// controls and the τ readout above it — it is a peer of those, not a footnote
+// under them, and the three used to sit at three different weights.
 function HumanQueue({
   events,
   onVerdict,
@@ -621,9 +558,12 @@ function HumanQueue({
   onVerdict: (id: string, verdict: "accept" | "reject") => void;
 }) {
   return (
-    <div className="flex flex-col gap-2">
-      <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
-        Human queue · {events.length} unjudged
+    <div className="flex flex-col gap-2 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+      {/* Says "judge by hand" and not "human queue": these are the same rows the
+          bulk pass reads, so naming them after the judge that happens to take
+          them made the two buttons look like two different queues. */}
+      <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+        Judge by hand · {events.length} unjudged
       </h3>
       {events.length === 0 && (
         <p className="text-xs text-zinc-400">Nothing unjudged in this space.</p>

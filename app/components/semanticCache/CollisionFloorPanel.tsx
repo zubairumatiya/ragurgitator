@@ -202,7 +202,6 @@ export function CollisionFloorPanel({
 
   return (
     <Panel
-      step={1}
       title="Collision floor"
       about={ABOUT}
       subtitle="Free — arithmetic over the eval bank. Start here."

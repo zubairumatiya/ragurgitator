@@ -1,21 +1,20 @@
 // Appraise → Semantic caching. A peer page of Costs and the cross-config metrics
 // table, under the shared AppraiseNav. Surfaces Phase 2 of the semantic cache: the
-// eval-bank collision floor, the per-space thresholds, and the shadow-judge
-// calibration.
+// eval-bank collision floor, the per-space thresholds, and the would-hit queue.
 //
-// Panel order follows the order you'd actually work in, cheapest evidence first,
-// and each panel is NUMBERED with its place in it:
-//   1. Collision floor — pure arithmetic over the eval bank, no LLM spend, usable
-//      the moment a config has labeled questions. The apply control sits in its
-//      footer so the recommendation and the box that makes it live are one reading
-//      order apart.
-//   2. Thresholds by vector-space — what's live now, read-only.
-//   3. Shadow judge — needs real would-hit traffic and costs judge tokens, so it's
-//      the refinement you reach for after (1).
-//   4. Cache key model — the only panel that isn't about a threshold's VALUE: it
-//      changes WHICH SPACE a config reads its threshold from.
-//
-// All four wear the same card, so they read as four steps of one workflow.
+// The panels were NUMBERED 1–4 as steps of one workflow. They aren't one: two of
+// them stand alone, and the numbering implied an order nobody works in. They are
+// peers now — same card, no rank — ordered cheapest-evidence-first, which is a
+// suggestion rather than a sequence:
+//   • Collision floor — pure arithmetic over the eval bank, no LLM spend, usable
+//     the moment a config has labeled questions. The apply control sits in its
+//     footer so the recommendation and the box that makes it live are one reading
+//     order apart.
+//   • Thresholds by vector-space — what's live now, read-only.
+//   • Would-hit queue — needs real would-hit traffic and costs judge tokens, so
+//     it's the refinement you reach for once the floor is in place.
+//   • Cache key model — the only panel that isn't about a threshold's VALUE: it
+//     changes WHICH SPACE a config reads its threshold from.
 //
 // The page frame is a Server Component. It reads the config list and the first
 // config's SAVED collision floor here, on the server, and hands them to
@@ -65,7 +64,7 @@ const ABOUT =
   "Semantic answer cache calibration — the per-space cosine threshold that " +
   "decides when a past answer is served for a new question.\n\n" +
   "Lower it only where it's proven safe: the collision floor from the eval " +
-  "bank, or the shadow judge over real would-hit traffic.";
+  "bank, or judged verdicts over the would-hit queue.";
 
 // The saved floor for the config the panel opens on — the FIRST in the picker's
 // order, which is what the panel selects by default. Best-effort, matching
@@ -121,8 +120,8 @@ export default async function SemanticCachePage() {
           {/* The apply control goes in the collision-floor panel's FOOTER: the
               floor is where a threshold starts, so the number and the control
               that puts it live are one card apart rather than one page apart.
-              Both panels that recommend into it (collision floor here, shadow
-              judge below) stay within a screen. */}
+              Both panels that recommend into it (collision floor here, the
+              would-hit queue below) stay within a screen. */}
           <CollisionFloorPanel
             configs={configs}
             preload={preload}

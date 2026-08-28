@@ -641,7 +641,7 @@ export function KeyModelPanel({
             "Submitted a batch — pairs land when it completes (Batch API panel tracks it), " +
             "and a judge screen is submitted automatically once they do. " +
             "Mislabelled pairs are quarantined when its verdicts arrive, and a " +
-            "probe run stocks the shadow judge queue at the same time."
+            "probe run stocks the would-hit queue at the same time."
           : String(d.reason ?? "Nothing to generate."),
       );
     } else {
@@ -833,7 +833,6 @@ export function KeyModelPanel({
 
   return (
     <Panel
-      step={4}
       title="Cache key model"
       about={ABOUT}
       subtitle="Which space a config reads its threshold FROM — not what it serves at."
@@ -1147,8 +1146,8 @@ export function KeyModelPanel({
               {busy === "probe" ? "Probing…" : "Probe one pair"}
             </button>
             <span className="text-xs text-zinc-400">
-              One embedding — stocks the Accept / Reject queue above with a row
-              nothing has judged.
+              One embedding — stocks the would-hit queue above with a row nothing
+              has judged.
             </span>
           </div>
           {notes && <p className={DEMO_NOTE}>{notes.probe}</p>}

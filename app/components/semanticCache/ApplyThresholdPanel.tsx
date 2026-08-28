@@ -2,7 +2,7 @@
 // panel only computes and displays; a number goes live here or nowhere, so there's
 // one control to reason about instead of an apply button per calibration method.
 // Rendered into the Collision floor section's FOOTER, directly under the first
-// recommendation you'd apply. The shadow judge recommends into it too.
+// recommendation you'd apply. The would-hit queue recommends into it too.
 //
 // A footer strip and not the heading row it used to sit on: there it had to stay
 // heading-height, which meant a nested bordered box around the controls and every
@@ -284,7 +284,7 @@ export function ApplyThresholdPanel() {
         )}
 
         {/* Recommendations arrive from the calibration panels — the collision
-            floor this footer belongs to, and the shadow judge below. Nothing is
+            floor this footer belongs to, and the would-hit queue below. Nothing is
             live until Apply, so this is a suggestion to take, edit, or ignore. */}
         {rec && parsed !== rec.value && (
           <p className="text-zinc-500 dark:text-zinc-400">
