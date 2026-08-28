@@ -8,6 +8,8 @@
 //        candidate: the key vector never touches a chunks_* table. For a GUEST it
 //        also carries `publishedSweep`, the leaderboard the publish banked (0077),
 //        because the POST that would produce one is a spend the demo won't make.
+//        It also carries `economics` — the census and the realized per-hit saving
+//        the precision slider's payoff readout is derived from.
 // POST — three actions:
 //        • sweep    — score every candidate on the pooled pair set. Embedding-only
 //                     and cached, so a re-run is nearly free. NOT folded into GET:
@@ -48,6 +50,7 @@ import { registerRunId, isCancelled, unregisterRun } from "@/lib/http/cancelRegi
 import { withRequestConfig } from "@/lib/http/configScope";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { getBatchSavings, updateBatchSavings } from "@/lib/rag/batchStore";
+import { readCacheEconomics } from "@/lib/rag/cacheEconomics";
 import { listClosedConfigs, listConfigs } from "@/lib/rag/configStore";
 import { runKeyModelSweep } from "@/lib/rag/keyModelSweep";
 import {
@@ -67,8 +70,19 @@ export async function GET(request: Request) {
   return withRequestConfig(request, async () => {
     try {
       const savings = await getBatchSavings(activeConfig().id);
+      const status = await keyModelStatus(savings.semanticCache.keyModel);
       return Response.json({
-        ...(await keyModelStatus(savings.semanticCache.keyModel)),
+        ...status,
+        // WHAT THE PRECISION TARGET COSTS, for the space the key model actually
+        // serves in — the payoff readout beside the slider. Folded into this GET
+        // rather than given a route of its own: it is read once, at the same
+        // moment as the threshold it is scored against, and a second round trip
+        // would paint the slider before the only number that says what moving it
+        // is worth. Three small aggregates; nothing here embeds or judges.
+        economics: await readCacheEconomics(
+          status.threshold.space,
+          status.threshold.threshold,
+        ),
         // THE PUBLISHED SWEEP, for a guest only (phase 1 of
         // docs/demo-cache-lab-plan.md). It seeds the panel's `sweep` state, which
         // is the whole unlock: §4's leaderboard and its precision slider render

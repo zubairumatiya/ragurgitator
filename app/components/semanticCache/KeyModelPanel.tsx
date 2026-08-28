@@ -37,8 +37,12 @@ import type { LeaderboardRow, SweepResult } from "@/lib/rag/keyModelSweep";
 // accepts/n and accepts/totalAccepts, so they are divided back here rather than
 // stored, on the same operands and therefore bit-for-bit.
 import { unpackSweep, type PublishedSweep } from "@/lib/rag/publishedSweepCore";
+// TYPE-ONLY — the read side (lib/rag/cacheEconomics.ts) imports the DB client.
+// The arithmetic lives in the core, which is import-free for exactly this reason.
+import type { CacheEconomics } from "@/lib/rag/cacheEconomicsCore";
 
 import { SC_CHANGED } from "./events";
+import { PayoffReadout } from "./PayoffReadout";
 import {
   BTN,
   BTN_PRIMARY,
@@ -244,6 +248,11 @@ type Status = {
     dimension: number;
     provider: string;
   }[];
+  // The traffic census and realized per-hit saving for the space `threshold`
+  // names, for the payoff readout beside the slider. Optional: it rides this GET
+  // rather than having a route of its own, and a response predating it (or from
+  // a deployment ahead of its reads) simply leaves the readout off.
+  economics?: CacheEconomics | null;
 };
 
 // THE DEMO'S SENTENCES, handed down from the page rather than imported here.
@@ -532,6 +541,12 @@ export function KeyModelPanel({ notes }: { notes?: DemoNotes }) {
   // count: "too few pairs" and "the target is out of reach on this set" are the
   // difference between get-more-data and lower-the-target, and only the sweep
   // knows which prefix it actually got to consider.
+  // The row for the model this config ACTUALLY keys on, re-read at the dragged
+  // target — the anchor for the payoff readout. Undefined when the sweep did not
+  // score it (a cancelled run, or a model dropped from the candidate list), in
+  // which case the readout simply doesn't render.
+  const live = derived.find((d) => d.row.model === status?.keyModel);
+
   const scored = derived.filter((d) => d.attainability !== null);
   const noThresholds =
     derived.length > 0 && !derived.some((d) => d.kind === "at-target");
@@ -737,79 +752,100 @@ export function KeyModelPanel({ notes }: { notes?: DemoNotes }) {
               with the same function the server uses — no re-sweep, no request,
               no embedding spend. Comparability is untouched: wherever the slider
               sits, every model is still being held to the SAME precision. */}
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-zinc-200 px-3 py-2 dark:border-zinc-800">
-            <Tooltip align="left" text={TARGET_ABOUT}>
-              <span className="text-xs text-zinc-500 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
-                Precision held at
-              </span>
-            </Tooltip>
-            <span className="text-lg font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
-              {pct(target)}
-            </span>
-            {/* Bounds from the shared constant, not literals: the published
-                sweep's curves are thinned to exactly the positions this input
-                can produce (lib/rag/publishedSweep), so a widened range or a
-                finer step here would silently start reading positions those
-                curves were never thinned for. */}
-            <input
-              type="range"
-              min={TARGET_SLIDER.min}
-              max={TARGET_SLIDER.max}
-              step={TARGET_SLIDER.step}
-              value={target * 100}
-              onChange={(e) => setTargetOverride(Number(e.target.value) / 100)}
-              aria-label="Precision target"
-              className="h-1 w-48 min-w-32 max-w-full cursor-pointer accent-zinc-900 dark:accent-zinc-100"
-            />
-            {/* An explored number must never be mistaken for the config's
-                setting — this is a lens, and nothing here writes. */}
-            {exploring ? (
-              <span className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500 dark:text-zinc-400">
-                exploring —{" "}
-                <span className="font-mono">
-                  {sweep.targetSource.configLabel}
-                </span>{" "}
-                is set to{" "}
-                <span className="tabular-nums">{pct(sweep.target)}</span>
-                <button
-                  type="button"
-                  onClick={() => setTargetOverride(null)}
-                  className="underline underline-offset-2 cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
-                >
-                  reset
-                </button>
-                {/* Named at length on purpose. The apply box at the foot of this
-                    panel writes a KEY MODEL, and a bare "Apply" a few hundred
-                    pixels away would read as a variation of it — so this one
-                    says whose setting it moves and what that setting governs. */}
-                <button
-                  type="button"
-                  onClick={saveTarget}
-                  disabled={busy !== null}
-                  title={
-                    "Stores this precision as the calibration target for " +
-                    `${sweep.targetSource.configLabel}. It governs which τ the sweeps ` +
-                    "RECOMMEND — not the cosine the cache serves at, which is the " +
-                    "threshold applied in the Threshold section."
-                  }
-                  className="underline underline-offset-2 cursor-pointer hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:text-zinc-200"
-                >
-                  {busy === "target"
-                    ? "Setting…"
-                    : `set as ${sweep.targetSource.configLabel}'s calibration target`}
-                </button>
-              </span>
-            ) : (
-              <span className="text-[11px] text-zinc-400">
-                from{" "}
-                <span className="font-mono">
-                  {sweep.targetSource.configLabel}
+          {/* A COLUMN since phase 4: the dial on the first row, and under it what
+              that dial costs. They are one control — the readout is the only
+              thing on the page that says what a precision target BUYS — so they
+              share a box rather than sitting as two. */}
+          <div className="flex flex-col gap-2 rounded-lg border border-zinc-200 px-3 py-2 dark:border-zinc-800">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+              <Tooltip align="left" text={TARGET_ABOUT}>
+                <span className="text-xs text-zinc-500 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                  Precision held at
                 </span>
-                {sweep.targetSource.source === "config"
-                  ? " (override)"
-                  : " (global default)"}{" "}
-                · drag to re-read the table
+              </Tooltip>
+              <span className="text-lg font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
+                {pct(target)}
               </span>
+              {/* Bounds from the shared constant, not literals: the published
+                  sweep's curves are thinned to exactly the positions this input
+                  can produce (lib/rag/publishedSweep), so a widened range or a
+                  finer step here would silently start reading positions those
+                  curves were never thinned for. */}
+              <input
+                type="range"
+                min={TARGET_SLIDER.min}
+                max={TARGET_SLIDER.max}
+                step={TARGET_SLIDER.step}
+                value={target * 100}
+                onChange={(e) => setTargetOverride(Number(e.target.value) / 100)}
+                aria-label="Precision target"
+                className="h-1 w-48 min-w-32 max-w-full cursor-pointer accent-zinc-900 dark:accent-zinc-100"
+              />
+              {/* An explored number must never be mistaken for the config's
+                  setting — this is a lens, and nothing here writes. */}
+              {exploring ? (
+                <span className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500 dark:text-zinc-400">
+                  exploring —{" "}
+                  <span className="font-mono">
+                    {sweep.targetSource.configLabel}
+                  </span>{" "}
+                  is set to{" "}
+                  <span className="tabular-nums">{pct(sweep.target)}</span>
+                  <button
+                    type="button"
+                    onClick={() => setTargetOverride(null)}
+                    className="underline underline-offset-2 cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
+                  >
+                    reset
+                  </button>
+                  {/* Named at length on purpose. The apply box at the foot of this
+                      panel writes a KEY MODEL, and a bare "Apply" a few hundred
+                      pixels away would read as a variation of it — so this one
+                      says whose setting it moves and what that setting governs. */}
+                  <button
+                    type="button"
+                    onClick={saveTarget}
+                    disabled={busy !== null}
+                    title={
+                      "Stores this precision as the calibration target for " +
+                      `${sweep.targetSource.configLabel}. It governs which τ the sweeps ` +
+                      "RECOMMEND — not the cosine the cache serves at, which is the " +
+                      "threshold applied in the Threshold section."
+                    }
+                    className="underline underline-offset-2 cursor-pointer hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:text-zinc-200"
+                  >
+                    {busy === "target"
+                      ? "Setting…"
+                      : `set as ${sweep.targetSource.configLabel}'s calibration target`}
+                  </button>
+                </span>
+              ) : (
+                <span className="text-[11px] text-zinc-400">
+                  from{" "}
+                  <span className="font-mono">
+                    {sweep.targetSource.configLabel}
+                  </span>
+                  {sweep.targetSource.source === "config"
+                    ? " (override)"
+                    : " (global default)"}{" "}
+                  · drag to re-read the table
+                </span>
+              )}
+            </div>
+
+            {/* THE BUSINESS AXIS (phase 4 of docs/semantic-cache-page-plan.md).
+                Read through the config's LIVE key model, not the table's top
+                row: the census is real traffic, and this account's traffic only
+                exists in the space it is actually served from — a hit rate
+                quoted for some other model's space would be a projection onto
+                questions that space has never seen. */}
+            {status?.economics && live && (
+              <PayoffReadout
+                econ={status.economics}
+                tau={live.threshold}
+                keyModel={status.keyModel}
+                atTarget={live.kind === "at-target"}
+              />
             )}
           </div>
 
