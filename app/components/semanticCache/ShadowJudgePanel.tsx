@@ -37,7 +37,11 @@ const ABOUT =
   "Judge recorded would-hit events — does the stored answer acceptably answer " +
   "the new question? — then sweep the labels for the lowest threshold whose " +
   "served set still keeps acceptance at or above the precision target.\n\n" +
-  "Events are judged on demand, not as they arrive.";
+  "Events are judged on demand, not as they arrive.\n\n" +
+  "REAL TRAFFIC ONLY — questions someone actually asked. Probe rows are " +
+  "excluded and scored in the Cache key model table instead, because a τ swept " +
+  "from engineered near-misses is a worst-case bound rather than a setting. " +
+  "This is the only τ on the page offered to the Set threshold box.";
 
 const pctOf = (n: number) => `${(n * 100).toFixed(1)}%`;
 
@@ -274,13 +278,13 @@ export function ShadowJudgePanel() {
 
           {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
 
-          {/* The swept τ and everything needed to read it, in one block.
-              THE CURVE THAT USED TO HEAD IT IS GONE: it drew acceptance-vs-sim
-              with no y-axis, no labels and preserveAspectRatio="none", so its
-              one real message — where acceptance falls off — was carried better
-              by the numbers under it, and on this account's traffic it was a
-              flat line at 1.0 (91 judged, 91 accepted) saying nothing at all. */}
-          <div className="flex flex-col gap-3 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+          {/* The swept τ and the sample behind it. NOT A BOX any more: it was
+              bordered to hold a curve, then a picker, then a per-population
+              paragraph, and with all three gone a border around two lines was
+              chrome pretending there was something inside it. The judging
+              controls above and the queue below keep theirs — they hold real
+              stacks of controls and rows. */}
+          <div className="flex flex-col gap-1.5">
             <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
               <span className="flex items-baseline gap-2">
                 <span className="text-xs text-zinc-500 dark:text-zinc-400">Recommended τ</span>
@@ -321,14 +325,6 @@ export function ShadowJudgePanel() {
                 </span>
               )}
             </div>
-
-            {/* WHAT THIS POPULATION IS. One line rather than the picker's three:
-                a τ is not interpretable without knowing what was asked, and this
-                panel now only ever sweeps one thing. */}
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              Questions someone actually asked — the only population a live threshold
-              may be set from.
-            </p>
 
             {/* Points at the apply box in the Threshold section's footer. The
                 branch that said "not sent" is gone with the picker: everything
