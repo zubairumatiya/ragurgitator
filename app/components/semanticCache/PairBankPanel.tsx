@@ -566,9 +566,10 @@ export function PairBankPanel({
           >
             {busy === "probe" ? "Probing…" : "Probe one pair"}
           </button>
-          <span className="text-xs text-zinc-400">
-            One embedding — stocks the would-hit queue with a row nothing has judged.
-          </span>
+          {/* The COST only. What the probe does is on the button's own tooltip,
+              and it was said twice — once as a hint, once on hover — which is the
+              standing prose this section had most of. */}
+          <span className="text-xs text-zinc-400">Costs one embedding.</span>
         </div>
         {notes && <p className={DEMO_NOTE}>{notes.probe}</p>}
         {probe && <ProbeReport probe={probe} />}

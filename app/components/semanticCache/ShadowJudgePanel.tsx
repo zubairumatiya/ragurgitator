@@ -15,8 +15,9 @@
 // to ApplyThresholdPanel, which owns every threshold write.
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 
+import { Tooltip } from "@/app/components/Tooltip";
 import { config } from "@/lib/config";
 import { apiFetch } from "@/lib/http/client";
 import type {
@@ -27,7 +28,7 @@ import type {
 } from "@/lib/rag/semanticCacheCalibration";
 
 import { emitRecommendation, SC_CHANGED } from "./events";
-import { BTN, NOTE_AMBER, Panel, SELECT } from "./Panel";
+import { BTN, NOTE_AMBER, Panel, SELECT, WarnDot } from "./Panel";
 
 // Deliberately does NOT name the target: it's a per-config setting now
 // (batch_savings.semanticCache.acceptTarget), so a number baked in here would be
@@ -45,38 +46,44 @@ const MODELS = config.semanticCache.judgeModelOptions;
 
 // The three populations the sweep can be run over, in the order they should be
 // TRIED, not in the order they were built: what really happened, then the bound,
-// then both at once. Each carries the sentence that keeps its number honest —
-// rendered under the readout, because "τ = 0.81" and "τ = 0.95" look like the same
-// kind of fact and are not.
+// then both at once.
+//
+// Each keeps ONE line under the readout, because "τ = 0.81" and "τ = 0.95" look
+// like the same kind of fact and are not. The paragraph that used to stand there
+// per origin moved into SWEPT_ABOUT, on the picker: three populations' worth of
+// standing prose to read the one number under it was documentation, not a label.
 type CurveOrigin = "traffic" | "probe" | "all";
 
 const ORIGINS: { value: CurveOrigin; label: string; note: string }[] = [
   {
     value: "traffic",
     label: "Real traffic",
-    note:
-      "Questions someone actually asked. This is the only population a live " +
-      "threshold may be set from, and the only one whose τ is offered to the " +
-      "Set threshold box.",
+    note: "Questions someone actually asked — the only τ here a cache may be set from.",
   },
   {
     value: "probe",
     label: "Probes (worst-case bound)",
-    note:
-      "Engineered near-misses, half of them hard negatives. Precision here is a " +
-      "lower bound against an adversarial question mix — it shows where matches " +
-      "start failing, which is what real traffic cannot show while it is still " +
-      "all accepts. Not a setting: read it, don't apply it.",
+    note: "Engineered near-misses. A worst-case bound: read it, don't apply it.",
   },
   {
     value: "all",
     label: "Both pooled",
-    note:
-      "Traffic and probes in one sweep. The mixture is whatever the two sample " +
-      "sizes happen to be rather than anything about the world, so this is a " +
-      "sanity check on the other two, not a third measurement.",
+    note: "Traffic and probes together — a sanity check on the other two.",
   },
 ];
+
+// The three-way trust rule, once, on the control that switches between them.
+const SWEPT_ABOUT =
+  "Which recorded events the τ below is swept over.\n\n" +
+  "REAL TRAFFIC — questions someone actually asked. The only population a live " +
+  "threshold may be set from, and the only one whose τ is offered to the Set " +
+  "threshold box.\n\n" +
+  "PROBES — engineered near-misses, half of them hard negatives. Precision " +
+  "against an adversarial mix is a lower bound, and it shows where matches " +
+  "start failing — which traffic cannot show while it is still all accepts.\n\n" +
+  "BOTH POOLED — the mixture is whatever the two sample sizes happen to be " +
+  "rather than anything about the world, so it is a cross-check, not a third " +
+  "measurement.";
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 
 // What the swept population is called mid-sentence. Every count the sweep
@@ -367,7 +374,11 @@ export function ShadowJudgePanel() {
                 else about the panel — the judging controls above it and the
                 queue below it are per-space, not per-origin. */}
             <div className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="text-zinc-500 dark:text-zinc-400">Swept over</span>
+              <Tooltip align="left" text={SWEPT_ABOUT}>
+                <span className="text-zinc-500 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                  Swept over
+                </span>
+              </Tooltip>
               <select
                 value={origin}
                 onChange={(e) => setOrigin(e.target.value as CurveOrigin)}
@@ -457,81 +468,7 @@ export function ShadowJudgePanel() {
               else, leaving "is my data too small or my target too strict?" to be
               worked out by hand — and those have opposite fixes. */}
           {curve && rec === null && curve.attainability.blocker !== "no-events" && (
-            <p className={NOTE_AMBER}>
-              {curve.attainability.blocker === "below-min-samples" ? (
-                <>
-                  No τ yet: {curve.totalJudged} judged {POPULATION[curve.origin]} events
-                  never fill a serve set of {curve.minSamples}, so {pctOf(curve.target)} was
-                  never tested. Judge more events.
-                </>
-              ) : curve.attainability.blocker === "one-class-sample" ? (
-                <>
-                  No τ: all {curve.totalJudged} judged events were accepted, so precision
-                  is 100% at every threshold and the sweep would return the lowest
-                  similarity in the sample rather than a boundary. Nothing here shows where
-                  matches start failing
-                  {/* One expression, not interleaved text: at this indent JSX wraps the
-                      chunk after the count onto a new line and eats the space in front
-                      of it, which renders as "239excluded". */}
-                  {/* Guarded on the origin, not just on the count: under any other
-                      population `excludedByOrigin` counts the rows this curve left
-                      out, which are the traffic ones, and the sentence would name
-                      the wrong set. Traffic is also the only population that can
-                      BE one-class here, so the other branches lose nothing. */}
-                  {origin === "traffic" && curve.excludedByOrigin > 0
-                    ? ` — the ${curve.excludedByOrigin} excluded probe rows do. Switch ` +
-                      `“Swept over” to them to see where, remembering that a τ swept ` +
-                      `from engineered near-misses is a worst-case bound and not this ` +
-                      `account's traffic`
-                    : null}
-                  . Keep the current threshold until real rejects appear.
-                </>
-              ) : (
-                <>
-                  {/* TWO COUNTS IN ONE SENTENCE, and both were unlabelled: the
-                      population (this curve is one origin, above the floor —
-                      not the space picker's tally) and the SERVE SET (the
-                      events at or above a candidate τ, a prefix of that
-                      population, not all of it). Read against the picker, a
-                      bare "held 21 events" looks like the panel contradicting
-                      its own judged count. */}
-                  No τ at {pctOf(curve.target)} over this curve&apos;s{" "}
-                  <span className="tabular-nums">{curve.totalJudged}</span> judged{" "}
-                  {POPULATION[curve.origin]} events: the best serve set — the events at or
-                  above a candidate τ, not all{" "}
-                  <span className="tabular-nums">{curve.totalJudged}</span> — held{" "}
-                  <span className="tabular-nums">{curve.attainability.bestRateAt!.n}</span> at{" "}
-                  <span className="tabular-nums">{pctOf(curve.attainability.bestRate!)}</span>{" "}
-                  ({curve.attainability.rejectsInBest} rejected).
-                  {/* WHERE THE TARGET IS SET, corrected: it left Settings →
-                      Savings when it stopped being a cosine's neighbour (see
-                      EvalSettings.tsx) and now lives beside the slider that
-                      shows what each precision costs. Both halves of this
-                      advice are things a guest can also do — human verdicts
-                      are carved out of the judge gate and the target write is
-                      not gated at all — so no demo branch is owed here. */}
-                  {curve.attainability.requiredN !== null ? (
-                    <>
-                      {" "}
-                      Clearing {pctOf(curve.target)} with {curve.attainability.rejectsInBest}{" "}
-                      rejected needs{" "}
-                      <span className="tabular-nums">{curve.attainability.requiredN}</span> events
-                      at or above τ — judge more in the queue below, or lower{" "}
-                      <span className="font-mono">{curve.targetSource.configLabel}</span>&apos;s
-                      precision target beside the slider in Cache key model.
-                    </>
-                  ) : (
-                    <>
-                      {" "}
-                      At {pctOf(curve.target)} no serve set size forgives a single reject, so only
-                      a perfectly clean prefix yields a τ. Lower{" "}
-                      <span className="font-mono">{curve.targetSource.configLabel}</span>&apos;s
-                      precision target beside the slider in Cache key model.
-                    </>
-                  )}
-                </>
-              )}
-            </p>
+            <NoTau curve={curve} origin={origin} />
           )}
 
           {/* THE QUEUE, in the space the calibration curve used to take. It is
@@ -542,6 +479,94 @@ export function ShadowJudgePanel() {
         </>
       )}
     </Panel>
+  );
+}
+
+// WHY THERE IS NO τ: the diagnosis on the line, the mechanism behind the dot.
+//
+// All three of these used to be full amber paragraphs. Each was accurate and each
+// was five lines of standing prose above the queue — a reader who has met the
+// blocker once needs the numbers and the fix, not the derivation again, so the
+// derivation moved to the dot and the numbers stayed.
+function NoTau({ curve, origin }: { curve: CalibrationReport; origin: CurveOrigin }) {
+  const { attainability: att } = curve;
+  const pop = POPULATION[curve.origin];
+  const target = pctOf(curve.target);
+  // Named rather than pointed at: the target's slider is a section away, and the
+  // config that owns it needn't be the one this curve was swept for.
+  const targetHome = `${curve.targetSource.configLabel}'s precision target, beside the slider in Cache key model`;
+
+  let why: string;
+  let line: ReactNode;
+
+  if (att.blocker === "below-min-samples") {
+    why =
+      `A τ is only offered once ${curve.minSamples} events sit at or above it, so ` +
+      `${target} was never actually tested on a sample this small.`;
+    line = (
+      <>
+        No τ yet — <span className="tabular-nums">{curve.totalJudged}</span> judged {pop}{" "}
+        events never fill a serve set of {curve.minSamples}. Judge more events.
+      </>
+    );
+  } else if (att.blocker === "one-class-sample") {
+    why =
+      "Precision is 100% at every threshold, so the sweep would return the lowest " +
+      "similarity in the sample rather than a boundary — nothing here shows where " +
+      "matches start failing." +
+      // Guarded on the origin, not just on the count: under any other population
+      // `excludedByOrigin` counts the rows this curve left out, which are the
+      // traffic ones, and the sentence would name the wrong set. Traffic is also
+      // the only population that can BE one-class here, so nothing is lost.
+      (origin === "traffic" && curve.excludedByOrigin > 0
+        ? ` The ${curve.excludedByOrigin} excluded probe rows do: switch “Swept over” ` +
+          "to them, remembering that a τ swept from engineered near-misses is a " +
+          "worst-case bound and not this account's traffic."
+        : "");
+    line = (
+      <>
+        No τ — all <span className="tabular-nums">{curve.totalJudged}</span> judged events
+        were accepted. Keep the current threshold until real rejects appear.
+      </>
+    );
+  } else {
+    // THE SERVE SET is the count that needed explaining: it is the events at or
+    // above a candidate τ, a PREFIX of this curve's judged events rather than all
+    // of them, so a bare "held 21" read against the space picker's tally looks
+    // like the panel contradicting itself.
+    why =
+      `The serve set is the events at or above a candidate τ — a prefix of this ` +
+      `curve's ${curve.totalJudged} judged ${pop} events, not all of them. ` +
+      (att.requiredN !== null
+        ? `Clearing ${target} with ${att.rejectsInBest} rejected takes ${att.requiredN} of them.`
+        : `At ${target} no serve set size forgives a single reject, so only a ` +
+          "perfectly clean prefix yields a τ.");
+    line = (
+      <>
+        No τ at {target} — the best serve set held{" "}
+        <span className="tabular-nums">{att.bestRateAt!.n}</span> at{" "}
+        <span className="tabular-nums">{pctOf(att.bestRate!)}</span> ({att.rejectsInBest}{" "}
+        rejected).{" "}
+        {att.requiredN !== null ? (
+          <>
+            Judge more in the queue below, or lower {targetHome}.
+          </>
+        ) : (
+          <>Lower {targetHome}.</>
+        )}
+      </>
+    );
+  }
+
+  return (
+    <p className="flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-400">
+      {/* mt-0.5: the dot is a glyph on a wrapping paragraph, so it aligns to the
+          first line's text rather than to the block's centre. */}
+      <span className="mt-0.5 shrink-0">
+        <WarnDot text={why} />
+      </span>
+      <span>{line}</span>
+    </p>
   );
 }
 

@@ -939,10 +939,9 @@ export function KeyModelPanel({ notes }: { notes?: DemoNotes }) {
 
           {derived.some((d) => d.kind === "best-attainable") && (
             <p className="text-[11px] text-zinc-400">
-              ✳ best attainable — this model never reaches {pct(target)} on a
-              serve set of {sweep.minSamples}+, so its best operating point is
-              shown instead. Not comparable with an at-target row, and sorted
-              below them.
+              ✳ best attainable — never reaches {pct(target)}, so its best
+              operating point is shown instead. Not comparable with an at-target
+              row.
             </p>
           )}
         </div>

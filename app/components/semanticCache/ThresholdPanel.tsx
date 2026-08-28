@@ -89,26 +89,32 @@ const POPULATIONS: {
   label: string;
   kind: string;
   applicable: boolean;
+  // One line under the pills; the paragraph behind the floor's own label.
   blurb: string;
+  about: string;
 }[] = [
   {
     id: "eval",
     label: "Eval bank",
     kind: "applicable",
     applicable: true,
-    blurb:
-      "Ground-truth chunk ids — nothing was asked to judge anything. The only " +
-      "floor here that may be applied.",
+    blurb: "Ground-truth chunk ids — the only floor here that may be applied.",
+    about:
+      "The highest cosine between two eval questions whose ground-truth chunks " +
+      "DIFFER. Nothing was asked to judge anything: the labels are chunk ids, " +
+      "which is what makes this the one population a serving threshold may be " +
+      "moved from.",
   },
   {
     id: "pairs",
     label: "Pair bank",
     kind: "bound",
     applicable: false,
-    blurb:
-      "LLM-written hard negatives, engineered to sit as close as the generator " +
-      "could manage. Quarantined pairs are excluded. A worst-case bound — read " +
-      "it, don't apply it, and read the pairs: this is COSINE ALONE, while the " +
+    blurb: "LLM-written hard negatives — a worst-case bound, not a setting.",
+    about:
+      "Hard negatives engineered to sit as close as the generator could manage, " +
+      "with quarantined pairs excluded.\n\n" +
+      "Read the pairs before believing it: this is COSINE ALONE, while the " +
       "serving path also runs the entity guard, which blocks reversals and " +
       "changed numbers outright.",
   },
@@ -117,10 +123,12 @@ const POPULATIONS: {
     label: "Real traffic",
     kind: "bound",
     applicable: false,
-    blurb:
-      "The highest similarity a judge ever REJECTED on real questions. The most " +
-      "honest labels on the page and usually the emptiest set; it fills in as " +
-      "the cache is used.",
+    blurb: "The highest similarity a judge ever REJECTED on a real question.",
+    about:
+      "The most honest labels on the page and usually the emptiest set — it " +
+      "fills in as the cache is used and a judged match comes back rejected. A " +
+      "judge's verdict is still a verdict, so this is a bound to read against, " +
+      "not a number to apply.",
   },
 ];
 
@@ -560,9 +568,15 @@ export function ThresholdPanel({
         {shownFloor !== null && (
           <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
             <span className="flex items-baseline gap-2 text-xs">
-              <span className="text-zinc-500 dark:text-zinc-400">
-                {pop.applicable ? "Collision floor" : "Bound"}
-              </span>
+              {/* THE TERM, explained where it is used. "Collision floor" is the
+                  page's own coinage and "Bound" is doing quiet work — which of
+                  the two you are looking at decides whether the number may be
+                  applied, so the label is what carries the population's rule. */}
+              <Tooltip align="left" text={pop.about}>
+                <span className="text-zinc-500 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                  {pop.applicable ? "Collision floor" : "Bound"}
+                </span>
+              </Tooltip>
               <span className="text-lg font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
                 {num(shownFloor)}
               </span>
@@ -703,28 +717,25 @@ export function ThresholdPanel({
         {/* --- empty states, one per reason -------------------------------- */}
         {population === "eval" && !report && !busy && (
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            No floor computed for this config yet — press Compute. Pure arithmetic over
-            the query vectors the eval bank has already banked; nothing is embedded.
+            No floor computed for this config yet — press Compute. Arithmetic over
+            banked vectors; nothing is embedded.
           </p>
         )}
         {population === "pairs" && !boundView && !busy && (
           <p className="text-xs text-zinc-500 dark:text-zinc-400">
-            Press Compute to take the bound over this account&apos;s pair bank. It reads only
-            vectors already banked in this space and embeds nothing.
+            Press Compute to take the bound over this account&apos;s pair bank — banked
+            vectors only, nothing embedded.
           </p>
         )}
         {boundView?.floor === null && (
           <p className={NOTE_AMBER}>
             {boundView.population === "pairs"
               ? boundView.missingVectors > 0
-                ? `No pair in the bank has both texts banked in ${boundView.embeddingModel}. ` +
-                  "Nothing is embedded here, so run the key-model sweep over this space " +
-                  "first — it banks the vectors this bound reads."
-                : "No known-different pairs in the bank yet. Generate pairs above, then " +
-                  "take the bound."
-              : "No rejected would-hit events on real traffic in this space yet. This " +
-                "floor fills in the first time a judged match is rejected — until then " +
-                "the eval bank and the pair bank are the only evidence there is."}
+                ? `No pair has both texts banked in ${boundView.embeddingModel} — nothing ` +
+                  "is embedded here, so run the key-model sweep over this space first."
+                : "No known-different pairs in the bank yet — generate pairs above."
+              : "No rejected would-hit event on real traffic in this space yet. This " +
+                "floor fills in the first time a judged match comes back rejected."}
           </p>
         )}
 
