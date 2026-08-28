@@ -17,7 +17,6 @@
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 
-import { Tooltip } from "@/app/components/Tooltip";
 import { config } from "@/lib/config";
 import { apiFetch } from "@/lib/http/client";
 import type {
@@ -28,7 +27,7 @@ import type {
 } from "@/lib/rag/semanticCacheCalibration";
 
 import { emitRecommendation, SC_CHANGED } from "./events";
-import { BTN, NOTE_AMBER, Panel, SELECT, WarnDot } from "./Panel";
+import { BTN, Panel, SELECT, WarnDot } from "./Panel";
 
 // Deliberately does NOT name the target: it's a per-config setting now
 // (batch_savings.semanticCache.acceptTarget), so a number baked in here would be
@@ -44,80 +43,31 @@ const pctOf = (n: number) => `${(n * 100).toFixed(1)}%`;
 
 const MODELS = config.semanticCache.judgeModelOptions;
 
-// The three populations the sweep can be run over, in the order they should be
-// TRIED, not in the order they were built: what really happened, then the bound,
-// then both at once.
-//
-// Each keeps ONE line under the readout, because "τ = 0.81" and "τ = 0.95" look
-// like the same kind of fact and are not. The paragraph that used to stand there
-// per origin moved into SWEPT_ABOUT, on the picker: three populations' worth of
-// standing prose to read the one number under it was documentation, not a label.
-type CurveOrigin = "traffic" | "probe" | "all";
+// PINNED TO REAL TRAFFIC. There used to be a "Swept over" picker offering probe
+// rows and both pooled as well, and both of those are now read off the Cache key
+// model table instead: its sweep pools the generated pairs with EVERY judged
+// shadow row, traffic and probe alike (keyModelSweep.ts:106), so it is the same
+// measurement over a strictly larger set, per model, with recall and AUC beside
+// it. The one thing it structurally cannot give is a TRAFFIC-ONLY number —
+// pooling is its method — and traffic-only is the only τ the apply box may take.
+// So that is what this panel is for, and it no longer offers the two views
+// something else does better.
+const ORIGIN = "traffic" as const;
 
-const ORIGINS: { value: CurveOrigin; label: string; note: string }[] = [
-  {
-    value: "traffic",
-    label: "Real traffic",
-    note: "Questions someone actually asked — the only τ here a cache may be set from.",
-  },
-  {
-    value: "probe",
-    label: "Probes (worst-case bound)",
-    note: "Engineered near-misses. A worst-case bound: read it, don't apply it.",
-  },
-  {
-    value: "all",
-    label: "Both pooled",
-    note: "Traffic and probes together — a sanity check on the other two.",
-  },
-];
 
-// The three-way trust rule, once, on the control that switches between them.
-const SWEPT_ABOUT =
-  "Which recorded events the τ below is swept over.\n\n" +
-  "REAL TRAFFIC — questions someone actually asked. The only population a live " +
-  "threshold may be set from, and the only one whose τ is offered to the Set " +
-  "threshold box.\n\n" +
-  "PROBES — engineered near-misses, half of them hard negatives. Precision " +
-  "against an adversarial mix is a lower bound, and it shows where matches " +
-  "start failing — which traffic cannot show while it is still all accepts.\n\n" +
-  "BOTH POOLED — the mixture is whatever the two sample sizes happen to be " +
-  "rather than anything about the world, so it is a cross-check, not a third " +
-  "measurement.";
-const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
-
-// What the swept population is called mid-sentence. Every count the sweep
-// reports is scoped to ONE origin and to rows at or above the shadow floor,
-// while the space picker on the heading row counts every judged row in the
-// space — so a sentence quoting a sweep count and read against that picker
-// looks like a contradiction unless it says which set it is counting.
-const POPULATION: Record<CurveOrigin, string> = {
-  traffic: "real-traffic",
-  probe: "probe",
-  all: "pooled",
-};
+// What the swept population is called mid-sentence. Every count the sweep reports
+// is scoped to rows at or above the shadow floor, while the space picker on the
+// heading row counts every judged row in the space — so a sentence quoting a
+// sweep count and read against that picker looks like a contradiction unless it
+// says which set it is counting.
+const POPULATION = "real-traffic";
 
 export function ShadowJudgePanel() {
   const [spaces, setSpaces] = useState<ShadowSpace[]>([]);
   const [space, setSpace] = useState("");
   const [events, setEvents] = useState<ShadowEvent[]>([]);
   const [curve, setCurve] = useState<CalibrationReport | null>(null);
-  // WHICH POPULATION THE SWEEP RUNS OVER (0069). Not a filter on one set —
-  // two different measurements that share a table, and the difference between
-  // them is the difference between "what this account's traffic does" and "what
-  // an adversary could make it do".
-  //
-  // Opens on `traffic`, matching the route's own default, because that is the
-  // only one a serving threshold may be set from. The other two are here so the
-  // bound is LOOKABLE-AT: this account's traffic is one-class (91 judged, 91
-  // accepted), so it yields no τ at all and shows nothing about where matches start
-  // failing. The probe rows are the only place precision visibly trades against
-  // recall.
-  const [origin, setOrigin] = useState<CurveOrigin>("traffic");
   const [bulkModel, setBulkModel] = useState<string>(config.semanticCache.judgeBulkModel);
-  const [boundaryModel, setBoundaryModel] = useState<string>(
-    config.semanticCache.judgeBoundaryModel,
-  );
   const [busy, setBusy] = useState<string | null>(null); // label of the in-flight action
   const [lastRun, setLastRun] = useState<JudgeRunResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -140,13 +90,13 @@ export function ShadowJudgePanel() {
 
   // Only ever sets state from async callbacks (never synchronously in the effect
   // body) so it's safe to call straight from an effect.
-  const loadSpaceData = useCallback((s: string, o: CurveOrigin) => {
+  const loadSpaceData = useCallback((s: string) => {
     apiFetch(`/api/semantic-cache/shadow?space=${encodeURIComponent(s)}&filter=unjudged&limit=50`)
       .then((r) => r.json())
       .then((d) => setEvents(d.events ?? []))
       .catch((e) => setError(String(e)));
     apiFetch(
-      `/api/semantic-cache/shadow/calibration?space=${encodeURIComponent(s)}&origin=${o}`,
+      `/api/semantic-cache/shadow/calibration?space=${encodeURIComponent(s)}&origin=${ORIGIN}`,
     )
       .then((r) => r.json())
       .then((d) => {
@@ -160,14 +110,13 @@ export function ShadowJudgePanel() {
         // and reports "one-class-sample" — so this needs no check of its own beyond
         // the null. The note below explains the absence.
         //
-        // TRAFFIC ONLY, AND THIS IS THE LOAD-BEARING PART OF THE WHOLE CONTROL. A τ
-        // swept over engineered near-misses answers "what would the threshold have
-        // to be if every question were adversarial"; applying it to a real cache
-        // sets the threshold from a question mix nobody asked. The apply box cannot
-        // tell where a recommendation came from — it takes a number — so the
-        // refusal has to be here, at the only place that knows. The bound is still
-        // on screen; it is just not offered as a setting.
-        if (report !== null && report.recommended !== null && o === "traffic") {
+        // Unconditionally safe to emit NOW THAT THE PANEL IS PINNED TO TRAFFIC.
+        // This used to be guarded on the origin, and that guard was load-bearing:
+        // a τ swept over engineered near-misses answers "what would the threshold
+        // have to be if every question were adversarial", and the apply box cannot
+        // tell where a number came from. The picker is gone, so the guard moved up
+        // into ORIGIN rather than being dropped.
+        if (report !== null && report.recommended !== null) {
           emitRecommendation({
             value: report.recommended,
             space: s,
@@ -184,15 +133,15 @@ export function ShadowJudgePanel() {
     loadSpaces();
   }, [loadSpaces]);
   useEffect(() => {
-    if (space) loadSpaceData(space, origin);
-  }, [space, origin, loadSpaceData]);
+    if (space) loadSpaceData(space);
+  }, [space, loadSpaceData]);
 
   // Reload from the space loadSpaces actually RESOLVED, not the captured one:
   // if the kept space no longer exists it falls back to list[0], and reusing the
   // stale `space` here would then load data for a space we're no longer showing.
   const refresh = useCallback(() => {
-    loadSpaces(space).then((next) => next && loadSpaceData(next, origin));
-  }, [loadSpaces, loadSpaceData, space, origin]);
+    loadSpaces(space).then((next) => next && loadSpaceData(next));
+  }, [loadSpaces, loadSpaceData, space]);
 
   // A ROW CAN NOW ARRIVE FROM ANOTHER PANEL. §4's single probe (phase 4 of
   // docs/demo-cache-lab-plan.md) writes an unjudged shadow row and broadcasts
@@ -239,7 +188,7 @@ export function ShadowJudgePanel() {
       .then((d) => {
         if (d.error) setError(d.error);
         // Refresh the curve/counts; leave the (already-trimmed) queue as is.
-        loadSpaceData(space, origin);
+        loadSpaceData(space);
         loadSpaces(space);
       })
       .catch((e) => setError(String(e)));
@@ -281,10 +230,13 @@ export function ShadowJudgePanel() {
         </p>
       ) : (
         <>
-          {/* The two judging runs and the model each uses, paired: a button next
-              to the select that governs it, instead of a row of three unlabelled
-              dropdowns above a row of two buttons with no visible link between
-              them. */}
+          {/* ONE JUDGING RUN. There was a second — "Refine boundary", which
+              re-judged the ±0.03 band around τ with a stronger model. Good idea,
+              never used: across 489 judged rows every LLM verdict on this account
+              came from the bulk model, because the button needs a τ to aim at and
+              one-class traffic yields none, so it sat disabled behind the origin
+              picker that is also gone. It can come back when traffic has rejects
+              and there is a real boundary to spend a better model on. */}
           <div className="flex flex-col gap-2 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
             <div className="flex flex-wrap items-center gap-2">
               <button
@@ -312,46 +264,6 @@ export function ShadowJudgePanel() {
               </select>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                className={`${BTN} min-w-40`}
-                disabled={busy !== null || rec === null}
-                title={
-                  rec === null
-                    ? "Run the bulk pass first to locate the boundary"
-                    : `Re-judge sim ∈ [${clamp01(rec - 0.03).toFixed(2)}, ${clamp01(rec + 0.03).toFixed(2)}]`
-                }
-                onClick={() =>
-                  rec !== null &&
-                  runJudge("boundary", {
-                    mode: "llm",
-                    space,
-                    model: boundaryModel,
-                    rejudge: true,
-                    simMin: clamp01(rec - 0.03),
-                    simMax: clamp01(rec + 0.03),
-                    limit: 100,
-                  })
-                }
-              >
-                {busy === "boundary" ? "Refining…" : "Refine boundary"}
-              </button>
-              <span className="text-xs text-zinc-400">with</span>
-              <select
-                value={boundaryModel}
-                onChange={(e) => setBoundaryModel(e.target.value)}
-                aria-label="Boundary model"
-                className={SELECT}
-              >
-                {MODELS.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
-            </div>
-
             {lastRun && (
               <p className="text-xs text-zinc-500 dark:text-zinc-400">
                 {lastRun.model}: {lastRun.accepted} accept · {lastRun.rejected} reject
@@ -369,30 +281,6 @@ export function ShadowJudgePanel() {
               by the numbers under it, and on this account's traffic it was a
               flat line at 1.0 (91 judged, 91 accepted) saying nothing at all. */}
           <div className="flex flex-col gap-3 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-            {/* The population picker sits ON the readout block, not on the
-                heading row: it changes what this one number means and nothing
-                else about the panel — the judging controls above it and the
-                queue below it are per-space, not per-origin. */}
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              <Tooltip align="left" text={SWEPT_ABOUT}>
-                <span className="text-zinc-500 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
-                  Swept over
-                </span>
-              </Tooltip>
-              <select
-                value={origin}
-                onChange={(e) => setOrigin(e.target.value as CurveOrigin)}
-                aria-label="Population the sweep runs over"
-                className={SELECT}
-              >
-                {ORIGINS.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
             <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
               <span className="flex items-baseline gap-2">
                 <span className="text-xs text-zinc-500 dark:text-zinc-400">Recommended τ</span>
@@ -407,17 +295,15 @@ export function ShadowJudgePanel() {
                     ? `, ${(curve.overallAcceptRate * 100).toFixed(0)}% accept`
                     : ""}
                   ; needs ≥ {curve.minSamples}
-                  {/* WHAT THIS SAMPLE IS, named against the picker above rather
-                      than assumed. It used to read "real traffic only" because
-                      traffic was the only reachable population; now that probe and
-                      pooled are too, the count has to say which set it left out or
-                      it becomes the misreading it was written to prevent. */}
+                  {/* WHAT THIS SAMPLE IS. The panel sweeps traffic and only
+                      traffic, so the excluded rows are always the probes — but
+                      they are still worth naming: the space picker above counts
+                      them, and a reader comparing the two tallies otherwise sees
+                      the panel contradicting itself. */}
                   {curve.excludedByOrigin > 0 && (
                     <>
                       {" "}
-                      · {curve.origin === "traffic" ? "real traffic" : "probes"} only (
-                      {curve.excludedByOrigin}{" "}
-                      {curve.origin === "traffic" ? "probe" : "traffic"} row
+                      · real traffic only ({curve.excludedByOrigin} probe row
                       {curve.excludedByOrigin === 1 ? "" : "s"} excluded)
                     </>
                   )}
@@ -436,39 +322,30 @@ export function ShadowJudgePanel() {
               )}
             </div>
 
-            {/* WHAT THIS POPULATION IS, always — a τ is not interpretable without
-                it, and the two the picker offers differ by more than their sample
-                size. */}
+            {/* WHAT THIS POPULATION IS. One line rather than the picker's three:
+                a τ is not interpretable without knowing what was asked, and this
+                panel now only ever sweeps one thing. */}
             <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              {ORIGINS.find((o) => o.value === origin)!.note}
+              Questions someone actually asked — the only population a live threshold
+              may be set from.
             </p>
 
-            {/* Points at the apply box in the Threshold section's footer — but
-                ONLY for traffic, because only traffic is emitted (see the guard in
-                loadSpaceData). A sentence promising the number had been sent while
-                nothing was sent is the exact lie phase 5 of the demo plan is about,
-                and it is just as wrong for the operator as for a visitor. */}
-            {rec !== null &&
-              (origin === "traffic" ? (
-                <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                  Sent to the <strong className="font-medium">Set threshold</strong> box in
-                  the Threshold section — nothing is live until you apply it there.
-                </p>
-              ) : (
-                <p className={NOTE_AMBER}>
-                  Not sent to <strong className="font-medium">Set threshold</strong>: this τ
-                  was swept over a population nobody asked. Switch to{" "}
-                  <strong className="font-medium">Real traffic</strong> for a number this
-                  cache can be set from.
-                </p>
-              ))}
+            {/* Points at the apply box in the Threshold section's footer. The
+                branch that said "not sent" is gone with the picker: everything
+                this panel sweeps is now emitted. */}
+            {rec !== null && (
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Sent to the <strong className="font-medium">Set threshold</strong> box in
+                the Threshold section — nothing is live until you apply it there.
+              </p>
+            )}
           </div>
 
           {/* WHY there's no τ. Without this the panel shows a dash and nothing
               else, leaving "is my data too small or my target too strict?" to be
               worked out by hand — and those have opposite fixes. */}
           {curve && rec === null && curve.attainability.blocker !== "no-events" && (
-            <NoTau curve={curve} origin={origin} />
+            <NoTau curve={curve} />
           )}
 
           {/* THE QUEUE, in the space the calibration curve used to take. It is
@@ -488,9 +365,9 @@ export function ShadowJudgePanel() {
 // was five lines of standing prose above the queue — a reader who has met the
 // blocker once needs the numbers and the fix, not the derivation again, so the
 // derivation moved to the dot and the numbers stayed.
-function NoTau({ curve, origin }: { curve: CalibrationReport; origin: CurveOrigin }) {
+function NoTau({ curve }: { curve: CalibrationReport }) {
   const { attainability: att } = curve;
-  const pop = POPULATION[curve.origin];
+  const pop = POPULATION;
   const target = pctOf(curve.target);
   // Named rather than pointed at: the target's slider is a section away, and the
   // config that owns it needn't be the one this curve was swept for.
@@ -514,14 +391,14 @@ function NoTau({ curve, origin }: { curve: CalibrationReport; origin: CurveOrigi
       "Precision is 100% at every threshold, so the sweep would return the lowest " +
       "similarity in the sample rather than a boundary — nothing here shows where " +
       "matches start failing." +
-      // Guarded on the origin, not just on the count: under any other population
-      // `excludedByOrigin` counts the rows this curve left out, which are the
-      // traffic ones, and the sentence would name the wrong set. Traffic is also
-      // the only population that can BE one-class here, so nothing is lost.
-      (origin === "traffic" && curve.excludedByOrigin > 0
-        ? ` The ${curve.excludedByOrigin} excluded probe rows do: switch “Swept over” ` +
-          "to them, remembering that a τ swept from engineered near-misses is a " +
-          "worst-case bound and not this account's traffic."
+      // WHERE TO LOOK INSTEAD, now that this panel no longer offers the probe
+      // view itself. The key model table sweeps the probe rows pooled with the
+      // generated pairs, which is where precision visibly trades against recall
+      // while traffic is still all accepts.
+      (curve.excludedByOrigin > 0
+        ? ` The ${curve.excludedByOrigin} probe rows this sweep excludes do — they are ` +
+          "scored in the Cache key model table, remembering that a τ from engineered " +
+          "near-misses is a worst-case bound and not this account's traffic."
         : "");
     line = (
       <>
