@@ -65,6 +65,10 @@ import {
   type Estimate,
 } from "@/app/components/BackgroundOfferDialog";
 import { ConfigChangeDialog } from "@/app/components/ConfigChangeDialog";
+import {
+  DemoBlockedProvider,
+  useDemoBlock,
+} from "@/app/components/DemoBlocked";
 import { EVAL_CRITERIA_CHANGED } from "@/app/components/EvalSettings";
 import { NdcgRankingPanel } from "@/app/components/NdcgRankingPanel";
 import { Tooltip } from "@/app/components/Tooltip";
@@ -1142,6 +1146,10 @@ export function EvalDashboard() {
   const canRescore = summary === null || summary.total > 0;
 
   return (
+    // Every gated control on this page reads its sentence out of here, so a
+    // guest sees WHICH actions the demo withholds and why, instead of pressing
+    // one and collecting a 403 (§5 of docs/demo-real-flow-plan.md).
+    <DemoBlockedProvider value={summary?.demoBlocked ?? null}>
     <div className="flex flex-col gap-6">
       {/* Retrieval changed shape (a delegate/override was set or cleared) after
           some results were scored — they still count toward the rates, badged
@@ -1489,6 +1497,7 @@ export function EvalDashboard() {
         </>
       )}
     </div>
+    </DemoBlockedProvider>
   );
 }
 
@@ -1771,6 +1780,7 @@ const QuestionRow = memo(function QuestionRow({
   onCloseRanking: () => void;
   onRankingChange: () => void;
 }) {
+  const blockUnfreeze = useDemoBlock("unfreeze");
   const [draft, setDraft] = useState(q.question);
   // Delete confirmation, inline rather than a modal: window.confirm can't carry
   // the uncache checkbox, and an expanding row suits this dense list better than
@@ -1928,13 +1938,17 @@ const QuestionRow = memo(function QuestionRow({
               {!q.frozen && (q.ignored || failsBar(q, criteria)) && (
                 <button
                   onClick={() => onToggleIgnore(q)}
-                  disabled={busy}
+                  disabled={busy || blockUnfreeze !== null}
                   title={
-                    q.heldOut
+                    // The route gates EVERY question, not only the frozen ones
+                    // that hide this button — so a tunable question's Ignore is
+                    // a 403 too, and it says so rather than finding out.
+                    blockUnfreeze ??
+                    (q.heldOut
                       ? "Pull this question out of the held-out test set — the next holdout draw may put it back"
                       : q.ignored
                         ? "Count this question in rates again"
-                        : "Exclude this question from rates and autotune targeting (manual false-positive mode)"
+                        : "Exclude this question from rates and autotune targeting (manual false-positive mode)")
                   }
                   className="cursor-pointer hover:underline disabled:cursor-not-allowed disabled:opacity-50"
                 >
@@ -2034,6 +2048,9 @@ function AddQuestionForm({
   onAdd: (chunkId: string, draft: string) => void;
   onGenerate: (chunkId: string, difficulty: Difficulty) => void;
 }) {
+  // Only the SYNTHETIC half needs an answer model; typing one by hand is free,
+  // so the Manual tab stays live and the difficulty buttons go dark.
+  const blockGenerate = useDemoBlock("generate");
   const [mode, setMode] = useState<"synthetic" | "manual">("synthetic");
 
   return (
@@ -2070,12 +2087,18 @@ function AddQuestionForm({
                 <button
                   key={d}
                   onClick={() => onGenerate(chunkId, d)}
-                  disabled={busy}
+                  disabled={busy || blockGenerate !== null}
+                  title={blockGenerate ?? undefined}
                   className="cursor-pointer rounded border border-zinc-300 px-2 py-0.5 font-medium capitalize text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
                 >
                   {genDifficulty === d ? "Generating…" : d}
                 </button>
               ))}
+              {blockGenerate && (
+                <span className="text-zinc-500">
+                  Use the Manual tab, or “Add cached” in Bulk actions.
+                </span>
+              )}
             </div>
           ) : (
             <ManualAdd
@@ -2287,6 +2310,13 @@ function BulkActions({
   canRescore: boolean;
   canAddQuestion: boolean;
 }) {
+  // The demo's three refusals that live in this menu. Null for a real account,
+  // so every use below is a plain "is this off, and what do I say about it".
+  const blockGenerate = useDemoBlock("generate");
+  const blockRank = useDemoBlock("rank");
+  const blockLlmRank = useDemoBlock("llmRank");
+  const blockOverride = useDemoBlock("override");
+  const blockReconfigure = useDemoBlock("reconfigure");
   const [open, setOpen] = useState(false);
   const [subOpen, setSubOpen] = useState(false);
   // "Add question": clicking a difficulty stages one more question per chunk at
@@ -2363,6 +2393,11 @@ function BulkActions({
         (id) => docs?.find((d) => d.id === id)?.fileName ?? "unknown document",
       )
     : null;
+
+  // The config dialog does one of two blocked things depending on the scope —
+  // a whole-config reconfigure, or per-document chunk overrides — so the
+  // sentence its buttons carry follows the scope rather than being picked once.
+  const configBlock = scopeIds ? blockOverride : blockReconfigure;
 
   return (
     <div className="relative">
@@ -2548,9 +2583,12 @@ function BulkActions({
                   </span>
                 )}
                 <div className="flex items-center gap-2">
+                  {/* The PAID half. "Add cached" beside it is carved out of the
+                      same gate in the route, so only this one goes dark. */}
                   <button
                     type="button"
-                    disabled={stagedTotal === 0}
+                    disabled={stagedTotal === 0 || blockGenerate !== null}
+                    title={blockGenerate ?? undefined}
                     onClick={() => {
                       const counts = addCounts;
                       const topUp = addTopUp;
@@ -2603,11 +2641,12 @@ function BulkActions({
             <button
               type="button"
               onClick={() => setNdcgOpen((s) => !s)}
-              disabled={!canRescore}
+              disabled={!canRescore || blockRank !== null}
               title={
-                canRescore
+                blockRank ??
+                (canRescore
                   ? "Builds + promotes the aggregate ranking for every question in scope that has no ground truth yet"
-                  : "No labeled questions to grade yet"
+                  : "No labeled questions to grade yet")
               }
               className="flex w-full cursor-pointer items-center justify-between px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
@@ -2660,11 +2699,12 @@ function BulkActions({
             <button
               type="button"
               onClick={() => setLlmNdcgOpen((s) => !s)}
-              disabled={!canRescore}
+              disabled={!canRescore || blockLlmRank !== null}
               title={
-                canRescore
+                blockLlmRank ??
+                (canRescore
                   ? "Ask the LLM to re-order the aggregate's top-k for every question in scope (costs LLM calls; skips questions with no aggregate and ones already cached)"
-                  : "No labeled questions to rank yet"
+                  : "No labeled questions to rank yet")
               }
               className="flex w-full cursor-pointer items-center justify-between px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
@@ -2716,33 +2756,41 @@ function BulkActions({
               Re-score all
             </button>
             <div className="my-1 border-t border-zinc-200 dark:border-zinc-800" />
+            {/* Both of these open the same dialog, and both ends of what it can
+                do are blocked for a guest: the whole-config path is a
+                reconfigure and the per-document path writes overrides. So they
+                go dark on either sentence, whichever the scope would hit. */}
             <button
               type="button"
+              disabled={configBlock !== null}
               onClick={() => {
                 close();
                 onChangeConfig(scopeIds, scopeNames);
               }}
               title={
-                scopeIds
+                configBlock ??
+                (scopeIds
                   ? "Overrides the selected documents' chunks to another model (config unchanged)"
-                  : "Changes THIS config in place — re-embeds but keeps question(s)"
+                  : "Changes THIS config in place — re-embeds but keeps question(s)")
               }
-              className="block w-full cursor-pointer px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              className="block w-full cursor-pointer px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               Change base model…
             </button>
             <button
               type="button"
+              disabled={configBlock !== null}
               onClick={() => {
                 close();
                 onChangeConfig(scopeIds, scopeNames);
               }}
               title={
-                scopeIds
+                configBlock ??
+                (scopeIds
                   ? "Re-splits the selected documents' chunks via per-chunk overrides (config unchanged)"
-                  : "Changes THIS config in place — re-embeds but keeps question(s)"
+                  : "Changes THIS config in place — re-embeds but keeps question(s)")
               }
-              className="block w-full cursor-pointer px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              className="block w-full cursor-pointer px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               Adjust chunk size / overlap…
             </button>
@@ -3776,6 +3824,10 @@ function ModelTrial({
   chunkId: string;
   onSaved: (trial: SavedModelTrial) => void;
 }) {
+  // The whole panel is one blocked action: running a trial re-embeds the chunk
+  // and its pool. So a guest never gets it open — the collapsed link is the
+  // thing that goes dark, and it carries the sentence.
+  const blockTryModel = useDemoBlock("tryModel");
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<TrialState | null>(null);
 
@@ -4067,7 +4119,9 @@ function ModelTrial({
       <div className="border-t border-zinc-200 px-3 py-2 dark:border-zinc-800">
         <button
           onClick={toggleOpen}
-          className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-700 hover:underline dark:hover:text-zinc-300"
+          disabled={blockTryModel !== null}
+          title={blockTryModel ?? undefined}
+          className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-700 hover:underline disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:no-underline dark:hover:text-zinc-300"
         >
           Try a different configuration
         </button>
@@ -4963,6 +5017,8 @@ function SavedTrialRow({
   onApply: () => void;
   onDelete: () => void;
 }) {
+  // Persisting a variation writes an override, which the demo doesn't buy.
+  const blockOverride = useDemoBlock("override");
   const [open, setOpen] = useState(false);
   const sim = avgTrialSim(trial.results);
   const fusedHits = fusedHitCount(trial);
@@ -5070,11 +5126,12 @@ function SavedTrialRow({
             <button
               type="button"
               onClick={onApply}
-              disabled={delegating || !canApply}
+              disabled={delegating || !canApply || blockOverride !== null}
               title={
-                canApply
+                blockOverride ??
+                (canApply
                   ? "Persist this variation to represent this chunk in this config — its questions re-score immediately"
-                  : "Custom-border shapes can't be persisted as an override yet"
+                  : "Custom-border shapes can't be persisted as an override yet")
               }
               className="self-start cursor-pointer rounded border border-blue-300 px-1.5 py-0.5 font-medium text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-900/20"
             >
@@ -5145,6 +5202,9 @@ function BaselineRow({
   delegating: boolean;
   onRestore: () => void;
 }) {
+  // Clearing a delegate is the same route as setting one, and just as blocked —
+  // reachable for a guest, since autotune (which they MAY press) writes one.
+  const blockOverride = useDemoBlock("override");
   const [open, setOpen] = useState(false);
   // Per-question BASELINE top-k drill-down: what pure base-model retrieval
   // returned (the newest result with the 'baseline' 0022 fingerprint), fetched
@@ -5212,8 +5272,11 @@ function BaselineRow({
         <button
           type="button"
           onClick={onRestore}
-          disabled={delegating}
-          title="Clear the delegate — rank this chunk under the base model again (its questions re-score immediately)"
+          disabled={delegating || blockOverride !== null}
+          title={
+            blockOverride ??
+            "Clear the delegate — rank this chunk under the base model again (its questions re-score immediately)"
+          }
           className="shrink-0 cursor-pointer text-amber-700 underline hover:no-underline disabled:opacity-50 dark:text-amber-400"
         >
           {delegating ? "Restoring & re-scoring…" : "Restore as delegate"}

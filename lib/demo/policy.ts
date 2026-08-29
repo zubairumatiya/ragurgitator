@@ -150,6 +150,18 @@ export const DEMO_ACTIONS = {
     "Rebuilding a question's ideal ranking embeds a pool of chunks under every " +
     "model on the list, so it's off in the demo. The graded rankings you can " +
     "open are real, and the nDCG on the Eval tab is scored against them.",
+  // SPLIT OFF `generate` (§5 of docs/demo-real-flow-plan.md). Both halves of
+  // this route need an answer-model key, so one entry covered them — but the
+  // sentence a visitor read on "Add LLM nDCG rankings" was the one about
+  // WRITING QUESTIONS, pointing them at "Add cached" for a button that has
+  // nothing to do with re-ranking. A tooltip that answers a question nobody
+  // asked is the same defect as a refusal pointing at an empty tab.
+  llmRank:
+    "Asking an LLM to re-order a question's top-k costs one answer-model call " +
+    "per question, which the demo doesn't carry a key for. The ranking builder " +
+    "on any question still opens: the aggregate ideal an LLM re-ranking would " +
+    "be compared against is there, and it's the one the Eval tab's nDCG is " +
+    "actually scored on.",
   appraise:
     "The model comparison replays the whole corpus from cached vectors — 92 MB " +
     "of them — which the demo doesn't have the bandwidth to do per visitor, so " +
@@ -271,4 +283,40 @@ export async function assertDemoAllows(action: DemoAction): Promise<void> {
 // a disabled button is a courtesy, not a boundary.
 export async function demoBlocks(): Promise<boolean> {
   return isGuest();
+}
+
+// The same question again, answered for a WHOLE PAGE at once — the sentences a
+// guest's controls need in order to render themselves disabled instead of
+// answering with a 403 three layers down.
+//
+// Why the sentences travel rather than the action names: DEMO_ACTIONS is the one
+// copy of this wording, it is server-only, and a second copy on the client is a
+// second copy to keep true. So the summary carries the text.
+//
+// NULL FOR A REAL ACCOUNT, never an empty object — same carve-out rule as
+// lib/demo/replay's readers, so a non-guest payload is byte-for-byte what it was
+// and there is no per-lap egress to account for.
+export type DemoBlockedSentences = Partial<Record<DemoAction, string>>;
+
+// What the Eval tab can actually reach. `unfreeze` is here even though the
+// frozen questions hide their own Ignore button: the route gates every question,
+// so a TUNABLE one's Ignore is a 403 too. Autotune is deliberately absent —
+// it is not in DEMO_ACTIONS at all, because a guest may press it.
+export const EVAL_DEMO_ACTIONS = [
+  "generate",
+  "rank",
+  "llmRank",
+  "tryModel",
+  "override",
+  "unfreeze",
+  "reconfigure",
+] as const satisfies readonly DemoAction[];
+
+export async function demoBlockedSentences(
+  actions: readonly DemoAction[],
+): Promise<DemoBlockedSentences | null> {
+  if (!(await demoBlocks())) return null;
+  const out: DemoBlockedSentences = {};
+  for (const a of actions) out[a] = DEMO_ACTIONS[a];
+  return out;
 }

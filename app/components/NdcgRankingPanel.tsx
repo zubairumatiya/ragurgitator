@@ -10,6 +10,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useDemoBlock } from "@/app/components/DemoBlocked";
 import { apiFetch } from "@/lib/http/client";
 import type {
   LlmStatus,
@@ -43,6 +44,11 @@ export function NdcgRankingPanel({
 }) {
   const [ctx, setCtx] = useState<RankingContext | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // EVERY action in this panel is one POST behind assertDemoAllows("rank") —
+  // the two that spend AND the two free ones, because `manual` and `truth`
+  // rewrite the ground truth the demo's published nDCG is scored against. So a
+  // guest gets the panel read-only rather than four buttons that 403.
+  const blocked = useDemoBlock("rank");
   const [busy, setBusy] = useState<string | null>(null); // the running action's key
   const [manual, setManual] = useState<RankingItem[] | null>(null);
   // The ranking kind a manual edit was started from, so the save records it and
@@ -136,7 +142,8 @@ export function NdcgRankingPanel({
       <button
         type="button"
         onClick={() => act({ action: "aggregate" })}
-        disabled={busy !== null}
+        disabled={busy !== null || blocked !== null}
+        title={blocked ?? undefined}
         className="cursor-pointer self-start rounded bg-black px-2 py-0.5 font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
       >
         {busy === "aggregate" ? "Building…" : "Build aggregate"}
@@ -151,6 +158,7 @@ export function NdcgRankingPanel({
           status={ctx?.llmStatus.pool ?? "none"}
           hasAggregate={!!ctx?.hasAggregate}
           busy={busy !== null}
+          blocked={blocked}
           running={busy === "llm_pool"}
           onClick={() => act({ action: "llm_pool" })}
         />
@@ -159,6 +167,7 @@ export function NdcgRankingPanel({
           status={ctx?.llmStatus.rerank ?? "none"}
           hasAggregate={!!ctx?.hasAggregate}
           busy={busy !== null}
+          blocked={blocked}
           running={busy === "llm_rerank"}
           onClick={() => act({ action: "llm_rerank" })}
         />
@@ -174,6 +183,7 @@ export function NdcgRankingPanel({
               candidate={candidate}
               defaultOpen={defaultOpen}
               busy={busy !== null}
+              blocked={blocked}
               onSetTruth={() => act({ action: "truth", rankingId: candidate.id })}
               onEditManual={() => {
                 setManual(candidate.items.map((it) => ({ ...it })));
@@ -193,6 +203,7 @@ export function NdcgRankingPanel({
         <ManualEditor
           items={manual}
           busy={busy !== null}
+          blocked={blocked}
           onChange={setManual}
           onCancel={() => {
             setManual(null);
@@ -241,6 +252,7 @@ function LlmButton({
   status,
   hasAggregate,
   busy,
+  blocked,
   running,
   onClick,
 }: {
@@ -248,12 +260,15 @@ function LlmButton({
   status: LlmStatus;
   hasAggregate: boolean;
   busy: boolean;
+  blocked: string | null;
   running: boolean;
   onClick: () => void;
 }) {
   const fresh = status === "fresh";
   const text = running ? "Asking…" : `${label}${fresh ? " ✓" : status === "stale" ? " ↻" : ""}`;
-  const title = !hasAggregate
+  const title = blocked
+    ? blocked
+    : !hasAggregate
     ? "Build the aggregate first"
     : fresh
       ? "Cached — inputs unchanged since last run; re-requesting is disabled to avoid spend"
@@ -264,7 +279,7 @@ function LlmButton({
     <button
       type="button"
       onClick={onClick}
-      disabled={busy || !hasAggregate || fresh}
+      disabled={busy || !hasAggregate || fresh || blocked !== null}
       title={title}
       className="cursor-pointer rounded border border-zinc-300 px-2 py-0.5 font-medium text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
     >
@@ -277,12 +292,14 @@ function CandidateCard({
   candidate,
   defaultOpen,
   busy,
+  blocked,
   onSetTruth,
   onEditManual,
 }: {
   candidate: RankingCandidate;
   defaultOpen: boolean;
   busy: boolean;
+  blocked: string | null;
   onSetTruth: () => void;
   onEditManual: () => void;
 }) {
@@ -321,7 +338,8 @@ function CandidateCard({
           <button
             type="button"
             onClick={onEditManual}
-            disabled={busy}
+            disabled={busy || blocked !== null}
+            title={blocked ?? undefined}
             className="cursor-pointer text-zinc-500 hover:underline disabled:opacity-50"
           >
             Edit as manual
@@ -330,7 +348,8 @@ function CandidateCard({
             <button
               type="button"
               onClick={onSetTruth}
-              disabled={busy}
+              disabled={busy || blocked !== null}
+              title={blocked ?? undefined}
               className="cursor-pointer font-medium text-zinc-700 hover:underline disabled:opacity-50 dark:text-zinc-300"
             >
               Set as ground truth
@@ -390,12 +409,14 @@ function ChunkRow({ item, index }: { item: RankingItem; index: number }) {
 function ManualEditor({
   items,
   busy,
+  blocked,
   onChange,
   onCancel,
   onSave,
 }: {
   items: RankingItem[];
   busy: boolean;
+  blocked: string | null;
   onChange: (items: RankingItem[]) => void;
   onCancel: () => void;
   onSave: () => void;
@@ -417,7 +438,8 @@ function ManualEditor({
           <button
             type="button"
             onClick={onSave}
-            disabled={busy || items.length === 0}
+            disabled={busy || items.length === 0 || blocked !== null}
+            title={blocked ?? undefined}
             className="cursor-pointer rounded bg-black px-2 py-0.5 font-medium text-white hover:opacity-90 disabled:opacity-50 dark:bg-zinc-50 dark:text-black"
           >
             {busy ? "Saving…" : "Save manual"}

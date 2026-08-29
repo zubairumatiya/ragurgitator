@@ -9,6 +9,11 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { sql, toJsonb } from "@/lib/db";
 import { FROZEN_REASON, PUBLISHED_RUN_NOTE } from "@/lib/demo/frozen";
 import { isGuest } from "@/lib/demo/guest";
+import {
+  demoBlockedSentences,
+  EVAL_DEMO_ACTIONS,
+  type DemoBlockedSentences,
+} from "@/lib/demo/policy";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";
 import { cacheKey, DigestMemo } from "@/lib/rag/digestMemo";
 import { reciprocalRank, ndcg } from "@/lib/rag/evalMetrics";
@@ -297,6 +302,13 @@ export type EvalSummary = {
   // straight away: you get a card per chunk with the "add question" and "try a
   // model" affordances on it, before any question exists to hang them off.
   chunks: ChunkRef[];
+  // WHAT THIS VISITOR MAY NOT PRESS — action name to the sentence explaining it,
+  // and null for everyone but a guest (lib/demo/policy.demoBlockedSentences).
+  //
+  // The gate itself is still the boundary; this is what lets the page render a
+  // blocked control DISABLED instead of leaving it looking live until a 403 comes
+  // back from three layers down. Confirmed 2026-08-29 that every one of them did.
+  demoBlocked: DemoBlockedSentences | null;
   // The saved eval criteria (metrics/k/min-rate/difficulties/autotune) and the
   // active config basics — for the Settings dropdown and Bulk-actions pre-fill.
   criteria: EvalCriteria;
@@ -2720,6 +2732,9 @@ export async function getChunkQuestions(
 export async function getSummary(): Promise<EvalSummary> {
   const cfg = activeConfig();
   const criteria = await getActiveCriteria();
+  // Asked once per lap, before the early return: an empty config's page has the
+  // same blocked buttons on it as a full one.
+  const demoBlocked = await demoBlockedSentences(EVAL_DEMO_ACTIONS);
   const recallK = effectiveK(criteria.recall, cfg.topK);
   const mrrK = effectiveK(criteria.mrr, cfg.topK);
   const ndcgK = effectiveK(criteria.ndcg, cfg.topK);
@@ -2760,6 +2775,7 @@ export async function getSummary(): Promise<EvalSummary> {
     retrievalChanges: [],
     chunkCount: 0,
     chunks: [],
+    demoBlocked,
     criteria,
     config: configInfo,
     overrides: [],
@@ -3073,6 +3089,7 @@ export async function getSummary(): Promise<EvalSummary> {
       fileName: r.file_name,
       position: r.position,
     })),
+    demoBlocked,
     criteria,
     config: configInfo,
     overrides,

@@ -31,7 +31,7 @@ export async function POST(request: Request) {
   const { documentIds } = body.data;
 
   return withRequestConfig(request, async () => {
-    await assertDemoAllows("generate");
+    await assertDemoAllows("llmRank");
     return ndjsonStream<EvalEvent>(async (send, shouldStop) => {
       try {
         await bulkBuildLlmRankings(send, documentIds, shouldStop);
