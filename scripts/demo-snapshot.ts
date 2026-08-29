@@ -838,8 +838,20 @@ async function main() {
       `${summary.shadowVerdicts} verdicts banked, ${summary.shadowPoolable} poolable), ` +
       `${summary.replayRows} model rows (${summary.replayScored} scored), ` +
       `${summary.sweepRows === 0 ? "no cache-key sweep" : `a cache-key sweep (${summary.sweepModels} models)`}, ` +
-      `${summary.matrixPairs === 0 ? "NO replay matrix" : `a replay matrix over ${summary.matrixPairs} pairs`}\n`,
+      `${summary.matrixPairs === 0 ? "NO replay matrix" : `a replay matrix over ${summary.matrixPairs} pairs`}, ` +
+      `${summary.ledgerRows === 0 ? "NO savings ledger" : `${summary.ledgerRows} savings row`}\n`,
   );
+  // The payoff readout's money is the whole point of §4's bottom line, and its
+  // absence is silent by design: readCacheEconomics turns a zero-event ledger
+  // into `savedPerHitUsd: null`, which renders as a hit rate with no dollars
+  // rather than as an error. So the publish says it here or nobody finds out.
+  if (summary.ledgerRows === 0) {
+    console.log(
+      "\u26a0 no semantic_cache savings row reached the snapshot, so the payoff readout will\n" +
+        "  show a hit rate with no money. The master accrues that row by SERVING cache hits —\n" +
+        "  ask a repeated question on the published config and re-publish.\n",
+    );
+  }
   // Louder than the count above, because a build with no matrix is the one
   // failure of this phase that looks like a working publish: every other number
   // on the line is unchanged, and §4 goes back to being a poster.

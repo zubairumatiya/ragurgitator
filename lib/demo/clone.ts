@@ -202,6 +202,11 @@ async function buildMap(
 //     here because it spent two phases in neither list, which is how the demo
 //     shipped its most distinctive chart empty: a table that is merely unmentioned
 //     looks identical to one that was considered and rejected.
+//   savings_totals, ONE LEVER OF IT — step 5h. 'semantic_cache' travels because
+//     the payoff readout prices a hit off it and renders no money without it; the
+//     other levers stay behind, since money for work the guest's workspace never
+//     did is worse than no money. spend_totals is not cloned at all: nothing in
+//     the demo reads a rate off it.
 //   user_provider_keys   Cannot be cloned even in principle: aadFor(userId,
 //     provider) binds the AAD to the user id, so a copied row fails its GCM tag
 //     check on first use. The key is re-sealed instead — see lib/demo/provision.
@@ -235,6 +240,7 @@ export type CloneSummary = {
   bankedPairs: number; // of the master's rest, the ones "Generate pairs" may reveal
   blankedVerdicts: number; // cloned pairs arriving unscreened, verdict held in the bank
   matrixPairs: number; // pairs in the banked similarity matrix the demo replays (step 5g)
+  ledgerRows: number; // savings rows priced the payoff readout's money (step 5h)
 };
 
 // THE PUBLISH OPTIONS — used by scripts/demo-snapshot.ts, never by a guest.
@@ -1495,6 +1501,40 @@ export async function cloneSeedWorkspace(
        limit 1
     `;
 
+    // --- 5h. the savings ledger, so the payoff readout has money -------------
+    //
+    // Phase 6 of docs/demo-cache-replay-plan.md. `PayoffReadout` renders a hit
+    // rate over the guest's own traffic census and then prices it from
+    // `savings_totals` — `readCacheEconomics`'s third read, `sum(saved_usd) /
+    // sum(event_count)` for lever 'semantic_cache'. The clone did not copy that
+    // table, so a guest got a zero-event ledger, which the reader deliberately
+    // turns into `savedPerHitUsd: null` rather than $0 — and the money line
+    // disappears. The section's whole reason for existing is the money.
+    //
+    // WHAT TRAVELS IS A RATE, not a balance. The row lands beside a census the
+    // guest computes themselves, and only the QUOTIENT is read: the operator's
+    // realized dollars per served hit, ~$0.0039 over 51 priced hits. So the
+    // number a visitor sees is the master's real published figure multiplied by
+    // their own traffic, which is the same construction the rest of this page
+    // uses — replay the measurement, recompute the reading.
+    //
+    // ONE LEVER, NOT THE LEDGER. 'semantic_cache' is the only total any surface
+    // in the demo reads a rate off. Copying the other levers would put money on
+    // the Costs page attributed to work the guest's workspace never did, and
+    // nothing there needs it.
+    //
+    // No dedupe and no rewrite: the primary key is (config_id, lever), the
+    // config is remapped like everywhere else, and one source config can hold at
+    // most one row for the lever — so the copy cannot collide with itself, on
+    // either hop.
+    const ledgerRows = await copyRows(tx, {
+      table: "savings_totals",
+      joins: `join _map_config mc on mc.old_id = s.config_id`,
+      where: `s.lever = 'semantic_cache'`,
+      overrides: { config_id: "mc.new_id" },
+      params: [],
+    });
+
     // --- 6. REWRITE THE CACHE FINGERPRINTS, or step 5 was for nothing --------
     //
     // currentFingerprint hashes documentSignature, which is an md5 over the
@@ -1595,6 +1635,7 @@ export async function cloneSeedWorkspace(
       bankedPairs: (banked.count ?? 0) + (carried.count ?? 0),
       blankedVerdicts: (blanked.count ?? 0) + (carriedVerdicts.count ?? 0),
       matrixPairs: matrixRows.count > 0 ? (bankedMatrix?.pairs ?? 0) : 0,
+      ledgerRows,
     };
   }) as Promise<CloneSummary>;
 }

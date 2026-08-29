@@ -1632,6 +1632,78 @@ describe("cloneSeedWorkspace generated pairs", () => {
 //   3. THE COUNT IS OUT OF THE PAYLOAD. `matrixPairs` reports pairs, not rows: a
 //      matrix over nothing is a leaderboard with nothing to score and it copies
 //      just as successfully as a full one.
+// THE SAVINGS LEDGER — step 5h, phase 6 of docs/demo-cache-replay-plan.md.
+//
+// `PayoffReadout` is the only line on the semantic-cache page that quotes money,
+// and it derives it from a rate: readCacheEconomics divides `savings_totals`'
+// saved_usd by its event_count for lever 'semantic_cache'. With no row the
+// quotient is deliberately null rather than 0 — "no hit has been priced" and "a
+// hit is worth nothing" are different claims — so the money simply vanishes and
+// nothing renders as broken. That is why it is asserted here rather than trusted
+// to a page that looks fine either way.
+//
+// Two properties: the row is REMAPPED onto the destination's config (the reader
+// scopes by owned configs, so a row still pointing at the seed's config is a row
+// no guest can see), and the copy is SCOPED TO ONE LEVER (money for embedding or
+// cascade work the guest's workspace never performed would land on the Costs
+// page as a claim about them).
+describe("cloneSeedWorkspace savings ledger", () => {
+  const bankLever = (lever: string, events: number, usd: string) =>
+    admin`
+      insert into savings_totals (config_id, lever, event_count, tokens_saved, saved_usd)
+      values (${seedConfigId}, ${lever}, ${events}, 0, ${usd})
+      on conflict (config_id, lever) do update set event_count = excluded.event_count,
+                                                   saved_usd = excluded.saved_usd`;
+
+  const landed = (userId: string) =>
+    admin<{ lever: string; event_count: string; saved_usd: string; config_id: string }[]>`
+      select s.lever, s.event_count, s.saved_usd, s.config_id
+        from savings_totals s join configs c on c.id = s.config_id
+       where c.user_id = ${userId} order by s.lever`;
+
+  it("carries the semantic_cache row onto the guest's own config", async () => {
+    await bankLever("semantic_cache", 51, "0.200294");
+    const summary = await cloneSeedWorkspace(seed.id, guest.id, { onlyConfigId: seedConfigId });
+
+    const rows = await landed(guest.id);
+    assert.equal(summary.ledgerRows, 1);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].lever, "semantic_cache");
+    assert.equal(Number(rows[0].event_count), 51);
+    // The dollars travel exactly, because what the readout uses is the quotient
+    // and a rounded copy would quote a price the Costs page never printed.
+    assert.equal(Number(rows[0].saved_usd), 0.200294);
+    assert.notEqual(rows[0].config_id, seedConfigId, "remapped, or no guest can read it");
+  });
+
+  it("leaves every other lever behind", async () => {
+    await bankLever("semantic_cache", 4, "0.04");
+    await bankLever("embed_cache", 900, "12.5");
+    await bankLever("cascade", 30, "-0.9");
+    const summary = await cloneSeedWorkspace(seed.id, guest.id, { onlyConfigId: seedConfigId });
+
+    assert.equal(summary.ledgerRows, 1);
+    assert.deepEqual((await landed(guest.id)).map((r) => r.lever), ["semantic_cache"]);
+  });
+
+  it("survives the second hop, master \u2192 snapshot \u2192 guest", async () => {
+    await bankLever("semantic_cache", 51, "0.200294");
+    await cloneSeedWorkspace(seed.id, guest.id, { onlyConfigId: seedConfigId });
+
+    const second = await createUser(admin);
+    const summary = await cloneSeedWorkspace(guest.id, second.id);
+    assert.equal(summary.ledgerRows, 1);
+    assert.equal(Number((await landed(second.id))[0].saved_usd), 0.200294);
+    await deleteUser(admin, second.id);
+  });
+
+  it("publishes without one, since a master that has served no hit has no row", async () => {
+    const summary = await cloneSeedWorkspace(seed.id, guest.id, { onlyConfigId: seedConfigId });
+    assert.equal(summary.ledgerRows, 0);
+    assert.equal((await landed(guest.id)).length, 0);
+  });
+});
+
 describe("cloneSeedWorkspace replay matrix", () => {
   const matrix = (pairs: number, models = ["voyage-4-lite", "voyage-4"]) => ({
     version: 1,
