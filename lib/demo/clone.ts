@@ -240,6 +240,7 @@ export type CloneSummary = {
   bankedPairs: number; // of the master's rest, the ones "Generate pairs" may reveal
   blankedVerdicts: number; // cloned pairs arriving unscreened, verdict held in the bank
   matrixPairs: number; // pairs in the banked similarity matrix the demo replays (step 5g)
+  boardChunks: number; // chunks the demo's Eval tab is scoped to (step 5g's second half)
   ledgerRows: number; // savings rows priced the payoff readout's money (step 5h)
 };
 
@@ -1469,7 +1470,7 @@ export async function cloneSeedWorkspace(
       [guestId, seedId] as never[],
     );
 
-    // --- 5g. the similarity matrix, which every hop copies unchanged ---------
+    // --- 5g. the similarity matrix, and the board's scope ---------------------
     //
     // Phase 2 of docs/demo-cache-replay-plan.md. The demo's §4 replays the
     // master's own arithmetic over the first `n` pairs a visitor has reached, and
@@ -1490,9 +1491,11 @@ export async function cloneSeedWorkspace(
     // — the failure mode 5e's `carried` had to be taught the hard way, where the
     // second hop found nothing to bank and phase 3 shipped invisible.
     //
-    // MATRIX ONLY. `progress` is the visitor's own walk into it and starts fresh
-    // in every workspace; `shadow_verdict` names the destination's shadow rows
-    // and is written by the step that mints them (phase 4).
+    // MATRIX ONLY, in this statement. `progress` is the visitor's own walk into
+    // it and starts fresh in every workspace; `shadow_verdict` names the
+    // destination's shadow rows and is written by the step that mints them
+    // (phase 4); `board` travels too, but through the remapping statement below
+    // rather than this one.
     const matrixRows = await tx.unsafe(
       `insert into demo_replay (user_id, kind, key, payload)
        select $1, r.kind, r.key, r.payload
@@ -1508,6 +1511,45 @@ export async function cloneSeedWorkspace(
       select coalesce(jsonb_array_length(r.payload -> 'pairs'), 0)::int as pairs
         from demo_replay r
        where r.user_id = ${guestId} and r.kind = 'matrix'
+       limit 1
+    `;
+
+    // THE BOARD, which is the one banked thing here that DOES name rows.
+    //
+    // Phase 2 of docs/demo-real-flow-plan.md. `board` (0081) is the ~30 chunk ids
+    // the demo's Eval tab is scoped to, and unlike the matrix above it cannot be
+    // forwarded byte-for-byte: chunk uuids are minted fresh in every workspace,
+    // so a copied payload would name the source's rows and scope the destination
+    // to nothing — a board that arrives as a perfectly successful copy and
+    // renders an empty page. Remapped through `_map_chunk` on both hops, the same
+    // rewrite step 4b gives `retrieved_ids` and 4c gives an ideal's `chunk_ids`.
+    //
+    // AN INNER JOIN, WHERE THOSE TWO USE A LEFT ONE, and the difference is what
+    // the array means. There, position is rank and a dropped element renumbers a
+    // measurement, so an unmappable id has to hold its place as a null. Here the
+    // array is a SET of things to show: a chunk that did not travel is not on the
+    // board, and a null in the list would be a card with no chunk behind it.
+    const boardRows = await tx.unsafe(
+      `insert into demo_replay (user_id, kind, key, payload)
+       select $1, r.kind, r.key,
+              jsonb_set(r.payload, '{chunks}', coalesce(
+                (select jsonb_agg(mch.new_id::text order by u.ord)
+                   from jsonb_array_elements_text(r.payload -> 'chunks')
+                        with ordinality u(old_id, ord)
+                   join _map_chunk mch on mch.old_id = u.old_id::uuid),
+                '[]'::jsonb))
+         from demo_replay r
+        where r.user_id = $2 and r.kind = 'board'`,
+      [guestId, seedId] as never[],
+    );
+    // Counted out of the payload for bankedMatrix's reason, and here it is the
+    // number that decides whether the Eval tab has a demo at all: a board of zero
+    // chunks (every id failed to map) inserts one perfectly good row and scopes
+    // the page to nothing.
+    const [bankedBoard] = await tx<{ chunks: number }[]>`
+      select coalesce(jsonb_array_length(r.payload -> 'chunks'), 0)::int as chunks
+        from demo_replay r
+       where r.user_id = ${guestId} and r.kind = 'board'
        limit 1
     `;
 
@@ -1645,6 +1687,7 @@ export async function cloneSeedWorkspace(
       bankedPairs: (banked.count ?? 0) + (carried.count ?? 0),
       blankedVerdicts: (blanked.count ?? 0) + (carriedVerdicts.count ?? 0),
       matrixPairs: matrixRows.count > 0 ? (bankedMatrix?.pairs ?? 0) : 0,
+      boardChunks: boardRows.count > 0 ? (bankedBoard?.chunks ?? 0) : 0,
       ledgerRows,
     };
   }) as Promise<CloneSummary>;

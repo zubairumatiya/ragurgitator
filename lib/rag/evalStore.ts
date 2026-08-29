@@ -9,6 +9,7 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { sql, toJsonb } from "@/lib/db";
 import { FROZEN_REASON, PUBLISHED_RUN_NOTE } from "@/lib/demo/frozen";
 import { isGuest } from "@/lib/demo/guest";
+import { readBoard } from "@/lib/demo/replay";
 import {
   demoBlockedSentences,
   EVAL_DEMO_ACTIONS,
@@ -294,7 +295,10 @@ export type EvalSummary = {
   // first — the stale badge's hover list. Empty when nothing is stale.
   retrievalChanges: { description: string; at: number }[];
   // Total chunks under the active config — gates bulk "Add question" (no chunks
-  // = nothing to generate against). Always equals `chunks.length`.
+  // = nothing to generate against). Always equals `chunks.length`, which for a
+  // demo guest is the BOARD's size rather than the corpus's (see demoBoard): the
+  // corpus is still 236 chunks and retrieval still ranks against all of them,
+  // but the workbench lists the ~30 a visitor walks.
   chunkCount: number;
   // EVERY chunk under the active config, in document order — not just the ones
   // that have questions. The dashboard groups questions by chunk, and seeding
@@ -309,6 +313,19 @@ export type EvalSummary = {
   // blocked control DISABLED instead of leaving it looking live until a 403 comes
   // back from three layers down. Confirmed 2026-08-29 that every one of them did.
   demoBlocked: DemoBlockedSentences | null;
+  // WHICH CHUNKS THE DEMO'S BOARD IS, and null for everyone but a guest whose
+  // build published one (0081, lib/demo/replay.readBoard).
+  //
+  // It is what the frozen set used to imply. The dashboard's split — "Chunks
+  // (12)" over a "Frozen — 448" section — is derived from `frozenCount > 0`
+  // today, which is a scope that evaporates the moment the board is emptied for
+  // the visitor to build it themselves (docs/demo-real-flow-plan.md §3.1). So the
+  // scope is handed over as data instead of inferred, and `chunks` above is
+  // already filtered to it: a guest's payload carries the board, not the corpus.
+  //
+  // Null for a real account means every derivation downstream falls back to
+  // exactly what it does today, by construction rather than by a branch.
+  demoBoard: string[] | null;
   // The saved eval criteria (metrics/k/min-rate/difficulties/autotune) and the
   // active config basics — for the Settings dropdown and Bulk-actions pre-fill.
   criteria: EvalCriteria;
@@ -2776,6 +2793,7 @@ export async function getSummary(): Promise<EvalSummary> {
     chunkCount: 0,
     chunks: [],
     demoBlocked,
+    demoBoard: null,
     criteria,
     config: configInfo,
     overrides: [],
@@ -2785,8 +2803,19 @@ export async function getSummary(): Promise<EvalSummary> {
   if (!table) return empty;
 
   // Fetched first: the detail query below prefers results scored under the
-  // CURRENT override state, so it needs the fingerprint as a parameter.
-  const currentState = await retrievalStateFingerprint();
+  // CURRENT override state, so it needs the fingerprint as a parameter — and the
+  // chunk query below needs the demo's board scope, for the same reason. Both
+  // ride one Promise.all so the pair costs one round trip rather than two, and
+  // readBoard is memoed per process besides.
+  const [currentState, board] = await Promise.all([
+    retrievalStateFingerprint(),
+    readBoard(),
+  ]);
+  // Null for every account but a demo guest, so the chunk query below is
+  // byte-for-byte the query it has always been for everyone else — the rule
+  // lib/demo/frozen's header states and the reason this is a bound parameter
+  // rather than a branch.
+  const boardIds = board?.chunks ?? null;
 
   // THE FROZEN HALF IS ASKED FOR BY DIGEST FIRST — see frozenDetailMemo above.
   // Both of these ride the same Promise.all the rest of the summary already
@@ -2855,6 +2884,13 @@ export async function getSummary(): Promise<EvalSummary> {
       join document_embeddings de on de.id = c.document_embedding_id
       join documents doc on doc.id = c.document_id
       where de.config_id = ${activeConfig().id}
+        -- THE DEMO'S BOARD, applied here and nowhere else (0081). A guest's
+        -- workspace holds the whole 236-chunk corpus — retrieval is measured
+        -- against all of it, which is what makes their scores real — while the
+        -- Eval tab is a walk over the ~30 the publish chose. Filtering in SQL
+        -- rather than in the client is what turns 236 chunk refs on every lap
+        -- into 30. Null (every real account) leaves the predicate true.
+        and (${boardIds}::uuid[] is null or c.id = any(${boardIds}::uuid[]))
       order by doc.file_name, c.position
     `,
     listChunkOverrideInfo(table),
@@ -3090,6 +3126,7 @@ export async function getSummary(): Promise<EvalSummary> {
       position: r.position,
     })),
     demoBlocked,
+    demoBoard: boardIds,
     criteria,
     config: configInfo,
     overrides,

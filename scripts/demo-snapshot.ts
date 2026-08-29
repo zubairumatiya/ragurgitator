@@ -52,7 +52,7 @@ import {
 import { resolveConfig, withConfig } from "../lib/rag/activeConfig";
 import { ndcg } from "../lib/rag/evalMetrics";
 import { captureReplayMatrix } from "../lib/demo/captureMatrix";
-import { writeMatrix } from "../lib/demo/replay";
+import { writeBoard, writeMatrix } from "../lib/demo/replay";
 import { DEMO_MATRIX_MAX_BYTES } from "../lib/demo/replayCore";
 import { runKeyModelSweep } from "../lib/rag/keyModelSweep";
 import {
@@ -787,6 +787,33 @@ async function main() {
     }
   }
 
+  // THE BOARD THE EVAL TAB IS SCOPED TO (phase 2 of docs/demo-real-flow-plan.md).
+  //
+  // Written on the MASTER, before the clone, for the same reason the matrix above
+  // is: these are the master's chunk ids, and clone step 5g is the one thing that
+  // knows how to rewrite an id into the destination's space. Written on every
+  // publish rather than under a flag — unlike the matrix it costs nothing to
+  // capture, and a build without one is a build whose demo has no scope.
+  //
+  // THE SAME CHUNKS THE TUNABLE SET SITS ON, deliberately: the board is what
+  // selectTunable already chose, promoted from an implication of the frozen set
+  // into a fact of its own. Today those two agree by construction; phase 4 empties
+  // the questions and this row is what survives that.
+  //
+  // Order is the selector's (tier desc, md5) and no reader depends on it —
+  // getSummary orders the chunk list by document and position, as it does for
+  // every account. It is banked as given so a re-publish of an unchanged build
+  // produces an identical payload rather than a reshuffled one.
+  // Through privilegedSql, like every other publish-time write in this script
+  // (seedPublishedBank, armAutotune): a script has no request scope, so the
+  // request-scoped `sql` writeBoard defaults to would throw before it wrote. The
+  // matrix above avoids this by running inside the sweep's own withUser block.
+  await writeBoard(
+    master,
+    { version: 1, chunks: [...new Set(tunable.map((t) => t.chunk))] },
+    privilegedSql,
+  );
+
   const summary = await cloneSeedWorkspace(master, snapshot, {
     onlyConfigId: configId,
     replaceDestination: true,
@@ -822,6 +849,7 @@ async function main() {
       `${summary.replayRows} model rows (${summary.replayScored} scored), ` +
       `${summary.sweepRows === 0 ? "no cache-key sweep" : `a cache-key sweep (${summary.sweepModels} models)`}, ` +
       `${summary.matrixPairs === 0 ? "NO replay matrix" : `a replay matrix over ${summary.matrixPairs} pairs`}, ` +
+      `${summary.boardChunks === 0 ? "NO board scope" : `a board scoped to ${summary.boardChunks} chunks`}, ` +
       `${summary.ledgerRows === 0 ? "NO savings ledger" : `${summary.ledgerRows} savings row`}\n`,
   );
   // The payoff readout's money is the whole point of §4's bottom line, and its
@@ -833,6 +861,18 @@ async function main() {
       "\u26a0 no semantic_cache savings row reached the snapshot, so the payoff readout will\n" +
         "  show a hit rate with no money. The master accrues that row by SERVING cache hits —\n" +
         "  ask a repeated question on the published config and re-publish.\n",
+    );
+  }
+  // The board's own failure mode, and it is quieter than the matrix's below:
+  // readBoard returns null for a build without one, every reader falls through to
+  // the unscoped path, and the guest's Eval tab renders all 236 chunk cards
+  // exactly as it does today. That is a demo with no scope wearing the face of a
+  // working one, so the publish says it here.
+  if (summary.boardChunks === 0) {
+    console.log(
+      "\u26a0 no board scope reached the snapshot, so a guest's Eval tab is scoped to the\n" +
+        "  whole corpus. Either the master carries no board row, or none of its chunk ids\n" +
+        "  survived the clone's remap — check step 5g.\n",
     );
   }
   // Louder than the count above, because a build with no matrix is the one

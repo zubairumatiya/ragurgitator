@@ -53,3 +53,6 @@ next-env.d.ts
 .mcp.json
 # local git hooks — enable with: git config core.hooksPath .githooks
 .githooks/
+
+# headless phase-loop transcripts
+.loop-logs/

@@ -1058,23 +1058,46 @@ export function EvalDashboard() {
   // ones, so an unsplit list buries the entire point of the page under cards
   // whose every control is either absent or a 403.
   //
-  // DERIVED FROM `frozen === 0`, like DemoScope: a real account has no frozen
-  // rows, so this is null and the list renders exactly as it always did — one
-  // ungrouped sequence, no headers — rather than because anything asked who is
-  // logged in. A card counts as tunable when it holds a question that is not
-  // frozen, which is also what makes a question a visitor ADDS pull its chunk up
-  // into the top section.
+  // DERIVED FROM DATA THE PUBLISH WROTE DOWN, never from who is asking: a real
+  // account has neither a board scope nor a frozen row, so this is null and the
+  // list renders exactly as it always did — one ungrouped sequence, no headers.
+  //
+  // THE BOARD IS THE INPUT NOW, and the frozen set is the fallback (0081,
+  // docs/demo-real-flow-plan.md §3.1). The old derivation — a card is tunable
+  // when it holds an unfrozen question — cannot survive the build that EMPTIES
+  // the board for the visitor to fill: with no questions there are no frozen
+  // rows, so `split` would go null and the page would render one card per corpus
+  // chunk with nothing on it. A published board says which cards are the walk
+  // whether or not anything hangs off them yet. The fallback is what keeps a
+  // workspace cloned from an older build (no board row) rendering as it did.
+  //
+  // `tunableCount` stays a count of UNFROZEN QUESTIONS either way, because it is
+  // what the headline rates are computed over: a board chunk's frozen second
+  // question is on screen but out of every rate, and counting it live would put a
+  // number above three rates it does not feed.
   const split = useMemo(() => {
     if (summary === null) return null;
-    const tunableCount = summary.questions.filter((q) => !q.frozen).length;
-    const frozenCount = summary.questions.length - tunableCount;
-    if (frozenCount === 0) return null;
+    const onBoard = summary.demoBoard === null ? null : new Set(summary.demoBoard);
+    const frozenTotal = summary.questions.filter((q) => q.frozen).length;
+    if (onBoard === null && frozenTotal === 0) return null;
     const tunable: ChunkGroup[] = [];
     const frozen: ChunkGroup[] = [];
     for (const g of groups) {
-      (g.questions.some((q) => !q.frozen) ? tunable : frozen).push(g);
+      const live = onBoard
+        ? onBoard.has(g.chunkId)
+        : g.questions.some((q) => !q.frozen);
+      (live ? tunable : frozen).push(g);
     }
-    return { tunable, frozen, tunableCount, frozenCount };
+    const tunableCount = tunable.reduce(
+      (n, g) => n + g.questions.filter((q) => !q.frozen).length,
+      0,
+    );
+    return {
+      tunable,
+      frozen,
+      tunableCount,
+      frozenCount: summary.questions.length - tunableCount,
+    };
   }, [groups, summary]);
 
   // WHAT THE HEADLINE ROW IS ACTUALLY MEASURING.
@@ -2812,13 +2835,20 @@ function BulkActions({
 // nothing else says.
 //
 // IT IS NOT AN isGuest() BRANCH, for the reason lib/demo/frozen.ts gives at
-// length: a real account has no frozen rows, so `frozen === 0` and this renders
-// nothing — by construction rather than by a test of who is asking. That also
-// makes an UNPUBLISHED guest build silent rather than boastful, which is the
-// honest outcome: with no frozen set there is no scope to announce.
+// length: a real account has neither a published board nor frozen rows, so both
+// tests below are false and this renders nothing — by construction rather than
+// by a test of who is asking. That also makes an UNPUBLISHED guest build silent
+// rather than boastful, which is the honest outcome: with no scope of either
+// kind there is nothing to announce.
+//
+// THE BOARD FIRST, the frozen set second, exactly as `split` above reads them
+// and for the same reason: the build this plan is heading for has a scope and no
+// frozen questions at all, and a banner that vanished the moment the board was
+// emptied would take the page's only statement that the limits are deliberate
+// with it.
 function DemoScope({ summary }: { summary: EvalSummary }) {
   const frozen = summary.questions.filter((q) => q.frozen).length;
-  if (frozen === 0) return null;
+  if (summary.demoBoard === null && frozen === 0) return null;
   return (
     <section className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/50 dark:text-amber-200">
       <p>

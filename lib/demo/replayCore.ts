@@ -21,6 +21,11 @@ export const MATRIX_KEY = "pooled";
 // The single progress row's key — how far the generate slider has advanced.
 export const PROGRESS_KEY = "pairs";
 
+// The single board row's key. Named for what it holds rather than left empty,
+// on MATRIX_KEY's argument: a second scope (a second board, if the demo ever
+// walks two) has somewhere to go without a migration.
+export const BOARD_KEY = "chunks";
+
 // STABLE IDENTITY, and it is the one thing phase 1 has to get right. The matrix
 // is banked in the master's order and subsetted by "the first n", so that n must
 // mean the SAME n pairs on both sides of the clone and across both publish hops
@@ -90,6 +95,26 @@ export type ReplayProgress = {
   // Generate leaves pairs unscreened; screening admits them to the sweep. False
   // means the quarantine over the current n is unresolved.
   screened: boolean;
+};
+
+// THE BOARD — phase 2 of docs/demo-real-flow-plan.md, and the only kind here
+// that is about the Eval tab rather than the caching lane.
+//
+// Which chunks the demo's workbench is scoped to: the ~30 the publish chose, in
+// document order, and nothing else. It replaces what the frozen set was carrying
+// — the dashboard's split, the demo banner, and the server-side chunk list — for
+// the build that empties the board, where there are no frozen questions left to
+// derive a scope from.
+//
+// IDS, NOT A COUNT OR A QUERY. The selection is made once at publish time
+// (lib/demo/tunable) against scores that will not exist in the guest's workspace
+// in the same shape, so re-deriving it per workspace would re-roll it; and a
+// count would leave every reader to pick its own thirty.
+export type ReplayBoard = {
+  version: 1;
+  // Chunk ids in the READER's own id space: clone step 5g remaps them on each
+  // hop, exactly as it remaps an ideal's chunk_ids.
+  chunks: string[];
 };
 
 // The verdict the operator's judge really returned for one queued shadow row,

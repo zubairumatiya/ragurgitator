@@ -6,11 +6,14 @@
 // visitor has reached. This module is the shelf that arithmetic sits on
 // (`demo_replay`, 0080) and the only thing that reads or writes it.
 //
-// THREE KINDS, ONE TABLE, and they are not three unrelated things — they are the
-// three tenses of the same measurement. `matrix` is what the master computed;
-// `progress` is how far this visitor has walked into it; `shadow_verdict` is the
-// judge's own answer for a row the clone deliberately blanked so the visitor
-// could answer it themselves. lib/demo/replayCore names their payloads.
+// THREE OF THE KINDS ARE THREE TENSES OF ONE MEASUREMENT, not three unrelated
+// things. `matrix` is what the master computed; `progress` is how far this
+// visitor has walked into it; `shadow_verdict` is the judge's own answer for a
+// row the clone deliberately blanked so the visitor could answer it themselves.
+// `board` (0081) is the fourth and the odd one out: it is the Eval tab's scope
+// rather than the caching lane's arithmetic, banked here because it is the same
+// thing in every other respect — publish-written, guest-read, account-wide.
+// lib/demo/replayCore names their payloads.
 //
 // THE CARVE-OUT IS THE FUNCTION, which is the rule lib/demo/pairBank already
 // holds and the reason guards.ts sweep 7 can pin it: every READ here returns
@@ -31,8 +34,10 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { isGuest } from "@/lib/demo/guest";
 import {
+  BOARD_KEY,
   MATRIX_KEY,
   PROGRESS_KEY,
+  type ReplayBoard,
   type ReplayMatrix,
   type ReplayProgress,
   type ReplayShadowVerdict,
@@ -81,6 +86,15 @@ export async function writeMatrix(userId: string, matrix: ReplayMatrix, db: Writ
   forgetMatrix(userId);
 }
 
+// The board the demo's Eval tab is scoped to (phase 2 of
+// docs/demo-real-flow-plan.md). Written on the MASTER by the publish, before the
+// clone, for writeMatrix's reason exactly: the ids it holds are the master's,
+// and clone step 5g is what rewrites them into each destination's id space.
+export async function writeBoard(userId: string, board: ReplayBoard, db: Writer = sql): Promise<void> {
+  await put(db, userId, "board", BOARD_KEY, board);
+  forgetBoard(userId);
+}
+
 // The guest's progress, written at clone time so their first page load has a
 // starting `n` rather than a null the panel has to have an opinion about.
 export async function writeProgress(userId: string, progress: ReplayProgress, db: Writer = sql): Promise<void> {
@@ -106,6 +120,7 @@ export async function writeShadowVerdicts(
 export async function clearReplay(userId: string, db: Writer = sql): Promise<void> {
   await db`delete from demo_replay where user_id = ${userId}`;
   forgetMatrix(userId);
+  forgetBoard(userId);
 }
 
 // --- the read, and the memo in front of it ----------------------------------
@@ -130,6 +145,19 @@ export function forgetMatrix(userId?: string): void {
   else memo.delete(userId);
 }
 
+// The board gets its own memo on the same terms, and it needs one more than the
+// matrix does: getSummary asks for it on EVERY Eval lap to scope the chunk
+// query, where the matrix is read once per panel mount. Same immutability
+// argument — only a publish and a clone write kind='board', never a request —
+// and the same refusal to cache a miss, since the clone writes a guest's board
+// during provisioning in this same process.
+const boardMemo = new Map<string, ReplayBoard>();
+
+export function forgetBoard(userId?: string): void {
+  if (userId === undefined) boardMemo.clear();
+  else boardMemo.delete(userId);
+}
+
 // The banked matrix for the scoped account, or null for a real one.
 export async function readMatrix(): Promise<ReplayMatrix | null> {
   if (!(await isGuest())) return null;
@@ -143,6 +171,26 @@ export async function readMatrix(): Promise<ReplayMatrix | null> {
   if (!row) return null;
   if (memo.size >= MEMO_MAX) memo.delete(memo.keys().next().value as string);
   memo.set(userId, row.payload);
+  return row.payload;
+}
+
+// The chunk ids this guest's Eval tab is scoped to, or null for a real account
+// AND for a guest whose build was published without a board. Those two cases are
+// deliberately the same null: a workspace with no published scope is one whose
+// chunk list is the whole config, which is what every account outside the demo
+// already gets.
+export async function readBoard(): Promise<ReplayBoard | null> {
+  if (!(await isGuest())) return null;
+  const userId = activeUserId();
+  const memoed = boardMemo.get(userId);
+  if (memoed) return memoed;
+  const row = await withoutStore(sql<{ payload: ReplayBoard }[]>`
+    select payload from demo_replay
+     where user_id = ${userId} and kind = 'board' and key = ${BOARD_KEY}
+  `.then((rows) => rows[0] ?? null));
+  if (!row) return null;
+  if (boardMemo.size >= MEMO_MAX) boardMemo.delete(boardMemo.keys().next().value as string);
+  boardMemo.set(userId, row.payload);
   return row.payload;
 }
 
