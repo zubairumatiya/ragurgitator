@@ -43,20 +43,17 @@ import {
   type CollisionFloorPreload,
 } from "@/app/components/semanticCache/ThresholdPanel";
 import { withPageUser } from "@/lib/auth/dal";
-import { isGuest } from "@/lib/demo/guest";
-// THE DEMO COPY CROSSES HERE, and it has to: lib/demo/policy is `import
-// "server-only"`, and every panel below is a Client Component. Same boundary
-// app/appraise/models/page.tsx:29 uses for the replay's two sentences — the
-// sentences are read on the server and handed down as props, so no panel imports
-// the policy table it is quoting.
-import {
-  GUEST_PROBE_NOTE,
-  LIVE_HALF_NOTE,
-  PUBLISHED_PAIRS_NOTE,
-  PUBLISHED_SCREEN_NOTE,
-  PUBLISHED_SWEEP_NOTE,
-  REVEALED_PAIRS_NOTE,
-} from "@/lib/demo/policy";
+// NO DEMO COPY CROSSES HERE ANY MORE — phase 5 of docs/demo-cache-replay-plan.md.
+// Six sentences used to be read on the server and handed down as `notes` props,
+// because lib/demo/policy is `import "server-only"` and every panel below is a
+// Client Component. They explained a page that behaved differently for a guest:
+// a frozen leaderboard, a "Generate" that revealed, a screen that resolved. Every
+// one of those now does the same arithmetic a real account's does, over a banked
+// similarity matrix instead of a paid embedding run, so THIS PAGE RENDERS
+// IDENTICALLY FOR A GUEST AND FOR AN ACCOUNT. With nothing behaving differently
+// there is nothing to explain, and the global DemoBanner already states what a
+// demo is. The one thing a guest does not see is the probe, and PairBankPanel
+// hides it off the banked matrix rather than off a flag from here.
 import { resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { readCollisionFloorState } from "@/lib/rag/collisionFloorStore";
 import { listClosedConfigs, listConfigs } from "@/lib/rag/configStore";
@@ -89,7 +86,7 @@ async function preloadFirstFloor(
 }
 
 export default async function SemanticCachePage() {
-  const { configs, preload, guest } = await withPageUser(async () => {
+  const { configs, preload } = await withPageUser(async () => {
     // Same list, in the same order, the panel's picker used to fetch for itself:
     // open tabs then closed ones.
     const [open, closed] = await Promise.all([listConfigs(), listClosedConfigs()]);
@@ -97,10 +94,6 @@ export default async function SemanticCachePage() {
     return {
       configs,
       preload: await preloadFirstFloor(configs[0]?.id),
-      // Read once here rather than per-note: every sentence below is either all
-      // present or all absent, and a page that resolved them independently could
-      // render half a story.
-      guest: await isGuest(),
     };
   });
 
@@ -116,39 +109,14 @@ export default async function SemanticCachePage() {
 
         <AppraiseNav />
 
-        {/* WHICH HALF OF THIS PAGE IS LIVE, rendered by the page because that is
-            whose statement it is: it spans four sections, and it used to sit at
-            the top of the leaderboard — the one section it says is frozen. */}
-        {guest && (
-          <p className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400">
-            {LIVE_HALF_NOTE}
-          </p>
-        )}
-
         {/* gap-3 between cards, against the page's gap-4 above: the cards have
             their own borders and padding, so they need less air between them
             than the unboxed header block does. */}
         <div className="flex flex-col gap-3">
           {/* The bank's GAP is config-scoped and this page carries no configId of
               its own, so without the list it would silently describe the Default
-              config. The demo copy travels as ONE prop rather than four, so the
-              panel cannot render the reveal note while missing the one that says
-              the leaderboard it feeds is frozen — they only make sense together
-              (phase 5 of docs/demo-cache-lab-plan.md). Undefined for a real
-              account, which is what every `notes &&` in the panel tests. */}
-          <PairBankPanel
-            configs={configs}
-            notes={
-              guest
-                ? {
-                    pairs: PUBLISHED_PAIRS_NOTE,
-                    revealed: REVEALED_PAIRS_NOTE,
-                    screen: PUBLISHED_SCREEN_NOTE,
-                    probe: GUEST_PROBE_NOTE,
-                  }
-                : undefined
-            }
-          />
+              config. */}
+          <PairBankPanel configs={configs} />
 
           <ShadowJudgePanel />
 
@@ -163,7 +131,7 @@ export default async function SemanticCachePage() {
             action={<ApplyThresholdPanel />}
           />
 
-          <KeyModelPanel notes={guest ? { sweep: PUBLISHED_SWEEP_NOTE } : undefined} />
+          <KeyModelPanel />
         </div>
       </main>
     </div>

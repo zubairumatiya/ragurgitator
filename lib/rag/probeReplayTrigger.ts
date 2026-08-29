@@ -43,11 +43,12 @@ const none = (reason: string | null): ProbeTrigger => ({
 // have nowhere to put it.
 export async function triggerProbeReplay(): Promise<ProbeTrigger> {
   try {
-    // A guest never reaches here through the front door — pair generation is
-    // behind assertDemoAllows("sweep") — so this is belt and braces for a future
-    // caller, and it RETURNS rather than throws: a trigger is not an entry point,
-    // and a gate that threw here would turn "the demo doesn't do this" into a
-    // failed generation. The enforcing gate is /api/jobs' DEMO_ACTION_FOR_JOB.
+    // A guest never reaches here through the front door — pair generation either
+    // walks the banked matrix and returns before this, or hits
+    // assertDemoAllows("pairs") — so this is belt and braces for a future caller,
+    // and it RETURNS rather than throws: a trigger is not an entry point, and a
+    // gate that threw here would turn "the demo doesn't do this" into a failed
+    // generation. The enforcing gate is /api/jobs' DEMO_ACTION_FOR_JOB.
     if (await demoBlocks()) return none(null);
 
     // One run at a time per config. Two overlapping runs would each freeze their

@@ -111,14 +111,6 @@ export function WarnDot({ text, align = "left" }: { text: string; align?: "cente
   );
 }
 
-// The demo's sentences wear one look, borrowed from ModelReplayTable's published
-// note: quiet, bordered, never amber. None of them is a warning — they say where a
-// number came from — and dressing them as one would make a panel read as several
-// things going wrong. Shared, because two panels now carry them.
-export const DEMO_NOTE =
-  "rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-relaxed " +
-  "text-zinc-500 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400";
-
 // A borderless table, for use INSIDE a card: the card already draws the box, so
 // the table separates rows with hairlines and bleeds to the card's edges rather
 // than drawing a second border just inside the first.

@@ -466,7 +466,7 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
   // a row the caller owns, `llm` buys tokens. Sweep 6 keeps passing however wide
   // this condition grows, since the file keeps its gate call either way, so the
   // condition is the needle. The demo's calibration workbench is downstream of
-  // this one line, and so is the promise lib/demo/policy's `judge` sentence makes.
+  // this one line.
   {
     file: "app/api/semantic-cache/shadow/judge/route.ts",
     needles: [
@@ -492,6 +492,11 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
   //      running the sweep would be a measurement implying a computation that did
   //      not happen;
   //   3. the fallback for a build published WITHOUT a matrix is still a refusal.
+  //      Phase 5 kept this line where the plan had it deleted, and the reason is
+  //      in scripts/demo-snapshot: the matrix is captured only under --sweep, and
+  //      its absence WARNS rather than fails. A routine cheap republish is exactly
+  //      a build whose guests reach line 3, and without it their click buys ~510
+  //      texts under every candidate model on the operator's key.
   {
     file: "app/api/semantic-cache/key-model/route.ts",
     needles: [
@@ -610,17 +615,20 @@ const PROBE_FILES = [
   // Phase 4 of docs/demo-cache-lab-plan.md: a SECOND entry into the same work,
   // one probe at a time and by hand. It shares the path's rails for the same
   // reason the job does — it lands rows in the queue a live τ is swept from.
+  // Phase 5 took it out of the DEMO, not out of the app; it is a real account's
+  // button now, and every rail below applies to it unchanged.
   "app/api/semantic-cache/probe/route.ts",
 ];
 
-// 7f's requirements on that route, which is the one place in the path a guest
-// reaches directly.
+// 7f's requirements on that route.
 //
 // The floor is the load-bearing one. A research pass records everything (F2's
 // origin split), but this route stocks a queue whose other rows came from
 // lib/demo/clone step 5b, which strides a sample at the CONFIGURED floor — so a
 // 0.4 near-miss landing among them would be a row about the demo rather than
-// about the cache, judged by a visitor who cannot tell the difference.
+// about the cache, judged by a visitor who cannot tell the difference. That
+// argument survives phase 5 hiding the button: the queue it describes is the
+// operator's own, and a real account's probe lands in it beside the same rows.
 const REQUIRED_IN_PROBE_ROUTE: Record<string, string> = {
   "config.semanticCache.shadowLogFloor":
     "the probe must record at the CONFIGURED floor, not PROBE_LOOKUP's 0",
@@ -632,6 +640,12 @@ const REQUIRED_IN_PROBE_ROUTE: Record<string, string> = {
 // (DEMO_ACTIONS.probeReplay, 40 probes nobody pressed a button for); a route
 // that grew a cap or reached launchJob would be a second door into exactly what
 // the gate refuses, opened from the side that has no gate at all.
+//
+// STILL TRUE AFTER PHASE 5, which HID this route's button from the demo rather
+// than gating the route. A guest reaching it now has no eligible pair and gets
+// NOTHING_ELIGIBLE — but "the UI does not offer it" is not a spend limit, and the
+// day something makes a pair eligible again this cap is the only thing standing
+// between one probe and forty.
 const FORBIDDEN_IN_PROBE_ROUTE: Record<string, string> = {
   launchJob: "one probe by hand is the whole point — the bulk job stays blocked",
   PROBE_CAP: "a cap means this route is running more than one probe",
@@ -735,8 +749,8 @@ function sweepProbeReplay() {
     );
   }
 
-  // 7f. The single-probe route: the demo's one live action, checked from both
-  // ends — what it must do, and what it must never grow into.
+  // 7f. The single-probe route, checked from both ends — what it must do, and
+  // what it must never grow into.
   const route = codeOnly(read(join(ROOT, "app/api/semantic-cache/probe/route.ts")));
   for (const [symbol, why] of Object.entries(REQUIRED_IN_PROBE_ROUTE)) {
     if (!route.includes(symbol)) {

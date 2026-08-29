@@ -1,14 +1,22 @@
 // THE PUBLISHED CACHE-KEY SWEEP (0077) — phase 1 of docs/demo-cache-lab-plan.md.
 //
 // Appraise → Semantic caching's §4 is the app's most distinctive measurement and
-// the one panel a guest cannot touch at all: the leaderboard, the pair counts and
-// the precision slider all render inside `{sweep && …}`, and `sweep` is client
-// state set by a POST behind assertDemoAllows("sweep").
+// it used to be the one panel a guest could not touch at all: the leaderboard,
+// the pair counts and the precision slider all render inside `{sweep && …}`, and
+// `sweep` is client state set by a POST behind assertDemoAllows("sweep").
 //
 // Only ONE of those three actually costs anything. The slider re-derives every
 // row from the curves the sweep already shipped, with selectFromCurve bundled
-// client-side precisely so dragging is free. So the demo does not need to let a
-// guest run a sweep; it needs to hand them a SweepResult.
+// client-side precisely so dragging is free. So the demo did not need to let a
+// guest run a sweep; it needed to hand them a SweepResult.
+//
+// WHAT STILL READS THIS FILE, now that the demo has moved on. A guest's §4 is no
+// longer this row — docs/demo-cache-replay-plan.md rebuilds a SweepResult from a
+// banked similarity MATRIX (0080) at whatever `n` the visitor has reached, which
+// the 0077 row could not do because a banked result has no `n`. What survived is
+// the PACKING: the matrix's replay travels to the panel through publishedForm and
+// thinCurve here, because a curve thinned to the 101 positions the slider can
+// reach is the right wire shape whoever computed it.
 //
 // WHY THIS NEEDS A TABLE WHEN replay_metrics DID NOT. The replay is a cache: the
 // master computes it, the row sits there, and clone step 5c copies it. The sweep

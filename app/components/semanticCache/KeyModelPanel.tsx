@@ -46,7 +46,6 @@ import { PayoffReadout } from "./PayoffReadout";
 import {
   BTN,
   BTN_PRIMARY,
-  DEMO_NOTE,
   NOTE_AMBER,
   Panel,
   TABLE_HEAD,
@@ -255,22 +254,19 @@ type Status = {
   economics?: CacheEconomics | null;
 };
 
-// THE DEMO'S SENTENCES, handed down from the page rather than imported here.
-// lib/demo/policy is `import "server-only"` and this is a Client Component, so
-// the boundary is the page's (app/appraise/semantic-cache/page.tsx) — the same
-// crossing app/appraise/models/page.tsx makes for the replay's two notes.
+// NO `notes` PROP EITHER, since phase 5 of docs/demo-cache-replay-plan.md. This
+// panel used to take one demo sentence and change three strings around it — the
+// button read "Show the published sweep", the spinner "Fetching…", the hint
+// "nothing is embedded" — because a guest's leaderboard was a banked row that
+// could not move. It moves now: the click re-runs calibrateFromJudged and auc
+// over the banked cosines at whatever `n` the visitor has reached, which is a
+// scoring run in every sense but the embedding. So the ordinary wording is the
+// true one, and the panel no longer knows whether it is in a demo.
 //
-// PRESENT ONLY FOR A GUEST. One sentence now rather than six: the pair set's four
-// left with the bank, and the page-level "which half is live" line is rendered by
-// the page, which is whose statement it always was.
-export type DemoNotes = {
-  sweep: string; // the leaderboard was measured on the operator's account
-};
-
 // NO `configs` PROP ANY MORE: the only per-config thing this panel held was the
 // pair gap, and that left with the bank. The sweep pools every config's pairs and
 // the precision target is resolved by the route, so there is nothing here to scope.
-export function KeyModelPanel({ notes }: { notes?: DemoNotes }) {
+export function KeyModelPanel() {
   const [status, setStatus] = useState<Status | null>(null);
   const [sweep, setSweep] = useState<SweepResult | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -296,13 +292,6 @@ export function KeyModelPanel({ notes }: { notes?: DemoNotes }) {
   // to travel outbound (see the route). Null whenever no sweep is running.
   const [sweepRunId, setSweepRunId] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
-  // Whether the leaderboard on screen was BANKED rather than computed here
-  // (phases 1 and 2). It drives one note, and it is tracked separately from
-  // `notes` because the two answer different questions: `notes` says "this is the
-  // demo", this says "these particular rows are a replay". A build published
-  // without a sweep row leaves a guest with notes and no table, and must not
-  // claim a published measurement it does not have.
-  const [sweepPublished, setSweepPublished] = useState(false);
   // Whether a sweep this account COMPUTED is on screen. A ref because load()
   // reads it from a callback that deliberately does not depend on the sweep, and
   // because nothing renders off it — it only decides whether the published row
@@ -330,12 +319,7 @@ export function KeyModelPanel({ notes }: { notes?: DemoNotes }) {
         // from: load() is a useCallback that must not re-create on every sweep,
         // so the state it closes over is stale by definition. The ref is written
         // in the same tick the result lands.
-        if (d.publishedSweep && !ownSweep.current) {
-          setSweep(unpackSweep(d.publishedSweep));
-          // These particular rows are a replay. Set here and cleared only by a
-          // sweep the visitor's own account actually computed.
-          setSweepPublished(true);
-        }
+        if (d.publishedSweep && !ownSweep.current) setSweep(unpackSweep(d.publishedSweep));
       })
       .catch(() => {});
   }, []);
@@ -398,17 +382,15 @@ export function KeyModelPanel({ notes }: { notes?: DemoNotes }) {
       setCancelling(false);
     });
     if (!d) return;
-    // A GUEST'S CLICK REPLAYS RATHER THAN RUNS (phase 2). The route answers
+    // A GUEST'S CLICK REPLAYS RATHER THAN RUNS. The route answers
     // `{ published: true, sweep }` with the curves PACKED, so this is not a
-    // SweepResult and must be unpacked before anything reads a curve — and the
-    // table it fills has to say where the numbers came from, which is what
-    // `sweepPublished` carries to the note below.
+    // SweepResult and must be unpacked before anything reads a curve. The tag is
+    // still needed for that unpacking even though nothing renders off it any more:
+    // the two shapes are not interchangeable, whatever the panel says about them.
     if ("published" in d) {
       setSweep(unpackSweep(d.sweep as PublishedSweep));
-      setSweepPublished(true);
     } else {
       setSweep(d as unknown as SweepResult);
-      setSweepPublished(false);
       // This account computed what is on screen, so load() must stop seeding the
       // banked rows over the top of it on the next SC_CHANGED.
       ownSweep.current = true;
@@ -657,19 +639,7 @@ export function KeyModelPanel({ notes }: { notes?: DemoNotes }) {
             onClick={runSweep}
             disabled={busy !== null}
           >
-            {/* NOTHING IS SCORED IN THE DEMO, so nothing may say it is. The
-                click fetches a row the operator's account measured; a spinner
-                reading "Scoring…" would be the panel claiming the spend the
-                whole phase exists to avoid. */}
-            {busy === "sweep"
-              ? notes
-                ? "Fetching…"
-                : "Scoring…"
-              : notes
-                ? "Show the published sweep"
-                : sweep
-                  ? "Re-run sweep"
-                  : "Run sweep"}
+            {busy === "sweep" ? "Scoring…" : sweep ? "Re-run sweep" : "Run sweep"}
           </button>
           {busy === "sweep" && sweepRunId && (
             <button
@@ -683,16 +653,12 @@ export function KeyModelPanel({ notes }: { notes?: DemoNotes }) {
             </button>
           )}
           <span className="text-xs text-zinc-400">
-            {notes
-              ? // Neither half of the sentence beside it is true here: nothing is
-                // sequential, nothing is embedded, and there is no hour to wait.
-                "Replays the published measurement — nothing is embedded."
-              : busy === "sweep"
-                ? // The first run on a cold cache is the expensive one in
-                  // WALL-CLOCK, not money, and saying so is what stops it being
-                  // killed half-way for a third time.
-                  "Sequential over models — the first run on a cold cache takes ~an hour. Cancelling keeps everything embedded so far."
-                : "Embedding-only — no LLM calls, and cached, so re-runs are nearly free."}
+            {busy === "sweep"
+              ? // The first run on a cold cache is the expensive one in
+                // WALL-CLOCK, not money, and saying so is what stops it being
+                // killed half-way for a third time.
+                "Sequential over models — the first run on a cold cache takes ~an hour. Cancelling keeps everything embedded so far."
+              : "Embedding-only — no LLM calls, and cached, so re-runs are nearly free."}
           </span>
         </div>
       </div>
@@ -731,14 +697,6 @@ export function KeyModelPanel({ notes }: { notes?: DemoNotes }) {
               Re-running resumes cheaply: every vector already embedded is
               cached.
             </p>
-          )}
-
-          {/* WHERE THESE ROWS CAME FROM, above the numbers rather than below
-              them. Gated on `sweepPublished`, not on `notes`: a build published
-              without a sweep row leaves a guest with the sentences and no table,
-              and this must never claim a measurement that was not banked. */}
-          {sweepPublished && notes && (
-            <p className={DEMO_NOTE}>{notes.sweep}</p>
           )}
 
           <p className="text-xs text-zinc-500 dark:text-zinc-400">

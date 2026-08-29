@@ -17,7 +17,8 @@
 //      contradicted pair is quarantined rather than deleted: by then the row exists,
 //      and F3 put the generator's hard negatives at only ~80% correct.
 //   3. Probe    — replay ONE pair as a question. The only verb here whose output
-//      lands somewhere else: an unjudged row in the would-hit queue.
+//      lands somewhere else: an unjudged row in the would-hit queue. Also the only
+//      one hidden in the demo: it embeds live, so no publish can bank it.
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
@@ -28,7 +29,7 @@ import type { ConfigSummary } from "@/lib/rag/configStore";
 import type { PairStats } from "@/lib/rag/semanticCachePairs";
 
 import { SC_CHANGED } from "./events";
-import { BTN, DEMO_NOTE, NOTE_AMBER, Panel, SELECT } from "./Panel";
+import { BTN, NOTE_AMBER, Panel, SELECT } from "./Panel";
 
 const ABOUT =
   "The labeled pair set two things on this page read: the cache-key " +
@@ -56,27 +57,17 @@ const GEN_MAX = 200;
 // Its default, and a sane starting position — a run you can watch finish.
 const GEN_DEFAULT = 25;
 
-// The demo's sentences for THIS panel. The page passes all of them or none, so
-// every `notes &&` below asks "is this the demo?" rather than "did this
-// particular string get passed?" — which is what stops a half-told story.
-export type PairBankNotes = {
-  pairs: string; // "Generate" hands out pairs already paid for
-  revealed: string; // revealing pairs cannot move the frozen leaderboard
-  screen: string; // the screen resolves to audited verdicts, not a new judge run
-  probe: string; // one probe is one embedding, and it lands unjudged
-};
-
-// The pair counts as this panel holds them: pairStats' own fields plus the two
+// The pair counts as this panel holds them: pairStats' own fields plus the one
 // the GET adds for a guest (app/api/semantic-cache/pairs). Deliberately NOT
-// folded into PairStats — those two describe the BANK the publish left behind,
-// not the pair table, and every other reader of PairStats wants the table.
+// folded into PairStats — it describes how much of the banked MATRIX is still
+// ahead of this visitor, not the pair table, and every other reader of PairStats
+// wants the table.
 //
 // Null rather than absent for a real account, which is the distinction the whole
-// reveal control is sized off: null means "there is no shelf here", 0 means "you
-// have emptied yours".
+// generate control is sized off: null means "there is no matrix here", 0 means
+// "you have walked to the end of yours".
 type PairsState = PairStats & {
   bankedRemaining?: number | null;
-  bankedVerdicts?: number | null;
 };
 
 // What ONE probe reports back (app/api/semantic-cache/probe). Held rather than
@@ -97,18 +88,11 @@ type ProbeResult = {
   matchedQuery?: string | null;
   remaining?: number;
   reason?: string;
-  note?: string | null;
 };
 
 // `configs` comes from the page's server render, the same list (open tabs then
 // closed) every other panel gets.
-export function PairBankPanel({
-  configs,
-  notes,
-}: {
-  configs: ConfigSummary[];
-  notes?: PairBankNotes;
-}) {
+export function PairBankPanel({ configs }: { configs: ConfigSummary[] }) {
   const [pairs, setPairs] = useState<PairsState | null>(null);
   // WHICH CONFIG THE GAP DESCRIBES — and nothing else here. The bank itself is
   // account-wide (a pair belongs to two question texts, not to a config), so this
@@ -128,10 +112,6 @@ export function PairBankPanel({
   // numbers into a sentence is how the one live thing here would end up reading
   // like every other status line.
   const [probe, setProbe] = useState<ProbeResult | null>(null);
-  // Whether a reveal has told us the leaderboard is banked. It only matters once
-  // the visitor has moved a count, which is exactly when it becomes true.
-  const [frozenSeen, setFrozenSeen] = useState(false);
-
   // The generate control's range and current position. Capped at the gap (asking
   // for more questions than exist just generates the gap) and at the inline
   // path's own ceiling, so the slider can never promise a run the server will
@@ -145,10 +125,15 @@ export function PairBankPanel({
   // pairs, so that count is ~0 for a guest and the control would never render.
   const banked = pairs?.bankedRemaining ?? null;
   const genMax = Math.min(banked ?? pairs?.questionsRemaining ?? 0, GEN_MAX);
-  // Whether this control UNCOVERS rather than writes. Read from the bank being
-  // present at all, not from `notes`: the sentences say "this is the demo", the
-  // shelf says "there is something here to hand you", and a build published
-  // without a bank must fall back to the ordinary control and its ordinary 403.
+  // Whether this control WALKS A BANKED MEASUREMENT rather than buying one. Read
+  // from the matrix being present at all rather than from any "is this a guest"
+  // flag: the shelf says "there is something here to hand you", and a build
+  // published without one must fall back to the ordinary control and its ordinary
+  // 403. It is also what the panel's two remaining guest-visible differences key
+  // off, and both are truth constraints rather than demo copy: the probe below is
+  // hidden (nothing can bank an embedding), and the screen button drops "(batch)"
+  // (nothing is submitted, so no job will ever appear in the Batch API panel to
+  // track). The generate control itself is now worded exactly as an account's.
   const revealing = banked !== null;
   const genQuestions = Math.max(1, Math.min(genLimit ?? GEN_DEFAULT, genMax || 1));
 
@@ -224,20 +209,20 @@ export function PairBankPanel({
       { limit: genQuestions },
     );
     if (!d) return;
-    // THE GUEST PATH REVEALS, IT DOES NOT GENERATE (phase 3). The pairs were
-    // written and audited on the operator's account and banked with the publish,
-    // so `limit` meant "how many to uncover" and the counts below are pairs
-    // rather than questions. Nothing was bought, and the note beside the slider
-    // says so — as does the revealed note, because the leaderboard that reads
-    // these counts is banked and will not move however far the count climbs.
+    // THE GUEST PATH WALKS A BANKED MEASUREMENT, IT DOES NOT BUY ONE. `limit`
+    // means "how many pairs to bring into the set" rather than "how many origin
+    // questions to write pairs for", which is why the counts below are pairs. The
+    // pairs and their cosines were paid for once, on the operator's account, at
+    // publish time; everything downstream of this click — the counts line, the
+    // leaderboard, the pair-bank floor — then re-derives over the larger `n`,
+    // which is real arithmetic and moves for real.
     if (d.mode === "revealed") {
       const revealed = Number(d.revealed);
-      if (d.frozenLeaderboard) setFrozenSeen(true);
       setNote(
         revealed === 0
-          ? "Nothing left to uncover — every published pair is already showing."
-          : `Uncovered ${revealed} pair${revealed === 1 ? "" : "s"}` +
-            `; ${d.remaining} still banked.`,
+          ? "Nothing left — every pair in the set is already here."
+          : `Generated ${revealed} pair${revealed === 1 ? "" : "s"}` +
+            `; ${d.remaining} still to go.`,
       );
       // The bank count rides in `remaining` rather than in `stats` (it describes
       // the shelf, not the pair table), so it is carried across by hand — without
@@ -309,7 +294,7 @@ export function PairBankPanel({
           (s.quarantined > 0
             ? `; ${s.quarantined} pair${s.quarantined === 1 ? " was" : "s were"} labelled wrong and ${s.quarantined === 1 ? "is" : "are"} now quarantined out of the sweep.`
             : " — the judge agreed with every label.") +
-          (s.remaining > 0 ? ` ${s.remaining} still banked.` : ""),
+          (s.remaining > 0 ? ` ${s.remaining} still to go.` : ""),
       );
       load();
       announce();
@@ -325,10 +310,10 @@ export function PairBankPanel({
     announce();
   };
 
-  // ONE PROBE — the live half of a published page (phase 4). It embeds a single
-  // question variant and looks it up, landing one UNJUDGED row in the would-hit
-  // queue; the bulk replay job stays blocked in the demo, which is why this is a
-  // button rather than something that happens on its own.
+  // ONE PROBE. It embeds a single question variant and looks it up, landing one
+  // UNJUDGED row in the would-hit queue; the bulk replay job fires itself after a
+  // generate, which is why this is a button — a top-up you ask for, one row at a
+  // time. Not offered while `revealing`: see the control below.
   const runProbe = async () => {
     const d = await post(
       "probe",
@@ -385,8 +370,14 @@ export function PairBankPanel({
             : "—"}
         </span>
         {/* Named, because this is the ONE count on the line that isn't
-            account-wide — it belongs to the config in the picker above. */}
-        {pairs && pairs.questionsRemaining > 0 && (
+            account-wide — it belongs to the config in the picker above.
+            NOT WHILE REVEALING, for the reason the two empty-gap sentences below
+            are also suppressed: it prices the control a real account has, and the
+            control on screen is not that one. A guest's gap is ~443 because the
+            clone gave only the questions it copied their pairs, so this reads as
+            "443 questions you could cover" beside a slider that cannot cover
+            them — a number about the clone, dressed as a number about the bank. */}
+        {!revealing && pairs && pairs.questionsRemaining > 0 && (
           <span className="text-zinc-400">
             · {pairs.questionsRemaining} eval question
             {pairs.questionsRemaining === 1 ? "" : "s"} in{" "}
@@ -423,21 +414,22 @@ export function PairBankPanel({
             max={genMax}
             value={genQuestions}
             onChange={(e) => setGenLimit(Number(e.target.value))}
-            aria-label={revealing ? "Pairs to uncover" : "Questions to generate pairs for"}
+            aria-label={revealing ? "Pairs to generate" : "Questions to generate pairs for"}
             disabled={busy !== null}
             className="h-1 w-40 min-w-32 max-w-full cursor-pointer accent-zinc-900 dark:accent-zinc-100"
           />
           {/* The two units are not interchangeable and the arithmetic between
               them only holds on the generating side: a question BUYS ~3 pairs, a
-              reveal uncovers exactly the number asked for. Printing "→ ~N pairs"
-              over a reveal would promise three times what lands. */}
+              walk into the matrix brings in exactly the number asked for.
+              Printing "→ ~N pairs" over that would promise three times what
+              lands. */}
           <span className="text-xs text-zinc-500 dark:text-zinc-400">
             <span className="font-semibold tabular-nums text-zinc-800 dark:text-zinc-100">
               {genQuestions}
             </span>{" "}
             {revealing ? (
               <>
-                of {banked} banked pair{banked === 1 ? "" : "s"}
+                of {banked} pair{banked === 1 ? "" : "s"}
               </>
             ) : (
               <>
@@ -466,28 +458,10 @@ export function PairBankPanel({
             </button>
           </div>
           <button type="button" className={BTN} onClick={generate} disabled={busy !== null}>
-            {busy === "pairs"
-              ? revealing
-                ? "Uncovering…"
-                : "Generating…"
-              : revealing
-                ? "Reveal pairs"
-                : "Generate pairs"}
+            {busy === "pairs" ? "Generating…" : "Generate pairs"}
           </button>
         </div>
       )}
-      {/* WHAT THE BUTTON ABOVE ACTUALLY DOES IN THE DEMO, next to the button
-          rather than at the top of the panel: "Reveal" is not the word anyone
-          arrives expecting on a control that used to spend a model key, and the
-          reason it can be free is the whole point of the phase. */}
-      {notes && <p className={DEMO_NOTE}>{notes.pairs}</p>}
-      {/* And the consequence, once they have used it. A pair count climbing above
-          a leaderboard that never moves reads as a broken sweep — this is the
-          sentence that makes it read as a published one instead. Shown from the
-          first reveal, because that is when the count starts moving; the route
-          flags it (`frozenLeaderboard`) rather than the panel inferring it, so
-          the two cannot disagree about what was banked. */}
-      {notes && frozenSeen && <p className={DEMO_NOTE}>{notes.revealed}</p>}
       {/* The generate control is gated on knowing the gap, so say so rather than
           rendering nothing — an empty space where a button was reads as "the
           feature is gone", not "the count hasn't arrived". */}
@@ -542,19 +516,20 @@ export function PairBankPanel({
           </button>
         </div>
       )}
-      {/* Why the demo's screen returns instantly and costs nothing: it fills in
-          verdicts F3 already obtained rather than asking a model. Beside the
-          control, and only while there is one — "(batch)" is dropped from the
-          label above for the same reason, since nothing is submitted and no job
-          will ever appear in the Batch API panel to track. */}
-      {notes && pairs !== null && pairs.unjudged > 0 && (
-        <p className={DEMO_NOTE}>{notes.screen}</p>
-      )}
-
       {/* --- probe ---------------------------------------------------------- */}
       {/* Draws from a pair and lands in the would-hit queue, so it sits at the
           foot of the bank that feeds it rather than in the queue that receives
           it: the pair is the input you are spending, and one is all it spends. */}
+      {/* THE ONE THING A GUEST DOES NOT SEE (phase 5 of
+          docs/demo-cache-replay-plan.md). Every other control on this page now
+          replays a measurement the publish banked, but a probe has to EMBED a
+          question variant and look it up live — there is no cosine a matrix could
+          hold that stands in for it — and the pair TEXT it would embed left the
+          clone with the pair rows. So it is hidden rather than replayed or left to
+          fail, and hidden off `revealing` for the reason the generate control is
+          sized off it: the shelf is what says a workspace is walking a banked
+          measurement, and that is exactly the workspace with no text to probe. */}
+      {!revealing && (
       <div className="flex flex-col gap-2 border-t border-zinc-100 pt-3 dark:border-zinc-800">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <button
@@ -571,9 +546,9 @@ export function PairBankPanel({
               standing prose this section had most of. */}
           <span className="text-xs text-zinc-400">Costs one embedding.</span>
         </div>
-        {notes && <p className={DEMO_NOTE}>{notes.probe}</p>}
         {probe && <ProbeReport probe={probe} />}
       </div>
+      )}
 
       {noNegatives && (
         <p className={NOTE_AMBER}>

@@ -3,20 +3,22 @@
 // ONE probe, chosen by the server, landing one unjudged row in §3's Accept /
 // Reject queue (docs/demo-cache-lab-plan.md, Phase 4).
 //
-// WHY THIS EXISTS BESIDE A BLOCKED JOB, since merged main took the opposite
-// position on purpose. `probe_replay` ships blocked in the demo —
-// DEMO_ACTION_FOR_JOB in app/api/jobs/route.ts, with DEMO_ACTIONS.probeReplay's
-// sentence: "every probe is an embedding a guest did not pay for". That is right
-// about the JOB, whose cap is 40 probes fired automatically by a trigger nobody
-// pressed, and it does not settle the ACTION. One probe is one embedQueryCached
-// (content-addressed, so often not even a call) plus one indexed single-row
-// lookup: the same ~25 KB a guest spends asking a question, which lib/demo/policy
-// already funds and calls "the demo".
+// NOT A DEMO FEATURE ANY MORE, and the change is in the PANEL rather than here.
+// This route once carried the demo's one live action: the bulk `probe_replay` job
+// ships blocked (DEMO_ACTION_FOR_JOB in app/api/jobs/route.ts), but a SINGLE probe
+// is one embedQueryCached plus one indexed single-row lookup — the same ~25 KB a
+// guest spends asking a question — so it was offered as a door a visitor opened
+// themselves, one row at a time.
 //
-// So the split this route implements: the bulk job stays blocked, its gate and
-// its sentence untouched, and triggerProbeReplay keeps its own demoBlocks()
-// self-check so nothing AUTO-fires in a guest workspace. What a visitor gets is a
-// door they have to open themselves, one row at a time.
+// Phase 5 of docs/demo-cache-replay-plan.md closed that door, because the rest of
+// the page moved past it. Every other control there now replays a measurement the
+// publish banked, and a probe is the one thing no publish can bank: it has to
+// embed live, and the pair TEXT it would embed is what the matrix replaced. So
+// PairBankPanel hides the button for a guest and this route keeps NO gate — it
+// never had one, and it needs none: a guest reaching it has no eligible pair and
+// gets NOTHING_ELIGIBLE. The bulk job's gate and sentence are untouched, and
+// triggerProbeReplay keeps its own demoBlocks() self-check so nothing AUTO-fires
+// in a guest workspace.
 //
 // NOT ROUTED THROUGH launchJob, deliberately. The job's cap (PROBE_CAP),
 // its frozen cursor and its one-run-per-config lock are all machinery for a run
@@ -31,7 +33,6 @@
 // the bulk job would have used first.
 import { config } from "@/lib/config";
 import { assertDemoEmbedBudget } from "@/lib/demo/budget";
-import { demoBlocks, GUEST_PROBE_NOTE } from "@/lib/demo/policy";
 import { NEVER_STOP } from "@/lib/http/cancelRegistry";
 import { withRequestConfig } from "@/lib/http/configScope";
 import {
@@ -140,11 +141,6 @@ export async function POST(request: Request) {
       // offering one that would come back NOTHING_ELIGIBLE. Minus this probe,
       // which consumed its own eligibility (lib/jobs/steps/probeReplay.ts).
       remaining: Math.max(candidates.length - 1, 0),
-      // The demo's sentence, for the demo only — a real account is not spending
-      // anyone else's budget and does not need to be told what a probe costs.
-      // demoBlocks() is the courtesy read, never the gate here: this route has no
-      // gate, because a single probe is a thing a guest may do.
-      note: (await demoBlocks()) ? GUEST_PROBE_NOTE : null,
     });
   });
 }
