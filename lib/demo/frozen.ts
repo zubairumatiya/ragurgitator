@@ -40,22 +40,32 @@ export const FROZEN_REASON = "demo_frozen";
 // this whole section exists to stop telling.
 export const PUBLISHED_RUN_NOTE = "as published";
 
-// HOW MANY BANKED QUESTIONS A PUBLISH CARRIES (phase 6.1).
+// HOW MANY BANKED QUESTIONS A PUBLISH CARRIES (phase 6.1, re-cut by
+// docs/demo-question-bank-plan.md).
 //
-// The third piece of the demo's scope, and the least obvious one. `Add cached`
-// is the ONLY way a guest can add a question — generation needs a key the demo
-// does not carry — so the size of the published question_cache is a hard ceiling
-// on how far the tunable set can grow, and therefore on what autotune runs over.
-// Without it the ceiling is whatever the master happened to bank: 43 today, an
-// unknown number after the next generation run on the master, and nothing in the
-// publish would report the difference.
+// The third piece of the demo's scope, and the least obvious one. `Add cached` is
+// the ONLY way a guest can add a question — generation needs a key the demo does
+// not carry — so the size of the published question_cache is a hard ceiling on
+// how far the tunable set can grow, and therefore on what autotune runs over.
 //
 // TWELVE, to match the tunable set: the worst case a guest can reach is 24
 // questions, exactly twice the number phase 4 sized and measured autotune
-// against. A cap that moves with the master's bookkeeping is not a cap.
+// against.
 //
-// It is applied in lib/demo/clone step 4e, at PUBLISH time, for the same reason
-// FROZEN_REASON is: the scope is data in the build, not a branch in the app.
+// IT USED TO BE A CAP ON SOMEONE ELSE'S SET, AND IS NOW THE SIZE OF THIS ONE.
+// Clone step 4e copied whatever question_cache rows the master happened to hold
+// for published chunk text and took the first twelve, so every property a visitor
+// would notice — which documents the questions were about, whether the chunk
+// already had one — was an accident of the master's generation history. It
+// produced twelve questions about one file, three of them on chunks that already
+// carried a tunable question. lib/demo/publishedBank.ts now CONSTRUCTS the twelve
+// at publish time out of the build's own frozen questions and removes them from
+// the build, so this number is what the bank IS rather than what it was trimmed
+// to.
+//
+// Step 4e still applies it, because that is the step that copies the snapshot's
+// bank into each guest and a cap there is what keeps a hand-edited snapshot from
+// widening the scope silently.
 export const BANKED_QUESTION_CAP = 12;
 
 // HOW MUCH OF THE SHADOW LOG A PUBLISH CARRIES (phase 6.2).

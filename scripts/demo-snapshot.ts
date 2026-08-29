@@ -41,6 +41,7 @@ import { privilegedSql } from "../lib/db";
 import { createSnapshotAccount } from "../lib/demo/admin";
 import { cloneSeedWorkspace } from "../lib/demo/clone";
 import { BANKED_QUESTION_CAP } from "../lib/demo/frozen";
+import { seedPublishedBank, selectBankable } from "../lib/demo/publishedBank";
 import {
   QUOTAS,
   selectTunable,
@@ -235,41 +236,6 @@ async function destCensus(userId: string) {
            (select count(*) from semantic_cache where user_id = ${userId})::int as cached
   `;
   return { configs: cfgs.length, chunks, ...row };
-}
-
-// HOW MANY DOCUMENTS THE PUBLISHED BANK OF SPARE WORDING SPREADS OVER.
-//
-// A latent defect in clone step 4e, reported rather than fixed here because the
-// selection is deliberate and changing it is a separate decision: it picks
-// `distinct on (text_hash) … order by text_hash`, which spreads the twelve over
-// twelve distinct CHUNKS but says nothing about which documents those chunks come
-// from. Hash order is effectively random, so the spread is usually fine — but it
-// is not guaranteed, and a bank drawn entirely from one file gives "Add cached"
-// twelve questions about one document. The publish printed a count and nothing
-// else, so that build would look identical to a good one.
-//
-// Joined on the chunk text's own hash because question_cache is content-addressed
-// (0055) and carries no document_id — the same property that lets the bank clone
-// byte for byte is why the document has to be recovered this way.
-async function bankedSpread(userId: string): Promise<number> {
-  const cfgs = await privilegedSql<{ id: string; base_model: string }[]>`
-    select id, base_model from configs where user_id = ${userId}
-  `;
-  const docs = new Set<string>();
-  for (const cfg of cfgs) {
-    const table = tableFor(cfg.base_model);
-    if (!table) continue;
-    const rows = await privilegedSql.unsafe<{ document_id: string }[]>(
-      `select distinct c.document_id::text as document_id
-         from "${table}" c
-         join question_cache q
-           on q.text_hash = encode(sha256(convert_to(c."text", 'UTF8')), 'hex')
-        where c.config_id = $1 and q.user_id = $2`,
-      [cfg.id, userId] as never[],
-    );
-    for (const r of rows) docs.add(r.document_id);
-  }
-  return docs.size;
 }
 
 // THE CHECK THAT MATTERS AFTER A PUBLISH. semantic_cache rows are found by
@@ -827,13 +793,30 @@ async function main() {
     tunableQuestionIds: tunable.map((t) => t.id),
   });
 
+  // THE QUESTIONS "ADD CACHED" WILL HAND OUT (docs/demo-question-bank-plan.md).
+  //
+  // Runs on the SNAPSHOT, after the copy, because that is where the two sets it
+  // reads are already written down: the tunable twelve are the questions with no
+  // frozen-ignore row, and everything else is a candidate. It replaces the bank
+  // the clone inherited from the master with twelve chosen ones and removes those
+  // twelve from the build — see lib/demo/publishedBank.ts for why both halves.
+  //
+  // Nothing on the master changes, so a publish is still a copy: this only edits
+  // the account it just wrote.
+  const [snapCfg] = await privilegedSql<{ id: string; llm_model: string }[]>`
+    select id, llm_model from configs where user_id = ${snapshot} limit 1
+  `;
+  if (!snapCfg) die(`the publish wrote no config into ${snapshot}.`);
+  const picks = await selectBankable(snapCfg.id, cfg.base_model);
+  const bank = await seedPublishedBank(snapshot, snapCfg.llm_model, picks);
+
   console.log("published:");
   console.log(
     `  ${summary.configs} config, ${summary.documents} documents, ${summary.chunks} chunks, ` +
-      `${summary.questions} questions, ${summary.results} scores, ` +
-      `${summary.rankings} graded rankings, ${summary.frozen} frozen, ` +
+      `${summary.questions - bank.removed} questions, ${summary.results} scores, ` +
+      `${summary.rankings} graded rankings, ${summary.frozen - bank.removed} frozen, ` +
       `${summary.cachedAnswers} cached answers, ` +
-      `${summary.bankedQuestions} banked questions, ` +
+      `${bank.banked} banked questions, ` +
       `${summary.shadowEvents} shadow events (${summary.shadowQueued} unjudged, ` +
       `${summary.shadowVerdicts} verdicts banked, ${summary.shadowPoolable} poolable), ` +
       `${summary.replayRows} model rows (${summary.replayScored} scored), ` +
@@ -862,37 +845,52 @@ async function main() {
     );
   }
   // The one thing a guest can ADD without a key: "Bulk actions → Add question →
-  // Add cached" reads question_cache, which step 4e of the clone now carries
-  // (phase 6.1 of docs/demo-analytics-plan.md).
+  // Add cached" reads question_cache, which the publish now CONSTRUCTS out of the
+  // build's own frozen questions (docs/demo-question-bank-plan.md) rather than
+  // inheriting whatever the master happened to have generated for this corpus.
   //
-  // Both directions are worth a line, because the count alone reads the same
-  // either way. A CAPPED build is working as designed and the number is not the
-  // master's — say which. An EMPTY one is not an error (the master's bank only
-  // fills as it generates) but it is a dead button on the published build, and it
-  // is invisible from the outside.
-  if (summary.bankedQuestions === 0) {
+  // The composition is the report, not the count — twelve is the uninteresting
+  // half, exactly as it is for the tunable set two screens up. What a visitor
+  // notices is which files the questions are about, and whether adding them gives
+  // autotune anything to find.
+  if (bank.banked === 0) {
     console.log(
-      "⚠ no banked questions published — the master's question_cache holds nothing for\n" +
-        "  this corpus's chunk text, so a guest's \u201cAdd cached\u201d will find nothing to add.\n" +
-        "  Generate some questions on the master and re-publish to give it something.\n",
+      "\u26a0 no banked questions published \u2014 nothing frozen in this build was eligible, so a\n" +
+        "  guest's \u201cAdd cached\u201d will find nothing to add and the button is dead. Check that the\n" +
+        "  published config has scored questions on chunks the tunable set does not use.\n",
     );
-  } else if (summary.bankedAvailable > summary.bankedQuestions) {
+  } else {
+    const tierLabel = (t: number) => (t === 99 ? "missed" : `rank ${t}`);
     console.log(
-      `  (${summary.bankedAvailable} passages had banked wording; capped to ` +
-        `${BANKED_QUESTION_CAP} — a guest's tunable set tops out at ` +
-        `${tunable.length + summary.bankedQuestions}, which is what autotune runs over.)\n`,
+      `  the bank a guest can add: ${bank.banked} question(s) over ${bank.documents} document(s) ` +
+        `(${bank.tiers.map((t) => `${t.n} ${tierLabel(t.tier)}`).join(", ")}), removed from the\n` +
+        `  published set so adding them is an addition \u2014 a guest's tunable set tops out at ` +
+        `${tunable.length + bank.banked}, which is what autotune runs over.\n`,
     );
-  }
-  // …and the half of that count the number itself cannot show: WHICH documents
-  // the bank came from. See bankedSpread — step 4e spreads by chunk, not by
-  // document, so a one-file bank is possible and was previously invisible.
-  if (summary.bankedQuestions > 0) {
-    const spread = await bankedSpread(snapshot);
-    if (spread < 2) {
+    if (bank.banked < BANKED_QUESTION_CAP) {
       console.log(
-        `⚠ all ${summary.bankedQuestions} banked questions come from ${spread} document(s) — ` +
-          `\u201cAdd cached\u201d\n  would hand a guest twelve questions about one file. clone.ts step 4e ` +
-          `spreads by\n  CHUNK, not by document; re-publishing will not change it on its own.\n`,
+        `\u26a0 only ${bank.banked} of ${BANKED_QUESTION_CAP} banked \u2014 the build ran out of frozen questions on ` +
+          `chunks the\n  tunable set does not already use. The demo still works; it just has ` +
+          `less to add.\n`,
+      );
+    }
+    // The old failure mode, kept as a check rather than as a warning nothing
+    // could act on: selectBankable round-robins by document, so one document now
+    // means the eligible set was confined to one, not that the bank drifted.
+    if (bank.documents < 2) {
+      console.log(
+        `\u26a0 all ${bank.banked} banked questions come from ${bank.documents} document(s) \u2014 ` +
+          `\u201cAdd cached\u201d would hand\n  a guest twelve questions about one file. ` +
+          `Check what else in this build is eligible.\n`,
+      );
+    }
+    // Belt and braces on the half that is invisible afterwards: a banked question
+    // still sitting in the published set is one fillChunksFromCache will count
+    // and then decline to add, because selectNewQuestions dedupes on wording.
+    if (bank.removed !== bank.banked) {
+      console.log(
+        `\u26a0 banked ${bank.banked} question(s) but removed ${bank.removed} from the build. Any that\n` +
+          `  stayed are wording a guest already has, so \u201cAdd cached\u201d will silently skip them.\n`,
       );
     }
   }

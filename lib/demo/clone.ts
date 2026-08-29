@@ -826,14 +826,24 @@ export async function cloneSeedWorkspace(
     //      fingerprint here would mean a publish silently dropping the bank the
     //      moment someone edits a prompt constant.
     //   3. BANKED_QUESTION_CAP — the one that is a spend limit rather than a
-    //      correctness filter, and the reason this step reads as carefully as
-    //      step 4d does. A question a guest ADDS is unfrozen by construction
-    //      (only a publish writes FROZEN_REASON), so every row copied here is a
-    //      row autotune may later run over. Uncapped, the demo's tunable set is
-    //      whatever the master happens to have banked — 43 today, unknown after
-    //      the master's next generation run, and nothing would report the drift.
-    //      Capped, the ceiling is 12 + 12 and it is written down in
-    //      lib/demo/frozen.ts next to the other two halves of the same scope.
+    //      correctness filter. A question a guest ADDS is unfrozen by
+    //      construction (only a publish writes FROZEN_REASON), so every row
+    //      copied here is a row autotune may later run over, and the ceiling is
+    //      12 + 12 written down in lib/demo/frozen.ts next to the other two
+    //      halves of the same scope.
+    //
+    // WHAT THE SNAPSHOT'S BANK NOW IS, which changes what this step is doing
+    // without changing a line of it (docs/demo-question-bank-plan.md). This used
+    // to be the ONLY thing deciding the demo's spare wording, and it decided it by
+    // accident: whatever the master had generated, twelve of it in hash order.
+    // That shipped twelve questions about one file, three of them on chunks that
+    // already carried a tunable question — which "Add cached" then silently
+    // declined to add, because selectNewQuestions dedupes on wording.
+    // scripts/demo-snapshot now CONSTRUCTS the snapshot's bank out of the build's
+    // own frozen questions and deletes those questions from the build, so a
+    // GUEST clone (snapshot → guest) copies a set that was chosen. The MASTER →
+    // snapshot clone still runs this step first and its rows are then replaced,
+    // which is why this reads as unchanged.
     //
     // ONE PER PASSAGE, then the cap. `distinct on (text_hash)` spreads the twelve
     // across twelve different chunks rather than stacking four slots onto three,

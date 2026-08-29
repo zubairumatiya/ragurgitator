@@ -1073,6 +1073,22 @@ export function EvalDashboard() {
     return { tunable, frozen, tunableCount, frozenCount };
   }, [groups, summary]);
 
+  // WHAT THE HEADLINE ROW IS ACTUALLY MEASURING.
+  //
+  // The rates beside these counts already exclude the frozen half — a frozen row
+  // is `ignored`, and reduceRates drops those — so `Recall`, `MRR` and `nDCG` are
+  // over the twelve live questions. But `summary.total` and `summary.chunkCount`
+  // are raw sizes of the whole config, so the row read "12 scored of 460
+  // questions" and "Chunks (236)" beside three rates none of those rows fed. The
+  // frozen set has its own numbers in the "As published" card below; here it is
+  // simply not what is being measured.
+  //
+  // Display-only, and only when the demo split exists: summary.total stays the
+  // config's real size for everything that gates on it, and a real account (no
+  // frozen rows, `split === null`) prints exactly what it always did.
+  const liveTotal = split ? split.tunableCount : (summary?.total ?? 0);
+  const liveChunks = split ? split.tunable.length : (summary?.chunkCount ?? 0);
+
   // One chunk card. A function because the demo split renders the same card in
   // two sections, and a card that drifted between them would make the page mean
   // two different things depending on which half you were reading. `summary` is
@@ -1221,23 +1237,17 @@ export function EvalDashboard() {
         <p className="text-sm text-zinc-500">Loading…</p>
       ) : (
         <>
-          {/* The sentence that makes the two sections below legible (phase 5). */}
+          {/* The sentence that makes the frozen/live split legible (phase 5). */}
           <DemoScope summary={summary} />
 
-          {/* THE DEMO'S TWO SECTIONS (docs/demo-analytics-plan.md, phase 2).
-              "As published" is the frozen build a visitor was handed; "Now" is
-              what their own tuning has made of it. Neither heading appears for a
-              real account — summary.asPublished is null there and the headline
-              row renders bare, exactly as it always has. */}
-          {summary.asPublished && (
-            <AsPublished run={summary.asPublished} summary={summary} />
-          )}
-
-          {summary.asPublished && (
-            <h2 className="-mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-              Now
-            </h2>
-          )}
+          {/* The "As published" card used to sit HERE, above the live headline,
+              under a "Now" heading. It has moved down beside the frozen chunks
+              (see the Chunks section): the top of the page belongs to the
+              numbers a visitor can actually move, and the published build's
+              frozen numbers belong with the frozen questions they were measured
+              over. With nothing above it to contrast against, the bare "Now"
+              heading was labelling the only headline row on the page, so it is
+              gone too — DemoScope already says which set is live. */}
 
           {/* Headline metrics — one labeled card per eval */}
           <div className="flex flex-wrap gap-4">
@@ -1312,14 +1322,14 @@ export function EvalDashboard() {
                   </>
                 }
                 sub={
-                  `${summary.ndcgCovered}/${summary.total} graded` +
+                  `${summary.ndcgCovered}/${liveTotal} graded` +
                   (summary.criteria.ndcg.minRate != null
                     ? ` · min ${summary.criteria.ndcg.minRate.toFixed(2)}`
                     : "")
                 }
               />
             )}
-            <Stat label="Questions" value={String(summary.total)} />
+            <Stat label="Questions" value={String(liveTotal)} />
             <Stat label="Scored" value={String(summary.scored)} />
             <Stat label="Hits" value={String(summary.hits)} />
           </div>
@@ -1349,13 +1359,24 @@ export function EvalDashboard() {
             </p>
           )}
 
-          {/* Per-document breakdown */}
+          {/* Per-document breakdown — closed by default, for every account and
+              not just a demo: it is a per-file drill-down, read when a headline
+              rate needs explaining rather than on the way past, and under a
+              corpus of any size it is the longest thing between the headline
+              and the chunks. The count rides in the heading so the shut section
+              still says how many files it holds. */}
           {summary.perDocument.length > 0 && (
-            <section className="flex flex-col gap-2">
-              <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
+            <details className="group">
+              {/* list-none alone leaves Safari's marker in place, so the
+                  caret is drawn by hand. */}
+              <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium uppercase tracking-wide text-zinc-500 hover:text-zinc-700 [&::-webkit-details-marker]:hidden dark:hover:text-zinc-300">
+                <Caret />
                 By document
-              </h2>
-              <ul className="flex flex-col divide-y divide-zinc-200 rounded-lg border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800">
+                <span className="text-xs font-normal normal-case tracking-normal text-zinc-400">
+                  ({summary.perDocument.length})
+                </span>
+              </summary>
+              <ul className="mt-2 flex flex-col divide-y divide-zinc-200 rounded-lg border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800">
                 {summary.perDocument.map((d) => (
                   <li
                     key={d.documentId}
@@ -1369,7 +1390,7 @@ export function EvalDashboard() {
                   </li>
                 ))}
               </ul>
-            </section>
+            </details>
           )}
 
           {/* Run history — collapsible; grows over time so it folds away by default. */}
@@ -1425,7 +1446,7 @@ export function EvalDashboard() {
               <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
                 Chunks
                 <span className="ml-2 text-xs font-normal normal-case tracking-normal text-zinc-400">
-                  ({summary.chunkCount})
+                  ({liveChunks})
                 </span>
               </h2>
               <div className="flex flex-col gap-3">
@@ -1433,25 +1454,28 @@ export function EvalDashboard() {
                   groups.map((group) => renderGroup(group, summary))
                 ) : (
                   <>
-                    <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
-                      Demo — {split.tunableCount}
-                    </h3>
+                    {/* No "Demo — N" heading over these: the Chunks count above
+                        is now that same number, and two labels for one list is
+                        one more than the list needs. */}
                     {split.tunable.map((group) => renderGroup(group, summary))}
+                    {/* The published build's own numbers, immediately above the
+                        frozen questions they were measured over. It rides
+                        inside this branch on purpose: `split` is non-null
+                        exactly when frozen rows exist, which is exactly when
+                        summary.asPublished is set, so the two appear and vanish
+                        together. */}
+                    {summary.asPublished && (
+                      <AsPublished run={summary.asPublished} summary={summary} />
+                    )}
                     {/* Closed on open: these cards are here to be read, and a
                         few hundred of them between a visitor and the rest of
                         the page is the clutter the split exists to remove. */}
                     <details className="group">
-                      {/* list-none alone leaves Safari's marker in place, and
-                          the "show"/"hide" hint is the affordance instead. */}
-                      <summary className="cursor-pointer list-none text-xs font-semibold uppercase tracking-wide text-zinc-500 hover:text-zinc-700 [&::-webkit-details-marker]:hidden dark:hover:text-zinc-300">
+                      {/* list-none alone leaves Safari's marker in place, so
+                          the caret is drawn by hand. */}
+                      <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 hover:text-zinc-700 [&::-webkit-details-marker]:hidden dark:hover:text-zinc-300">
+                        <Caret />
                         Frozen — {split.frozenCount}
-                        <span
-                          aria-hidden
-                          className="ml-1 font-sans normal-case text-zinc-400"
-                        >
-                          <span className="group-open:hidden">— show</span>
-                          <span className="hidden group-open:inline">— hide</span>
-                        </span>
                       </summary>
                       <div className="mt-3 flex flex-col gap-3">
                         {split.frozen.map((group) => renderGroup(group, summary))}
@@ -2729,26 +2753,15 @@ function BulkActions({
   );
 }
 
-// THE BANNER THAT SAYS WHAT THE TWO SECTIONS BELOW MEAN (phase 5 of
-// docs/demo-analytics-plan.md).
+// THE DEMO BANNER (phase 5 of docs/demo-analytics-plan.md).
 //
-// By phase 4 the demo's Eval tab had a frozen headline, a live headline, a
-// per-question "frozen" chip and a set of buttons quietly pointed at a dozen
-// questions — and nothing on the page said so. A visitor could re-score, watch
-// "12 questions" go by, and reasonably conclude the workbench was broken. This
-// is not decoration: an app that leaves its own scope to be inferred is telling
-// the visitor the same lie by omission that phase 2 removed from the cards.
+// A visitor can press a button, have it refuse, and reasonably conclude the
+// workbench is broken. This says up front that the limits are deliberate.
 //
-// IT COUNTS RATHER THAN ASSERTS. Every number here comes off the questions the
-// page already has, so a re-publish that lands 9 tunable questions instead of 12
-// (scripts/demo-snapshot's assertSpread accepts 8) prints 9, and a visitor who
-// adds one of their own prints 13 — their question is unfrozen by construction
-// (nothing writes FROZEN_REASON but a publish), which is exactly the promise
-// this paragraph makes.
-//
-// IT NAMES ONLY THE LIVE HALF. The frozen set is counted by the "Frozen" section
-// the chunk list collapses it into, where a visitor meets it; saying it twice
-// made the banner argue a case the page below was already making.
+// It used to spell the split out in numbers (N frozen, N live, and where to add
+// more). The counts are on the page already — the headline row and the
+// "Frozen — N" heading down in Chunks — so the banner keeps only the part
+// nothing else says.
 //
 // IT IS NOT AN isGuest() BRANCH, for the reason lib/demo/frozen.ts gives at
 // length: a real account has no frozen rows, so `frozen === 0` and this renders
@@ -2758,17 +2771,11 @@ function BulkActions({
 function DemoScope({ summary }: { summary: EvalSummary }) {
   const frozen = summary.questions.filter((q) => q.frozen).length;
   if (frozen === 0) return null;
-  const tunable = summary.questions.length - frozen;
   return (
     <section className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/50 dark:text-amber-200">
       <p>
-        <strong className="font-semibold">This demo is deliberately scoped.</strong>{" "}
-        All {summary.questions.length} questions carry the scores they were
-        measured with before this workspace was published
-        {summary.asPublished ? " — that is the “As published” row, and it never moves." : "."}{" "}
-        <strong className="font-semibold">{tunable} of them are live</strong>,
-        picked to span a first-place hit through to a complete miss: re-score
-        them, autotune them, add your own.
+        <strong className="font-semibold">Demo</strong> — restrictions and limits
+        apply to some actions on this page.
       </p>
     </section>
   );
@@ -2804,14 +2811,22 @@ function AsPublished({
 }) {
   const recall = run.questionCount > 0 ? run.hitCount / run.questionCount : null;
   return (
-    <section className="flex flex-col gap-2">
-      <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+    // Closed on open, like the frozen chunk list it now sits above: these three
+    // numbers never move, so they are reference rather than news, and a visitor
+    // scrolling past the twelve live questions should reach the frozen set
+    // without a second headline row in the way. The heading still carries the
+    // question count, so the section says what it holds while shut.
+    <details className="group">
+      {/* list-none alone leaves Safari's marker in place, so the caret is
+          drawn by hand. */}
+      <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 hover:text-zinc-700 [&::-webkit-details-marker]:hidden dark:hover:text-zinc-300">
+        <Caret />
         As published
-        <span className="ml-2 font-normal normal-case tracking-normal text-zinc-400">
+        <span className="font-normal normal-case tracking-normal text-zinc-400">
           frozen — {run.questionCount} questions, measured before this demo went out
         </span>
-      </h2>
-      <div className="flex flex-wrap gap-4">
+      </summary>
+      <div className="mt-3 flex flex-wrap gap-4">
         {summary.criteria.recall.enabled && (
           <Stat label={`Recall@${run.k}`} value={pct(recall)} big />
         )}
@@ -2831,7 +2846,19 @@ function AsPublished({
           />
         )}
       </div>
-    </section>
+    </details>
+  );
+}
+
+// The open/shut caret every <details> on this page opens with, matching the ▸/▾
+// the Runs button has always drawn. CSS-only: `group-open:` reads the parent
+// <details>, so no section needs React state of its own to draw it.
+function Caret() {
+  return (
+    <span aria-hidden className="text-zinc-400">
+      <span className="group-open:hidden">▸</span>
+      <span className="hidden group-open:inline">▾</span>
+    </span>
   );
 }
 
