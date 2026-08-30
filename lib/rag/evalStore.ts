@@ -9,7 +9,7 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { sql, toJsonb } from "@/lib/db";
 import { FROZEN_REASON, PUBLISHED_RUN_NOTE } from "@/lib/demo/frozen";
 import { isGuest } from "@/lib/demo/guest";
-import { readBoard } from "@/lib/demo/replay";
+import { readBoard, readIdeals, readLlmRankings } from "@/lib/demo/replay";
 import {
   demoBlockedSentences,
   EVAL_DEMO_ACTIONS,
@@ -2751,7 +2751,20 @@ export async function getSummary(): Promise<EvalSummary> {
   const criteria = await getActiveCriteria();
   // Asked once per lap, before the early return: an empty config's page has the
   // same blocked buttons on it as a full one.
-  const demoBlocked = await demoBlockedSentences(EVAL_DEMO_ACTIONS);
+  //
+  // TWO OF THE SEVEN COME OFF WHEN THE SHELF IS STOCKED (phase 5 of
+  // docs/demo-real-flow-plan.md). "Add nDCG rankings" and "Add LLM nDCG rankings"
+  // are steps 4 and 5 of the demo's walk, and a build published with the master's
+  // banked rankings (0082) lets both run for free — so rendering them disabled
+  // would grey out the two buttons the visitor is there to press. The routes make
+  // the same call in the same order, so the tooltip and the 403 cannot disagree:
+  // a build published WITHOUT the shelf greys them and refuses, as before.
+  const [bankedIdeals, bankedLlm] = await Promise.all([readIdeals(), readLlmRankings()]);
+  const demoBlocked = await demoBlockedSentences(
+    EVAL_DEMO_ACTIONS.filter(
+      (a) => !(a === "rank" && bankedIdeals) && !(a === "llmRank" && bankedLlm),
+    ),
+  );
   const recallK = effectiveK(criteria.recall, cfg.topK);
   const mrrK = effectiveK(criteria.mrr, cfg.topK);
   const ndcgK = effectiveK(criteria.ndcg, cfg.topK);

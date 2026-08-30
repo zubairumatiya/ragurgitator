@@ -117,6 +117,54 @@ export type ReplayBoard = {
   chunks: string[];
 };
 
+// THE BANKED RANKINGS — phase 5 of docs/demo-real-flow-plan.md, and the Eval
+// tab's second and third kinds after the board.
+//
+// `ndcg_ideal` is the master's cross-model aggregate order per question;
+// `llm_ranking` is the llm_rerank order bought on the master at publish time.
+// ONE SHAPE FOR BOTH, because they are the same artifact seen twice: an ordered
+// list of chunk ids belonging to a question, replayed into a guest's workspace
+// as an eval_rankings row instead of being computed there.
+//
+// KEYED BY THE QUESTION'S TEXT, not by its id and not by (chunk, difficulty).
+// The published build ships no eval_questions at all (§3.2) — a guest's rows are
+// minted from the bank on their first press — so there is no id on either side
+// of the clone to key by. (chunk, difficulty) was the other candidate and it is
+// subtly wrong: two questions can share a passage and a difficulty, and the one
+// the bank picks is chosen by md5(id) in the SNAPSHOT's id space, so the ideal
+// would sometimes belong to the other one. The wording is what the bank carries
+// verbatim into the guest's eval_questions row, so hashing it is exact.
+export const IDEAL_KEY = "aggregate";
+export const LLM_RANKING_KEY = "rerank";
+
+// sha256 of the question text, truncated for the same reason pairIdentity is:
+// it is an equality key over a set of tens, not a signature.
+export const questionIdentity = (question: string): string =>
+  createHash("sha256").update(question, "utf8").digest("hex").slice(0, 32);
+
+export type ReplayRankingEntry = {
+  // questionIdentity(question). The join key on the reading side.
+  q: string;
+  // Chunk ids in the READER's own id space, best first. NULL HOLDS A PLACE: an
+  // id that failed the clone's remap stays in the array as null, because here
+  // position is rank and dropping an element would promote everything behind it.
+  order: (string | null)[];
+};
+
+export type ReplayRankings = {
+  version: 1;
+  entries: ReplayRankingEntry[];
+};
+
+// What the two ranking kinds may weigh, on DEMO_MATRIX_MAX_BYTES' terms exactly
+// (reported by scripts/demo-snapshot, never enforced) — except that these are
+// read on a BUTTON PRESS rather than on page load, so the bar is looser: 60
+// questions × a 30-chunk pool of uuids is ~70 kB and that is the normal case.
+export const DEMO_RANKINGS_MAX_BYTES = 250_000;
+
+export const rankingsBytes = (rankings: ReplayRankings): number =>
+  Buffer.byteLength(JSON.stringify(rankings), "utf8");
+
 // The verdict the operator's judge really returned for one queued shadow row,
 // which clone step 5b blanks and today throws away. Field-for-field the five
 // columns it nulls, snake_case because the payload is a row.

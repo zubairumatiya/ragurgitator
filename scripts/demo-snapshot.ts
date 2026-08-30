@@ -32,6 +32,12 @@
 //                                          on a cold embedding cache it is ~an
 //                                          hour of sequential embedding)
 //   … --yes --skip-sweep                   publish without one at all
+//   … --yes --skip-llm-rank                publish without buying the LLM
+//                                          re-rankings step 5 of the demo's walk
+//                                          replays (one answer-model call per
+//                                          board question, bought once and banked
+//                                          — the build is valid without them, that
+//                                          step just greys out)
 //
 // Env: DEMO_MASTER_USER_ID (the account you work in), DEMO_SNAPSHOT_USER_ID (the
 // published one), DEMO_SNAPSHOT_EMAIL (only for --create; must be a real address,
@@ -41,6 +47,12 @@ import { privilegedSql } from "../lib/db";
 import { createSnapshotAccount } from "../lib/demo/admin";
 import { cloneSeedWorkspace } from "../lib/demo/clone";
 import { BANKED_QUESTION_CAP } from "../lib/demo/frozen";
+import {
+  idealCensus,
+  llmRankingCensus,
+  packIdeals,
+  packLlmRankings,
+} from "../lib/demo/captureRankings";
 import { seedPublishedBank, selectBankable } from "../lib/demo/publishedBank";
 import {
   QUOTAS,
@@ -52,8 +64,15 @@ import {
 import { resolveConfig, withConfig } from "../lib/rag/activeConfig";
 import { ndcg } from "../lib/rag/evalMetrics";
 import { captureReplayMatrix } from "../lib/demo/captureMatrix";
-import { writeBoard, writeMatrix } from "../lib/demo/replay";
-import { BOARD_KEY, DEMO_MATRIX_MAX_BYTES, type ReplayBoard } from "../lib/demo/replayCore";
+import { writeBoard, writeIdeals, writeLlmRankings, writeMatrix } from "../lib/demo/replay";
+import {
+  BOARD_KEY,
+  DEMO_MATRIX_MAX_BYTES,
+  DEMO_RANKINGS_MAX_BYTES,
+  rankingsBytes,
+  type ReplayBoard,
+} from "../lib/demo/replayCore";
+import { buildLlmRanking } from "../lib/rag/ranking";
 import { runKeyModelSweep } from "../lib/rag/keyModelSweep";
 import {
   PUBLISHED_SWEEP_MAX_BYTES,
@@ -588,8 +607,11 @@ async function main() {
     )[0]?.id;
   if (!configId) die("the master account has no open config to publish (pass --config <uuid>).");
 
-  const [cfg] = await privilegedSql<{ name: string; base_model: string; top_k: number }[]>`
-    select name, base_model, top_k from configs where id = ${configId} and user_id = ${master}
+  const [cfg] = await privilegedSql<
+    { name: string; base_model: string; top_k: number; llm_model: string }[]
+  >`
+    select name, base_model, top_k, llm_model
+      from configs where id = ${configId} and user_id = ${master}
   `;
   if (!cfg) die(`config ${configId} is not owned by the master account.`);
 
@@ -598,6 +620,13 @@ async function main() {
   const tunable = await selectTunable(configId);
   const replay = await replayCensus(configId, cfg.base_model);
   const sweep = await sweepCensus(configId);
+  // THE BOARD, DERIVED ONCE AND USED TWICE: it is written below (after --yes) and
+  // it is what the two ranking censuses are scoped to. Same expression as the
+  // writeBoard call, kept here so the dry run reports on the set that would
+  // actually be published rather than on a second derivation of it.
+  const boardChunks = [...new Set(tunable.map((t) => t.chunk))];
+  const ideals = await idealCensus(configId, boardChunks);
+  const llmRanks = await llmRankingCensus(configId, boardChunks);
 
   console.log(`\nmaster    ${master}`);
   console.log(`snapshot  ${snapshot}  (${profile.email})\n`);
@@ -685,6 +714,34 @@ async function main() {
           ? "never published for this config"
           : `published but only ${sweep.models} models carry a curve`
     }${willSweep ? " → will be run before the copy (embedding spend)" : ""}`,
+  );
+
+  // THE TWO BANKED RANKINGS (phase 5 of docs/demo-real-flow-plan.md). Steps 4 and
+  // 5 of the demo's walk press "Add nDCG rankings" and "Add LLM nDCG rankings",
+  // and neither is affordable per visitor — so the publish banks the master's own
+  // answers for the questions the board can reach.
+  //
+  // The ideals cost nothing: the master already holds one for every question it
+  // has graded, so this line is a census and its only failure mode is a shortfall.
+  const idealsMissing = ideals.filter((q) => !q.hasRanking).length;
+  console.log(
+    `  nDCG ideals: ${ideals.length - idealsMissing}/${ideals.length} board questions ` +
+      `carry the master's aggregate ideal`,
+  );
+  // The LLM re-rankings are the ONE SPEND this plan adds, and it is a publish-time
+  // spend on the operator's own key rather than a per-visitor one. Reported before
+  // the dry-run exit for the same reason the sweep's cost is: an operator deciding
+  // whether to publish should see the calls it is about to make without having to
+  // type --yes to find out.
+  const llmMissing = llmRanks.filter((q) => !q.hasRanking).length;
+  const willBuyLlm = llmMissing > 0 && !has("--skip-llm-rank");
+  console.log(
+    `  LLM nDCG re-rankings: ${llmRanks.length - llmMissing}/${llmRanks.length} bought` +
+      (willBuyLlm
+        ? ` → will buy ${llmMissing} on the master (${cfg.llm_model ?? "the config's answer model"}, one call each)`
+        : llmMissing > 0
+          ? " → skipped, so that step greys out for a guest"
+          : ""),
   );
 
   // Before the dry-run exit, so an operator sees the refusal without having to
@@ -852,6 +909,86 @@ async function main() {
     privilegedSql,
   );
 
+  // THE TWO RANKINGS THE WALK'S STEPS 4 AND 5 REPLAY (phase 5 of
+  // docs/demo-real-flow-plan.md).
+  //
+  // Banked on the MASTER and before the clone, exactly like the board above and
+  // for the same reason: the chunk ids in every entry are the master's, and clone
+  // step 5i is the one thing that knows how to rewrite them into a destination's
+  // id space.
+  //
+  // AND AFTER THE SELECTION, which is the ordering §4.5 insists on: what is bought
+  // here is scoped to the board, so a capture taken before the set was chosen
+  // would be the spend repeated over the wrong questions.
+  //
+  // The ideals are free — the master graded these questions long ago — so they are
+  // captured on every publish, unconditionally. The LLM re-rankings are bought,
+  // which is why they have a flag.
+  if (willBuyLlm) {
+    const [me] = await privilegedSql<{ email: string }[]>`
+      select email from user_profiles where id = ${master}
+    `;
+    if (!me) die(`no user_profiles row for the master account ${master}.`);
+    console.log(`buying ${llmMissing} LLM re-ranking(s) on the master (one answer-model call each)…`);
+    const started = Date.now();
+    // IN THE MASTER'S OWN SCOPE, like the sweep and the replay: buildLlmRanking is
+    // an ordinary user- and config-scoped call that reads the master's aggregate
+    // and writes the master's eval_rankings. It serves from its own cache when the
+    // signature still matches, so a re-publish of an unchanged build buys nothing
+    // and this loop is free.
+    const failures = await withUser({ id: master, email: me.email }, async () => {
+      const scoped = await resolveConfig(configId);
+      if (!scoped) die(`config ${configId} did not resolve in the master's scope.`);
+      return withConfig(scoped, async () => {
+        const pending = llmRanks.filter((q) => !q.hasRanking);
+        const errors: string[] = [];
+        let next = 0;
+        let done = 0;
+        // Three at a time, on bulkBuildLlmRankings' argument: enough to hide the
+        // per-call latency, low enough not to become a rate limit.
+        const worker = async () => {
+          for (let i = next++; i < pending.length; i = next++) {
+            try {
+              await buildLlmRanking(pending[i].questionId, "rerank");
+            } catch (err) {
+              errors.push(`${pending[i].question.slice(0, 60)}… — ${String(err)}`);
+            }
+            done += 1;
+            if (done % 10 === 0) console.log(`  ${done}/${pending.length}`);
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(3, pending.length) }, worker));
+        return errors;
+      });
+    });
+    console.log(
+      `  bought ${llmMissing - failures.length}/${llmMissing} in ` +
+        `${((Date.now() - started) / 1000).toFixed(0)}s\n`,
+    );
+    // Reported rather than fatal: a garbled reply on one question is a step that
+    // refuses for that one question, not a build worth throwing away.
+    for (const f of failures.slice(0, 5)) console.log(`  ⚠ ${f}`);
+  }
+
+  const bankedIdeals = await packIdeals(configId, boardChunks);
+  const bankedLlm = await packLlmRankings(configId, boardChunks);
+  await writeIdeals(master, bankedIdeals, privilegedSql);
+  await writeLlmRankings(master, bankedLlm, privilegedSql);
+  const rankingBytes = rankingsBytes(bankedIdeals) + rankingsBytes(bankedLlm);
+  console.log(
+    `banked ${bankedIdeals.entries.length} nDCG ideal(s) and ${bankedLlm.entries.length} ` +
+      `LLM re-ranking(s) at ${(rankingBytes / 1024).toFixed(0)} KB\n`,
+  );
+  // Soft and reported, on DEMO_MATRIX_MAX_BYTES' terms — except that these are
+  // read on a button press rather than on page load, so the bar is looser and the
+  // consequence of crossing it is a slow press, not a slow first paint.
+  if (rankingBytes > DEMO_RANKINGS_MAX_BYTES) {
+    console.log(
+      `⚠ the banked rankings are ${(rankingBytes / 1024).toFixed(0)} KB, over the ` +
+        `${(DEMO_RANKINGS_MAX_BYTES / 1024).toFixed(0)} KB this is meant to stay under.\n`,
+    );
+  }
+
   const summary = await cloneSeedWorkspace(master, snapshot, {
     onlyConfigId: configId,
     replaceDestination: true,
@@ -909,6 +1046,7 @@ async function main() {
       `${summary.sweepRows === 0 ? "no cache-key sweep" : `a cache-key sweep (${summary.sweepModels} models)`}, ` +
       `${summary.matrixPairs === 0 ? "NO replay matrix" : `a replay matrix over ${summary.matrixPairs} pairs`}, ` +
       `${summary.boardChunks === 0 ? "NO board scope" : `a board scoped to ${summary.boardChunks} chunks`}, ` +
+      `${summary.bankedIdeals} banked ideals, ${summary.bankedLlmRankings} banked LLM re-rankings, ` +
       `${summary.ledgerRows === 0 ? "NO savings ledger" : `${summary.ledgerRows} savings row`}\n`,
   );
   // The payoff readout's money is the whole point of §4's bottom line, and its
@@ -932,6 +1070,25 @@ async function main() {
       "\u26a0 no board scope reached the snapshot, so a guest's Eval tab is scoped to the\n" +
         "  whole corpus. Either the master carries no board row, or none of its chunk ids\n" +
         "  survived the clone's remap — check step 5g.\n",
+    );
+  }
+  // THE TWO RANKING SHELVES (phase 5). Their failure is the quiet kind again: a
+  // build with neither is a build whose steps 4 and 5 grey out and refuse with the
+  // policy sentence, which reads exactly like a demo that was always meant to
+  // forbid them. So the publish says which one is missing and why it matters.
+  if (summary.bankedIdeals === 0) {
+    console.log(
+      "⚠ no nDCG ideals reached the snapshot, so \"Add nDCG rankings\" is blocked for a\n" +
+        "  guest and the walk stops at step 3 — no graded nDCG, and autotune loses the\n" +
+        "  metric it tunes against. Either the master's board questions carry no truth\n" +
+        "  ranking, or the ids did not survive the clone's remap — check step 5i.\n",
+    );
+  }
+  if (summary.bankedLlmRankings === 0) {
+    console.log(
+      "⚠ no LLM re-rankings reached the snapshot, so step 5 of the walk greys out. The\n" +
+        "  build is still valid — nothing else reads them, and no headline number moves —\n" +
+        "  but re-publish without --skip-llm-rank to buy them.\n",
     );
   }
   // Louder than the count above, because a build with no matrix is the one

@@ -241,6 +241,8 @@ export type CloneSummary = {
   blankedVerdicts: number; // cloned pairs arriving unscreened, verdict held in the bank
   matrixPairs: number; // pairs in the banked similarity matrix the demo replays (step 5g)
   boardChunks: number; // chunks the demo's Eval tab is scoped to (step 5g's second half)
+  bankedIdeals: number; // questions whose aggregate ideal "Add nDCG rankings" replays (5i)
+  bankedLlmRankings: number; // questions whose llm_rerank order "Add LLM nDCG rankings" replays
   ledgerRows: number; // savings rows priced the payoff readout's money (step 5h)
 };
 
@@ -1559,6 +1561,63 @@ export async function cloneSeedWorkspace(
        limit 1
     `;
 
+    // --- 5i. the banked rankings, remapped like the board --------------------
+    //
+    // Phase 5 of docs/demo-real-flow-plan.md. `ndcg_ideal` and `llm_ranking`
+    // (0082) are the two rankings a guest may not buy: the master's cross-model
+    // aggregate ideal per question, and the llm_rerank order the publish bought
+    // once. Steps 4 and 5 of the walk apply a copy of these instead of calling a
+    // provider, and the nDCG that follows is then graded live against the
+    // visitor's own retrieval.
+    //
+    // ONE STATEMENT FOR BOTH KINDS, because they are one payload shape: an array
+    // of entries, each an ordered list of chunk ids belonging to a question. Like
+    // the board they NAME ROWS, so they are remapped rather than forwarded — and
+    // unlike the board, the entries are nested, so the rewrite is two levels of
+    // jsonb_agg rather than one.
+    //
+    // A LEFT JOIN, WHERE THE BOARD USES AN INNER ONE, and it is the same
+    // distinction step 4c draws: here POSITION IS RANK. An id that fails to map
+    // holds its place as a null, because dropping it would silently promote every
+    // chunk behind it and turn a copy that half-failed into a measurably better
+    // ideal. A null matches no retrieved id, so it scores zero gain at that rank,
+    // which is what a chunk that did not travel is worth.
+    //
+    // The keys are hashes of question TEXT and so are invariant across both hops
+    // — which is the whole reason 0082 keys by wording rather than by a question
+    // id that does not survive the publish.
+    const rankingRows = await tx.unsafe(
+      `insert into demo_replay (user_id, kind, key, payload)
+       select $1, r.kind, r.key,
+              jsonb_set(r.payload, '{entries}', coalesce((
+                select jsonb_agg(
+                         jsonb_set(e.entry, '{order}', coalesce((
+                           select jsonb_agg(mch.new_id::text order by u.ord)
+                             from jsonb_array_elements_text(e.entry -> 'order')
+                                  with ordinality u(old_id, ord)
+                             left join _map_chunk mch on mch.old_id = u.old_id::uuid),
+                           '[]'::jsonb))
+                         order by e.ord)
+                  from jsonb_array_elements(r.payload -> 'entries')
+                       with ordinality e(entry, ord)),
+                '[]'::jsonb))
+         from demo_replay r
+        where r.user_id = $2 and r.kind in ('ndcg_ideal', 'llm_ranking')`,
+      [guestId, seedId] as never[],
+    );
+    // Counted out of the payloads for bankedMatrix's reason: a shelf of zero
+    // entries inserts two perfectly good rows and leaves both bulk buttons
+    // refusing in front of a visitor.
+    const [bankedRankings] = await tx<{ ideals: number; llm: number }[]>`
+      select
+        coalesce(max(case when r.kind = 'ndcg_ideal'
+                          then jsonb_array_length(r.payload -> 'entries') end), 0)::int as ideals,
+        coalesce(max(case when r.kind = 'llm_ranking'
+                          then jsonb_array_length(r.payload -> 'entries') end), 0)::int as llm
+        from demo_replay r
+       where r.user_id = ${guestId} and r.kind in ('ndcg_ideal', 'llm_ranking')
+    `;
+
     // --- 5h. the savings ledger, so the payoff readout has money -------------
     //
     // Phase 6 of docs/demo-cache-replay-plan.md. `PayoffReadout` renders a hit
@@ -1694,6 +1753,8 @@ export async function cloneSeedWorkspace(
       blankedVerdicts: (blanked.count ?? 0) + (carriedVerdicts.count ?? 0),
       matrixPairs: matrixRows.count > 0 ? (bankedMatrix?.pairs ?? 0) : 0,
       boardChunks: boardRows.count > 0 ? (bankedBoard?.chunks ?? 0) : 0,
+      bankedIdeals: rankingRows.count > 0 ? (bankedRankings?.ideals ?? 0) : 0,
+      bankedLlmRankings: rankingRows.count > 0 ? (bankedRankings?.llm ?? 0) : 0,
       ledgerRows,
     };
   }) as Promise<CloneSummary>;

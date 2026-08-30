@@ -10,10 +10,11 @@
 // things. `matrix` is what the master computed; `progress` is how far this
 // visitor has walked into it; `shadow_verdict` is the judge's own answer for a
 // row the clone deliberately blanked so the visitor could answer it themselves.
-// `board` (0081) is the fourth and the odd one out: it is the Eval tab's scope
-// rather than the caching lane's arithmetic, banked here because it is the same
-// thing in every other respect — publish-written, guest-read, account-wide.
-// lib/demo/replayCore names their payloads.
+// `board` (0081) is the fourth, and `ndcg_ideal` / `llm_ranking` (0082) are the
+// fifth and sixth: those three are the EVAL TAB's rather than the caching lane's
+// — its scope, and the two rankings a guest may not buy — banked here because
+// they are the same thing in every other respect: publish-written, guest-read,
+// account-wide. lib/demo/replayCore names their payloads.
 //
 // THE CARVE-OUT IS THE FUNCTION, which is the rule lib/demo/pairBank already
 // holds and the reason guards.ts sweep 7 can pin it: every READ here returns
@@ -35,11 +36,14 @@ import { sql } from "@/lib/db";
 import { isGuest } from "@/lib/demo/guest";
 import {
   BOARD_KEY,
+  IDEAL_KEY,
+  LLM_RANKING_KEY,
   MATRIX_KEY,
   PROGRESS_KEY,
   type ReplayBoard,
   type ReplayMatrix,
   type ReplayProgress,
+  type ReplayRankings,
   type ReplayShadowVerdict,
 } from "@/lib/demo/replayCore";
 
@@ -95,6 +99,21 @@ export async function writeBoard(userId: string, board: ReplayBoard, db: Writer 
   forgetBoard(userId);
 }
 
+// The rankings the demo's Eval tab replays: the master's aggregate ideals
+// (`ndcg_ideal`) and the llm_rerank orders bought once at publish time
+// (`llm_ranking`). Written on the MASTER, before the clone, for writeBoard's
+// reason — the chunk ids they hold are the master's, and clone step 5i is what
+// rewrites them into each destination's id space.
+export async function writeIdeals(userId: string, rankings: ReplayRankings, db: Writer = sql): Promise<void> {
+  await put(db, userId, "ndcg_ideal", IDEAL_KEY, rankings);
+  forgetRankings(userId);
+}
+
+export async function writeLlmRankings(userId: string, rankings: ReplayRankings, db: Writer = sql): Promise<void> {
+  await put(db, userId, "llm_ranking", LLM_RANKING_KEY, rankings);
+  forgetRankings(userId);
+}
+
 // The guest's progress, written at clone time so their first page load has a
 // starting `n` rather than a null the panel has to have an opinion about.
 export async function writeProgress(userId: string, progress: ReplayProgress, db: Writer = sql): Promise<void> {
@@ -121,6 +140,7 @@ export async function clearReplay(userId: string, db: Writer = sql): Promise<voi
   await db`delete from demo_replay where user_id = ${userId}`;
   forgetMatrix(userId);
   forgetBoard(userId);
+  forgetRankings(userId);
 }
 
 // --- the read, and the memo in front of it ----------------------------------
@@ -192,6 +212,55 @@ export async function readBoard(): Promise<ReplayBoard | null> {
   if (boardMemo.size >= MEMO_MAX) boardMemo.delete(boardMemo.keys().next().value as string);
   boardMemo.set(userId, row.payload);
   return row.payload;
+}
+
+// The two ranking kinds share a memo, on the board's terms and for one more
+// reason of their own: every press of "Add nDCG rankings" reads the whole shelf,
+// and the eval summary asks whether it is stocked on EVERY lap in order to
+// decide whether those two buttons render disabled. ~70 kB per lap over the hop
+// Supabase bills is the egress this store exists to avoid. Immutable for the
+// same reason as the others — only a publish and a clone ever write these kinds
+// — and a MISS is still not cached, since the clone stocks a guest's shelf
+// during provisioning in this same process.
+const rankingMemo = new Map<string, ReplayRankings>();
+
+export function forgetRankings(userId?: string): void {
+  if (userId === undefined) rankingMemo.clear();
+  else for (const key of [...rankingMemo.keys()]) {
+    if (key.startsWith(`${userId}:`)) rankingMemo.delete(key);
+  }
+}
+
+async function readRankings(kind: "ndcg_ideal" | "llm_ranking", key: string): Promise<ReplayRankings | null> {
+  if (!(await isGuest())) return null;
+  const userId = activeUserId();
+  const memoKey = `${userId}:${kind}`;
+  const memoed = rankingMemo.get(memoKey);
+  if (memoed) return memoed;
+  const row = await withoutStore(sql<{ payload: ReplayRankings }[]>`
+    select payload from demo_replay
+     where user_id = ${userId} and kind = ${kind} and key = ${key}
+  `.then((rows) => rows[0] ?? null));
+  if (!row) return null;
+  if (rankingMemo.size >= MEMO_MAX) rankingMemo.delete(rankingMemo.keys().next().value as string);
+  rankingMemo.set(memoKey, row.payload);
+  return row.payload;
+}
+
+// The master's aggregate ideals for this guest's bank, by question identity, or
+// null for a real account AND for a guest whose build was published without
+// them. Those two are deliberately the same null: both mean "no shelf", and the
+// caller's job in both cases is to take the ordinary path — which for a real
+// account is the real builder, and for a guest is the demo gate's refusal.
+export async function readIdeals(): Promise<Map<string, (string | null)[]> | null> {
+  const banked = await readRankings("ndcg_ideal", IDEAL_KEY);
+  return banked === null ? null : new Map(banked.entries.map((e) => [e.q, e.order]));
+}
+
+// The llm_rerank orders bought on the master, on readIdeals' terms exactly.
+export async function readLlmRankings(): Promise<Map<string, (string | null)[]> | null> {
+  const banked = await readRankings("llm_ranking", LLM_RANKING_KEY);
+  return banked === null ? null : new Map(banked.entries.map((e) => [e.q, e.order]));
 }
 
 // How far this guest has advanced. A MISSING row reads as zero-and-unscreened

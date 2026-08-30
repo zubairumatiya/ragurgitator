@@ -98,6 +98,16 @@ export const DEMO_BLOCKED = "demo_blocked";
 // so a routine cheap republish is exactly a build whose guests reach this line.
 // Without it their click runs the real sweep on the operator's key.
 //
+// `rank` AND `llmRank` ARE FALLBACKS NOW TOO — phase 5 of
+// docs/demo-real-flow-plan.md, and for `judge`'s reason exactly. Steps 4 and 5 of
+// the demo's walk are those two buttons, and a published build banks the master's
+// own answers for both (0082): the aggregate ideal per question, and the
+// llm_rerank order the publish buys once. With the shelf stocked neither is
+// blocked at all — the routes skip the gate, and lib/rag/evalStore drops both
+// entries from the summary's map so the buttons render live. These sentences are
+// what a build published WITHOUT them says, which is why both now name the
+// absence rather than only the cost.
+//
 // `keyModel` IS NEW, and it exists because `sweep` stopped covering the whole
 // route. POST /api/semantic-cache/key-model has three actions and one gate used
 // to blanket all of them; phase 2 splits them, because only `sweep` has a
@@ -148,8 +158,10 @@ export const DEMO_ACTIONS = {
     "the demo. Sign up with your own keys to run it on your corpus.",
   rank:
     "Rebuilding a question's ideal ranking embeds a pool of chunks under every " +
-    "model on the list, so it's off in the demo. The graded rankings you can " +
-    "open are real, and the nDCG on the Eval tab is scored against them.",
+    "model on the list, so it's off in the demo — and this build was published " +
+    "without the ideals that would otherwise replay it here, one ordering per " +
+    "question. The graded rankings you can open are real, and the nDCG on the " +
+    "Eval tab is scored against them.",
   // SPLIT OFF `generate` (§5 of docs/demo-real-flow-plan.md). Both halves of
   // this route need an answer-model key, so one entry covered them — but the
   // sentence a visitor read on "Add LLM nDCG rankings" was the one about
@@ -158,10 +170,11 @@ export const DEMO_ACTIONS = {
   // asked is the same defect as a refusal pointing at an empty tab.
   llmRank:
     "Asking an LLM to re-order a question's top-k costs one answer-model call " +
-    "per question, which the demo doesn't carry a key for. The ranking builder " +
-    "on any question still opens: the aggregate ideal an LLM re-ranking would " +
-    "be compared against is there, and it's the one the Eval tab's nDCG is " +
-    "actually scored on.",
+    "per question, which the demo doesn't carry a key for, and this build was " +
+    "published without the re-rankings that would stand in for it. The ranking " +
+    "builder on any question still opens: the aggregate ideal an LLM re-ranking " +
+    "would be compared against is there, and it's the one the Eval tab's nDCG " +
+    "is actually scored on.",
   appraise:
     "The model comparison replays the whole corpus from cached vectors — 92 MB " +
     "of them — which the demo doesn't have the bandwidth to do per visitor, so " +

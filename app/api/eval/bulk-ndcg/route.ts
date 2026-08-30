@@ -20,6 +20,7 @@ import { bulkNdcgStep } from "@/lib/jobs/steps/bulkNdcg";
 import type { EvalEvent } from "@/lib/rag/eval";
 import { getSummary } from "@/lib/rag/evalStore";
 import { assertDemoAllows } from "@/lib/demo/policy";
+import { readIdeals } from "@/lib/demo/replay";
 
 const Body = z.object({
   // Bulk-actions document scope: grade only these documents' questions
@@ -42,7 +43,14 @@ export async function POST(request: Request) {
     // ranking builder — the same pool-embedded-under-every-model work the
     // per-question Rank panel does, in bulk. Scoring is scoped for a guest now;
     // this is not, and it is the expensive half anyway.
-    await assertDemoAllows("rank");
+    //
+    // ASK THE SHELF FIRST (§4.3 of docs/demo-real-flow-plan.md), which is the
+    // sweep/judge fallback pattern. A build published with the master's ideals
+    // (0082) lets the step replay them for free, so the gate is skipped; a build
+    // published WITHOUT them refuses exactly as it did before. readIdeals is null
+    // for a real account too, and for one the gate is a no-op anyway — so this
+    // reads as "gate unless the demo has a published answer", which is what it is.
+    if ((await readIdeals()) === null) await assertDemoAllows("rank");
     return ndjsonStream<EvalEvent>(async (send, shouldStop) => {
       try {
         const run = await runStepStreamed(
