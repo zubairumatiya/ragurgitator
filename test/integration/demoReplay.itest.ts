@@ -31,8 +31,33 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import { withUser } from "../../lib/auth/userScope";
 import { config } from "../../lib/config";
 import { fragment, privilegedSql } from "../../lib/db";
-import { forgetMatrix, writeMatrix, writeShadowVerdicts } from "../../lib/demo/replay";
-import { packMatrix, pairIdentity, type ReplayPair } from "../../lib/demo/replayCore";
+import {
+  forgetBoard,
+  forgetMatrix,
+  forgetRankings,
+  forgetTuning,
+  readBoard,
+  readIdeals,
+  readLlmRankings,
+  readTuning,
+  writeBoard,
+  writeIdeals,
+  writeLlmRankings,
+  writeMatrix,
+  writeShadowVerdicts,
+  writeTuning,
+} from "../../lib/demo/replay";
+import {
+  packEmbedding,
+  packMatrix,
+  pairIdentity,
+  questionIdentity,
+  unpackEmbedding,
+  type ReplayBoard,
+  type ReplayPair,
+  type ReplayRankings,
+  type ReplayTuning,
+} from "../../lib/demo/replayCore";
 import {
   advanceReplay,
   replayBankCounts,
@@ -152,8 +177,12 @@ beforeEach(async () => {
   await truncateAll(admin);
   // The matrix is memoised per process and per user (see readMatrix), and the
   // ids are recycled by truncate — so a stale entry would serve the last test's
-  // matrix to this one's guest.
+  // matrix to this one's guest. Every kind memoises the same way, so all four
+  // of the Eval tab's shelves are dropped with it.
   forgetMatrix();
+  forgetBoard();
+  forgetRankings();
+  forgetTuning();
   guest = await createUser(admin);
   real = await createUser(admin);
   await admin`
@@ -422,6 +451,114 @@ describe("replayJudgeQueue", () => {
     await admin`update configs set user_id = ${real.id} where id = ${configId}`;
     await inScope(real, async () => {
       assert.equal(await replayJudgeQueue({ space: "test-space", model: "m" }), null);
+    });
+  });
+});
+
+// --- phase 8: the Eval tab's four kinds, from the carve-out's end ------------
+//
+// The rails for docs/demo-real-flow-plan.md. Its four new `demo_replay` kinds
+// (`board`, `ndcg_ideal`, `llm_ranking`, `tuning`) are what let a guest press
+// "Add nDCG rankings", "Add LLM nDCG rankings" and ⚙ Auto tune without spending
+// anything, and every one of those carve-outs is written the same way: read the
+// shelf, and gate only when it is empty. That inverts the usual failure — a
+// reader that answered a REAL account with a payload would not refuse them, it
+// would serve them the master's banked measurement in place of the computation
+// they asked for and paid for.
+//
+// scripts/guards.ts sweep 6c asserts the guard is in each function's source;
+// this asserts it is TRUE against a real database, with the kinds stocked under
+// the real account's own id — which is the case a missing row would hide.
+describe("the Eval tab's banked kinds", () => {
+  const QUESTION = "what is the fee?";
+  const BOARD: ReplayBoard = { version: 1, chunks: ["chunk-a", "chunk-b"] };
+  const ideals: ReplayRankings = {
+    version: 1,
+    entries: [{ q: questionIdentity(QUESTION), order: ["chunk-b", "chunk-a"] }],
+  };
+  const llm: ReplayRankings = {
+    version: 1,
+    // A null holds a rank that failed the clone's remap — the shape the reader
+    // has to hand back untouched, since position is the measurement.
+    entries: [{ q: questionIdentity(QUESTION), order: ["chunk-a", null] }],
+  };
+  const tuning: ReplayTuning = {
+    version: 1,
+    entries: [
+      {
+        chunk: "chunk-a",
+        model: KEY_MODEL,
+        kind: "model",
+        detail: "re-embedded under the trial model",
+        pieces: [
+          {
+            text: null,
+            dimension: 2,
+            // Exactly representable in float32, so a round-trip that loses
+            // precision is a failure rather than a rounding argument.
+            embedding: packEmbedding([0.5, -0.25]),
+            tokenStart: null,
+            tokenEnd: null,
+          },
+        ],
+        trials: [],
+      },
+    ],
+  };
+
+  // In the OWNER's scope, which is where the publish and the clone write: `sql`
+  // refuses to run outside one.
+  const stock = (owner: { id: string; email: string }) =>
+    withUser(owner, async () => {
+      await writeBoard(owner.id, BOARD);
+      await writeIdeals(owner.id, ideals);
+      await writeLlmRankings(owner.id, llm);
+      await writeTuning(owner.id, tuning);
+    });
+
+  it("a guest reads all four back, byte-for-byte", async () => {
+    await stock(guest);
+    await inScope(guest, async () => {
+      assert.deepEqual(await readBoard(), BOARD);
+      assert.deepEqual(
+        (await readIdeals())?.get(questionIdentity(QUESTION)),
+        ["chunk-b", "chunk-a"],
+      );
+      assert.deepEqual(
+        (await readLlmRankings())?.get(questionIdentity(QUESTION)),
+        ["chunk-a", null],
+      );
+      const banked = await readTuning();
+      assert.equal(banked?.entries[0].chunk, "chunk-a");
+      assert.deepEqual(unpackEmbedding(banked!.entries[0].pieces[0].embedding), [0.5, -0.25]);
+    });
+  });
+
+  it("a real account reads null from each, however stocked its own workspace is", async () => {
+    // Stocked under the REAL account: the carve-out is being a guest, not the
+    // absence of a row. The operator's workspace is the one that captured these.
+    await admin`update configs set user_id = ${real.id} where id = ${configId}`;
+    await stock(real);
+    await inScope(real, async () => {
+      assert.equal(await readBoard(), null);
+      assert.equal(await readIdeals(), null);
+      assert.equal(await readLlmRankings(), null);
+      assert.equal(await readTuning(), null);
+    });
+  });
+
+  it("is the same null for a guest whose build banked none of them", async () => {
+    await admin`
+      delete from demo_replay
+       where user_id = ${guest.id} and kind in ('board', 'ndcg_ideal', 'llm_ranking', 'tuning')`;
+    forgetBoard();
+    forgetRankings();
+    forgetTuning();
+    await inScope(guest, async () => {
+      assert.equal(await readBoard(), null);
+      assert.equal(await readIdeals(), null);
+      assert.equal(await readLlmRankings(), null);
+      assert.equal(await readTuning(), null);
     });
   });
 });

@@ -529,6 +529,54 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
     ],
     why: "the pair-screen carve-out is one named kind, and no other",
   },
+  // The Eval tab's three shelf-before-gate lines (phases 5 and 6 of
+  // docs/demo-real-flow-plan.md). Each is the same one-expression shape the
+  // key-model sweep's three lines are, and sweep 6 cannot see any of it: all
+  // three files keep calling assertDemoAllows whatever the condition says.
+  // What each line buys, and what its loss costs:
+  //
+  //   • the READ COMES FIRST, so a build published WITH the master's answer
+  //     replays it and a build published WITHOUT one is refused. Invert the two
+  //     and every guest is refused, which is a silent regression to phase 4 —
+  //     the buttons render live (the summary asks the same shelf) and then 403.
+  //   • the gate is UNCONDITIONAL behind the read, so the fallback is a refusal
+  //     and never a real embed on the operator's key. `sweep`'s lesson, and the
+  //     routine cheap republish is exactly the build that reaches it.
+  {
+    file: "app/api/eval/bulk-ndcg/route.ts",
+    needles: ['if ((await readIdeals()) === null) await assertDemoAllows("rank");'],
+    why: "the ideals carve-out: replay a published aggregate order, refuse without one",
+  },
+  {
+    file: "app/api/eval/bulk-llm-ndcg/route.ts",
+    needles: ['if ((await readLlmRankings()) === null) await assertDemoAllows("llmRank");'],
+    why: "the llm_rerank carve-out, on the ideals' terms exactly",
+  },
+  // The autotune's copy of the same shape, one layer in: the gate lives in the
+  // STEP rather than the route, because the search phase is what spends and a
+  // sliced job re-enters it. The ternary is pinned beside the gate for a reason
+  // the other two do not have — here the two branches are a replay and a REAL
+  // per-chunk search under every candidate model, so a `tuning ?? …` slip would
+  // run the expensive one for a guest whose shelf is stocked.
+  {
+    file: "lib/jobs/steps/autotune.ts",
+    needles: [
+      "const tuning = await readTuning();",
+      'if (tuning === null) await assertDemoAllows("autotune");',
+      "? runSearch(planned, emit, shouldStop)",
+      ": runReplay(planned, tuning, emit, shouldStop)",
+    ],
+    why: "the tuning carve-out, and that a stocked shelf takes runReplay rather than runSearch",
+  },
+  // Start over spends nothing, so it is deliberately outside DEMO_ACTIONS (§4.7)
+  // — which means the ONE thing standing between a real account and a request
+  // that deletes its eval board is this line. The route reads a null and answers
+  // 403; delete the line and the null never comes.
+  {
+    file: "lib/demo/restart.ts",
+    needles: ["if (!(await isGuest())) return null;"],
+    why: "the reset is guest-only from the module, since no gate covers it",
+  },
   // The needle that matters most of the four. Every carve-out above is safe only
   // because the matrix's readers refuse everyone who is not a guest; lose this and
   // a replayed measurement can be served to the account that made it.
@@ -565,7 +613,66 @@ function sweepDemoScope() {
       fail(`${path} — gated again, but still relied on as SCOPED in lib/demo/policy.ts`);
     }
   }
-  console.log(`   ${DEMO_SCOPED.length} scope sites intact, ${expectedOpen.length} routes open`);
+  const readers = sweepDemoReaders();
+  console.log(
+    `   ${DEMO_SCOPED.length} scope sites intact, ${expectedOpen.length} routes open, ` +
+      `${readers} readers guest-only`,
+  );
+}
+
+// 6c. EVERY reader of the demo's store answers a real account with null.
+//
+// The single needle in DEMO_SCOPED above pinned the carve-out when replay.ts had
+// one reader in it. It now has seven — the matrix, the board, the two ranking
+// kinds, progress, the shadow verdicts and the tuning — and a needle that only
+// asks whether the string appears SOMEWHERE in the file passes just as happily
+// with six of them guarded. So the readers are enumerated instead: a new kind
+// added without the line fails by name, which is the shape this whole file is.
+//
+// A reader is covered if it carries the line itself, or if it delegates to one
+// that does — readIdeals and readLlmRankings are two views of readRankings, and
+// making them repeat the check would be the duplication, not the guard.
+const GUEST_CARVE_OUT = "if (!(await isGuest())) return null;";
+
+function sweepDemoReaders(): number {
+  const file = "lib/demo/replay.ts";
+  const source = read(join(ROOT, file));
+  // Declaration sites in order, so each body is the slice up to the next one.
+  const decls = [...source.matchAll(/^(?:export )?async function (\w+)\b/gm)];
+  const bodies = new Map<string, string>();
+  decls.forEach((d, i) => {
+    const start = d.index ?? 0;
+    const end = i + 1 < decls.length ? (decls[i + 1].index ?? source.length) : source.length;
+    bodies.set(d[1], source.slice(start, end));
+  });
+  const readers = [...bodies.keys()].filter((name) => /^read[A-Z]/.test(name));
+  if (readers.length === 0) {
+    fail(`${file} — no read* functions found at all; the census below asserts nothing`);
+    return 0;
+  }
+  const covered = new Set(readers.filter((n) => bodies.get(n)!.includes(GUEST_CARVE_OUT)));
+  // One pass of delegation is enough today; loop anyway so a second layer of
+  // indirection does not turn into a false failure that invites deleting this.
+  for (let pass = 0; pass < readers.length; pass++) {
+    for (const name of readers) {
+      if (covered.has(name)) continue;
+      const body = bodies.get(name)!;
+      for (const [other, otherBody] of bodies) {
+        if (other === name || !body.includes(`${other}(`)) continue;
+        if (otherBody.includes(GUEST_CARVE_OUT) || covered.has(other)) covered.add(name);
+      }
+    }
+  }
+  for (const name of readers) {
+    if (!covered.has(name)) {
+      fail(
+        `${file}:${name} — reads the demo's store without \`${GUEST_CARVE_OUT}\` and ` +
+          `without delegating to a reader that has it. Every carve-out in DEMO_SCOPED ` +
+          `is safe only because a real account reads null here.`,
+      );
+    }
+  }
+  return readers.length;
 }
 
 function sweepDemoGates() {
