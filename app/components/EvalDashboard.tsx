@@ -332,6 +332,12 @@ export function EvalDashboard() {
   // Bump to re-fetch the summary (used after process / edit / delete / add). A
   // reload means questions/scores may have changed, so reset transient UI.
   const [reloadKey, setReloadKey] = useState(0);
+  // Bumped ONLY by the demo's "Start over" (see DemoScope), and used as the
+  // AutotunePanel's key. The panel owns its own run log, and reload() cannot
+  // reach it — so a reset board would otherwise sit under the finished log of a
+  // run whose history row has just been deleted. Not reloadKey: that fires at
+  // the END of an autotune run, which would take the result away as it landed.
+  const [restartKey, setRestartKey] = useState(0);
   const reload = useCallback(() => {
     explainsRef.current = {};
     expandedIdRef.current = null;
@@ -1211,6 +1217,7 @@ export function EvalDashboard() {
         />
         {summary && (
           <AutotunePanel
+            key={restartKey}
             summary={summary}
             busy={busy}
             onBusyChange={setBusy}
@@ -1269,7 +1276,18 @@ export function EvalDashboard() {
       ) : (
         <>
           {/* The sentence that makes the frozen/live split legible (phase 5). */}
-          <DemoScope summary={summary} />
+          <DemoScope
+            summary={summary}
+            onRestart={() => {
+              // The last run's notice describes a board that has just stopped
+              // existing ("Added 60 cached question(s)… Recall 70.0%"), so it
+              // goes with it; the page emptying under the button is the
+              // feedback, and the empty state says what to press next.
+              setNotice(null);
+              setRestartKey((k) => k + 1);
+              reload();
+            }}
+          />
 
           {/* The "As published" card used to sit HERE, above the live headline,
               under a "Now" heading. It has moved down beside the frozen chunks
@@ -2865,15 +2883,83 @@ function BulkActions({
 // frozen questions at all, and a banner that vanished the moment the board was
 // emptied would take the page's only statement that the limits are deliberate
 // with it.
-function DemoScope({ summary }: { summary: EvalSummary }) {
+function DemoScope({
+  summary,
+  onRestart,
+}: {
+  summary: EvalSummary;
+  onRestart: () => void;
+}) {
   const frozen = summary.questions.filter((q) => q.frozen).length;
+  // Two-click confirm rather than window.confirm: this deletes a board someone
+  // may have spent ten minutes building, and a native dialog in a demo is a
+  // modal a visitor cannot read the page behind.
+  const [armed, setArmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function restart() {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await apiFetch("/api/demo/restart", { method: "POST" });
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status}).`);
+      setArmed(false);
+      onRestart();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Network error.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (summary.demoBoard === null && frozen === 0) return null;
+  // The button is a guest's, on demoBlocked's own rule — it is null for a real
+  // account, so this cannot render for one even if the board scope somehow did.
+  const canRestart = summary.demoBlocked !== null;
   return (
     <section className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/50 dark:text-amber-200">
-      <p>
-        <strong className="font-semibold">Demo</strong> — restrictions and limits
-        apply to some actions on this page.
-      </p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p>
+          <strong className="font-semibold">Demo</strong> — restrictions and limits
+          apply to some actions on this page.
+        </p>
+        {canRestart &&
+          (armed ? (
+            <span className="flex items-center gap-2">
+              <span className="text-xs">
+                Clears the questions you added, their scores, and any tuning.
+              </span>
+              <button
+                type="button"
+                onClick={restart}
+                disabled={busy}
+                className="rounded border border-amber-400 bg-amber-100 px-2 py-1 text-xs font-medium hover:bg-amber-200 disabled:opacity-50 dark:border-amber-800 dark:bg-amber-900/60 dark:hover:bg-amber-900"
+              >
+                {busy ? "Clearing…" : "Yes, start over"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setArmed(false)}
+                disabled={busy}
+                className="rounded px-2 py-1 text-xs underline underline-offset-2 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setArmed(true)}
+              title="Empty the board and hand the sixty cached questions back, so the walk can be done again from the start."
+              className="rounded border border-amber-400 px-2 py-1 text-xs font-medium hover:bg-amber-100 dark:border-amber-800 dark:hover:bg-amber-900/60"
+            >
+              Start over
+            </button>
+          ))}
+      </div>
+      {error && <p className="mt-2 text-xs text-red-700 dark:text-red-400">{error}</p>}
     </section>
   );
 }
