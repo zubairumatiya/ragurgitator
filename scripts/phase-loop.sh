@@ -52,18 +52,42 @@ for i in $(seq 1 "$MAX_PHASES"); do
     --permission-mode "$PERM" > "$LOG" 2>&1
   RC=$?
 
-  # surface the agent's own markers, in the order it wrote them
-  grep -o 'PHASE_START [0-9]*\|PHASE_VERIFY [0-9]*\|PHASE_DONE [0-9]*\|ALL_PHASES_COMPLETE\|BLOCKED[^"]\{0,120\}' "$LOG" \
+  # Verdict comes from the FINAL result message only. Scanning the whole transcript
+  # false-trips: the prompt echo and the agent's own code comments contain these words.
+  FINAL=$(python3 - "$LOG" <<'PY'
+import json, sys
+res = None
+for line in open(sys.argv[1], errors="replace"):
+    line = line.strip()
+    if not line.startswith("{"): continue
+    try: d = json.loads(line)
+    except Exception: continue
+    if d.get("type") == "result": res = d
+print((res or {}).get("result", "") if res else "")
+PY
+)
+  # markers the agent declared in its answer
+  grep -oE 'PHASE_START [0-9]+|PHASE_VERIFY [0-9]+|PHASE_DONE [0-9]+|ALL_PHASES_COMPLETE' <<<"$FINAL" \
     | awk '!seen[$0]++' | while read -r m; do say "  $m"; done
 
-  if grep -qi 'usage limit\|rate_limit_error' "$LOG"; then
+  # structured field, so safe to scan the whole transcript
+  if grep -q '"status":"rejected"\|"status":"blocked"' "$LOG" \
+     || grep -qi 'usage limit reached\|rate_limit_error' <<<"$FINAL"; then
     say "STOP: usage limit ($LOG)"; exit 2
   fi
   if [ $RC -ne 0 ]; then say "STOP: claude exited $RC ($LOG)"; exit $RC; fi
-  if grep -q 'BLOCKED' "$LOG"; then say "STOP: agent blocked ($LOG)"; exit 3; fi
-  if grep -q 'ALL_PHASES_COMPLETE' "$LOG"; then say "ALL PHASES COMPLETE"; exit 0; fi
+  if grep -qE '(^|[[:space:]])BLOCKED([[:space:]]|$)' <<<"$FINAL"; then
+    say "STOP: agent blocked ($LOG)"; exit 3
+  fi
+  if grep -q 'ALL_PHASES_COMPLETE' <<<"$FINAL"; then say "ALL PHASES COMPLETE"; exit 0; fi
   if ! git diff --quiet HEAD; then say "STOP: uncommitted changes left ($LOG)"; exit 4; fi
 
   say "LAP $i committed: $(git log -1 --format=%s)"
+
+  # graceful pause: `touch .loop-logs/PAUSE` any time; the current phase finishes
+  # and commits, then the loop stops instead of starting the next one.
+  if [ -e "$LOGS/PAUSE" ]; then
+    rm -f "$LOGS/PAUSE"; say "STOP: paused by request after lap $i"; exit 0
+  fi
 done
 say "STOP: hit MAX_PHASES=$MAX_PHASES"

@@ -281,15 +281,34 @@ async function verifyFingerprints(userId: string): Promise<boolean> {
   return ok;
 }
 
+// File names for the composition line, keyed by document id. Read here rather
+// than joined into selectTunable because the selection is shared with
+// demo-warm-answers.ts, which has no use for a name it would only be paying to
+// carry.
+async function documentNames(ids: string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const rows = await privilegedSql<{ id: string; file_name: string }[]>`
+    select id::text as id, file_name from documents where id = any(${ids}::uuid[])
+  `;
+  return new Map(rows.map((r) => [r.id, r.file_name]));
+}
+
 // REFUSE A DULL BUILD. The set drifts on purpose, so the failure mode is not a
-// crash — it is a publish that quietly hands every visitor twelve rank-1 questions,
-// an autotune button with nothing to search, and a drilldown that shows twelve
-// identical perfect orderings. That is a worse demo than the one this replaces, and
-// it would ship without a single error.
+// crash — it is a publish that quietly hands every visitor a board of rank-1
+// questions, an autotune button with nothing to search, and a drilldown that shows
+// one identical perfect ordering after another. That is a worse demo than the one
+// this replaces, and it would ship without a single error.
 //
 // The bars are deliberately below the quota: the quota is what we ask for, this is
-// what the demo cannot do without.
+// what the demo cannot do without. They are FRACTIONS OF QUOTAS rather than the
+// constants they used to be, because the set widened from 12 to 30 (§2) and a
+// hand-written floor of 8 would have let a build a third of the intended size walk
+// straight past the guard that exists to stop it.
 function assertSpread(picked: Tunable[]): void {
+  const want = QUOTAS.reduce((n, q) => n + q.n, 0);
+  const quota = (tier: number) => QUOTAS.find((q) => q.tier === tier)?.n ?? 0;
+  const twoThirds = Math.ceil((want * 2) / 3);
+
   const misses = picked.filter((p) => p.tier === 99).length;
   const tail = picked.filter((p) => p.tier >= 3).length; // rank 3+ or missed
   const easy = picked.filter((p) => p.tier === 1).length;
@@ -297,12 +316,21 @@ function assertSpread(picked: Tunable[]): void {
   const docs = new Set(picked.map((p) => p.document)).size;
 
   const problems: string[] = [];
-  if (picked.length < 8) problems.push(`only ${picked.length} tunable questions (want 12)`);
-  if (misses < 2) problems.push(`only ${misses} missed question(s) — autotune needs failures`);
-  if (tail < 5) problems.push(`only ${tail} in the hard tail (rank 3+ or missed)`);
+  if (picked.length < twoThirds)
+    problems.push(`only ${picked.length} tunable questions (want ${want})`);
+  if (misses < Math.ceil(quota(99) / 2))
+    problems.push(`only ${misses} missed question(s) — autotune needs failures`);
+  if (tail < Math.ceil((quota(99) + quota(4) + quota(3)) / 2))
+    problems.push(`only ${tail} in the hard tail (rank 3+ or missed)`);
   if (easy < 1) problems.push("no rank-1 question — nothing to show a working retrieval against");
-  if (chunks < 8) problems.push(`only ${chunks} distinct chunks — autotune reshapes chunks`);
-  if (docs < 2) problems.push(`only ${docs} document(s)`);
+  if (chunks < twoThirds) problems.push(`only ${chunks} distinct chunks — autotune reshapes chunks`);
+  // FOUR OF THE SIX, not two. §2 measured one document's board and found it flat
+  // before anything was even scoped to it — 51 of 60 questions already at rank 1 —
+  // so a set that collapsed onto one or two files would argue against the product
+  // it is demonstrating. Four rather than all six because rank 3 and rank 4 each
+  // span only three documents on the master today; requiring six would make the
+  // publish hostage to a tier that may only exist in two files next month.
+  if (docs < 4) problems.push(`only ${docs} document(s) — a one-document board is already flat`);
   if (problems.length > 0) {
     die(
       `the tunable set has no spread, so the published demo would have a dead autotune button:\n` +
@@ -580,9 +608,9 @@ async function main() {
         from.labeled === from.questions ? "" : ` (of ${from.questions} — the rest carry no label here)`
       }, ${from.scores} published scores, ${from.cached} cached answers`,
   );
-  // The composition, not just the count: twelve is the uninteresting half of this
-  // number and the spread is the half that decides whether the demo has a working
-  // autotune button.
+  // The composition, not just the count: the size of the set is the uninteresting
+  // half of this number and the spread is the half that decides whether the demo
+  // has a working autotune button.
   const tiers = QUOTAS.map((q) => {
     const n = tunable.filter((t) => t.tier === q.tier).length;
     return n > 0 ? `${n} ${q.label}` : null;
@@ -592,6 +620,16 @@ async function main() {
       `${new Set(tunable.map((t) => t.chunk)).size} chunks in ` +
       `${new Set(tunable.map((t) => t.document)).size} documents`,
   );
+  // AND THE PER-DOCUMENT SHARE, spelled out. The document count above says six
+  // without saying that five of the thirty are in one file and one is in each of
+  // the rest — and the document filter narrows WITHIN the board (§2), so a
+  // document holding one question is a filter that lands a visitor on an
+  // almost-empty board. Nothing else in the publish shows this.
+  const perDoc = await documentNames([...new Set(tunable.map((t) => t.document))]);
+  const share = [...perDoc.entries()]
+    .map(([id, name]) => ({ name, n: tunable.filter((t) => t.document === id).length }))
+    .sort((a, b) => b.n - a.n || a.name.localeCompare(b.name));
+  console.log(`    ${share.map((d) => `${d.name} ${d.n}`).join(" · ")}`);
   // CAN A GUEST ACTUALLY ASK THE TWELVE? A guest carries a Voyage key and no
   // answer-model key, so a tunable question with no banked answer under the
   // lookup's exact key is a dead end (/api/chat → DEMO_BLOCKED). The total on the

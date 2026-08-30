@@ -1,16 +1,18 @@
-// --- THE TWELVE ---------------------------------------------------------------
+// --- THE TUNABLE SET ----------------------------------------------------------
 //
-// Which questions get a graded-nDCG drilldown in the published demo, and — once
-// phase 4 lands — which ones a visitor may re-score and autotune.
+// Which questions get a graded-nDCG drilldown in the published demo, and which
+// ones a visitor may re-score and autotune. Thirty of them since §2 of the
+// real-flow plan; twelve before that, and the codebase still calls them "the
+// twelve" in a good many comments this phase did not go and rewrite.
 //
 // SELECTED BY QUERY, NOT BY HAND, so a re-publish after the master has moved
-// re-rolls the set against the corpus as it now scores rather than pinning twelve
-// uuids that quietly stopped being interesting. The trade is that a re-publish can
+// re-rolls the set against the corpus as it now scores rather than pinning uuids
+// that quietly stopped being interesting. The trade is that a re-publish can
 // silently produce a duller set, which is what demo-snapshot's assertSpread is for.
 //
 // IN lib/ RATHER THAN IN THE PUBLISH SCRIPT because two scripts now need the same
-// twelve and they must not disagree: demo-snapshot.ts freezes everything else
-// around this set, and demo-warm-answers.ts buys the answers that make it usable
+// set and they must not disagree: demo-snapshot.ts freezes everything else
+// around it, and demo-warm-answers.ts buys the answers that make it usable
 // without a key. A second hand-rolled copy of this query is how those two would
 // drift apart on the next quota edit.
 import "server-only";
@@ -21,32 +23,38 @@ import { answerFingerprint } from "@/lib/rag/semanticCacheCore";
 import { chunksTable, modelDimension } from "@/lib/rag/vectorStore";
 
 // THE COMPOSITION IS THE WHOLE POINT. Autotune only has work to do on questions
-// that are FAILING: twelve rank-1 hits give the demo's most interesting button
-// nothing to search for. So the quota is weighted at the hard tail of the
-// distribution the demo actually publishes (measured 2026-08-22, the no-override
-// generation): 355 at rank 1, 62 at 2, 16 at 3, 11 at 4, none at 5, 28 missed.
+// that are FAILING: a board of rank-1 hits gives the demo's most interesting
+// button nothing to search for. So the quota is weighted at the hard tail.
 //
-// A couple of comfortable questions are in the set deliberately — a drilldown
-// showing what a rank-1 ideal ordering looks like is what makes the failures
-// legible as failures.
+// WIDENED TO THIRTY (§2). The ceiling is not the raw distribution but what
+// survives ONE-QUESTION-PER-CHUNK, which is the smaller number and the one that
+// decides whether a quota can be filled. Measured on the master's published
+// config 2026-08-29, after the per-chunk dedupe: 175 at rank 1, 32 at 2, 7 at 3,
+// 7 at 4, 15 missed. So the tail quotas below deliberately stop short of
+// exhausting their tiers — take all 7 rank-4s and the next re-publish, after the
+// master has moved by one question, comes up short and the build fails.
+//
+// A few comfortable questions are in the set deliberately — a drilldown showing
+// what a rank-1 ideal ordering looks like is what makes the failures legible as
+// failures.
 export const QUOTAS: { tier: number; n: number; label: string }[] = [
-  { tier: 99, n: 4, label: "missed" }, // 99 = not found in the top k
-  { tier: 4, n: 3, label: "rank 4" },
-  { tier: 3, n: 3, label: "rank 3" },
-  { tier: 2, n: 1, label: "rank 2" },
-  { tier: 1, n: 1, label: "rank 1" },
+  { tier: 99, n: 10, label: "missed" }, // 99 = not found in the top k
+  { tier: 4, n: 6, label: "rank 4" },
+  { tier: 3, n: 6, label: "rank 3" },
+  { tier: 2, n: 4, label: "rank 2" },
+  { tier: 1, n: 4, label: "rank 1" },
 ];
 
 export type Tunable = { id: string; tier: number; chunk: string; document: string };
 
-// ONE QUESTION PER SOURCE CHUNK. Autotune reshapes CHUNKS, so twelve questions
-// hanging off one chunk is one candidate search wearing twelve hats — the plan's
+// ONE QUESTION PER SOURCE CHUNK. Autotune reshapes CHUNKS, so a dozen questions
+// hanging off one chunk is one candidate search wearing a dozen hats — the plan's
 // "several distinct chunks" requirement, enforced rather than hoped for.
 //
 // Ordered by md5(id) inside every bucket, not by id or created_at: those correlate
 // with ingest order, which correlates with document, and the top of the list would
 // be four questions from whichever file was uploaded first. md5 is stable, so the
-// same corpus re-rolls the same twelve.
+// same corpus re-rolls the same set.
 export async function selectTunable(configId: string): Promise<Tunable[]> {
   // The quota table, inlined as a CASE rather than joined in as a VALUES list, so
   // QUOTAS above stays the single place the composition is written down.
@@ -93,15 +101,15 @@ export async function selectTunable(configId: string): Promise<Tunable[]> {
   );
 }
 
-// --- CAN THE PUBLISHED DEMO ACTUALLY ANSWER THE TWELVE? -----------------------
+// --- CAN THE PUBLISHED DEMO ACTUALLY ANSWER THE SET? --------------------------
 //
-// The twelve are the only questions a guest may re-score and autotune, so they are
+// These are the only questions a guest may re-score and autotune, so they are
 // what the demo steers visitors towards. A guest holds a Voyage key and nothing
 // else, so a question with no banked answer is a DEAD END: /api/chat reaches
 // generation, finds no answer-model key, and returns DEMO_BLOCKED.
 //
 // Nothing reported this. The publish counts cached answers in TOTAL — 252 of them,
-// which reads as plenty — while the specific twelve that matter go uncovered. The
+// which reads as plenty — while the specific ones that matter go uncovered. The
 // state this census was written for was 5 of 12 banked and 7 dead.
 //
 // The four columns below are semanticCacheLookup's WHERE clause, and matching it
