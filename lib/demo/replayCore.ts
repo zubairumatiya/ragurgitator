@@ -240,3 +240,114 @@ export function simsFor(matrix: ReplayMatrix, model: string): number[] | null {
   const i = matrix.models.indexOf(model);
   return i === -1 ? null : (matrix.sims[i] ?? null);
 }
+
+// THE BANKED TUNING — phase 6 of docs/demo-real-flow-plan.md, and the Eval tab's
+// last kind (0083).
+//
+// One entry per BOARD CHUNK the master autotuned: the winning override it
+// confirmed through real retrieval, and the model trials that chunk's "Models
+// tried" list reads. A guest's press of ⚙ Auto tune installs these instead of
+// searching for them, and then re-scores and reports for real over its own
+// questions — the split lib/demo/policy.PUBLISHED_SEARCH_NOTE describes.
+//
+// A CHUNK THE MASTER NEVER OVERRODE HAS NO ENTRY, and that is a result rather
+// than a gap: the master's own search found nothing for it either, so the
+// replayed run reports it unresolved exactly as a real one would.
+export const TUNING_KEY = "overrides";
+
+// One piece of a banked override — config_chunk_overrides row-for-row, except
+// for the vector.
+//
+// BASE64 FLOAT32, NOT A JSON ARRAY. The board's 30 chunks carry ~72 override
+// rows and ~80,000 float4s between them; as JSON numbers that is ~1.6 MB of
+// digits, and rounding them (the matrix's answer for cosines) would mean handing
+// a visitor a vector the master never confirmed. Little-endian float32 in base64
+// is byte-exact against the `real[]` column it came from and ~425 kB.
+export type ReplayTuningPiece = {
+  // null = the whole base chunk (a model-only override).
+  text: string | null;
+  dimension: number;
+  embedding: string;
+  tokenStart: number | null;
+  tokenEnd: number | null;
+};
+
+// One saved model trial for the chunk, keyed by the QUESTION'S WORDING for
+// ReplayRankingEntry's reason exactly: the published build ships no
+// eval_questions, so a stored question id names a row that exists in no
+// destination. The apply step re-resolves each of these against the guest's own
+// board and drops what it cannot find.
+//
+// `topPool` IS DROPPED ON THE WAY IN. It is the only optional field of the
+// stored shape (a trial saved before it existed simply omits it), and carrying
+// it would put chunk ids a THIRD level deep in the payload for the clone to
+// remap — for a drilldown inside a drilldown of a replayed measurement.
+export type ReplayTrialOutcome = {
+  question: string;
+  storedHit: boolean | null;
+  storedRank: number | null;
+  newHit: boolean;
+  newRank: number;
+  newScore: number;
+  fusedRank?: number;
+  fusedHit?: boolean;
+};
+
+export type ReplayTuningTrial = {
+  baselineModel: string;
+  trialModel: string;
+  kind: string;
+  chunkSize: number | null;
+  chunkOverlap: number | null;
+  pieceCount: number | null;
+  k: number;
+  // The candidate pool, in the READER's id space. A SET, so clone step 5j drops
+  // an id that fails to map rather than holding its place — the same rule the
+  // board takes and the opposite of a ranking's.
+  pool: string[];
+  results: ReplayTrialOutcome[];
+};
+
+export type ReplayTuningEntry = {
+  // The chunk this override belongs to, in the READER's id space (step 5j).
+  chunk: string;
+  model: string;
+  kind: "model" | "size" | "size+model";
+  // The change-log phrasing the master's own run would have written, so a
+  // guest's retrieval-change list reads like a real run's rather than like a
+  // copy ("re-split at 400 tokens under voyage-3.5" and not "delegate → …").
+  detail: string;
+  pieces: ReplayTuningPiece[];
+  trials: ReplayTuningTrial[];
+};
+
+export type ReplayTuning = {
+  version: 1;
+  entries: ReplayTuningEntry[];
+};
+
+// float32 little-endian, base64. One pair of functions rather than an encode at
+// the publish and a decode at the press, because a mismatch between them is a
+// vector that ranks like noise and looks like a bad autotune.
+export const packEmbedding = (embedding: number[]): string =>
+  Buffer.from(new Float32Array(embedding).buffer).toString("base64");
+
+export const unpackEmbedding = (packed: string): number[] => {
+  const bytes = Buffer.from(packed, "base64");
+  // COPIED OUT of the Buffer's pool rather than viewed in place: Node hands
+  // small Buffers a shared ArrayBuffer at an arbitrary byteOffset, and
+  // Float32Array requires a multiple-of-4 one — so the view throws for some
+  // payloads and not others, which is the worst kind of intermittent.
+  const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return [...new Float32Array(copy)];
+};
+
+// What the tuning kind may weigh, on DEMO_RANKINGS_MAX_BYTES' terms: reported by
+// scripts/demo-snapshot, never enforced, and looser than the matrix's because it
+// is read on a button press rather than on page load. ~425 kB of vectors is the
+// normal case for a 30-chunk board, so this bar is set above it rather than at
+// an aspiration nobody can meet.
+export const DEMO_TUNING_MAX_BYTES = 700_000;
+
+export const tuningBytes = (tuning: ReplayTuning): number =>
+  Buffer.byteLength(JSON.stringify(tuning), "utf8");

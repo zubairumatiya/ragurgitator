@@ -222,6 +222,29 @@ export const DEMO_ACTIONS = {
     "needed here: this workspace was published with a sample of real shadow " +
     "events already waiting, which is what a signed-up account uses this to " +
     "build for itself. The would-hit queue is the result either way.",
+  // AUTOTUNE, AND IT IS A FALLBACK ONLY — phase 6 of docs/demo-real-flow-plan.md.
+  //
+  // This table's header has said for two phases that autotune is deliberately
+  // absent from it, and the reason was the frozen set: with the board held to
+  // twelve questions the search was bounded, so blocking it would have been a
+  // second limit disagreeing with the first. §3.2 removed that bound — a visitor
+  // now builds a sixty-question board — and the search is the half that spends:
+  // one candidate rung per failing chunk of real embedding, plausibly 150k–350k
+  // tokens against a 200,000-token budget.
+  //
+  // So the button is still live in the normal case, and it is live for a REASON
+  // rather than by omission: a published build banks the master's confirmed
+  // winners (0083) and the press installs them, then re-scores and reports for
+  // real. This sentence is what a build published WITHOUT that shelf says — the
+  // `sweep`/`judge` shape once more, and the same hazard, since a cheap
+  // republish from an older checkout is exactly the build whose guests reach it.
+  autotune:
+    "Autotune searches every failing chunk — a re-split and a re-embed per " +
+    "candidate — which is embedding spend the demo doesn\u2019t carry, and this " +
+    "build was published without the tuning that would stand in for it. The " +
+    "board is still yours to move: add the cached questions, score them and " +
+    "grade their rankings, and every number on this page is measured in your " +
+    "own workspace.",
   // Not an action anyone takes — the outcome of taking enough of them. It shares
   // this table because it shares the transport: a 403 with a sentence, from the
   // one catch site.
@@ -245,6 +268,27 @@ export type DemoAction = keyof typeof DEMO_ACTIONS;
 // So this is the same rule as every sentence above, pointed the other way: a
 // refusal may not point at something absent, and a MEASUREMENT may not imply a
 // computation that did not happen for this workspace.
+// THE OTHER HALF OF `autotune`, and it is PUBLISHED_REPLAY_NOTE's rule applied
+// to a run that really does move numbers (phase 6 of
+// docs/demo-real-flow-plan.md).
+//
+// A guest's ⚙ Auto tune installs the master's confirmed per-chunk winners and
+// then does everything else for real: the dirty-set re-score, the history row,
+// the holdout capture, all over the visitor's own questions in their own
+// workspace. So unlike Appraise → Models, this panel's numbers ARE theirs — and
+// that is exactly why the sentence is needed. Every rate that moves invites the
+// reading that the search found them here, and it did not.
+//
+// Worded as PUBLISHED SEARCH, LIVE RESULT, never as "autotune ran": the second
+// would be a measurement implying a computation that did not happen, which is
+// the one thing the notes in this file exist to prevent.
+export const PUBLISHED_SEARCH_NOTE =
+  "Published search, live result: the per-chunk winners installed here were " +
+  "found on this corpus before the workspace was cloned for you \u2014 searching " +
+  "for them again would re-embed every candidate, which the demo doesn\u2019t pay " +
+  "for. Everything after that is yours: the re-score, the rates and the run " +
+  "history are all measured on your own questions.";
+
 export const PUBLISHED_REPLAY_NOTE =
   "Published measurement: every model was ranked over this corpus before the " +
   "workspace was cloned for you. Re-running it needs each model's cached " +
@@ -313,12 +357,21 @@ export type DemoBlockedSentences = Partial<Record<DemoAction, string>>;
 
 // What the Eval tab can actually reach. `unfreeze` is here even though the
 // frozen questions hide their own Ignore button: the route gates every question,
-// so a TUNABLE one's Ignore is a 403 too. Autotune is deliberately absent —
-// it is not in DEMO_ACTIONS at all, because a guest may press it.
+// so a TUNABLE one's Ignore is a 403 too.
+//
+// THREE OF THESE COME OFF WHEN THE DEMO HAS A PUBLISHED ANSWER, and `autotune`
+// is the one that is normally off: `rank` and `llmRank` are filtered out by
+// getSummary when the ranking shelves are stocked, and `autotune` when the
+// tuning shelf is (0083) — which is the ordinary build. It is listed here at
+// all because a build published WITHOUT that shelf has to grey the button and
+// refuse the press, rather than fall through to a real search on the operator's
+// key. Until phase 6 autotune was absent from DEMO_ACTIONS entirely, on the
+// grounds that the frozen set bounded it; §3.2 removed that bound.
 export const EVAL_DEMO_ACTIONS = [
   "generate",
   "rank",
   "llmRank",
+  "autotune",
   "tryModel",
   "override",
   "unfreeze",

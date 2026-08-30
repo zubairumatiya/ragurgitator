@@ -133,6 +133,20 @@ export type AutotuneEvent =
     }
   | { type: "chunk-unresolved"; chunkId: string; reason: string }
   | {
+      // THE DEMO'S REPLAY OF A SEARCH IT DID NOT RUN (phase 6 of
+      // docs/demo-real-flow-plan.md). A guest's press installs the master's
+      // confirmed winner for the chunk instead of searching for one, so there is
+      // no AutotuneCandidate to report: `chunk-resolved` carries the ranks a
+      // search produced, and inventing a set of them here would be the exact
+      // move lib/demo/policy's notes exist to prevent. What there IS to say is
+      // what was installed, which is what this carries.
+      type: "chunk-published";
+      chunkId: string;
+      detail: string; // the change-log phrasing, e.g. "re-split into 3 pieces"
+      pieces: number;
+      trials: number; // saved model trials that came with it, 0 if none
+    }
+  | {
       // autotune.stopEarly: every targeted metric's aggregate rate reached its
       // min-rate mid-run, so the remaining below-bar chunks were skipped.
       type: "early-stop";

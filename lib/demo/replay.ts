@@ -45,6 +45,8 @@ import {
   type ReplayProgress,
   type ReplayRankings,
   type ReplayShadowVerdict,
+  type ReplayTuning,
+  TUNING_KEY,
 } from "@/lib/demo/replayCore";
 
 // Same 42P01 tolerance published_sweep and demo_pair_bank hold, for the same
@@ -114,6 +116,15 @@ export async function writeLlmRankings(userId: string, rankings: ReplayRankings,
   forgetRankings(userId);
 }
 
+// The tuning the demo's ⚙ Auto tune replays: the master's confirmed per-chunk
+// overrides for the board, with the model trials that go with them. Written on
+// the MASTER before the clone, on writeIdeals' terms — every entry names a chunk,
+// and clone step 5j is what rewrites those ids into a destination's space.
+export async function writeTuning(userId: string, tuning: ReplayTuning, db: Writer = sql): Promise<void> {
+  await put(db, userId, "tuning", TUNING_KEY, tuning);
+  forgetTuning(userId);
+}
+
 // The guest's progress, written at clone time so their first page load has a
 // starting `n` rather than a null the panel has to have an opinion about.
 export async function writeProgress(userId: string, progress: ReplayProgress, db: Writer = sql): Promise<void> {
@@ -141,6 +152,7 @@ export async function clearReplay(userId: string, db: Writer = sql): Promise<voi
   forgetMatrix(userId);
   forgetBoard(userId);
   forgetRankings(userId);
+  forgetTuning(userId);
 }
 
 // --- the read, and the memo in front of it ----------------------------------
@@ -284,4 +296,37 @@ export async function readShadowVerdicts(): Promise<Map<string, ReplayShadowVerd
   `);
   if (rows === null) return null;
   return new Map(rows.map((r) => [r.key, r.payload]));
+}
+
+// The master's confirmed overrides for this guest's board, or null for a real
+// account AND for a guest whose build was published without them — the same
+// deliberate null every reader above returns, because the caller's job in both
+// cases is the ordinary path: a real search for a real account, and the demo
+// gate's refusal for a guest.
+//
+// A MEMO OF ITS OWN rather than a share of the rankings', because this is the
+// heaviest payload in the store (~425 kB of vectors) and the rarest read — once
+// per press of one button, against the rankings' every-lap. Holding one is still
+// worth it: the step reads it once per SLICE, and a sliced background autotune
+// re-enters this function every time it resumes.
+const tuningMemo = new Map<string, ReplayTuning>();
+
+export function forgetTuning(userId?: string): void {
+  if (userId === undefined) tuningMemo.clear();
+  else tuningMemo.delete(userId);
+}
+
+export async function readTuning(): Promise<ReplayTuning | null> {
+  if (!(await isGuest())) return null;
+  const userId = activeUserId();
+  const memoed = tuningMemo.get(userId);
+  if (memoed) return memoed;
+  const row = await withoutStore(sql<{ payload: ReplayTuning }[]>`
+    select payload from demo_replay
+     where user_id = ${userId} and kind = 'tuning' and key = ${TUNING_KEY}
+  `.then((rows) => rows[0] ?? null));
+  if (!row) return null;
+  if (tuningMemo.size >= MEMO_MAX) tuningMemo.delete(tuningMemo.keys().next().value as string);
+  tuningMemo.set(userId, row.payload);
+  return row.payload;
 }

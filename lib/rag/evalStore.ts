@@ -9,10 +9,11 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { sql, toJsonb } from "@/lib/db";
 import { FROZEN_REASON, PUBLISHED_RUN_NOTE } from "@/lib/demo/frozen";
 import { isGuest } from "@/lib/demo/guest";
-import { readBoard, readIdeals, readLlmRankings } from "@/lib/demo/replay";
+import { readBoard, readIdeals, readLlmRankings, readTuning } from "@/lib/demo/replay";
 import {
   demoBlockedSentences,
   EVAL_DEMO_ACTIONS,
+  PUBLISHED_SEARCH_NOTE,
   type DemoBlockedSentences,
 } from "@/lib/demo/policy";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";
@@ -313,6 +314,14 @@ export type EvalSummary = {
   // blocked control DISABLED instead of leaving it looking live until a 403 comes
   // back from three layers down. Confirmed 2026-08-29 that every one of them did.
   demoBlocked: DemoBlockedSentences | null;
+  // WHICH HALF OF AUTOTUNE THIS WORKSPACE WILL RUN — the sentence, or null.
+  //
+  // Non-null only for a guest whose build carries the banked tuning (0083), i.e.
+  // exactly when ⚙ Auto tune will install the master's confirmed winners rather
+  // than search for its own. The sentence travels rather than a boolean for
+  // demoBlocked's reason: lib/demo/policy is the one copy of this wording and it
+  // is server-only.
+  demoPublishedSearch: string | null;
   // WHICH CHUNKS THE DEMO'S BOARD IS, and null for everyone but a guest whose
   // build published one (0081, lib/demo/replay.readBoard).
   //
@@ -2759,12 +2768,28 @@ export async function getSummary(): Promise<EvalSummary> {
   // would grey out the two buttons the visitor is there to press. The routes make
   // the same call in the same order, so the tooltip and the 403 cannot disagree:
   // a build published WITHOUT the shelf greys them and refuses, as before.
-  const [bankedIdeals, bankedLlm] = await Promise.all([readIdeals(), readLlmRankings()]);
+  //
+  // AUTOTUNE IS THE THIRD (phase 6), and the one whose blocked state is the
+  // ABNORMAL one: it survives the filter only when the tuning shelf is empty,
+  // which is exactly the build in which lib/jobs/steps/autotune refuses the
+  // press. Same expression and same order as the step's own gate, so the tooltip
+  // and the 403 cannot disagree.
+  const [bankedIdeals, bankedLlm, bankedTuning] = await Promise.all([
+    readIdeals(),
+    readLlmRankings(),
+    readTuning(),
+  ]);
   const demoBlocked = await demoBlockedSentences(
     EVAL_DEMO_ACTIONS.filter(
-      (a) => !(a === "rank" && bankedIdeals) && !(a === "llmRank" && bankedLlm),
+      (a) =>
+        !(a === "rank" && bankedIdeals) &&
+        !(a === "llmRank" && bankedLlm) &&
+        !(a === "autotune" && bankedTuning),
     ),
   );
+  // Only when the search really will be replayed: a build without the shelf
+  // refuses instead, and the sentence above is what that visitor reads.
+  const demoPublishedSearch = bankedTuning === null ? null : PUBLISHED_SEARCH_NOTE;
   const recallK = effectiveK(criteria.recall, cfg.topK);
   const mrrK = effectiveK(criteria.mrr, cfg.topK);
   const ndcgK = effectiveK(criteria.ndcg, cfg.topK);
@@ -2806,6 +2831,7 @@ export async function getSummary(): Promise<EvalSummary> {
     chunkCount: 0,
     chunks: [],
     demoBlocked,
+    demoPublishedSearch,
     demoBoard: null,
     criteria,
     config: configInfo,
@@ -3139,6 +3165,7 @@ export async function getSummary(): Promise<EvalSummary> {
       position: r.position,
     })),
     demoBlocked,
+    demoPublishedSearch,
     demoBoard: boardIds,
     criteria,
     config: configInfo,

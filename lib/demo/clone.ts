@@ -243,6 +243,7 @@ export type CloneSummary = {
   boardChunks: number; // chunks the demo's Eval tab is scoped to (step 5g's second half)
   bankedIdeals: number; // questions whose aggregate ideal "Add nDCG rankings" replays (5i)
   bankedLlmRankings: number; // questions whose llm_rerank order "Add LLM nDCG rankings" replays
+  bankedTuning: number; // board chunks whose autotune winner ⚙ Auto tune installs (step 5j)
   ledgerRows: number; // savings rows priced the payoff readout's money (step 5h)
 };
 
@@ -1618,6 +1619,63 @@ export async function cloneSeedWorkspace(
        where r.user_id = ${guestId} and r.kind in ('ndcg_ideal', 'llm_ranking')
     `;
 
+    // --- 5j. the banked tuning, remapped two levels deep ---------------------
+    //
+    // Phase 6 of docs/demo-real-flow-plan.md. `tuning` (0083) is the master's
+    // confirmed autotune winner for each board chunk — model, kind, and every
+    // piece with its own vector — plus the saved model trials that chunk's
+    // "Models tried" list reads. A guest's ⚙ Auto tune installs these instead of
+    // searching for them, and then re-scores and reports for real.
+    //
+    // TWO LEVELS OF IDS, which is what makes this the deepest rewrite in the
+    // function: an entry names the CHUNK it overrides, and each of its trials
+    // names the candidate POOL it re-ranked inside. Both are sets rather than
+    // rankings, so both take the board's inner join rather than an ideal's left
+    // one (5i): a chunk that did not travel is not a chunk to tune, and a pool
+    // member that did not travel is not a candidate — where in a ranking the
+    // same drop would promote everything behind it.
+    //
+    // The VECTORS ride through untouched. They are base64 float32 (see
+    // lib/demo/replayCore), which names nothing and so needs no rewrite — the
+    // same property that lets the matrix above be forwarded byte-for-byte.
+    const tuningRows = await tx.unsafe(
+      `insert into demo_replay (user_id, kind, key, payload)
+       select $1, r.kind, r.key,
+              jsonb_set(r.payload, '{entries}', coalesce((
+                select jsonb_agg(
+                         jsonb_set(
+                           jsonb_set(e.entry, '{chunk}', to_jsonb(mch.new_id::text)),
+                           '{trials}', coalesce((
+                             select jsonb_agg(
+                                      jsonb_set(t.trial, '{pool}', coalesce((
+                                        select jsonb_agg(mp.new_id::text order by u.ord)
+                                          from jsonb_array_elements_text(t.trial -> 'pool')
+                                               with ordinality u(old_id, ord)
+                                          join _map_chunk mp on mp.old_id = u.old_id::uuid),
+                                        '[]'::jsonb))
+                                      order by t.ord)
+                               from jsonb_array_elements(e.entry -> 'trials')
+                                    with ordinality t(trial, ord)),
+                             '[]'::jsonb))
+                         order by e.ord)
+                  from jsonb_array_elements(r.payload -> 'entries')
+                       with ordinality e(entry, ord)
+                  join _map_chunk mch on mch.old_id = (e.entry ->> 'chunk')::uuid),
+                '[]'::jsonb))
+         from demo_replay r
+        where r.user_id = $2 and r.kind = 'tuning'`,
+      [guestId, seedId] as never[],
+    );
+    // Counted out of the payload for bankedMatrix's reason, and here the count
+    // is the difference between a finale and a refusal: an empty shelf is what
+    // the step's own gate reads to decide whether to replay or to refuse.
+    const [bankedTuning] = await tx<{ chunks: number }[]>`
+      select coalesce(jsonb_array_length(r.payload -> 'entries'), 0)::int as chunks
+        from demo_replay r
+       where r.user_id = ${guestId} and r.kind = 'tuning'
+       limit 1
+    `;
+
     // --- 5h. the savings ledger, so the payoff readout has money -------------
     //
     // Phase 6 of docs/demo-cache-replay-plan.md. `PayoffReadout` renders a hit
@@ -1755,6 +1813,7 @@ export async function cloneSeedWorkspace(
       boardChunks: boardRows.count > 0 ? (bankedBoard?.chunks ?? 0) : 0,
       bankedIdeals: rankingRows.count > 0 ? (bankedRankings?.ideals ?? 0) : 0,
       bankedLlmRankings: rankingRows.count > 0 ? (bankedRankings?.llm ?? 0) : 0,
+      bankedTuning: tuningRows.count > 0 ? (bankedTuning?.chunks ?? 0) : 0,
       ledgerRows,
     };
   }) as Promise<CloneSummary>;

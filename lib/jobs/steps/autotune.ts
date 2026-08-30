@@ -86,6 +86,9 @@
 import { randomUUID } from "node:crypto";
 
 import { NEVER_STOP } from "@/lib/http/cancelRegistry";
+import { assertDemoAllows } from "@/lib/demo/policy";
+import { readTuning } from "@/lib/demo/replay";
+import { unpackEmbedding, type ReplayTuning, type ReplayTuningEntry } from "@/lib/demo/replayCore";
 import {
   drainStuck,
   nextChunks,
@@ -123,8 +126,11 @@ import {
 } from "@/lib/rag/eval";
 import type { EvalCriteria } from "@/lib/rag/evalSettingsStore";
 import {
+  getModelTrialChunk,
   getQuestionToScore,
   getSummary,
+  insertModelTrial,
+  listModelTrials,
   type EvalSummary,
   type QuestionDetail,
   type QuestionToScore,
@@ -133,6 +139,7 @@ import {
   listOverrides,
   overrideFingerprints,
   retrievalStateFingerprint,
+  setChunkOverridePieces,
 } from "@/lib/rag/overrideStore";
 
 // Same size and the same reason as the re-score step's: big enough that
@@ -312,7 +319,22 @@ export const autotuneStep: JobStep<
     // before the first chunk is touched, which is the property that matters.
     const c = cursor ?? (await freshCursor());
     if (c.phase === "settle") return runSettle(c, emit, shouldStop);
-    if (c.phase === "search") return runSearch(await ensurePlanned(c), emit, shouldStop);
+    if (c.phase === "search") {
+      const planned = await ensurePlanned(c);
+      // THE ONE GATE THIS STEP HAS, and it reads as one expression on purpose:
+      // "gate unless the demo has a published answer", exactly as bulk-ndcg and
+      // bulk-llm-ndcg do since phase 5. readTuning is null for every real
+      // account — where assertDemoAllows is a no-op — so a non-guest run takes
+      // the real search byte-for-byte as it always has. A guest with a stocked
+      // shelf replays the master's winners; a guest whose build was published
+      // WITHOUT them is refused rather than falling through to a real search on
+      // the operator's key, which is `sweep`'s lesson (lib/demo/policy).
+      const tuning = await readTuning();
+      if (tuning === null) await assertDemoAllows("autotune");
+      return tuning === null
+        ? runSearch(planned, emit, shouldStop)
+        : runReplay(planned, tuning, emit, shouldStop);
+    }
     if (c.phase === "rescore") return runRescore(c, emit, shouldStop);
     if (c.phase === "outcomes") return runOutcomes(c, emit);
     return runSnapshots(c, emit, shouldStop);
@@ -789,6 +811,245 @@ function liveQuestionState(
     );
   }
   return live;
+}
+
+// --- phase 1, replayed: the demo installs a search it did not run ------------
+//
+// Phase 6 of docs/demo-real-flow-plan.md. Autotune is the walk's last step and
+// the only one that was never blocked — with the frozen set holding it to twelve
+// questions it was affordable. A visitor now builds a sixty-question board, and
+// the SEARCH is the expensive half: one candidate rung per chunk of real
+// embedding spend, plausibly 150k–350k tokens against a 200,000-token budget.
+//
+// So for a guest whose build carries the shelf (0083), this replaces runSearch
+// and NOTHING ELSE. The overrides installed here are the master's own winners,
+// vectors included, confirmed through real retrieval on the same corpus; the
+// dirty-set re-score (phase 2), the history row and the holdout capture (phase 3)
+// and the trial snapshots (phase 4) then run unchanged, over the visitor's own
+// questions in their own workspace. Published search, live result — and
+// lib/demo/policy.PUBLISHED_SEARCH_NOTE is the sentence the panel owes them for
+// it, on PUBLISHED_REPLAY_NOTE's rule: a measurement may not imply a computation
+// that did not happen here.
+//
+// A PLANNED CHUNK WITH NOTHING BANKED IS UNRESOLVED, not skipped. The master's
+// own search found nothing for it either, so reporting it as anything else would
+// be a demo in which every chunk improves, which is a demo nobody believes.
+async function runReplay(
+  c: PlannedCursor,
+  tuning: ReplayTuning,
+  emit: Emit,
+  shouldStop: StopSignal,
+) {
+  const covered = new Set(c.covered);
+  const prepared = await prepareAutotune();
+  if (!prepared.ok) {
+    // runSearch's ending, for its reasons exactly — see the comment there.
+    emit({ doneUnits: covered.size, event: { type: "error", message: prepared.error } });
+    if (covered.size === 0) return { cursor: c, done: true, doneUnits: 0 };
+    return {
+      cursor: { ...c, phase: "rescore" as const, stopReason: "aborted" as const },
+      done: false,
+      doneUnits: covered.size,
+      mustFinish: true,
+    };
+  }
+  const { prep, summary } = prepared;
+  const chunksTotal = c.plan.length;
+  const targetsByQuestion = new Map(prepared.targets.map((t) => [t.questionId, t]));
+  const planned = new Set(c.plan.map((e) => e.chunkId));
+
+  if (covered.size === 0) {
+    emit({
+      doneUnits: 0,
+      event: {
+        type: "autotune-start",
+        targeted: prepared.targets.length,
+        chunks: chunksTotal,
+        // NOT prep.search. The config's setting describes a search that is not
+        // about to happen, and the first line of the run's log is the worst
+        // place to say something that is not true of this run.
+        search: "published",
+        apply: prep.applyMode,
+      },
+    });
+  }
+
+  // Baselined on the same rule as runSearch: a question that starts failing
+  // mid-run is this run's target from the moment it sees it, but only on a chunk
+  // the frozen plan holds.
+  for (const t of prepared.targets) {
+    if (!(t.questionId in c.baselines) && planned.has(t.sourceChunkId)) {
+      c.baselines[t.questionId] = {
+        chunkId: t.sourceChunkId,
+        metrics: t.metrics,
+        hit: t.beforeHit,
+        rank: t.beforeRank,
+        rr: t.beforeRr,
+        ndcg: t.beforeNdcg,
+      };
+    }
+  }
+
+  // The guest's own questions, by wording. The shelf's trials name questions by
+  // TEXT for the reason 0082 does — the published build ships no eval_questions,
+  // so a stored id names a row in no destination — and this is the other end of
+  // that: the board's rows were minted from the bank carrying the master's exact
+  // wording, so an equality join on it is exact.
+  const questionIds = new Map(summary.questions.map((q) => [q.question, q.questionId]));
+
+  const banked = new Map(tuning.entries.map((e) => [e.chunk, e]));
+  for (const entry of c.plan) {
+    const chunkId = entry.chunkId;
+    if (covered.has(chunkId)) continue;
+    // Between chunks, on runSearch's terms: a deadline means another slice is
+    // coming, anything else means the books have to close on what is installed.
+    if (shouldStop()) {
+      const why = shouldStop.reason?.() ?? "deadline";
+      if (why === "deadline") {
+        return { cursor: { ...c, covered: [...covered] }, done: false, doneUnits: covered.size };
+      }
+      if (why === "budget") {
+        emit({
+          doneUnits: covered.size,
+          event: {
+            type: "budget-stop",
+            searchedChunks: covered.size,
+            skippedChunks: c.plan.length - covered.size,
+            elapsedMs: STREAM_BUDGET_MS,
+          },
+        });
+      }
+      c.stopReason = why === "budget" ? "budget" : "cancelled";
+      break;
+    }
+    covered.add(chunkId);
+
+    const chunkTargets = entry.questionIds
+      .map((id) => targetsByQuestion.get(id))
+      .filter((t) => t !== undefined);
+    emit({
+      doneUnits: covered.size - 1,
+      message: `Installing chunk ${covered.size} of ${chunksTotal}`,
+      event: {
+        type: "chunk-start",
+        chunkId,
+        fileName: chunkTargets[0]?.fileName ?? "?",
+        position: chunkTargets[0]?.position ?? null,
+        index: covered.size,
+        total: chunksTotal,
+        questions: chunkTargets.length,
+      },
+    });
+
+    const shelved = banked.get(chunkId);
+    if (!shelved) {
+      emit({
+        doneUnits: covered.size,
+        event: {
+          type: "chunk-unresolved",
+          chunkId,
+          reason: "the published search found no variation that helped this chunk",
+        },
+      });
+      continue;
+    }
+
+    try {
+      await installBanked(shelved, questionIds);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Installing the published override failed.";
+      emit({
+        doneUnits: covered.size,
+        failure: message,
+        event: { type: "chunk-unresolved", chunkId, reason: message },
+      });
+      continue;
+    }
+    emit({
+      doneUnits: covered.size,
+      event: {
+        type: "chunk-published",
+        chunkId,
+        detail: shelved.detail,
+        pieces: shelved.pieces.length,
+        trials: shelved.trials.length,
+      },
+    });
+  }
+
+  return {
+    cursor: { ...c, phase: "rescore" as const, covered: [...covered] },
+    done: false,
+    doneUnits: covered.size,
+    mustFinish: true,
+  };
+}
+
+// One banked winner, written as this workspace's own override.
+//
+// THROUGH setChunkOverridePieces RATHER THAN A RAW INSERT, which is the whole
+// difference between a replay and a fake: it stamps the config's
+// retrieval_changed_at and writes the change-log line, so every result scored
+// before this moment goes stale and phase 2 re-scores it. Insert the rows
+// directly and the fingerprint never moves — the dirty set comes back empty, the
+// history row reports nothing changed, and the visitor watches a run that did
+// nothing.
+//
+// The trials are the chunk card's "Models tried" list, and they are inserted
+// ONLY when the chunk has none: a second press of the button would otherwise
+// stack another copy of the same frozen aggregate under it.
+async function installBanked(
+  entry: ReplayTuningEntry,
+  questionIds: ReadonlyMap<string, string>,
+): Promise<void> {
+  await setChunkOverridePieces(
+    entry.chunk,
+    entry.model,
+    entry.kind,
+    entry.pieces.map((p) => ({
+      text: p.text,
+      dimension: p.dimension,
+      embedding: unpackEmbedding(p.embedding),
+      tokenStart: p.tokenStart,
+      tokenEnd: p.tokenEnd,
+    })),
+    entry.detail,
+  );
+
+  if (entry.trials.length === 0) return;
+  const chunk = await getModelTrialChunk(entry.chunk);
+  if (!chunk) return; // not in this config's corpus: nothing to hang a trial on
+  if ((await listModelTrials(entry.chunk)).length > 0) return;
+  for (const t of entry.trials) {
+    // RE-KEYED TO THIS WORKSPACE'S QUESTIONS, and cut down to them. A banked
+    // outcome whose wording is not on the visitor's board names a question that
+    // does not exist here, and its drilldown would 404; the counts are then
+    // recomputed from what survives rather than carried, so the row's headline
+    // and its expansion cannot disagree.
+    const results = t.results
+      .map((r) => {
+        const questionId = questionIds.get(r.question);
+        return questionId === undefined ? null : { ...r, questionId };
+      })
+      .filter((r) => r !== null);
+    if (results.length === 0) continue;
+    await insertModelTrial({
+      sourceChunkId: entry.chunk,
+      documentEmbeddingId: chunk.documentEmbeddingId,
+      baselineModel: t.baselineModel,
+      trialModel: t.trialModel,
+      kind: t.kind as "model" | "size" | "size+model",
+      chunkSize: t.chunkSize,
+      chunkOverlap: t.chunkOverlap,
+      pieceCount: t.pieceCount,
+      k: t.k,
+      poolChunkIds: t.pool,
+      questionCount: results.length,
+      hitCount: results.filter((r) => r.newHit).length,
+      storedHitCount: results.filter((r) => r.storedHit).length,
+      results,
+    });
+  }
 }
 
 // --- phase 2: the dirty-set re-score ----------------------------------------

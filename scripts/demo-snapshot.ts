@@ -64,12 +64,15 @@ import {
 import { resolveConfig, withConfig } from "../lib/rag/activeConfig";
 import { ndcg } from "../lib/rag/evalMetrics";
 import { captureReplayMatrix } from "../lib/demo/captureMatrix";
-import { writeBoard, writeIdeals, writeLlmRankings, writeMatrix } from "../lib/demo/replay";
+import { packTuning, tuningCensus } from "../lib/demo/captureTuning";
+import { writeBoard, writeIdeals, writeLlmRankings, writeMatrix, writeTuning } from "../lib/demo/replay";
 import {
   BOARD_KEY,
   DEMO_MATRIX_MAX_BYTES,
   DEMO_RANKINGS_MAX_BYTES,
+  DEMO_TUNING_MAX_BYTES,
   rankingsBytes,
+  tuningBytes,
   type ReplayBoard,
 } from "../lib/demo/replayCore";
 import { buildLlmRanking } from "../lib/rag/ranking";
@@ -627,6 +630,7 @@ async function main() {
   const boardChunks = [...new Set(tunable.map((t) => t.chunk))];
   const ideals = await idealCensus(configId, boardChunks);
   const llmRanks = await llmRankingCensus(configId, boardChunks);
+  const tuning = await tuningCensus(configId, boardChunks, cfg.base_model);
 
   console.log(`\nmaster    ${master}`);
   console.log(`snapshot  ${snapshot}  (${profile.email})\n`);
@@ -742,6 +746,20 @@ async function main() {
         : llmMissing > 0
           ? " → skipped, so that step greys out for a guest"
           : ""),
+  );
+
+  // THE BANKED TUNING (phase 6). Free, like the ideals: the master autotuned
+  // these chunks long ago, so this is a census and its only failure mode is a
+  // shortfall. A shortfall is not a defect either — a board chunk the master
+  // never overrode is one its own search found nothing for, and the replayed run
+  // reports it unresolved exactly as a real one would. What matters is the
+  // number reaching ZERO, which is a build whose last step refuses.
+  console.log(
+    `  autotune winners: ${tuning.overridden - tuning.foreign}/${tuning.boardChunks} board chunks ` +
+      `carry a bankable one (${tuning.overrideRows} override rows, ${tuning.trials} saved trial(s))` +
+      (tuning.foreign > 0
+        ? `, ${tuning.foreign} dropped — won under a provider the demo has no key for`
+        : ""),
   );
 
   // Before the dry-run exit, so an operator sees the refusal without having to
@@ -989,6 +1007,31 @@ async function main() {
     );
   }
 
+  // THE TUNING THE WALK'S LAST STEP INSTALLS (phase 6 of
+  // docs/demo-real-flow-plan.md).
+  //
+  // Banked on the MASTER and before the clone, exactly like the board and the two
+  // rankings above and for their reason: every entry names a chunk, and clone
+  // step 5j is what rewrites those ids into a destination's space.
+  //
+  // Unconditional and free — the master's own autotune paid for this search
+  // months ago, and what travels is the winner it confirmed. Board-scoped and
+  // never wider (§6): the other ~200 override rows name chunks no visitor can
+  // reach.
+  const bankedTuning = await packTuning(configId, boardChunks, cfg.base_model);
+  await writeTuning(master, bankedTuning, privilegedSql);
+  const tuningSize = tuningBytes(bankedTuning);
+  console.log(
+    `banked the autotune winner for ${bankedTuning.entries.length} board chunk(s) at ` +
+      `${(tuningSize / 1024).toFixed(0)} KB\n`,
+  );
+  if (tuningSize > DEMO_TUNING_MAX_BYTES) {
+    console.log(
+      `⚠ the banked tuning is ${(tuningSize / 1024).toFixed(0)} KB, over the ` +
+        `${(DEMO_TUNING_MAX_BYTES / 1024).toFixed(0)} KB this is meant to stay under.\n`,
+    );
+  }
+
   const summary = await cloneSeedWorkspace(master, snapshot, {
     onlyConfigId: configId,
     replaceDestination: true,
@@ -1047,6 +1090,7 @@ async function main() {
       `${summary.matrixPairs === 0 ? "NO replay matrix" : `a replay matrix over ${summary.matrixPairs} pairs`}, ` +
       `${summary.boardChunks === 0 ? "NO board scope" : `a board scoped to ${summary.boardChunks} chunks`}, ` +
       `${summary.bankedIdeals} banked ideals, ${summary.bankedLlmRankings} banked LLM re-rankings, ` +
+      `${summary.bankedTuning === 0 ? "NO banked tuning" : `banked tuning for ${summary.bankedTuning} chunks`}, ` +
       `${summary.ledgerRows === 0 ? "NO savings ledger" : `${summary.ledgerRows} savings row`}\n`,
   );
   // The payoff readout's money is the whole point of §4's bottom line, and its
@@ -1089,6 +1133,17 @@ async function main() {
       "⚠ no LLM re-rankings reached the snapshot, so step 5 of the walk greys out. The\n" +
         "  build is still valid — nothing else reads them, and no headline number moves —\n" +
         "  but re-publish without --skip-llm-rank to buy them.\n",
+    );
+  }
+  // AND THE TUNING SHELF (phase 6), whose absence is the loudest of the three:
+  // unlike the two ranking shelves this one is captured on EVERY publish, so a
+  // zero here means the remap dropped everything rather than that a flag was
+  // passed — and the walk's last step stops being live at all.
+  if (summary.bankedTuning === 0) {
+    console.log(
+      "⚠ no banked tuning reached the snapshot, so ⚙ Auto tune is BLOCKED for a guest and\n" +
+        "  the walk ends at step 5. Either the master has never autotuned a board chunk, or\n" +
+        "  the ids did not survive the clone's remap — check step 5j.\n",
     );
   }
   // Louder than the count above, because a build with no matrix is the one
