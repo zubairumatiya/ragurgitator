@@ -1379,14 +1379,25 @@ export function EvalDashboard() {
           )}
 
           {/* Disappears the moment any question exists, added by hand or
-              generated. The two cases read differently: with chunks below, the
-              page is working and just has nothing scored yet; with none, there
-              is genuinely nothing ingested under this config. */}
+              generated. The three cases read differently: with chunks below,
+              the page is working and just has nothing scored yet; with none,
+              there is genuinely nothing ingested under this config.
+              AND IN THE DEMO THIS IS THE FIRST THING A VISITOR READS. §3.2
+              emptied the published build, so an empty board stopped being an
+              edge case and became the demo's opening screen — and the sentence
+              it had been showing all along points at "Bulk actions → Add", the
+              one button a guest is not allowed to press. Pointing a visitor at
+              a disabled control is exactly the failure §5 greyed the controls
+              out to end, so the demo gets the sentence for the button that
+              works. Keyed on the `generate` block rather than on isGuest(),
+              like every other consumer of this map. */}
           {summary.total === 0 && (
             <p className="text-sm text-zinc-500">
-              {summary.chunkCount > 0
-                ? "No eval questions yet — your chunks are listed below. Add one by hand on any chunk, or pick a difficulty in Bulk actions → Add to generate them."
-                : "Nothing ingested under this config yet. Add a document, and its chunks will appear here."}
+              {summary.chunkCount === 0
+                ? "Nothing ingested under this config yet. Add a document, and its chunks will appear here."
+                : summary.demoBlocked?.generate
+                  ? "No eval questions yet — the chunks below are the board. Bulk actions → Add question → Add cached fills it from the published question bank, for free; then Score pending retrieves them against the whole corpus."
+                  : "No eval questions yet — your chunks are listed below. Add one by hand on any chunk, or pick a difficulty in Bulk actions → Add to generate them."}
             </p>
           )}
 
@@ -1500,18 +1511,26 @@ export function EvalDashboard() {
                     )}
                     {/* Closed on open: these cards are here to be read, and a
                         few hundred of them between a visitor and the rest of
-                        the page is the clutter the split exists to remove. */}
-                    <details className="group">
-                      {/* list-none alone leaves Safari's marker in place, so
-                          the caret is drawn by hand. */}
-                      <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 hover:text-zinc-700 [&::-webkit-details-marker]:hidden dark:hover:text-zinc-300">
-                        <Caret />
-                        Frozen — {split.frozenCount}
-                      </summary>
-                      <div className="mt-3 flex flex-col gap-3">
-                        {split.frozen.map((group) => renderGroup(group, summary))}
-                      </div>
-                    </details>
+                        the page is the clutter the split exists to remove.
+                        Absent entirely when there is nothing frozen, which is
+                        the ordinary case since §3.2 emptied the build: the
+                        board is now scoped by the published board row, so a
+                        guest has a scope and no frozen questions at all, and a
+                        "Frozen — 0" heading would be a section advertising its
+                        own emptiness. */}
+                    {split.frozenCount > 0 && (
+                      <details className="group">
+                        {/* list-none alone leaves Safari's marker in place, so
+                            the caret is drawn by hand. */}
+                        <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 hover:text-zinc-700 [&::-webkit-details-marker]:hidden dark:hover:text-zinc-300">
+                          <Caret />
+                          Frozen — {split.frozenCount}
+                        </summary>
+                        <div className="mt-3 flex flex-col gap-3">
+                          {split.frozen.map((group) => renderGroup(group, summary))}
+                        </div>
+                      </details>
+                    )}
                   </>
                 )}
               </div>

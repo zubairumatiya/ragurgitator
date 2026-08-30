@@ -18,25 +18,39 @@
 // shipped with the warning firing, because nothing could act on it: re-publishing
 // does not change what the master banked.
 //
-// WHAT IT IS NOW. The publish CONSTRUCTS the bank out of the build's own frozen
-// questions and DELETES those questions from the build, so pressing the button is
-// an addition rather than a near-duplicate. Both halves are needed:
-// selectNewQuestions drops a banked question whose wording is already labeled to
-// that chunk, so banking without deleting is how a bank counts twelve and adds
-// three.
+// WHAT IT IS NOW. The publish CONSTRUCTS the bank out of the build's own
+// questions and then EMPTIES THE BUILD, so pressing the button is an addition
+// rather than a near-duplicate. Both halves are needed: selectNewQuestions drops
+// a banked question whose wording is already labeled to that chunk, so banking
+// without deleting is how a bank counts twelve and adds three.
+//
+// AND SINCE §3.2 OF docs/demo-real-flow-plan.md THE DELETE IS TOTAL. The build no
+// longer ships a board of live questions with a small bank beside it; it ships an
+// EMPTY board and a bank of sixty, and the visitor's first press is what puts
+// questions on it. So this module's delete stopped being "take the banked ones
+// back out" and became "leave nothing behind" — every eval_questions row in the
+// published account goes, and eval_labels, eval_results, eval_rankings and
+// eval_question_embeddings cascade with it. That cascade is the whole reason the
+// cold-start payload collapses.
+//
+// ORDER MATTERS, AND IT IS THE CALLER'S JOB: copy, then CORRECT, then empty.
+// scripts/demo-snapshot's freezePublishedRun reads the copied scores back to
+// compute the "As published" card, so it has to run before this does — the
+// headline is over what the master measured, not over what a visitor has built,
+// and there is nothing left to measure afterwards.
 //
 // WHY IT RUNS ON THE SNAPSHOT, AFTER THE CLONE, rather than on the master before
 // it. The master keeps every question it paid for — this is a property of the
 // BUILD, not of the corpus. And in the snapshot the selection is already written
-// down as data: step 4d froze all-but-twelve, so "frozen" is the candidate set
-// and "not frozen" is the tunable set, with no second copy of that decision to
+// down as data: clone step 5g remapped the published BOARD into the snapshot's id
+// space, so the scope is a row rather than a second copy of a decision that could
 // drift. Every id here is a snapshot id, so nothing needs mapping.
 import "server-only";
 
 import { createHash } from "node:crypto";
 
 import { privilegedSql } from "@/lib/db";
-import { BANKED_QUESTION_CAP, FROZEN_REASON } from "@/lib/demo/frozen";
+import { BANKED_QUESTION_CAP } from "@/lib/demo/frozen";
 import { composeBank } from "@/lib/demo/publishedBankCore";
 import { QUOTAS } from "@/lib/demo/tunable";
 import { QUESTION_PROMPT_VERSION, questionRequestParams, type Difficulty } from "@/lib/rag/eval";
@@ -63,35 +77,56 @@ export type BankPick = BankCandidateRow & { chunkText: string };
 
 export type BankReport = {
   banked: number;
-  removed: number;
+  removed: number; // eval_questions rows deleted — ALL of them, not just the banked
+  remaining: number; // and what is left, which must be zero
   documents: number;
+  difficulties: string[];
   inherited: number; // bank rows the publish clone copied, replaced by these
   tiers: { tier: number; n: number }[];
 };
 
-// WHICH TWELVE. Three rules, and each one is answering a complaint the published
+// WHICH SIXTY. Three rules, and each one is answering a complaint the published
 // build actually earned:
 //
-//   NOT A CHUNK THE TUNABLE SET ALREADY USES. Autotune reshapes CHUNKS, so a
-//     second question on a chunk that already has one gives it nothing new to
-//     search. This is tunable.ts's "one question per source chunk" rule applied
-//     across the two sets instead of within one.
-//   THE TUNABLE SET'S OWN COMPOSITION. Both halves of what a guest can move are
-//     weighted by the same QUOTAS, so the twelve they add look like the twelve
-//     they arrived with rather than like whatever was left over.
-//   SPREAD ACROSS DOCUMENTS, counted across the quotas rather than inside each
-//     one. The bank this replaced was twelve questions about one file.
+//   THE BOARD, AND ONLY THE BOARD. The candidate set is every question labeled to
+//     a chunk in the published board scope (§3.1). It used to be the complement —
+//     "not a chunk the tunable set already uses" — because the bank was a set of
+//     SPARES sitting beside a live build. There is no live build any more: the
+//     board's own questions are the walk, so excluding them would bank the one
+//     set a visitor must be able to reach.
+//   ONE ROW PER (CHUNK, DIFFICULTY). question_cache is keyed by
+//     (…, difficulty, text_hash, …, slot), and the master's second question about
+//     a passage is a different DIFFICULTY rather than a harder restatement (Q5).
+//     So a chunk contributes its easy one and its medium one and stops — two
+//     wordings of the same difficulty about the same passage would collide on the
+//     key, and `slot` exists for a case this selection does not create.
+//   THE BOARD'S OWN COMPOSITION AND SPREAD, unchanged: the same QUOTAS
+//     lib/demo/tunable.ts weights the board by, and a document counter shared
+//     across every quota. On today's corpus the two rules meet exactly — 30 board
+//     chunks × 2 difficulties = 60 = the cap — so composeBank has nothing to
+//     choose between; it is kept because a corpus with three difficulties per
+//     chunk would put it back in charge, and a bank chosen worst-first is the
+//     failure it was written for.
 //
 // The last two live in composeBank (publishedBankCore.ts), which is pure and
-// tested; this query's job is to hand it one candidate per eligible chunk in a
-// stable order. Ordering is md5(id) at every tie, matching tunable.ts: stable
-// across re-publishes of an unchanged build, and uncorrelated with ingest order
-// (which correlates with document, which would defeat the spread).
+// tested; this query's job is to hand it one candidate per eligible
+// (chunk, difficulty) in a stable order. Ordering is md5(id) at every tie,
+// matching tunable.ts: stable across re-publishes of an unchanged build, and
+// uncorrelated with ingest order (which correlates with document, which would
+// defeat the spread).
+//
+// `board` is the snapshot's own chunk ids, read back off the demo_replay row
+// clone step 5g remapped. An EMPTY board returns nothing rather than falling
+// through to the whole corpus: a build whose board did not survive the remap must
+// publish an empty bank the operator is warned about, not a bank of 60 arbitrary
+// questions that looks exactly like a working one.
 export async function selectBankable(
   configId: string,
   baseModel: string,
+  board: string[],
   cap: number = BANKED_QUESTION_CAP,
 ): Promise<BankPick[]> {
+  if (board.length === 0) return [];
   let table: string;
   try {
     table = chunksTable(baseModel, modelDimension(baseModel));
@@ -99,17 +134,7 @@ export async function selectBankable(
     return [];
   }
   const candidates = await privilegedSql.unsafe<BankCandidateRow[]>(
-    `with tunable_chunks as (
-       select distinct l.source_chunk_id as chunk
-         from eval_labels l
-         join document_embeddings de on de.id = l.document_embedding_id
-        where de.config_id = $1
-          and not exists (
-            select 1 from config_question_ignores i
-             where i.config_id = $1 and i.eval_question_id = l.eval_question_id
-          )
-     ),
-     latest as (
+    `with latest as (
        select distinct on (r.eval_label_id, r.k)
               r.eval_question_id as id,
               coalesce(r.found_rank, 99) as tier,
@@ -124,22 +149,20 @@ export async function selectBankable(
          join eval_questions q on q.id = r.eval_question_id
         where de.config_id = $1
           and r.retrieval_state = 'baseline' and not r.is_baseline
-          -- The candidate set IS the frozen set: step 4d wrote it, so this asks
-          -- the build what it published rather than re-deriving the twelve.
-          and exists (
-            select 1 from config_question_ignores i
-             where i.config_id = $1 and i.eval_question_id = q.id and i.reason = $2
-          )
-          and l.source_chunk_id not in (select chunk from tunable_chunks)
+          -- THE SCOPE, and the only one. The frozen/tunable split used to be the
+          -- candidate boundary here; the publish is about to delete both halves,
+          -- so the board row is what says which passages the walk is over.
+          and l.source_chunk_id = any($2::uuid[])
         order by r.eval_label_id, r.k, r.scored_at desc
      ),
-     -- One per chunk: worst-scoring first, then whichever carries an expected
-     -- answer. The answer is a PREFERENCE and not a filter — question_cache's
-     -- column is nullable and the eval scores retrieval, so a question without
-     -- one is still worth adding; it is just the weaker of two equals.
-     per_chunk as (
-       select distinct on (chunk) * from latest
-        order by chunk, tier desc, (expected_answer is null), md5(id::text)
+     -- One per (chunk, difficulty): worst-scoring first, then whichever carries an
+     -- expected answer. The answer is a PREFERENCE and not a filter —
+     -- question_cache's column is nullable and the eval scores retrieval, so a
+     -- question without one is still worth banking; it is just the weaker of two
+     -- equals.
+     per_pair as (
+       select distinct on (chunk, difficulty) * from latest
+        order by chunk, difficulty, tier desc, (expected_answer is null), md5(id::text)
      )
      select p.id::text          as "questionId",
             p.question          as question,
@@ -149,19 +172,19 @@ export async function selectBankable(
             p.document_id::text as "documentId",
             d.file_name         as "fileName",
             p.tier::int         as tier
-       from per_chunk p
+       from per_pair p
        join documents d on d.id = p.document_id
       order by p.tier desc, md5(p.id::text)`,
-    [configId, FROZEN_REASON] as never[],
+    [configId, board] as never[],
   );
 
   const picks = composeBank(candidates, QUOTAS, cap);
   if (picks.length === 0) return [];
 
-  // The chunk text last, and only for the twelve: it is what the bank is KEYED
+  // The chunk text last, and only for what survived: it is what the bank is KEYED
   // by (sha256 of the exact text, 0055) and what the token estimate re-prices the
   // generation from, but pulling it for every candidate would drag the whole
-  // corpus through the script to use 5% of it.
+  // corpus through the script to use a fraction of it.
   const texts = await privilegedSql.unsafe<{ id: string; text: string }[]>(
     `select id::text as id, "text" from "${table}" where id = any($1::uuid[])`,
     [picks.map((p) => p.chunkId)] as never[],
@@ -219,13 +242,23 @@ function usageFor(pick: BankPick, llmModel: string): { input: number; output: nu
   };
 }
 
-// Replace the snapshot's question bank with `picks`, and take those questions out
-// of the published build.
+// Replace the snapshot's question bank with `picks`, and EMPTY the published
+// build's question set.
 //
 // ONE TRANSACTION, because the two halves are one fact: a banked question still
 // sitting in the build is a row "Add cached" will count and then decline to add
 // (selectNewQuestions dedupes on wording), and a deleted question with no bank
 // row behind it is a question the publish simply lost.
+//
+// THE DELETE IS THE WHOLE BUILD, not the picks (§3.2). Deleting only the sixty
+// would ship a board of 400 questions a visitor did not add and cannot move,
+// under a banner saying the walk starts empty. Everything else about a question —
+// its label, its published score, its truth ranking, its frozen-ignore row, its
+// embedding — hangs off eval_questions and cascades, which is what collapses the
+// cold-start payload from 353 KB to a board with nothing on it.
+//
+// The picks are read out of the build BEFORE this runs (selectBankable) and are
+// carried here as values, so the delete cannot take the bank with it.
 //
 // The inherited rows go first. The publish clone's step 4e has already copied
 // whatever the master had banked for these chunks; leaving it would mean the
@@ -240,11 +273,24 @@ export async function seedPublishedBank(
     const inherited = await tx`
       delete from question_cache where user_id = ${snapshotId}
     `;
+    // NOTHING BANKED, NOTHING DELETED — deliberately, and it is the one place
+    // this function declines to do half its job. A build with no bank and no
+    // questions is a demo with no way to put anything on the board; leaving the
+    // copied questions in place ships the PREVIOUS shape (a full, scoped board)
+    // while the publish prints the warning that says why. A broken walk beats a
+    // blank one.
     if (picks.length === 0) {
+      const [{ count: remaining }] = await tx<{ count: number }[]>`
+        select count(*)::int as count
+          from eval_questions q join documents d on d.id = q.document_id
+         where d.user_id = ${snapshotId}
+      `;
       return {
         banked: 0,
         removed: 0,
+        remaining,
         documents: 0,
+        difficulties: [],
         inherited: inherited.count ?? 0,
         tiers: [],
       };
@@ -258,8 +304,8 @@ export async function seedPublishedBank(
         difficulty: p.difficulty,
         text_hash: hashText(p.chunkText),
         prompt_version: QUESTION_PROMPT_VERSION,
-        // Always 0: the selection is one question per chunk, so no two picks
-        // share a (hash, difficulty), and the inherited rows are already gone.
+        // Always 0: the selection is one question per (chunk, difficulty), so no
+        // two picks share a (hash, difficulty), and the inherited rows are gone.
         slot: 0,
         question: p.question,
         expected_answer: p.expectedAnswer,
@@ -284,10 +330,19 @@ export async function seedPublishedBank(
       on conflict do nothing
     `;
 
-    // The labels, the published scores and the frozen-ignore row all cascade off
-    // eval_questions, so this is the whole removal.
+    // EVERY question in the published account, scoped by document owner because
+    // that is the only column eval_questions carries — it has no user_id, and the
+    // config map that would scope it lives one join further out through
+    // eval_labels, which a question with no label would slip through.
     const removed = await tx`
-      delete from eval_questions where id = any(${picks.map((p) => p.questionId)}::uuid[])
+      delete from eval_questions q
+       using documents d
+       where d.id = q.document_id and d.user_id = ${snapshotId}
+    `;
+    const [{ count: remaining }] = await tx<{ count: number }[]>`
+      select count(*)::int as count
+        from eval_questions q join documents d on d.id = q.document_id
+       where d.user_id = ${snapshotId}
     `;
 
     const byTier = new Map<number, number>();
@@ -299,7 +354,9 @@ export async function seedPublishedBank(
     return {
       banked: banked.count ?? 0,
       removed: removed.count ?? 0,
+      remaining,
       documents: new Set(picks.map((p) => p.documentId)).size,
+      difficulties: [...new Set(picks.map((p) => p.difficulty))].sort(),
       inherited: inherited.count ?? 0,
       tiers,
     };

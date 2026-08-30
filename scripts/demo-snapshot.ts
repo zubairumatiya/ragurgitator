@@ -53,7 +53,7 @@ import { resolveConfig, withConfig } from "../lib/rag/activeConfig";
 import { ndcg } from "../lib/rag/evalMetrics";
 import { captureReplayMatrix } from "../lib/demo/captureMatrix";
 import { writeBoard, writeMatrix } from "../lib/demo/replay";
-import { DEMO_MATRIX_MAX_BYTES } from "../lib/demo/replayCore";
+import { BOARD_KEY, DEMO_MATRIX_MAX_BYTES, type ReplayBoard } from "../lib/demo/replayCore";
 import { runKeyModelSweep } from "../lib/rag/keyModelSweep";
 import {
   PUBLISHED_SWEEP_MAX_BYTES,
@@ -858,13 +858,24 @@ async function main() {
     tunableQuestionIds: tunable.map((t) => t.id),
   });
 
-  // THE QUESTIONS "ADD CACHED" WILL HAND OUT (docs/demo-question-bank-plan.md).
+  // THE "AS PUBLISHED" CARD, MEASURED BEFORE THE BUILD IS EMPTIED.
   //
-  // Runs on the SNAPSHOT, after the copy, because that is where the two sets it
-  // reads are already written down: the tunable twelve are the questions with no
-  // frozen-ignore row, and everything else is a candidate. It replaces the bank
-  // the clone inherited from the master with twelve chosen ones and removes those
-  // twelve from the build — see lib/demo/publishedBank.ts for why both halves.
+  // Moved above the bank by §3.2, and the order is now load-bearing rather than
+  // incidental: this reads the copied eval_results and eval_rankings back to
+  // compute the headline, and the next step deletes every one of them. Run it
+  // afterwards and it finds nothing and prints "no scores were published" over a
+  // build that published 460 of them. Copy, then CORRECT, then empty.
+  await freezePublishedRun(snapshot, summary.runs);
+
+  // THE QUESTIONS "ADD CACHED" WILL HAND OUT — WHICH IS NOW THE WHOLE BOARD
+  // (docs/demo-question-bank-plan.md, re-cut by §3.2 of the real-flow plan).
+  //
+  // Runs on the SNAPSHOT, after the copy, because that is where both things it
+  // reads are already written down: the board scope as the demo_replay row step
+  // 5g remapped, and the questions as the rows the clone just minted. It replaces
+  // the bank the clone inherited from the master with sixty chosen ones and then
+  // DELETES EVERY QUESTION IN THE BUILD — see lib/demo/publishedBank.ts for why
+  // both halves, and why the delete is total rather than the picks.
   //
   // Nothing on the master changes, so a publish is still a copy: this only edits
   // the account it just wrote.
@@ -872,14 +883,24 @@ async function main() {
     select id, llm_model from configs where user_id = ${snapshot} limit 1
   `;
   if (!snapCfg) die(`the publish wrote no config into ${snapshot}.`);
-  const picks = await selectBankable(snapCfg.id, cfg.base_model);
+  // The board in the SNAPSHOT's id space. Read back rather than derived from
+  // `tunable` above, whose ids are the master's: this is the same row a guest's
+  // getSummary will scope on, so a remap that dropped ids shows up here as a
+  // short bank in front of the operator rather than as a half-empty board in a
+  // visitor's browser.
+  const [boardRow] = await privilegedSql<{ payload: ReplayBoard }[]>`
+    select payload from demo_replay
+     where user_id = ${snapshot} and kind = 'board' and key = ${BOARD_KEY}
+  `;
+  const board = boardRow?.payload.chunks ?? [];
+  const picks = await selectBankable(snapCfg.id, cfg.base_model, board);
   const bank = await seedPublishedBank(snapshot, snapCfg.llm_model, picks);
 
   console.log("published:");
   console.log(
     `  ${summary.configs} config, ${summary.documents} documents, ${summary.chunks} chunks, ` +
-      `${summary.questions - bank.removed} questions, ${summary.results} scores, ` +
-      `${summary.rankings} graded rankings, ${summary.frozen - bank.removed} frozen, ` +
+      `${bank.remaining} questions on the board, ${summary.results} scores measured, ` +
+      `${summary.rankings} graded rankings, ${bank.removed} questions emptied out, ` +
       `${summary.cachedAnswers} cached answers, ` +
       `${bank.banked} banked questions, ` +
       `${summary.shadowEvents} shadow events (${summary.shadowQueued} unjudged, ` +
@@ -933,23 +954,26 @@ async function main() {
   // autotune anything to find.
   if (bank.banked === 0) {
     console.log(
-      "\u26a0 no banked questions published \u2014 nothing frozen in this build was eligible, so a\n" +
-        "  guest's \u201cAdd cached\u201d will find nothing to add and the button is dead. Check that the\n" +
-        "  published config has scored questions on chunks the tunable set does not use.\n",
+      "\u26a0 no banked questions published \u2014 nothing on the board was eligible, so a guest's\n" +
+        "  board stays EMPTY and \u201cAdd cached\u201d has nothing to put on it. The build's own\n" +
+        "  questions were left in place so the demo still shows something; check that the\n" +
+        "  board scope reached the snapshot and that its chunks carry scored questions.\n",
     );
   } else {
     const tierLabel = (t: number) => (t === 99 ? "missed" : `rank ${t}`);
     console.log(
-      `  the bank a guest can add: ${bank.banked} question(s) over ${bank.documents} document(s) ` +
-        `(${bank.tiers.map((t) => `${t.n} ${tierLabel(t.tier)}`).join(", ")}), removed from the\n` +
-        `  published set so adding them is an addition \u2014 a guest's tunable set tops out at ` +
-        `${tunable.length + bank.banked}, which is what autotune runs over.\n`,
+      `  the board a guest builds: ${bank.banked} banked question(s) over ${bank.documents} document(s) ` +
+        `(${bank.tiers.map((t) => `${t.n} ${tierLabel(t.tier)}`).join(", ")}; ` +
+        `${bank.difficulties.join(" + ")}), and the\n  published build emptied of all ` +
+        `${bank.removed} of its own \u2014 so a guest arrives at a board with nothing on it and\n` +
+        `  \u201cAdd cached\u201d is what fills it, up to ${bank.banked}, which is what scoring, nDCG and ` +
+        `autotune then run over.\n`,
     );
     if (bank.banked < BANKED_QUESTION_CAP) {
       console.log(
-        `\u26a0 only ${bank.banked} of ${BANKED_QUESTION_CAP} banked \u2014 the build ran out of frozen questions on ` +
-          `chunks the\n  tunable set does not already use. The demo still works; it just has ` +
-          `less to add.\n`,
+        `\u26a0 only ${bank.banked} of ${BANKED_QUESTION_CAP} banked \u2014 the board's ${board.length} chunk(s) did not ` +
+          `supply two scored\n  questions each. The demo still works; the board a guest can ` +
+          `build is just smaller.\n`,
       );
     }
     // The old failure mode, kept as a check rather than as a warning nothing
@@ -958,17 +982,20 @@ async function main() {
     if (bank.documents < 2) {
       console.log(
         `\u26a0 all ${bank.banked} banked questions come from ${bank.documents} document(s) \u2014 ` +
-          `\u201cAdd cached\u201d would hand\n  a guest twelve questions about one file. ` +
+          `\u201cAdd cached\u201d would hand\n  a guest a board about one file. ` +
           `Check what else in this build is eligible.\n`,
       );
     }
-    // Belt and braces on the half that is invisible afterwards: a banked question
-    // still sitting in the published set is one fillChunksFromCache will count
-    // and then decline to add, because selectNewQuestions dedupes on wording.
-    if (bank.removed !== bank.banked) {
+    // The half that is invisible afterwards, and it inverted with §3.2: the risk
+    // used to be a banked question LEFT in the build (fillChunksFromCache would
+    // count it and then decline to add it, because selectNewQuestions dedupes on
+    // wording). Now the delete is total, so ANY survivor is that same bug — a
+    // question sitting on a board the demo promises is empty.
+    if (bank.remaining !== 0) {
       console.log(
-        `\u26a0 banked ${bank.banked} question(s) but removed ${bank.removed} from the build. Any that\n` +
-          `  stayed are wording a guest already has, so \u201cAdd cached\u201d will silently skip them.\n`,
+        `\u26a0 ${bank.remaining} question(s) survived the empty-out. A guest's board is meant to ` +
+          `start blank;\n  these will be on it, unadded and \u2014 if their wording is banked \u2014 ` +
+          `silently unaddable.\n`,
       );
     }
   }
@@ -1072,7 +1099,6 @@ async function main() {
     );
   }
 
-  await freezePublishedRun(snapshot, summary.runs);
   await armAutotune(snapshot);
 
   const ok = await verifyFingerprints(snapshot);

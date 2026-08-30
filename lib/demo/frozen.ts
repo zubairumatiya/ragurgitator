@@ -41,32 +41,28 @@ export const FROZEN_REASON = "demo_frozen";
 export const PUBLISHED_RUN_NOTE = "as published";
 
 // HOW MANY BANKED QUESTIONS A PUBLISH CARRIES (phase 6.1, re-cut by
-// docs/demo-question-bank-plan.md).
+// docs/demo-question-bank-plan.md, widened by §3.2 of
+// docs/demo-real-flow-plan.md).
 //
-// The third piece of the demo's scope, and the least obvious one. `Add cached` is
-// the ONLY way a guest can add a question — generation needs a key the demo does
-// not carry — so the size of the published question_cache is a hard ceiling on
-// how far the tunable set can grow, and therefore on what autotune runs over.
+// The third piece of the demo's scope, and since §3.2 the ONLY one with anything
+// in it. `Add cached` is the only way a guest can add a question — generation
+// needs a key the demo does not carry — so the size of the published
+// question_cache is a hard ceiling on how far the board can grow, and therefore
+// on what scoring, nDCG and autotune run over.
 //
-// TWELVE, to match the tunable set: the worst case a guest can reach is 24
-// questions, exactly twice the number phase 4 sized and measured autotune
-// against.
-//
-// IT USED TO BE A CAP ON SOMEONE ELSE'S SET, AND IS NOW THE SIZE OF THIS ONE.
-// Clone step 4e copied whatever question_cache rows the master happened to hold
-// for published chunk text and took the first twelve, so every property a visitor
-// would notice — which documents the questions were about, whether the chunk
-// already had one — was an accident of the master's generation history. It
-// produced twelve questions about one file, three of them on chunks that already
-// carried a tunable question. lib/demo/publishedBank.ts now CONSTRUCTS the twelve
-// at publish time out of the build's own frozen questions and removes them from
-// the build, so this number is what the bank IS rather than what it was trimmed
-// to.
+// SIXTY, WHICH IS THE WALK ITSELF. It used to be a cap on someone else's set,
+// then the size of a spare bank sitting beside a build of 460 live questions.
+// The build now ships with NO questions at all: the publish banks these and
+// deletes every eval_questions row it just copied, so a guest's board starts
+// empty and the first press of "Add cached" is what fills it. Sixty is not a
+// budget, it is the board — the 30 chunks lib/demo/tunable.ts selects, times the
+// two difficulties the master generated for each of them (Q3: 236 chunks, 472
+// labels, exactly two per chunk).
 //
 // Step 4e still applies it, because that is the step that copies the snapshot's
 // bank into each guest and a cap there is what keeps a hand-edited snapshot from
 // widening the scope silently.
-export const BANKED_QUESTION_CAP = 12;
+export const BANKED_QUESTION_CAP = 60;
 
 // HOW MUCH OF THE SHADOW LOG A PUBLISH CARRIES (phase 6.2).
 //

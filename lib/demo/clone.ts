@@ -226,7 +226,7 @@ export type CloneSummary = {
   rankings: number; // graded-nDCG truth rows — the size of the drilldown set
   frozen: number; // questions a visitor may look at but not move (step 4d)
   bankedQuestions: number; // spare wording "Add cached" can hand out for free (step 4e)
-  bankedAvailable: number; // passages that HAD banked wording, before the cap
+  bankedAvailable: number; // (passage, difficulty) pairs that HAD banked wording, pre-cap
   cachedAnswers: number;
   shadowEvents: number; // judged + queued shadow rows behind the calibration curve
   shadowQueued: number; // of those, the ones arriving unjudged for the human queue
@@ -829,9 +829,10 @@ export async function cloneSeedWorkspace(
     //   3. BANKED_QUESTION_CAP — the one that is a spend limit rather than a
     //      correctness filter. A question a guest ADDS is unfrozen by
     //      construction (only a publish writes FROZEN_REASON), so every row
-    //      copied here is a row autotune may later run over, and the ceiling is
-    //      12 + 12 written down in lib/demo/frozen.ts next to the other two
-    //      halves of the same scope.
+    //      copied here is a row autotune may later run over. Since §3.2 the
+    //      published build carries NO questions of its own, so this cap is not a
+    //      ceiling on top of a board — it IS the board, written down in
+    //      lib/demo/frozen.ts.
     //
     // WHAT THE SNAPSHOT'S BANK NOW IS, which changes what this step is doing
     // without changing a line of it (docs/demo-question-bank-plan.md). This used
@@ -846,12 +847,17 @@ export async function cloneSeedWorkspace(
     // snapshot clone still runs this step first and its rows are then replaced,
     // which is why this reads as unchanged.
     //
-    // ONE PER PASSAGE, then the cap. `distinct on (text_hash)` spreads the twelve
-    // across twelve different chunks rather than stacking four slots onto three,
-    // which is what makes them worth something to a visitor: twelve passages to
-    // ask about, and twelve distinct chunks for autotune to find an override on.
+    // ONE PER (PASSAGE, DIFFICULTY), then the cap. This used to dedupe on
+    // text_hash ALONE, which spread twelve rows across twelve chunks rather than
+    // stacking four slots onto three — the right rule while the bank was a set of
+    // spares. §3.2 of docs/demo-real-flow-plan.md made the bank the BOARD: sixty
+    // rows over thirty passages, an easy one and a medium one each (Q5), and
+    // deduping on the hash alone would silently halve that on the guest hop,
+    // handing every visitor one difficulty per chunk and a board of thirty.
+    // Difficulty is part of question_cache's key (0055), so this is the table's
+    // own grain rather than a widening of it.
     // The ordering is arbitrary but STABLE (hash, then difficulty, then slot), so
-    // two publishes of an unchanged master carry the same twelve.
+    // two publishes of an unchanged master carry the same sixty.
     await tx.unsafe(
       `create temp table _hash_scope (text_hash text primary key) on commit drop`,
     );
@@ -870,7 +876,7 @@ export async function cloneSeedWorkspace(
     // What the cap turned away, so the publish can say so out loud rather than
     // leaving "12" to be read as "that is all there was".
     const [{ count: bankedAvailable }] = await tx.unsafe<{ count: number }[]>(
-      `select count(distinct s.text_hash)::int as count
+      `select count(distinct (s.text_hash, s.difficulty))::int as count
          from question_cache s join _hash_scope h on h.text_hash = s.text_hash
         where ${bankedScope}`,
       // $1 only: the census does not rewrite user_id, and a $2 this statement
@@ -882,7 +888,7 @@ export async function cloneSeedWorkspace(
       joins: `join _hash_scope h on h.text_hash = s.text_hash`,
       where: bankedScope,
       overrides: { user_id: "$2" },
-      dedupe: { on: `s.text_hash`, tieBreak: `s.difficulty, s.slot` },
+      dedupe: { on: `s.text_hash, s.difficulty`, tieBreak: `s.slot` },
       limit: BANKED_QUESTION_CAP,
       params: ids,
     });
