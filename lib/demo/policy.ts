@@ -132,12 +132,15 @@ export const DEMO_ACTIONS = {
   reconfigure:
     "Re-chunking or switching embedding model re-embeds the whole corpus, which " +
     "the demo doesn't pay for. Everything else on this page is live.",
+  // Names “Add” rather than “Add cached”: on a demo board the two swapped roles,
+  // and pointing a visitor at the button greyed out beside this one is worse
+  // than saying nothing.
   generate:
     "Writing a NEW question needs an answer-model key, which the demo doesn't " +
-    "carry — the bank you're looking at was generated the same way. \u201cAdd " +
-    "cached\u201d does work: this workspace was published with the wording " +
-    "already paid for, so it hands chunks questions that cost nothing and scores " +
-    "them like any other.",
+    "carry — the bank you're looking at was generated the same way. Bulk " +
+    "actions → Add question → \u201cAdd\u201d does work: this workspace was " +
+    "published with the wording already paid for, so it hands chunks questions " +
+    "that cost nothing and scores them like any other.",
   tryModel:
     "Trying a chunk under a different embedding model re-embeds it and every " +
     "chunk it is ranked against, so it's off in the demo. The question it " +

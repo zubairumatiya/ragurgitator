@@ -2183,7 +2183,8 @@ function AddQuestionForm({
               ))}
               {blockGenerate && (
                 <span className="text-zinc-500">
-                  Use the Manual tab, or “Add cached” in Bulk actions.
+                  Use the Manual tab, or Bulk actions → Add question →
+                  “Add”.
                 </span>
               )}
             </div>
