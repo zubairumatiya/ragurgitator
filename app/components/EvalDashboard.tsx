@@ -762,6 +762,19 @@ export function EvalDashboard() {
     await runHere();
   };
 
+  // A guest whose build published a board (lib/demo/replay.readBoard, handed over
+  // as data at evalStore.ts:337 rather than inferred). Null for everyone else, so
+  // every use below falls back to exactly what it did before.
+  const onDemoBoard = summary?.demoBoard != null;
+  // Both add buttons land here on the third press: the published bank holds one
+  // row per (chunk, difficulty) and two presses of 30 spend it, so "nothing came
+  // back" is the walk's ending, not a failure. Say so, and point at the press
+  // that measures what is already there.
+  const bankSpentNotice =
+    `No new questions for these chunks — nothing added, nothing spent. ` +
+    `The published question bank is spent: every question it holds is already ` +
+    `on its chunk. Score pending scores anything still unscored.`;
+
   // Bulk actions → Add question → {difficulty ×N} → Add: add N questions at each
   // requested difficulty to every chunk in scope (corpus-wide, or the selected
   // documents), or with `topUp` top each chunk up TO N. Same NDJSON stream.
@@ -769,6 +782,10 @@ export function EvalDashboard() {
   // The run scores nothing, so the notice reports what landed and points at the
   // press that measures it. Quoting recall here would quote the summary the
   // PREVIOUS press left behind.
+  //
+  // On a demo board this same button REUSES rather than generates (the route
+  // derives that from the shelf, §1.4), so the notice reads whichever count the
+  // run's own `done` event carries rather than branching on who is logged in.
   const onBulkAdd = (
     counts: DifficultyCounts,
     documentIds: string[] | null,
@@ -780,9 +797,14 @@ export function EvalDashboard() {
     return runStream(
       "/api/eval/bulk-generate",
       (r) =>
-        `Added ${r.generated} question(s) (${mix} per chunk${
-          topUp ? ", topped up" : ""
-        }), unscored. Press Score pending to retrieve and score them.`,
+        r.reused
+          ? `Added ${r.reused} banked question(s) for $0, unscored. ` +
+            `Press Score pending to retrieve and score them.`
+          : r.generated === 0 && onDemoBoard
+            ? bankSpentNotice
+            : `Added ${r.generated} question(s) (${mix} per chunk${
+                topUp ? ", topped up" : ""
+              }), unscored. Press Score pending to retrieve and score them.`,
       { counts, documentIds: documentIds ?? undefined, topUp },
     );
   };
@@ -792,24 +814,25 @@ export function EvalDashboard() {
   // it generates nothing — chunks with nothing banked are simply left alone, and
   // anything a chunk already shows is skipped, so pressing it twice adds nothing.
   //
-  // THIS IS THE ONE ADD A GUEST CAN PRESS (phase 6 of docs/demo-analytics-plan
-  // .md): the demo clones question_cache and carves `cachedOnly` out of the
-  // generate gate, so the empty-handed sentence must not send a visitor back to
-  // the Add button that will refuse them. Detected the way DemoScope detects a
-  // demo — a frozen row, which only a publish writes — rather than by asking who
-  // is logged in.
+  // On a demo board this button is GREYED (§1.5) — `Add` is the one a visitor
+  // presses, and it reuses too. The empty-handed sentence still has to be right
+  // for both, so it is shared with `onBulkAdd` above.
+  //
+  // The demo detector used to be "any frozen question", which §3.2 of the
+  // real-flow plan retired when it emptied the published board: it now reads
+  // false on every demo, and a guest with a spent bank was being sent back to a
+  // button that would refuse them. The board is the detector.
   const onBulkAddCached = (documentIds: string[] | null) => {
-    const published = summary?.questions.some((q) => q.frozen) ?? false;
     return runStream(
       "/api/eval/bulk-generate",
       (r) =>
         r.reused
           ? `Added ${r.reused} cached question(s) for $0, unscored. ` +
             `Press Score pending to retrieve and score them.`
-          : `No new cached questions for these chunks — nothing added, nothing spent. ` +
-            (published
-              ? `Every question this workspace was published with is already on its chunk.`
-              : `Use Add to generate them.`),
+          : onDemoBoard
+            ? bankSpentNotice
+            : `No new cached questions for these chunks — nothing added, nothing spent. ` +
+              `Use Add to generate them.`,
       { documentIds: documentIds ?? undefined, cachedOnly: true },
     );
   };
@@ -1216,6 +1239,7 @@ export function EvalDashboard() {
           onRescore={onRescore}
           canRescore={canRescore}
           canAddQuestion={summary === null || summary.chunkCount > 0}
+          onDemoBoard={onDemoBoard}
         />
         {summary && (
           <AutotunePanel
@@ -1409,14 +1433,15 @@ export function EvalDashboard() {
               one button a guest is not allowed to press. Pointing a visitor at
               a disabled control is exactly the failure §5 greyed the controls
               out to end, so the demo gets the sentence for the button that
-              works. Keyed on the `generate` block rather than on isGuest(),
-              like every other consumer of this map. */}
+              works. Keyed on the BOARD, not on the `generate` block: generate
+              stays blocked for a guest either way, so that key no longer picks
+              out the case this sentence is about (§1.5). */}
           {summary.total === 0 && (
             <p className="text-sm text-zinc-500">
               {summary.chunkCount === 0
                 ? "Nothing ingested under this config yet. Add a document, and its chunks will appear here."
-                : summary.demoBlocked?.generate
-                  ? "No eval questions yet — the chunks below are the board. Bulk actions → Add question → Add cached fills it from the published question bank, for free; then Score pending retrieves them against the whole corpus."
+                : onDemoBoard
+                  ? "No eval questions yet — the chunks below are the board. Bulk actions → Add question → Add fills it from the published question bank, for free; then Score pending retrieves them against the whole corpus."
                   : "No eval questions yet — your chunks are listed below. Add one by hand on any chunk, or pick a difficulty in Bulk actions → Add to generate them."}
             </p>
           )}
@@ -2354,6 +2379,7 @@ function BulkActions({
   onRescore,
   canRescore,
   canAddQuestion,
+  onDemoBoard,
 }: {
   busy: boolean;
   onAddDifficulty: (
@@ -2371,6 +2397,10 @@ function BulkActions({
   onRescore: (documentIds: string[] | null) => void;
   canRescore: boolean;
   canAddQuestion: boolean;
+  // A guest whose published build carries a board. The route derives the same
+  // fact server-side from the shelf and serves their Add from the bank, so the
+  // two Add buttons swap roles here: Add goes live, Add cached goes dark.
+  onDemoBoard: boolean;
 }) {
   // The demo's three refusals that live in this menu. Null for a real account,
   // so every use below is a plain "is this off, and what do I say about it".
@@ -2657,12 +2687,24 @@ function BulkActions({
                   </span>
                 )}
                 <div className="flex items-center gap-2">
-                  {/* The PAID half. "Add cached" beside it is carved out of the
-                      same gate in the route, so only this one goes dark. */}
+                  {/* The PAID half — EXCEPT on a demo board, where the route
+                      serves this press from the published bank instead (§1.4).
+                      Then it is the free one and the only one enabled, so both
+                      of its disjuncts have to be stood down: `generate` stays
+                      blocked (the badges above depend on that) and a guest can
+                      stage nothing to clear `stagedTotal === 0`. */}
                   <button
                     type="button"
-                    disabled={stagedTotal === 0 || blockGenerate !== null}
-                    title={blockGenerate ?? undefined}
+                    disabled={
+                      onDemoBoard
+                        ? false
+                        : stagedTotal === 0 || blockGenerate !== null
+                    }
+                    title={
+                      onDemoBoard
+                        ? "Hand every chunk on the board its next question from the published bank — free, and it generates nothing"
+                        : (blockGenerate ?? undefined)
+                    }
                     onClick={() => {
                       const counts = addCounts;
                       const topUp = addTopUp;
@@ -2680,7 +2722,12 @@ function BulkActions({
                       is. Generates nothing — what isn't banked, Add buys. */}
                   <button
                     type="button"
-                    title="Add every question already generated for identical chunks from all configs at any difficulty — skips dupe questions"
+                    disabled={onDemoBoard}
+                    title={
+                      onDemoBoard
+                        ? "Not needed here — on the demo board Add itself serves the published bank, free"
+                        : "Add every question already generated for identical chunks from all configs at any difficulty — skips dupe questions"
+                    }
                     onClick={() => {
                       close();
                       onAddCached(scopeIds);
@@ -2701,10 +2748,12 @@ function BulkActions({
                 </div>
                 {/* Says the quiet part out loud: the badges size the PAID run
                     only, so "Add cached" staying live at zero staged questions
-                    is the design, not a bug. */}
+                    is the design, not a bug. On a demo board the two buttons
+                    have swapped, so the sentence describes Add instead. */}
                 <span className="text-zinc-500">
-                  Add every question already generated for identical chunks from
-                  all configs at any difficulty — skips dupe questions
+                  {onDemoBoard
+                    ? "Add hands every chunk on the board its next question from the published bank — free, one per chunk per press, and it generates nothing."
+                    : "Add every question already generated for identical chunks from all configs at any difficulty — skips dupe questions"}
                 </span>
               </div>
             )}
