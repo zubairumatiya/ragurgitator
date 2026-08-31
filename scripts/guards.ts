@@ -452,15 +452,34 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
     why: "the published generation is exempt from the cache's own eviction",
   },
   // Phase 6 opened ONE form of bulk-generate to a guest: `cachedOnly`, which
-  // reads question_cache and calls no model. Sweep 6 above still passes if that
-  // condition WIDENS — the file keeps its assertDemoAllows() either way — so the
-  // condition itself is pinned here. This is the whole difference between "a
-  // guest may add a question that was already paid for" and "a guest may spend
-  // the operator's answer-model key", and it is one boolean long.
+  // reads question_cache and calls no model. Phase 3 of
+  // docs/demo-add-flow-plan.md opened a second — a guest whose build carries a
+  // published BOARD, whose plain "Add" is a press of that bank rather than a
+  // generation. Sweep 6 above still passes if either condition WIDENS — the file
+  // keeps its assertDemoAllows() either way — so the condition itself is pinned
+  // here. This is the whole difference between "a guest may add a question that
+  // was already paid for" and "a guest may spend the operator's answer-model
+  // key".
+  //
+  // THREE needles, not one, because pinning only the gate leaves the other half
+  // of the argument undetectable: "the gate opened, and then the generator ran
+  // anyway". The first is the shelf read the widening hangs on — DERIVED from a
+  // guest-only reader, never from the body, since the flip is precisely "the
+  // button that meant generate now means bank" and a client-set flag is a
+  // carve-out the client can widen. The second is the gate, unconditional behind
+  // it. The third is the branch, which must test the SAME boolean the gate did,
+  // so a boarded guest cannot reach bulkAddDifficulties or the batch submit.
   {
     file: "app/api/eval/bulk-generate/route.ts",
-    needles: ['if (!body.data.cachedOnly) await assertDemoAllows("generate")'],
-    why: "the carve-out is exactly the cachedOnly flag and nothing wider",
+    needles: [
+      "const boarded = (await readBoard()) !== null;",
+      "const fromBank = body.data.cachedOnly || boarded;",
+      'if (!fromBank) await assertDemoAllows("generate");',
+      "if (fromBank) {",
+    ],
+    why:
+      "the carve-out is the cachedOnly flag or a guest with a published board, " +
+      "derived server-side, and a boarded guest cannot reach the generating branch",
   },
   // Phase 6.2 opened the same shape on the shadow judge: `human` is one UPDATE on
   // a row the caller owns, `llm` buys tokens. Sweep 6 keeps passing however wide

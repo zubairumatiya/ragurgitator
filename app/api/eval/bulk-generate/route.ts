@@ -6,6 +6,9 @@
 // unscored. With `cachedOnly`, every chunk in scope is instead topped up from
 // question_cache — any difficulty, no counts, no generation, no cost.
 //
+// A GUEST ON A PUBLISHED DEMO BOARD takes that same free path from the plain
+// "Add", one banked question per chunk per press (see the gate below).
+//
 // Streams progress as NDJSON. Body: { counts: { easy?, medium?, hard? } }, or the
 // legacy { difficulty } (one question per chunk).
 import { streamError } from "@/lib/http/missingKeyServer";
@@ -28,6 +31,7 @@ import { isBatchEnabled } from "@/lib/batch/types";
 import { handlerFor } from "@/lib/batch/jobs/registry";
 import { submitBatch } from "@/lib/batch/orchestrator";
 import { assertDemoAllows } from "@/lib/demo/policy";
+import { readBoard } from "@/lib/demo/replay";
 
 const DIFFICULTIES = ["easy", "medium", "hard"] as const satisfies readonly Difficulty[];
 
@@ -83,31 +87,52 @@ export async function POST(request: Request) {
     : body.data.difficulty
       ? [{ difficulty: body.data.difficulty, count: 1 }]
       : [];
-  if (targets.length === 0 && !body.data.cachedOnly) {
-    return Response.json(
-      { error: "Pick at least one difficulty to add questions at." },
-      { status: 400 },
-    );
-  }
-
   return withRequestConfig(request, async () => {
-    // THE DEMO GATE, WITH ONE CARVE-OUT. `cachedOnly` is the only form of this
-    // request that calls no model: bulkAddCachedQuestions reads question_cache
-    // and inserts what it finds, and a MISS adds nothing rather than falling back
-    // to generation. Phase 6 of docs/demo-analytics-plan.md clones that table
-    // (lib/demo/clone step 4e) precisely so a guest has a free way to add a
-    // question. Every other form still spends an answer-model key the demo does
-    // not carry, so the gate stays exactly where it was for them.
+    // THE DEMO GATE, WITH ONE CARVE-OUT — SHELF FIRST, GATE UNCONDITIONALLY
+    // BEHIND IT. Two presses reach this route without calling a model:
+    // `cachedOnly` ("Add cached"), and — since phase 3 of
+    // docs/demo-add-flow-plan.md — a boarded guest's plain "Add", which the demo
+    // turns into a press of the published question bank. Both end at
+    // bulkAddCachedQuestions, which reads question_cache and inserts what it
+    // finds; a MISS adds nothing rather than falling back to generation. Every
+    // other form still spends an answer-model key the demo does not carry, so
+    // the gate stays exactly where it was for them.
     //
-    // The carve-out is on the BODY FLAG, not on a separate route, so there is one
-    // place where "does this generate?" is decided. Keep it that way: an
-    // `if (!cachedOnly)` that drifts above the parse, or a second entry point
-    // without this line, is how a guest reaches the generator.
-    if (!body.data.cachedOnly) await assertDemoAllows("generate");
+    // DERIVED, NEVER TAKEN FROM THE BODY. readBoard() answers a real account
+    // with null (lib/demo/replay.ts:214 opens `if (!(await isGuest()))`), so the
+    // second disjunct can only ever be true for a guest, and a real account's
+    // Add gates on `cachedOnly` exactly as it did. Deriving it matters because
+    // the flip is precisely "the button that used to mean generate now means
+    // bank": a body flag widening that carve-out is a flag the client sets.
+    // It also fails closed — a guest cloned from a build published WITHOUT a
+    // board reads null and is refused, which is the same routine-republish case
+    // the four other shelf-before-gate lines (scripts/guards.ts) exist for.
+    //
+    // Keep the shape: one place where "does this generate?" is decided, and the
+    // stream below branching on the SAME boolean the gate used. A branch that
+    // reads `cachedOnly` again is how a boarded guest reaches the generator.
+    const boarded = (await readBoard()) !== null;
+    const fromBank = body.data.cachedOnly || boarded;
+    if (!fromBank) await assertDemoAllows("generate");
+    // Staged counts are what a generating press needs; a bank press has none —
+    // the demo's difficulty picker is greyed and a banked question is free at
+    // any difficulty — so the 400 only applies to the generating branch.
+    if (targets.length === 0 && !fromBank) {
+      return Response.json(
+        { error: "Pick at least one difficulty to add questions at." },
+        { status: 400 },
+      );
+    }
     return ndjsonStream<EvalEvent>(async (send, shouldStop) => {
       try {
-        if (body.data.cachedOnly) {
-          await bulkAddCachedQuestions(send, documentIds, shouldStop);
+        if (fromBank) {
+          // A demo board hands out ONE banked question per chunk per press, so
+          // the visitor walks the bank (easy, then medium) a press at a time
+          // rather than receiving all sixty at once. A real account's "Add
+          // cached" is uncapped, as it always was.
+          await bulkAddCachedQuestions(send, documentIds, shouldStop, {
+            perChunk: boarded ? 1 : undefined,
+          });
           return;
         }
         // Savings preference: route question generation through the batch API
