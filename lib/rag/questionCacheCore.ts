@@ -28,13 +28,22 @@ export const normalizeQuestion = (q: string): string =>
 // hand-written, generated before the cache existed, or reused already, so a
 // positional "skip the first N" rule would both miss real duplicates and skip
 // perfectly good questions.
+//
+// `perChunk` caps how many the chunk takes from this press. The cap is applied
+// AFTER the dedupe, never before: a chunk already showing its easy question would
+// otherwise spend a cap of 1 on the row it is about to discard and land nothing,
+// so the walk would stall on press 2. With the bank ordered easy → medium → hard
+// (readBanked), a cap of 1 makes each press hand out the next difficulty up.
 export function selectNewQuestions<T extends { question: string }>(
   banked: T[],
   existing: string[],
+  opts: { perChunk?: number } = {},
 ): T[] {
   const seen = new Set(existing.map(normalizeQuestion));
   const out: T[] = [];
+  const cap = opts.perChunk;
   for (const item of banked) {
+    if (cap !== undefined && out.length >= cap) break;
     const key = normalizeQuestion(item.question);
     if (key === "" || seen.has(key)) continue;
     seen.add(key);

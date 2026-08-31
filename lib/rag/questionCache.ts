@@ -63,12 +63,30 @@ export type CachedQuestion = {
 // Batched read for a whole run: everything banked for these passages, keyed by
 // text hash, difficulties then slots ascending.
 //
+// THE DIFFICULTY ORDER IS THE WALK, and it is explicit rather than alphabetical.
+// A caller capping the fill at one question per chunk (selectNewQuestions'
+// `perChunk`) hands out this list's first new row, so press 1 serves easy and
+// press 2 medium. Sorting by the column would give that only by the accident of
+// `'easy' < 'hard' < 'medium'`; a corpus with hard questions would then walk
+// easy → hard → medium, getting harder and then easier again.
+//
 // DIFFICULTY IS A RESULT HERE, NOT A FILTER. "Add cached" asks "what do we
 // already own for this passage?", so a chunk is offered the hard question an
 // earlier config paid for even if this run never mentioned hard questions —
 // a banked question is free, and declining it on a difficulty technicality just
 // leaves money on the table. Row counts per passage are tiny, so reading them
-// all costs nothing.
+// all costs nothing. What a cap changes is HOW MANY of those results a chunk
+// takes in one press, not which difficulties are candidates.
+const DIFFICULTY_ORDER = ["easy", "medium", "hard"];
+
+// Unknown difficulties sort after the three known ones rather than being dropped:
+// the bank is keyed on whatever string generation used, and an unrecognised label
+// is still a free question.
+const difficultyRank = (d: string): number => {
+  const i = DIFFICULTY_ORDER.indexOf(d);
+  return i === -1 ? DIFFICULTY_ORDER.length : i;
+};
+
 async function readBanked(
   model: string,
   promptVersion: string,
@@ -97,6 +115,10 @@ async function readBanked(
         and text_hash = any(${[...new Set(hashes)]})
       order by difficulty, slot
     `;
+    // Re-order easy → medium → hard in JS: the rows are already in memory, and a
+    // `case` expression in the `order by` would put the sequence in SQL where the
+    // JS half of this module cannot see it.
+    rows.sort((a, b) => difficultyRank(a.difficulty) - difficultyRank(b.difficulty));
     for (const r of rows) {
       const list = out.get(r.text_hash) ?? [];
       list.push({
@@ -123,7 +145,8 @@ async function readBanked(
 //
 // DEDUPE IS BY QUESTION TEXT, against every question the chunk already shows under
 // this config — generated, previously reused, or hand written. So pressing the
-// button twice adds nothing the second time.
+// button twice adds nothing the second time — unless `opts.perChunk` held the
+// first press back, in which case the second press hands out what it capped.
 //
 // Reused questions are inserted exactly as generated ones are and handed to
 // `onLanded` so the caller can stream them into the dashboard live,
@@ -136,6 +159,7 @@ export async function fillChunksFromCache(
   promptVersion: string,
   onLanded: (question: GeneratedQuestionPayload) => void = () => {},
   onTotal: (total: number) => void = () => {},
+  opts: { perChunk?: number } = {},
 ): Promise<{ reused: number; difficulties: string[] }> {
   if (chunks.length === 0) {
     onTotal(0);
@@ -151,7 +175,7 @@ export async function fillChunksFromCache(
   // chunks needing their own labels, and the dedupe is per chunk.
   const plan = chunks.map((chunk, i) => ({
     chunk,
-    additions: selectNewQuestions(banked.get(hashes[i]) ?? [], chunk.existingQuestions),
+    additions: selectNewQuestions(banked.get(hashes[i]) ?? [], chunk.existingQuestions, opts),
   }));
   const total = plan.reduce((sum, p) => sum + p.additions.length, 0);
   onTotal(total);

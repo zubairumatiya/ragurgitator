@@ -50,3 +50,38 @@ test("selectNewQuestions: a blank banked question is never inserted", () => {
 test("normalizeQuestion: collapses the differences that don't make a question new", () => {
   assert.equal(normalizeQuestion("  What\n  is   A? "), "what is a?");
 });
+
+// The per-chunk cap is what turns one bank into a walk: with the bank ordered
+// easy → medium → hard, a cap of 1 hands out the next difficulty each press.
+test("selectNewQuestions: perChunk caps how many a chunk takes", () => {
+  const banked = [q("Easy?"), q("Medium?", "medium"), q("Hard?", "hard")];
+  assert.deepEqual(selectNewQuestions(banked, [], { perChunk: 1 }), [q("Easy?")]);
+  assert.deepEqual(selectNewQuestions(banked, [], { perChunk: 2 }), [
+    q("Easy?"),
+    q("Medium?", "medium"),
+  ]);
+  // A cap larger than the bank is not an error, and no cap at all is the old
+  // behaviour — every caller that predates the option must be unaffected.
+  assert.deepEqual(selectNewQuestions(banked, [], { perChunk: 9 }), banked);
+  assert.deepEqual(selectNewQuestions(banked, []), banked);
+});
+
+test("selectNewQuestions: the cap applies AFTER the dedupe, so the walk advances", () => {
+  // Press 2: the chunk already shows its easy question. Capping before the dedupe
+  // would spend the cap on the row about to be discarded and land nothing, and
+  // the visitor's second press would silently do nothing.
+  const banked = [q("Easy?"), q("Medium?", "medium"), q("Hard?", "hard")];
+  assert.deepEqual(selectNewQuestions(banked, ["Easy?"], { perChunk: 1 }), [
+    q("Medium?", "medium"),
+  ]);
+  // Press 3 on a two-difficulty bank: exhausted, and it reports so rather than
+  // repeating anything.
+  assert.deepEqual(
+    selectNewQuestions(banked.slice(0, 2), ["Easy?", "Medium?"], { perChunk: 1 }),
+    [],
+  );
+});
+
+test("selectNewQuestions: perChunk 0 adds nothing", () => {
+  assert.deepEqual(selectNewQuestions([q("A?")], [], { perChunk: 0 }), []);
+});

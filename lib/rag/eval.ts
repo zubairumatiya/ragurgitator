@@ -844,12 +844,17 @@ export async function bulkAddDifficulties(
 // Duplicates are impossible by construction — fillChunksFromCache compares
 // question TEXT against everything the chunk already shows.
 //
+// `opts.perChunk` caps a press at that many questions per chunk, so a caller can
+// hand the bank out a difficulty at a time instead of all at once. No caller
+// passes it yet; without it the press takes everything banked, as it always has.
+//
 // Like bulkAddDifficulties it scores nothing and snapshots nothing: "Score
 // pending" is the second press.
 export async function bulkAddCachedQuestions(
   emit: Emit = () => {},
   documentIds?: string[],
   shouldStop: ShouldStop = NEVER_STOP,
+  opts: { perChunk?: number } = {},
 ): Promise<{ reused: number; scored: number; recall: number | null }> {
   const chunks = await chunksWithQuestions(documentIds);
   let total = 0;
@@ -869,6 +874,7 @@ export async function bulkAddCachedQuestions(
       total = n;
       emit({ type: "generate-start", total });
     },
+    opts,
   );
   // Reflect what actually landed in the config's mix — a record of which
   // difficulties this config has used, which is what eval_difficulties is now
