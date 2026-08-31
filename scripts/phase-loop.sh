@@ -15,19 +15,21 @@ say() { echo "$(date +%H:%M:%S) $*" | tee -a "$PROG"; }
 read -r -d '' PROMPT <<'P'
 You are running one phase of a plan, unattended. Nobody can answer you.
 
-Plan file: docs/demo-real-flow-plan.working.md  (the ONLY plan file you edit)
+Plan file: docs/demo-add-flow-plan.md  (the ONLY plan file you edit)
 
 Do exactly this, in order:
-1. Read section 8 PHASING and the VERIFICATION LOG. Find the LOWEST-numbered phase
+1. Read section 5 PHASING and the VERIFICATION LOG. Find the LOWEST-numbered phase
    not marked DONE. If every phase is DONE, print exactly ALL_PHASES_COMPLETE and
    stop without changing anything. Otherwise print exactly PHASE_START <n> before
    you begin building.
 2. Build that phase, and only that phase.
 3. Print exactly PHASE_VERIFY <n>, then verify in a browser with the
-   firefox-devtools MCP tools against http://localhost:3002. Guest recipe:
-   POST /api/demo/start from the page, then /c/<configId>/eval. Fix and re-verify
+   firefox-devtools MCP tools against http://localhost:3002, by whatever method the
+   phase itself specifies. Most phases use the guest recipe: POST /api/demo/start
+   from the page, then /c/<configId>/eval. A phase that says to verify on a REAL
+   account means a logged-in non-guest workspace, not a guest. Fix and re-verify
    on failure.
-4. Append a VERIFICATION LOG entry and mark the phase DONE in section 8 with
+4. Append a VERIFICATION LOG entry and mark the phase DONE in section 5 with
    today's date, in the plan file above.
 5. Commit everything. Message under 30 words, no Co-Authored-By trailer, no
    Claude-Session trailer, no emoji.

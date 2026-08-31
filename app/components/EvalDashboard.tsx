@@ -2579,13 +2579,17 @@ function BulkActions({
                       <button
                         key={d}
                         type="button"
+                        disabled={blockGenerate !== null}
                         onClick={(e) => bumpDifficulty(d, e.shiftKey ? -1 : 1)}
                         onContextMenu={(e) => {
                           e.preventDefault();
                           bumpDifficulty(d, -1);
                         }}
-                        title={`Click to add one more ${d} question per chunk; shift-click (or right-click) to remove one`}
-                        className={`relative cursor-pointer rounded border px-2 py-0.5 text-xs font-medium capitalize ${
+                        title={
+                          blockGenerate ??
+                          `Click to add one more ${d} question per chunk; shift-click (or right-click) to remove one`
+                        }
+                        className={`relative cursor-pointer rounded border px-2 py-0.5 text-xs font-medium capitalize disabled:cursor-not-allowed disabled:opacity-50 ${
                           count > 0
                             ? "border-blue-500 bg-blue-50 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300"
                             : "border-zinc-300 text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
@@ -2601,7 +2605,9 @@ function BulkActions({
                     );
                   })}
                 </div>
-                <span className="text-zinc-500">
+                {/* Nothing to say to a guest: the staged-count hint only makes
+                    sense to someone who can stage a count. */}
+                <span className={`text-zinc-500 ${blockGenerate ? "hidden" : ""}`}>
                   {stagedTotal === 0
                     ? "Click a difficulty once per question you want."
                     : `${addTopUp ? "Tops every chunk in scope up to" : "Adds to every chunk in scope"} ${(
@@ -2616,14 +2622,20 @@ function BulkActions({
                     clicking twice buys twice. Ticking it restores fill-to-N,
                     which skips chunks already there — cheaper, and idempotent. */}
                 <label
-                  className="flex cursor-pointer items-start gap-1.5 text-zinc-500"
-                  title="Only add what a chunk is missing — chunks already at N get nothing. Off, every chunk in scope gets N more however many it already has."
+                  className={`flex items-start gap-1.5 text-zinc-500 ${
+                    blockGenerate ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+                  }`}
+                  title={
+                    blockGenerate ??
+                    "Only add what a chunk is missing — chunks already at N get nothing. Off, every chunk in scope gets N more however many it already has."
+                  }
                 >
                   <input
                     type="checkbox"
                     checked={addTopUp}
+                    disabled={blockGenerate !== null}
                     onChange={(e) => setAddTopUp(e.target.checked)}
-                    className="mt-0.5 cursor-pointer"
+                    className="mt-0.5 cursor-pointer disabled:cursor-not-allowed"
                   />
                   <span>
                     Top up{" "}
