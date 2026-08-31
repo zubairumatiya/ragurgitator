@@ -43,7 +43,7 @@ const CHUNKS_TABLE = process.env.EGRESS_CHUNKS_TABLE ?? "chunks_voyage_4_lite_10
 
 // Fallbacks, only for a width query that returns nothing (an empty table on a
 // fresh account). These are the figures docs/fusion-egress-plan.md §0 quotes.
-const FALLBACK_WIDTHS = { chunkText: 2388, overrideVec: 11414, cacheRow: 24577 };
+const FALLBACK_WIDTHS = { chunkText: 2388, overrideVec: 11414, cacheRow: 24577, simRow: 45 };
 
 type WidthKey = keyof typeof FALLBACK_WIDTHS;
 
@@ -78,6 +78,26 @@ const PATTERNS: Pattern[] = [
     label: "override vectors  (overrideEmbeddings: every piece, per query)",
     width: "overrideVec",
     ilike: ["select source_chunk_id, embedding from config_chunk_overrides%"],
+    headline: true,
+  },
+  {
+    // Phase 2's replacement for it (§1.1): Postgres collapses the pieces to one
+    // sim per overridden chunk. Tracked beside the statement it replaces so the
+    // phase is graded on bytes MOVED, not merely on the old counter going quiet —
+    // the same reason resolve_chunks is tracked below. The call count is EXPECTED
+    // to rise: one query per question per model, where the old read was one per
+    // fingerprint.
+    key: "override_sims",
+    label: "override sims  (overrideSims: one float per chunk, in SQL)",
+    width: "simRow",
+    // NB the literal `1` in `1 - (...)` is NORMALISED to a parameter by
+    // pg_stat_statements, so a pattern that spells it out matches nothing —
+    // the same silent-zero failure mode as phase 1's whitespace trap.
+    ilike: [
+      "select source_chunk_id, max(%",
+      "%from config_chunk_overrides%",
+      "%group by source_chunk_id%",
+    ],
     headline: true,
   },
   {
@@ -132,6 +152,10 @@ async function measureWidths(): Promise<Record<WidthKey, number>> {
     chunkText: chunk?.w ?? FALLBACK_WIDTHS.chunkText,
     overrideVec: ovr?.w ?? FALLBACK_WIDTHS.overrideVec,
     cacheRow: cache?.w ?? FALLBACK_WIDTHS.cacheRow,
+    // Not measured from a table — this row exists only in a result set: a uuid
+    // (36 B) plus a float rendered as text. Fixed, and small enough that being a
+    // few bytes out cannot change a phase's verdict.
+    simRow: FALLBACK_WIDTHS.simRow,
   };
 }
 
@@ -187,7 +211,11 @@ function tabulate(after: Snapshot, before?: Snapshot) {
     const a = after.readings.find((r) => r.key === p.key)!;
     const b = before?.readings.find((r) => r.key === p.key);
     const rows = a.rows - (b?.rows ?? 0);
-    return { p, calls: a.calls - (b?.calls ?? 0), rows, bytes: rows * widths[p.width] };
+    // A baseline taken by an EARLIER build has no width for a pattern added
+    // since. Fall back rather than multiplying by undefined and printing NaN —
+    // a phase-1 baseline has to stay usable for phase 2's report.
+    const width = widths[p.width] ?? after.widths[p.width] ?? FALLBACK_WIDTHS[p.width];
+    return { p, calls: a.calls - (b?.calls ?? 0), rows, bytes: rows * width };
   });
 }
 

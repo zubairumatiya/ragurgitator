@@ -32,12 +32,13 @@ import {
   clearRetrievalChanges,
   listOverrides,
   overrideEmbeddings,
+  overrideSims,
   retrievalStateFingerprint,
   setChunkOverride,
   setChunkOverridePieces,
   type ChunkOverride,
-  type OverrideEmbedding,
 } from "@/lib/rag/overrideStore";
+import { withCandidateSims } from "@/lib/rag/overrideSimMerge";
 import type Anthropic from "@anthropic-ai/sdk";
 import { meteredMessage } from "@/lib/rag/meter";
 import { fingerprintFrom } from "@/lib/rag/semanticCacheCore";
@@ -63,6 +64,7 @@ import {
   buildRetrievalContext,
   fuseWithOverrides,
   retrieveWithCutoffs,
+  type SimsFor,
 } from "@/lib/rag/retriever";
 import { chunkEmbeddings } from "@/lib/rag/vectorStore";
 import {
@@ -973,12 +975,17 @@ export async function screenAffectedQuestions(
   }
   const piecesByChunk = new Map<string, number[][]>();
   for (const m of models) {
-    const pieces = await overrideEmbeddings(m);
-    for (const c of changed) {
-      if (c.finalModel !== m) continue;
+    // Only the CHANGED chunks' pieces. This screen wants raw vectors (it cosines
+    // them against a question vector here in JS), so it cannot use the retriever's
+    // SQL-side sims — but it was reading every piece under the model to keep a
+    // handful, which is the same egress defect one level up
+    // (docs/fusion-egress-plan.md §1.1, "the fourth consumer").
+    const wanted = changed.filter((c) => c.finalModel === m).map((c) => c.chunkId);
+    const pieces = await overrideEmbeddings(m, wanted);
+    for (const chunkId of wanted) {
       piecesByChunk.set(
-        c.chunkId,
-        pieces.filter((p) => p.chunkId === c.chunkId).map((p) => p.embedding),
+        chunkId,
+        pieces.filter((p) => p.chunkId === chunkId).map((p) => p.embedding),
       );
     }
   }
@@ -1641,22 +1648,26 @@ export async function runModelTrial(
   // by the trial variation — what promotion would actually persist. Pieces for
   // the trial model are the in-memory trial vectors; other models keep their
   // stored pieces (minus this chunk's, if it's currently overridden elsewhere).
-  // Memoized per model: fuseWithOverrides asks once per model per question.
+  // Memoized per (model, question): a sim is query-dependent, so unlike the piece
+  // vectors this replaced it cannot be shared across the question loop below.
   const hypOverrides: ChunkOverride[] = [
     ...(await listOverrides()).filter((o) => o.sourceChunkId !== chunkId),
     { sourceChunkId: chunkId, model, kind: variation.kind },
   ];
-  const pieceCache = new Map<string, Promise<OverrideEmbedding[]>>();
-  const piecesFor = (m: string): Promise<OverrideEmbedding[]> => {
-    let p = pieceCache.get(m);
+  const simCache = new Map<string, Promise<Map<string, number>>>();
+  const simsFor: SimsFor = (m, qv, text) => {
+    const key = `${m}\0${text}`;
+    let p = simCache.get(key);
     if (!p) {
-      p = overrideEmbeddings(m).then((stored) => {
-        const kept = stored.filter((piece) => piece.chunkId !== chunkId);
-        return m === model
-          ? [...kept, ...pieceVectors.map((embedding) => ({ chunkId, embedding }))]
-          : kept;
-      });
-      pieceCache.set(m, p);
+      // Postgres collapses the STORED pieces (this chunk's excluded — the trial
+      // replaces them); the trial's own vectors exist only in memory, so they are
+      // cosined here and folded in by max (DECISION 3).
+      p = overrideSims(m, qv, chunkId).then((stored) =>
+        m === model
+          ? withCandidateSims(stored, chunkId, pieceVectors.map((v) => cosine(qv, v)))
+          : stored,
+      );
+      simCache.set(key, p);
     }
     return p;
   };
@@ -1701,7 +1712,7 @@ export async function runModelTrial(
       baseQVec,
       k,
       hypOverrides,
-      piecesFor,
+      simsFor,
     );
     const fusedRank = merged.findIndex((c) => c.id === chunkId) + 1;
 
