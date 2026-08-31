@@ -7,6 +7,8 @@ cd "$(dirname "$0")/.."
 LOGS=.loop-logs
 PROG="$LOGS/progress.log"
 MAX_PHASES=${MAX_PHASES:-12}
+# which plan is being walked; every lap edits this file and nothing else
+PLAN=${PLAN:-docs/demo-add-flow-plan.md}
 # how the child runs; override to acceptEdits if you'd rather approve bash yourself
 PERM=${PERM:-bypassPermissions}
 mkdir -p "$LOGS"
@@ -15,7 +17,7 @@ say() { echo "$(date +%H:%M:%S) $*" | tee -a "$PROG"; }
 read -r -d '' PROMPT <<'P'
 You are running one phase of a plan, unattended. Nobody can answer you.
 
-Plan file: docs/demo-add-flow-plan.md  (the ONLY plan file you edit)
+Plan file: __PLAN__  (the ONLY plan file you edit)
 
 Do exactly this, in order:
 1. Read section 5 PHASING and the VERIFICATION LOG. Find the LOWEST-numbered phase
@@ -23,12 +25,14 @@ Do exactly this, in order:
    stop without changing anything. Otherwise print exactly PHASE_START <n> before
    you begin building.
 2. Build that phase, and only that phase.
-3. Print exactly PHASE_VERIFY <n>, then verify in a browser with the
-   firefox-devtools MCP tools against http://localhost:3002, by whatever method the
-   phase itself specifies. Most phases use the guest recipe: POST /api/demo/start
-   from the page, then /c/<configId>/eval. A phase that says to verify on a REAL
-   account means a logged-in non-guest workspace, not a guest. Fix and re-verify
-   on failure.
+3. Print exactly PHASE_VERIFY <n>, then verify BY WHATEVER METHOD THE PHASE ITSELF
+   SPECIFIES — tests, a measuring script, a browser walk. Read the phase; do not
+   assume. Fix and re-verify on failure.
+   If the phase calls for a browser, use the firefox-devtools MCP tools against
+   http://localhost:3002 (start `npm run dev` in the background first if nothing is
+   listening there). The guest recipe is: POST /api/demo/start from the page, then
+   /c/<configId>/eval. A phase that says to verify on a REAL account means a
+   logged-in non-guest workspace, not a guest.
 4. Append a VERIFICATION LOG entry and mark the phase DONE in section 5 with
    today's date, in the plan file above.
 5. Commit everything. Message under 30 words, no Co-Authored-By trailer, no
@@ -42,6 +46,9 @@ Rules:
   and stop.
 - Do not start the next phase.
 P
+
+PROMPT=${PROMPT//__PLAN__/$PLAN}
+[ -f "$PLAN" ] || { say "STOP: no plan file at $PLAN"; exit 5; }
 
 for i in $(seq 1 "$MAX_PHASES"); do
   LOG="$LOGS/lap-$(date +%Y%m%d-%H%M%S).jsonl"
