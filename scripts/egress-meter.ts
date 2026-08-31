@@ -43,7 +43,7 @@ const CHUNKS_TABLE = process.env.EGRESS_CHUNKS_TABLE ?? "chunks_voyage_4_lite_10
 
 // Fallbacks, only for a width query that returns nothing (an empty table on a
 // fresh account). These are the figures docs/fusion-egress-plan.md §0 quotes.
-const FALLBACK_WIDTHS = { chunkText: 2388, overrideVec: 11414, cacheRow: 24577, simRow: 45 };
+const FALLBACK_WIDTHS = { chunkText: 2388, overrideVec: 11414, cacheRow: 24577, simRow: 45, annRow: 60 };
 
 type WidthKey = keyof typeof FALLBACK_WIDTHS;
 
@@ -98,6 +98,24 @@ const PATTERNS: Pattern[] = [
       "%from config_chunk_overrides%",
       "%group by source_chunk_id%",
     ],
+    headline: true,
+  },
+  {
+    // Phase 3's replacement for the deep pool (§1.2): the same ANN, the same
+    // deepN rows, without the text column. Tracked beside the statement it
+    // replaces for the same reason override_sims is — a phase is graded on bytes
+    // MOVED, not on an old counter going quiet.
+    key: "deep_pool_ids",
+    label: "deep pool  (queryExcludingIds: id + score, no text)",
+    width: "annRow",
+    // pg_stat_statements normalises the literal `1` in `1 - (...)`, so the
+    // select list is matched by its two real columns and not by the expression.
+    ilike: ["select id, % as score from \"chunks_%", "%not (id = any(%"],
+    // LOAD-BEARING: `select id, %` also matches the text-carrying variant above
+    // (`select id, document_id, position, text, ...`), which would double-count
+    // phase 3's saving into its own replacement. `position` is the column the
+    // light read dropped and the text read cannot omit.
+    unlike: ["%position%"],
     headline: true,
   },
   {
@@ -156,6 +174,10 @@ async function measureWidths(): Promise<Record<WidthKey, number>> {
     // (36 B) plus a float rendered as text. Fixed, and small enough that being a
     // few bytes out cannot change a phase's verdict.
     simRow: FALLBACK_WIDTHS.simRow,
+    // Same reasoning as simRow, one column wider in spirit: a uuid plus a
+    // double rendered as text. Also result-set-only, also too small to move a
+    // verdict.
+    annRow: FALLBACK_WIDTHS.annRow,
   };
 }
 
