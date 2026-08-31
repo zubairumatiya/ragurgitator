@@ -792,9 +792,14 @@ export async function scorePendingQuestions(
 
 // "Bulk actions → Add question → {difficulty ×N} → Add": persist each requested
 // difficulty into the config's mix, then add N questions at that difficulty to
-// every chunk in scope (or, with `topUp`, top each chunk up TO N), score the
-// unscored, and freeze a snapshot. Streams the same EvalEvents as the other runs
-// so the dashboard reuses the same progress UI.
+// every chunk in scope (or, with `topUp`, top each chunk up TO N). Streams the
+// same EvalEvents as the other runs so the dashboard reuses the same progress UI.
+//
+// IT DOES NOT SCORE, and it writes no eval_runs row. An eval_runs row is a
+// measurement of the board and an add measures nothing; "Score pending" scores
+// what this landed and snapshots it. Single add has always worked this way, and
+// so has the batch backend this button routes to when the question_generation
+// savings lever is on — so the button now means one thing either way.
 export async function bulkAddDifficulties(
   targets: DifficultyTarget[],
   emit: Emit = () => {},
@@ -810,33 +815,21 @@ export async function bulkAddDifficulties(
     topUp,
     shouldStop,
   );
-  // Cancelling the generation half skips the scoring half outright rather than
-  // scoring the part that landed: the user asked the run to stop, and what it
-  // generated is left pending for "Score pending".
-  const scored = shouldStop() ? 0 : await scoreUnscoredQuestions(emit, shouldStop);
-
-  const summary = await getSummary();
-  if (generated > 0 || scored > 0) {
-    await createRunSnapshot({
-      questionCount: summary.scored,
-      hitCount: summary.hits,
-      mrr: summary.mrr,
-      ndcg: summary.ndcg,
-      ndcgCovered: summary.ndcgCovered,
-      k: summary.recallK,
-    });
-  }
-
+  // AN ADD ADDS. Scoring is "Score pending", which the unscored questions this
+  // just landed turn enabled — the same two steps a single add has always taken,
+  // and the same two the batch backend has always taken (jobs/questionGeneration
+  // scores nothing). The metrics stay null rather than reporting the board's
+  // pre-existing summary, which measures the PREVIOUS press, not this one.
   emit({
     type: "done",
     cancelled: shouldStop(),
     generated,
-    scored,
-    recall: summary.recall,
-    mrr: summary.mrr,
-    ndcg: summary.ndcg,
+    scored: 0,
+    recall: null,
+    mrr: null,
+    ndcg: null,
   });
-  return { generated, scored, recall: summary.recall };
+  return { generated, scored: 0, recall: null };
 }
 
 // "Bulk actions → Add question → Add cached": the free counterpart to
@@ -850,6 +843,9 @@ export async function bulkAddDifficulties(
 //
 // Duplicates are impossible by construction — fillChunksFromCache compares
 // question TEXT against everything the chunk already shows.
+//
+// Like bulkAddDifficulties it scores nothing and snapshots nothing: "Score
+// pending" is the second press.
 export async function bulkAddCachedQuestions(
   emit: Emit = () => {},
   documentIds?: string[],
@@ -878,22 +874,6 @@ export async function bulkAddCachedQuestions(
   // difficulties this config has used, which is what eval_difficulties is now
   // that nothing auto-generates from it.
   for (const d of difficulties) await addDifficulty(d as Difficulty);
-  // The fill itself is one free query — the cancellable half is the scoring
-  // that follows it, which is where this run's time actually goes.
-  const scored = shouldStop() ? 0 : await scoreUnscoredQuestions(emit, shouldStop);
-
-  const summary = await getSummary();
-  if (reused > 0 || scored > 0) {
-    await createRunSnapshot({
-      questionCount: summary.scored,
-      hitCount: summary.hits,
-      mrr: summary.mrr,
-      ndcg: summary.ndcg,
-      ndcgCovered: summary.ndcgCovered,
-      k: summary.recallK,
-    });
-  }
-
   console.log(
     `[rag:eval] bulkAddCachedQuestions: reused=${reused} across ${chunks.length} chunk(s)`,
   );
@@ -902,12 +882,14 @@ export async function bulkAddCachedQuestions(
     cancelled: shouldStop(),
     generated: 0,
     reused,
-    scored,
-    recall: summary.recall,
-    mrr: summary.mrr,
-    ndcg: summary.ndcg,
+    // As above: the fill is one free query and it scores nothing. "Score pending"
+    // is the second press, and it is what writes the eval_runs row.
+    scored: 0,
+    recall: null,
+    mrr: null,
+    ndcg: null,
   });
-  return { reused, scored, recall: summary.recall };
+  return { reused, scored: 0, recall: null };
 }
 
 // "Re-score all" MOVED to lib/jobs/steps/rescore.ts, where it is expressed as a

@@ -764,8 +764,11 @@ export function EvalDashboard() {
 
   // Bulk actions → Add question → {difficulty ×N} → Add: add N questions at each
   // requested difficulty to every chunk in scope (corpus-wide, or the selected
-  // documents), or with `topUp` top each chunk up TO N, then score. Same NDJSON
-  // stream.
+  // documents), or with `topUp` top each chunk up TO N. Same NDJSON stream.
+  //
+  // The run scores nothing, so the notice reports what landed and points at the
+  // press that measures it. Quoting recall here would quote the summary the
+  // PREVIOUS press left behind.
   const onBulkAdd = (
     counts: DifficultyCounts,
     documentIds: string[] | null,
@@ -779,8 +782,7 @@ export function EvalDashboard() {
       (r) =>
         `Added ${r.generated} question(s) (${mix} per chunk${
           topUp ? ", topped up" : ""
-        }), scored ${r.scored}. ` +
-        `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
+        }), unscored. Press Score pending to retrieve and score them.`,
       { counts, documentIds: documentIds ?? undefined, topUp },
     );
   };
@@ -802,8 +804,8 @@ export function EvalDashboard() {
       "/api/eval/bulk-generate",
       (r) =>
         r.reused
-          ? `Added ${r.reused} cached question(s) for $0, scored ${r.scored}. ` +
-            `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`
+          ? `Added ${r.reused} cached question(s) for $0, unscored. ` +
+            `Press Score pending to retrieve and score them.`
           : `No new cached questions for these chunks — nothing added, nothing spent. ` +
             (published
               ? `Every question this workspace was published with is already on its chunk.`
