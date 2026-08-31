@@ -411,12 +411,62 @@ export async function getChunkOverridePieces(
 // the retriever ranks against the query embedded under that model. Returns one row per
 // piece (chunkId = the source chunk it belongs to); the retriever collapses to
 // the best piece per source chunk (hit = any piece in top-k).
-export async function overrideEmbeddings(model: string): Promise<OverrideEmbedding[]> {
+//
+// ⚠ THIS SHIPS VECTORS. A 1024-dim real[] renders to ~11 kB of text on the wire,
+// so a whole config's pieces is a few hundred kB per call. The RETRIEVER no longer
+// calls this — it asks Postgres for the collapsed sims instead (overrideSims,
+// below, docs/fusion-egress-plan.md §1.1). The one surviving caller needs the raw
+// vectors for a screen, not a ranking, and MUST pass `chunkIds` so it downloads
+// the handful it will actually use rather than the table.
+export async function overrideEmbeddings(
+  model: string,
+  chunkIds?: string[],
+): Promise<OverrideEmbedding[]> {
   const cfg = activeConfig();
+  if (chunkIds !== undefined && chunkIds.length === 0) return [];
+  const only =
+    chunkIds === undefined ? sql`` : sql`and source_chunk_id = any(${chunkIds}::uuid[])`;
   const rows = await sql<{ source_chunk_id: string; embedding: number[] }[]>`
     select source_chunk_id, embedding
     from config_chunk_overrides
-    where config_id = ${cfg.id} and model = ${model}
+    where config_id = ${cfg.id} and model = ${model} ${only}
   `;
   return rows.map((r) => ({ chunkId: r.source_chunk_id, embedding: r.embedding }));
+}
+
+// The same candidate set, collapsed to the one number the merge actually consumes:
+// the BEST piece sim per source chunk. Identical arithmetic to cosine-ing every
+// piece in JS and keeping the max (retriever.fuseWithOverrides used to), computed
+// where the vectors already live — ~300 kB per query per model becomes ~1 kB.
+//
+// Three things this depends on, none of them incidental:
+//   • `embedding` is real[] (_float4), NOT pgvector, so BOTH sides need ::vector.
+//     The cast is exact — pgvector stores float4 too — not a re-encoding.
+//   • The table carries btree indexes only (no HNSW), so `<=>` scans exactly the
+//     rows the JS loop scanned. Nothing here became ANN.
+//   • `<=>` requires equal dimensions, and `model = $2` is what guarantees that:
+//     pieces under different models are 384/1024/1536 wide. The model filter is
+//     LOAD-BEARING; dropping it turns this into a runtime dimension error.
+//
+// `excludeChunkId` is the trial path's excluded chunk — a dry-run replaces that
+// chunk's stored override with a hypothetical one, so its stored pieces must not
+// compete. It used to be a JS `.filter` after the download; in the where clause it
+// is free. scripts/fusion-equiv.ts replays both forms and asserts they agree.
+export async function overrideSims(
+  model: string,
+  queryVector: number[],
+  excludeChunkId?: string | null,
+): Promise<Map<string, number>> {
+  const cfg = activeConfig();
+  const exclude = excludeChunkId
+    ? sql`and source_chunk_id <> ${excludeChunkId}::uuid`
+    : sql``;
+  const rows = await sql<{ source_chunk_id: string; sim: number }[]>`
+    select source_chunk_id,
+           max(1 - (embedding::vector <=> ${queryVector}::real[]::vector)) as sim
+    from config_chunk_overrides
+    where config_id = ${cfg.id} and model = ${model} ${exclude}
+    group by source_chunk_id
+  `;
+  return new Map(rows.map((r) => [r.source_chunk_id, Number(r.sim)]));
 }

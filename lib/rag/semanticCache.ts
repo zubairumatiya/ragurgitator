@@ -18,6 +18,7 @@ import { config } from "@/lib/config";
 import { isolated, sql, toJsonb } from "@/lib/db";
 import { detached } from "@/lib/detached";
 import { activeConfig, type ResolvedConfig } from "@/lib/rag/activeConfig";
+import { cacheKey, DigestMemo } from "@/lib/rag/digestMemo";
 import { getBatchSavings } from "@/lib/rag/batchStore";
 import { defaultLabel, getConfig } from "@/lib/rag/configStore";
 import { embedQueryCached } from "@/lib/rag/embedCache";
@@ -860,63 +861,130 @@ const LIST_LIMIT = 500;
 // jsonb also holds `sources`, a full RetrievedChunk[] per row, which this page
 // never renders. Selecting it would pull megabytes of chunk text out of the DB to
 // display a truncated preview.
-export async function listCacheEntries(): Promise<CacheEntrySummary[]> {
-  try {
-    const rows = await sql<
-      {
-        id: string;
-        query_text: string;
-        answer: string | null;
-        hit_count: number;
-        name: string | null;
-        base_model: string | null;
-        chunk_size: number | null;
-        chunk_overlap: number | null;
-        llm_model: string;
-        embedding_model: string;
-        created_at: Date;
-        last_hit_at: Date | null;
-      }[]
-    >`
-      select
-        sc.id,
-        sc.query_text,
-        sc.result->>'answer' as answer,
-        sc.hit_count,
-        c.name,
-        c.base_model,
-        c.chunk_size,
-        c.chunk_overlap,
-        sc.llm_model,
-        sc.embedding_model,
-        sc.created_at,
-        sc.last_hit_at
+// THE /cache PAGE'S PER-VISIT EGRESS, and the memo in front of it.
+//
+// Measured against a live guest on 2026-08-26: 252 cloned answers, 161 KB, re-read
+// on every visit to the tab. A guest workspace is a clone, so these are their own
+// rows and there is nothing build-global to share — but they are also the same
+// rows on the second visit as on the first, and Supabase bills the hop either way.
+//
+// A PLAIN MEMO WOULD BE WRONG HERE, and obviously so: asking a question in the
+// demo is the one thing a guest is encouraged to do, and it inserts a row or bumps
+// a hit_count. So this goes through the digest-keyed form (lib/rag/digestMemo):
+// Postgres hashes exactly the rows it would have sent, and they are fetched only
+// when that 32-character answer is new. Ask a question and the digest moves on the
+// same request; sit on the page and it does not.
+//
+// Not demo-specific — the same read on a real account gets the same treatment, and
+// for the same reason.
+const listMemo = new DigestMemo<CacheEntrySummary[]>();
+
+// The listing's shape, written once so the digest and the fetch cannot describe
+// different column sets — a content-addressed key that hashes something other
+// than what it guards is the one way this could serve a stale row. A frozen
+// constant, so sql.unsafe carries no input.
+//
+// The ORDER BY is part of the digested projection's meaning rather than the
+// projection itself: hit_count is in the column list, so a reordering that
+// matters is a reordering the hash sees.
+const LIST_COLUMNS =
+  "sc.id, sc.query_text, sc.result->>'answer' as answer, sc.hit_count, c.name, " +
+  "c.base_model, c.chunk_size, c.chunk_overlap, sc.llm_model, sc.embedding_model, " +
+  "sc.created_at, sc.last_hit_at";
+
+// The shared body. `limit` is inside it because a digest over a different number
+// of rows than the fetch returns would be a hash of something nobody reads.
+function listSource(userId: string) {
+  return sql`
+    with listing as (
+      select ${sql.unsafe(LIST_COLUMNS)}
       from semantic_cache sc
       left join configs c on c.id = sc.config_id
-      where sc.user_id = ${activeUserId()}
+      where sc.user_id = ${userId}
       order by sc.hit_count desc, sc.created_at desc
       limit ${LIST_LIMIT}
+    )
+  `;
+}
+
+export async function listCacheEntries(): Promise<CacheEntrySummary[]> {
+  try {
+    const userId = activeUserId();
+    // Ordered by id inside the aggregate rather than inheriting a scan order: an
+    // md5 over a set whose order Postgres is free to change would miss for
+    // reasons that are not changes. The listing's OWN order is still digested,
+    // because hit_count and created_at — the columns it sorts on — are in the
+    // projection being hashed.
+    const [digestRow] = await sql<{ digest: string | null }[]>`
+      ${listSource(userId)}
+      select md5(string_agg(l::text, '|' order by l.id)) as digest from listing l
     `;
-    return rows.map((r) => ({
-      id: r.id,
-      question: r.query_text,
-      // `answer` is null only if a row's jsonb predates the current shape or was
-      // hand-written; the cell renders empty rather than the string "null".
-      answer: r.answer ?? "",
-      hitCount: r.hit_count,
-      // Null config ⇒ the banking config is gone. Reported as null so the UI can
-      // say so, rather than manufacturing a label out of null columns.
-      configLabel:
-        r.base_model === null
-          ? null
-          : (r.name ?? defaultLabel(r.base_model, r.chunk_size!, r.chunk_overlap!)),
-      llmModel: r.llm_model,
-      keyModel: r.embedding_model,
-      createdAt: r.created_at.getTime(),
-      lastHitAt: r.last_hit_at?.getTime() ?? null,
-    }));
+    const key = cacheKey(userId);
+    const memoed = listMemo.get(key, digestRow?.digest ?? null);
+    if (memoed) return memoed;
+    const entries = await fetchCacheEntries(userId);
+    // Stored under the digest we ASKED with, not one re-derived from the rows: a
+    // write landing between the two reads must leave this entry unreachable
+    // rather than blessed, and the next request's digest is what notices.
+    listMemo.set(key, digestRow?.digest ?? null, entries);
+    return entries;
   } catch (err) {
     if (isMissingTable(err)) return [];
     throw err;
   }
+}
+
+// Exported for the tests, and for anything that ever needs the door — see
+// DigestMemo.forget on why a memo with no door at all is a bad memo, even when
+// its key makes the door unnecessary.
+export function forgetCacheListing(userId?: string): void {
+  listMemo.forget(userId === undefined ? undefined : cacheKey(userId));
+}
+
+// The rows themselves, through the same source the digest hashed.
+//
+// Deliberately reads `result->>'answer'` rather than the whole `result` blob: the
+// jsonb also holds `sources`, a full RetrievedChunk[] per row, which this page
+// never renders. Selecting it would pull megabytes of chunk text out of the DB to
+// display a truncated preview.
+async function fetchCacheEntries(userId: string): Promise<CacheEntrySummary[]> {
+  const rows = await sql<
+    {
+      id: string;
+      query_text: string;
+      answer: string | null;
+      hit_count: number;
+      name: string | null;
+      base_model: string | null;
+      chunk_size: number | null;
+      chunk_overlap: number | null;
+      llm_model: string;
+      embedding_model: string;
+      created_at: Date;
+      last_hit_at: Date | null;
+    }[]
+  >`
+    ${listSource(userId)}
+    -- The CTE already ordered; repeated here because a CTE's order is not
+    -- something Postgres promises to carry through to the outer select.
+    select * from listing order by hit_count desc, created_at desc
+  `;
+  return rows.map((r) => ({
+    id: r.id,
+    question: r.query_text,
+    // `answer` is null only if a row's jsonb predates the current shape or was
+    // hand-written; the cell renders empty rather than the string "null".
+    answer: r.answer ?? "",
+    hitCount: r.hit_count,
+    // Null config ⇒ the banking config is gone. Reported as null so the UI can
+    // say so, rather than manufacturing a label out of null columns.
+    configLabel:
+      r.base_model === null
+        ? null
+        : (r.name ?? defaultLabel(r.base_model, r.chunk_size!, r.chunk_overlap!)),
+    llmModel: r.llm_model,
+    keyModel: r.embedding_model,
+    createdAt: r.created_at.getTime(),
+    lastHitAt: r.last_hit_at?.getTime() ?? null,
+  }));
 }

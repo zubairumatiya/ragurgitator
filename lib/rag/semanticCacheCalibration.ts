@@ -58,7 +58,7 @@ async function safe<T>(fn: () => Promise<T[]>, fallback: T[]): Promise<T[]> {
 // user_id of its own, so it filters on activeUserId() directly. Using this
 // fragment on it would still work but would silently drop every row whose banking
 // config was deleted — rows that are live and servable.
-const ownedConfigs = () =>
+export const ownedConfigs = () =>
   sql`config_id in (select id from configs where user_id = ${activeUserId()})`;
 
 export type CollisionFloorReport = CollisionFloorResult & {
@@ -123,7 +123,13 @@ export async function computeCollisionFloor(): Promise<CollisionFloorReport> {
   const vectors = await getCachedQueryEmbeddings(ids, keyModel);
   await recordEvalEmbedReuse(keyModel, questionText, vectors);
   const result = collisionFloor(
-    labels.map((l) => ({ questionId: l.questionId, sourceChunkId: l.sourceChunkId })),
+    // The question TEXT rides along so the report can name the pairs its floor
+    // rests on; nothing in the arithmetic reads it.
+    labels.map((l) => ({
+      questionId: l.questionId,
+      sourceChunkId: l.sourceChunkId,
+      text: l.question,
+    })),
     vectors,
     config.semanticCache.collisionMargin,
   );
@@ -481,8 +487,11 @@ export class JudgeAlreadyRunningError extends Error {
 // outlives a serverless request wall-clock (~10–60s) and 504s mid-loop, leaving
 // some rows judged and a retry re-judging the survivors. The 500 hard max is
 // still available for an explicit opt-in from a long-lived local process.
-const JUDGE_DEFAULT_LIMIT = 50;
-const JUDGE_MAX_LIMIT = 500;
+// EXPORTED so the demo's replay of this pass (lib/demo/replayView) reads exactly
+// the rows this one would have read. Two copies of "50" is how the free pass and
+// the paid one start describing different queues.
+export const JUDGE_DEFAULT_LIMIT = 50;
+export const JUDGE_MAX_LIMIT = 500;
 
 // On-demand batch LLM judge over a space. Default targets UNJUDGED rows (the
 // bulk pass); `rejudge: true` also re-labels prior LLM verdicts within the band

@@ -16,6 +16,7 @@ import { ndjsonStream } from "@/lib/http/ndjson";
 import type { EvalEvent } from "@/lib/rag/eval";
 import { bulkBuildLlmRankings } from "@/lib/rag/ranking";
 import { assertDemoAllows } from "@/lib/demo/policy";
+import { readLlmRankings } from "@/lib/demo/replay";
 
 const Body = z.object({
   // Bulk-actions document scope: rank only these documents' questions
@@ -31,7 +32,11 @@ export async function POST(request: Request) {
   const { documentIds } = body.data;
 
   return withRequestConfig(request, async () => {
-    await assertDemoAllows("generate");
+    // The shelf first, on bulk-ndcg's terms exactly (§4.5): the publish buys these
+    // llm_rerank orders ONCE on the master and banks them (0082), so a guest's
+    // press replays a copy and the gate only stands for a build published without
+    // one.
+    if ((await readLlmRankings()) === null) await assertDemoAllows("llmRank");
     return ndjsonStream<EvalEvent>(async (send, shouldStop) => {
       try {
         await bulkBuildLlmRankings(send, documentIds, shouldStop);

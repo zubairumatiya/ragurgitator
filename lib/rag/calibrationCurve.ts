@@ -89,6 +89,23 @@ export type CurveSelection = {
 // loss at any n a pair set will ever reach.
 const acceptsIn = (p: CurvePoint): number => Math.round(p.acceptRateAtOrAbove * p.n);
 
+// The smallest prefix size that clears `target` while still carrying `r` rejects.
+//
+// n ≥ r / (1 − target) is the algebra but NOT the answer: `1 - 0.9` is
+// 0.09999999999999998 in IEEE, so the quotient lands a hair above the true
+// minimum and `ceil` rounds a whole event up — 11 where 10 serves, 6 where 5
+// does at 0.8. The panel prints this as "judge this many more", so it has to be
+// settled against the same comparison the sweep makes — (n − r) / n ≥ target,
+// the identical division `acceptRateAtOrAbove` is built from — rather than
+// against the algebra that approximates it. One step in either direction is
+// enough: the quotient is off by at most an ulp.
+function smallestPassingN(r: number, target: number): number {
+  let n = Math.ceil(r / (1 - target));
+  while (n > r + 1 && (n - 1 - r) / (n - 1) >= target) n--;
+  while ((n - r) / n < target) n++;
+  return n;
+}
+
 // Pick τ: walk the curve from the strictest cut point downward and take the LAST
 // one that still clears `target` — the most inclusive threshold whose served set
 // keeps the false-hit rate under (1 − target).
@@ -157,13 +174,13 @@ export function selectFromCurve(
   }
 
   // requiredN inverts the acceptance test: accepts/n ≥ target with r rejects
-  // means (n − r)/n ≥ target, i.e. n ≥ r / (1 − target). At target = 1 the
-  // denominator is 0 — no prefix size ever forgives a single reject — so the
-  // honest answer is "not statable" rather than Infinity. Only meaningful when
-  // the best prefix actually FAILED, which is why it's gated on rejects > 0.
+  // means (n − r)/n ≥ target. At target = 1 no prefix size ever forgives a
+  // single reject, so the honest answer is "not statable" rather than Infinity.
+  // Only meaningful when the best prefix actually FAILED, which is why it's
+  // gated on rejects > 0.
   const requiredN =
     bestRateAt !== null && rejectsInBest > 0 && target < 1
-      ? Math.ceil(rejectsInBest / (1 - target))
+      ? smallestPassingN(rejectsInBest, target)
       : null;
 
   const blocker: AttainabilityBlocker =
@@ -192,4 +209,132 @@ export function selectFromCurve(
       requiredN,
     },
   };
+}
+
+// --- the slider's grid, and thinning a curve down to it ---------------------
+
+// THE PRECISION SLIDER'S REACHABLE POSITIONS. The panel renders an
+// `<input type="range">` with exactly these bounds, and reads it as
+// `value / 100`, so a curve only ever has to answer 101 questions.
+//
+// It lives here rather than in the panel because the thinning below is only
+// lossless if the two agree: widen the slider's range or halve its step and a
+// published curve silently starts approximating positions it was never thinned
+// for. The panel spreads these onto the input, so there is one definition.
+export const TARGET_SLIDER = { min: 50, max: 100, step: 0.5 } as const;
+
+// Every target the slider can produce, ascending. 101 of them at today's bounds.
+export function sliderTargets(): number[] {
+  const out: number[] = [];
+  const steps = Math.round((TARGET_SLIDER.max - TARGET_SLIDER.min) / TARGET_SLIDER.step);
+  for (let i = 0; i <= steps; i++) {
+    out.push((TARGET_SLIDER.min + i * TARGET_SLIDER.step) / 100);
+  }
+  return out;
+}
+
+// THIN A CURVE TO THE POINTS THAT CAN EVER BE READ — losslessly, which is the
+// whole design rather than a tolerance being accepted.
+//
+// A CalibrationResult holds one curve point per judged pair, so eleven models
+// over a ~510-pair pooled set is ~5,600 points (~500 KB) — a page-load payload
+// for something the demo wants to hand out on first render. But the panel never
+// reads a curve directly: it calls selectFromCurve at one of 101 slider targets
+// and renders what comes back. So keep, per model, only the points that function
+// can actually return, and every number the slider can ever display stays exact.
+//
+// WHAT HAS TO SURVIVE, and why each one:
+//   • the point selected at each target — the τ, precision and recall rows.
+//   • the argmax of `bestRate` — the "best attainable" operating point shown for
+//     a model that missed the target, and the one the attainability report is
+//     built from. Kept once and it is still the argmax of the subset, because
+//     selectFromCurve takes the FIRST strict maximum, so every earlier eligible
+//     point is strictly below it.
+//   • the LAST point of the full curve — selectFromCurve reads totalAccepts and
+//     totalRejects off it, which is recall's denominator and the one-class test.
+//
+// WHAT MAY BE DROPPED WITHOUT CHANGING AN ANSWER: everything else. A dropped
+// point can never become a selection in the thinned curve, since selection takes
+// the LAST point clearing the target — so if a surviving later point cleared it,
+// the full curve would have chosen that one too.
+//
+// Ties are safe by construction: only tie-boundary points are ever selected, so
+// no two kept points share a sim and every kept point stays a tie boundary.
+export function thinCurve(
+  curve: CurvePoint[],
+  targets: number[],
+  minSamples: number,
+): CurvePoint[] {
+  if (curve.length === 0) return [];
+  // Indices, not points: a curve can hold two points with the same sim, and a
+  // by-value key would collapse them.
+  const keep = new Set<number>([curve.length - 1]);
+  const boundaryAt = new Map<number, number>();
+  for (let i = 0; i < curve.length; i++) {
+    const isTieBoundary = i === curve.length - 1 || curve[i + 1].sim !== curve[i].sim;
+    if (isTieBoundary) boundaryAt.set(curve[i].sim, i);
+  }
+
+  for (const target of targets) {
+    const sel = selectFromCurve(curve, target, minSamples);
+    for (const sim of [sel.recommended, sel.attainability.bestRateAt?.sim ?? null]) {
+      if (sim === null) continue;
+      const i = boundaryAt.get(sim);
+      // Both sims come back FROM a tie boundary, so the lookup cannot miss —
+      // guarded rather than asserted because a miss here would silently publish
+      // a curve that reads differently from the one measured.
+      if (i !== undefined) keep.add(i);
+    }
+  }
+
+  return [...keep].sort((a, b) => a - b).map((i) => curve[i]);
+}
+
+// --- packing a curve for storage --------------------------------------------
+
+// A curve point as it is PUBLISHED: `[sim, n, accepts]`.
+//
+// Phase 1.5 of docs/demo-cache-lab-plan.md. Thinning already cut the payload
+// from ~500 KB to ~50 KB, which is comfortable for a page load — but the meter
+// that matters is not the page load. `published_sweep` is re-read from Postgres
+// on every panel mount, over the app-server hop Supabase bills and does not
+// compress, so the row's own size is the recurring cost.
+//
+// The two long float fields are DERIVABLE rather than storable:
+//   acceptRateAtOrAbove = accepts / n
+//   coverageAtOrAbove   = accepts / totalAccepts
+// and calibrateFromJudged computes them with exactly those two divisions. So
+// storing `accepts` — a small integer — and dividing on the way out is the SAME
+// IEEE operation on the same operands, not a re-derivation that happens to land
+// close. 50 KB becomes 18 KB with nothing given up.
+//
+// THE CHEAPER-LOOKING TRICK WAS TRIED AND REJECTED: rounding sims to 6dp is
+// smaller still and does NOT reproduce every reading, and a threshold that
+// displays a number other than the one that would be applied is the single
+// failure this file exists to prevent. Measure before assuming this class of
+// saving is free.
+export type PackedCurvePoint = [sim: number, n: number, accepts: number];
+
+// Accepts inside a prefix, recovered from its precision — see `acceptsIn`, which
+// is the same inversion the selection uses. Exact at any n a pair set reaches.
+export const packCurve = (curve: CurvePoint[]): PackedCurvePoint[] =>
+  curve.map((p) => [p.sim, p.n, Math.round(p.acceptRateAtOrAbove * p.n)]);
+
+// PRECONDITION, and the only one: the LAST point must be the widest prefix of
+// the curve it came from, because recall's denominator is read off it. Both
+// producers hold that — calibrateFromJudged emits every prefix, and thinCurve
+// keeps the last point explicitly for this same reason — so the round trip is
+// closed over everything that is ever published. Packing an arbitrary slice
+// would silently rescale coverage.
+export function unpackCurve(packed: PackedCurvePoint[]): CurvePoint[] {
+  if (packed.length === 0) return [];
+  const totalAccepts = packed[packed.length - 1][2];
+  return packed.map(([sim, n, accepts]) => ({
+    sim,
+    acceptRateAtOrAbove: accepts / n,
+    // The zero case is reproduced rather than divided: calibrateFromJudged
+    // writes a literal 0 when nothing was accepted, and 0/0 is NaN.
+    coverageAtOrAbove: totalAccepts === 0 ? 0 : accepts / totalAccepts,
+    n,
+  }));
 }

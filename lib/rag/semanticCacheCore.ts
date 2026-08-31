@@ -325,8 +325,34 @@ const intersects = (a: Set<string>, b: Set<string>): boolean => {
   return false;
 };
 
+// The two texts of one boundary pair and the cosine between them. A floor is a
+// MAX, so it rests on exactly one pair — the statistic most fragile to a single
+// bad label, and the F3 audit put generated hard negatives at ~80% correct. Every
+// population that reports a floor therefore also reports the handful of pairs
+// nearest it, so a suspicious number is one click from its cause rather than an
+// assertion to be taken on trust.
+export type FloorPair = { a: string; b: string; sim: number };
+
+// How many boundary pairs to carry. Enough to see whether the floor is one
+// outlier standing well above the rest or the top of a dense band; not so many
+// that the list becomes a second table.
+export const FLOOR_PAIRS_SHOWN = 5;
+
+// Insert into a descending top-N list, in place. N is 5, so a linear scan beats
+// any heap and keeps the ordering obvious.
+export function pushTopPair(top: FloorPair[], pair: FloorPair, n = FLOOR_PAIRS_SHOWN): void {
+  if (top.length === n && pair.sim <= top[n - 1].sim) return;
+  const at = top.findIndex((p) => pair.sim > p.sim);
+  top.splice(at === -1 ? top.length : at, 0, pair);
+  if (top.length > n) top.pop();
+}
+
 export type CollisionFloorResult = {
   floor: number | null; // max cosine among DISTINCT-question pairs (the safety floor)
+  // The distinct-question pairs nearest the floor, highest first — the first of
+  // them IS the floor. Question TEXT when the labels carried it, the question id
+  // otherwise (see the `text` field on the labels argument).
+  topDistinct: FloorPair[];
   sameAnswerMin: number | null; // min cosine among same-ground-truth pairs
   sameAnswerMedian: number | null;
   recommended: number | null; // suggested threshold, or null when uncalibratable
@@ -346,14 +372,19 @@ export type CollisionFloorResult = {
 // hit on the eval bank). Robust half is the floor: it comes only from distinct
 // pairs, so the leaky "same chunk ≠ same answer" proxy can't corrupt it.
 export function collisionFloor(
-  labels: { questionId: string; sourceChunkId: string }[],
+  // `text` is display only — it names the boundary pairs in topDistinct and
+  // nothing else reads it. Optional so the unit tests (and any caller that only
+  // has ids to hand) stay unchanged; a label without it falls back to its id.
+  labels: { questionId: string; sourceChunkId: string; text?: string }[],
   vectors: Map<string, number[]>,
   margin: number,
 ): CollisionFloorResult {
   // Ground-truth chunk set per question that actually has a cached vector.
   const chunkSets = new Map<string, Set<string>>();
+  const textOf = new Map<string, string>();
   for (const l of labels) {
     if (!vectors.has(l.questionId)) continue;
+    if (l.text) textOf.set(l.questionId, l.text);
     let s = chunkSets.get(l.questionId);
     if (!s) {
       s = new Set();
@@ -366,6 +397,8 @@ export function collisionFloor(
   let floor: number | null = null;
   const sameAnswerSims: number[] = [];
   let distinctPairs = 0;
+  const topDistinct: FloorPair[] = [];
+  const label = (id: string) => textOf.get(id) ?? id;
 
   for (let i = 0; i < ids.length; i++) {
     const vi = vectors.get(ids[i])!;
@@ -377,6 +410,7 @@ export function collisionFloor(
       } else {
         distinctPairs++;
         if (floor === null || sim > floor) floor = sim;
+        pushTopPair(topDistinct, { a: label(ids[i]), b: label(ids[j]), sim });
       }
     }
   }
@@ -393,6 +427,7 @@ export function collisionFloor(
 
   return {
     floor,
+    topDistinct,
     sameAnswerMin,
     sameAnswerMedian: median(sameAnswerSims),
     recommended,

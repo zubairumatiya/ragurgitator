@@ -26,6 +26,18 @@
 //                                          92 MB of egress; the build is valid
 //                                          without it, that tab just ships stale
 //                                          or empty)
+//   … --yes --sweep                        RE-run the cache-key sweep even though
+//                                          one is already published (it is only
+//                                          run automatically when there is none —
+//                                          on a cold embedding cache it is ~an
+//                                          hour of sequential embedding)
+//   … --yes --skip-sweep                   publish without one at all
+//   … --yes --skip-llm-rank                publish without buying the LLM
+//                                          re-rankings step 5 of the demo's walk
+//                                          replays (one answer-model call per
+//                                          board question, bought once and banked
+//                                          — the build is valid without them, that
+//                                          step just greys out)
 //
 // Env: DEMO_MASTER_USER_ID (the account you work in), DEMO_SNAPSHOT_USER_ID (the
 // published one), DEMO_SNAPSHOT_EMAIL (only for --create; must be a real address,
@@ -35,8 +47,45 @@ import { privilegedSql } from "../lib/db";
 import { createSnapshotAccount } from "../lib/demo/admin";
 import { cloneSeedWorkspace } from "../lib/demo/clone";
 import { BANKED_QUESTION_CAP } from "../lib/demo/frozen";
+import {
+  idealCensus,
+  llmRankingCensus,
+  packIdeals,
+  packLlmRankings,
+} from "../lib/demo/captureRankings";
+import { seedPublishedBank, selectBankable } from "../lib/demo/publishedBank";
+import {
+  QUOTAS,
+  selectTunable,
+  tunableAnswerCensus,
+  tunableCacheKey,
+  type Tunable,
+} from "../lib/demo/tunable";
+import { resolveConfig, withConfig } from "../lib/rag/activeConfig";
 import { ndcg } from "../lib/rag/evalMetrics";
+import { captureReplayMatrix } from "../lib/demo/captureMatrix";
+import { packTuning, tuningCensus } from "../lib/demo/captureTuning";
+import { writeBoard, writeIdeals, writeLlmRankings, writeMatrix, writeTuning } from "../lib/demo/replay";
+import {
+  BOARD_KEY,
+  DEMO_MATRIX_MAX_BYTES,
+  DEMO_RANKINGS_MAX_BYTES,
+  DEMO_TUNING_MAX_BYTES,
+  rankingsBytes,
+  tuningBytes,
+  type ReplayBoard,
+} from "../lib/demo/replayCore";
+import { buildLlmRanking } from "../lib/rag/ranking";
+import { runKeyModelSweep } from "../lib/rag/keyModelSweep";
+import {
+  PUBLISHED_SWEEP_MAX_BYTES,
+  publishedForm,
+  sweepBytes,
+  thinSweep,
+  writePublishedSweep,
+} from "../lib/rag/publishedSweep";
 import { replayConfig } from "../lib/rag/replayStore";
+import { scopedAcceptTarget } from "../lib/rag/semanticCache";
 import { answerFingerprint } from "../lib/rag/semanticCacheCore";
 import { chunksTable, modelDimension } from "../lib/rag/vectorStore";
 
@@ -108,6 +157,40 @@ async function replayCensus(configId: string, baseModel: string) {
       )[0].n
     : 0;
   return { ...row, pool, warm: row.scored >= 2 && row.corpus === pool };
+}
+
+// IS THE CACHE-KEY SWEEP PUBLISHED, and does it hold a table worth rendering?
+//
+// Phase 1 of docs/demo-cache-lab-plan.md. Unlike every other census here this
+// one reads a row THIS SCRIPT wrote: 0077 has no other writer, because
+// runKeyModelSweep computes on demand and returns to the response. So "warm"
+// means "a previous publish left one", not "the app kept one up to date".
+//
+// `models` is counted as rows with a non-empty CURVE rather than as rows, and
+// that is the number that decides whether the phase worked. A leaderboard row
+// with no curve renders as a dash and, more to the point, gives the precision
+// slider nothing to re-derive — and the slider is the entire reason this row is
+// published.
+async function sweepCensus(configId: string) {
+  const [row] = await privilegedSql<
+    { models: number; bytes: number; pairs: number | null; computed: Date | null }[]
+  >`
+    select
+      (select count(*) from jsonb_array_elements(s.result -> 'rows') r
+        where jsonb_array_length(coalesce(r -> 'calibration' -> 'curve', '[]'::jsonb)) > 0)::int
+        as models,
+      octet_length(s.result::text) as bytes,
+      (s.result -> 'pairs' ->> 'total')::int as pairs,
+      s.computed_at as computed
+    from published_sweep s
+    where s.config_id = ${configId}
+    order by s.computed_at desc
+    limit 1
+  `;
+  if (!row) return { models: 0, bytes: 0, pairs: null, computed: null, warm: false };
+  // Two scored models is the same bar the replay census uses, and for the same
+  // reason: one row is not a comparison.
+  return { ...row, warm: row.models >= 2 };
 }
 
 // WHAT WOULD BE PUBLISHED — measured through the config, which is what makes it
@@ -220,98 +303,34 @@ async function verifyFingerprints(userId: string): Promise<boolean> {
   return ok;
 }
 
-// --- THE TWELVE ---------------------------------------------------------------
-//
-// Which questions get a graded-nDCG drilldown in the published demo, and — once
-// phase 4 lands — which ones a visitor may re-score and autotune.
-//
-// SELECTED BY QUERY, NOT BY HAND, so a re-publish after the master has moved
-// re-rolls the set against the corpus as it now scores rather than pinning twelve
-// uuids that quietly stopped being interesting. The trade is that a re-publish can
-// silently produce a duller set, which is what assertSpread below is for.
-//
-// THE COMPOSITION IS THE WHOLE POINT. Autotune only has work to do on questions
-// that are FAILING: twelve rank-1 hits give the demo's most interesting button
-// nothing to search for. So the quota is weighted at the hard tail of the
-// distribution the demo actually publishes (measured 2026-08-22, the no-override
-// generation): 355 at rank 1, 62 at 2, 16 at 3, 11 at 4, none at 5, 28 missed.
-//
-// A couple of comfortable questions are in the set deliberately — a drilldown
-// showing what a rank-1 ideal ordering looks like is what makes the failures
-// legible as failures.
-const QUOTAS: { tier: number; n: number; label: string }[] = [
-  { tier: 99, n: 4, label: "missed" }, // 99 = not found in the top k
-  { tier: 4, n: 3, label: "rank 4" },
-  { tier: 3, n: 3, label: "rank 3" },
-  { tier: 2, n: 1, label: "rank 2" },
-  { tier: 1, n: 1, label: "rank 1" },
-];
-
-type Tunable = { id: string; tier: number; chunk: string; document: string };
-
-// ONE QUESTION PER SOURCE CHUNK. Autotune reshapes CHUNKS, so twelve questions
-// hanging off one chunk is one candidate search wearing twelve hats — the plan's
-// "several distinct chunks" requirement, enforced rather than hoped for.
-//
-// Ordered by md5(id) inside every bucket, not by id or created_at: those correlate
-// with ingest order, which correlates with document, and the top of the list would
-// be four questions from whichever file was uploaded first. md5 is stable, so the
-// same corpus re-rolls the same twelve.
-async function selectTunable(configId: string): Promise<Tunable[]> {
-  // The quota table, inlined as a CASE rather than joined in as a VALUES list, so
-  // QUOTAS above stays the single place the composition is written down.
-  const quotaCase =
-    QUOTAS.map((q) => `when ${q.tier} then ${q.n}`).join(" ") + " else 0";
-  return privilegedSql.unsafe<Tunable[]>(
-    `with latest as (
-       select distinct on (r.eval_label_id, r.k)
-              r.eval_question_id as id,
-              coalesce(r.found_rank, 99) as tier,
-              l.source_chunk_id::text as chunk,
-              q.document_id::text as document
-         from eval_results r
-         join eval_labels l on l.id = r.eval_label_id
-         join document_embeddings de on de.id = l.document_embedding_id
-         join eval_questions q on q.id = r.eval_question_id
-        where de.config_id = $1
-          and r.retrieval_state = 'baseline' and not r.is_baseline
-          -- Ungradable without one: this selection decides which truth rows get
-          -- cloned, and a question with none cannot supply one.
-          and exists (select 1 from eval_rankings er
-                       join document_embeddings de2 on de2.id = er.document_embedding_id
-                      where er.eval_question_id = q.id and er.is_truth
-                        and de2.config_id = $1)
-          -- Ignored on the master (0014), holdout rows (0061) included: the
-          -- operator took these out of the live aggregate, so they are not the
-          -- questions to hand a visitor.
-          and not exists (select 1 from config_question_ignores i
-                           where i.config_id = $1 and i.eval_question_id = q.id)
-        order by r.eval_label_id, r.k, r.scored_at desc
-     ),
-     per_chunk as (
-       select distinct on (chunk) * from latest order by chunk, md5(id::text)
-     ),
-     ranked as (
-       select *, row_number() over (partition by tier order by md5(id::text)) as rn
-         from per_chunk
-     )
-     select id::text as id, tier::int as tier, chunk, document
-       from ranked
-      where rn <= case tier ${quotaCase} end
-      order by tier desc, md5(id::text)`,
-    [configId] as never[],
-  );
+// File names for the composition line, keyed by document id. Read here rather
+// than joined into selectTunable because the selection is shared with
+// demo-warm-answers.ts, which has no use for a name it would only be paying to
+// carry.
+async function documentNames(ids: string[]): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const rows = await privilegedSql<{ id: string; file_name: string }[]>`
+    select id::text as id, file_name from documents where id = any(${ids}::uuid[])
+  `;
+  return new Map(rows.map((r) => [r.id, r.file_name]));
 }
 
 // REFUSE A DULL BUILD. The set drifts on purpose, so the failure mode is not a
-// crash — it is a publish that quietly hands every visitor twelve rank-1 questions,
-// an autotune button with nothing to search, and a drilldown that shows twelve
-// identical perfect orderings. That is a worse demo than the one this replaces, and
-// it would ship without a single error.
+// crash — it is a publish that quietly hands every visitor a board of rank-1
+// questions, an autotune button with nothing to search, and a drilldown that shows
+// one identical perfect ordering after another. That is a worse demo than the one
+// this replaces, and it would ship without a single error.
 //
 // The bars are deliberately below the quota: the quota is what we ask for, this is
-// what the demo cannot do without.
+// what the demo cannot do without. They are FRACTIONS OF QUOTAS rather than the
+// constants they used to be, because the set widened from 12 to 30 (§2) and a
+// hand-written floor of 8 would have let a build a third of the intended size walk
+// straight past the guard that exists to stop it.
 function assertSpread(picked: Tunable[]): void {
+  const want = QUOTAS.reduce((n, q) => n + q.n, 0);
+  const quota = (tier: number) => QUOTAS.find((q) => q.tier === tier)?.n ?? 0;
+  const twoThirds = Math.ceil((want * 2) / 3);
+
   const misses = picked.filter((p) => p.tier === 99).length;
   const tail = picked.filter((p) => p.tier >= 3).length; // rank 3+ or missed
   const easy = picked.filter((p) => p.tier === 1).length;
@@ -319,12 +338,21 @@ function assertSpread(picked: Tunable[]): void {
   const docs = new Set(picked.map((p) => p.document)).size;
 
   const problems: string[] = [];
-  if (picked.length < 8) problems.push(`only ${picked.length} tunable questions (want 12)`);
-  if (misses < 2) problems.push(`only ${misses} missed question(s) — autotune needs failures`);
-  if (tail < 5) problems.push(`only ${tail} in the hard tail (rank 3+ or missed)`);
+  if (picked.length < twoThirds)
+    problems.push(`only ${picked.length} tunable questions (want ${want})`);
+  if (misses < Math.ceil(quota(99) / 2))
+    problems.push(`only ${misses} missed question(s) — autotune needs failures`);
+  if (tail < Math.ceil((quota(99) + quota(4) + quota(3)) / 2))
+    problems.push(`only ${tail} in the hard tail (rank 3+ or missed)`);
   if (easy < 1) problems.push("no rank-1 question — nothing to show a working retrieval against");
-  if (chunks < 8) problems.push(`only ${chunks} distinct chunks — autotune reshapes chunks`);
-  if (docs < 2) problems.push(`only ${docs} document(s)`);
+  if (chunks < twoThirds) problems.push(`only ${chunks} distinct chunks — autotune reshapes chunks`);
+  // FOUR OF THE SIX, not two. §2 measured one document's board and found it flat
+  // before anything was even scoped to it — 51 of 60 questions already at rank 1 —
+  // so a set that collapsed onto one or two files would argue against the product
+  // it is demonstrating. Four rather than all six because rank 3 and rank 4 each
+  // span only three documents on the master today; requiring six would make the
+  // publish hostage to a tier that may only exist in two files next month.
+  if (docs < 4) problems.push(`only ${docs} document(s) — a one-document board is already flat`);
   if (problems.length > 0) {
     die(
       `the tunable set has no spread, so the published demo would have a dead autotune button:\n` +
@@ -582,8 +610,11 @@ async function main() {
     )[0]?.id;
   if (!configId) die("the master account has no open config to publish (pass --config <uuid>).");
 
-  const [cfg] = await privilegedSql<{ name: string; base_model: string; top_k: number }[]>`
-    select name, base_model, top_k from configs where id = ${configId} and user_id = ${master}
+  const [cfg] = await privilegedSql<
+    { name: string; base_model: string; top_k: number; llm_model: string }[]
+  >`
+    select name, base_model, top_k, llm_model
+      from configs where id = ${configId} and user_id = ${master}
   `;
   if (!cfg) die(`config ${configId} is not owned by the master account.`);
 
@@ -591,6 +622,15 @@ async function main() {
   const to = await destCensus(snapshot);
   const tunable = await selectTunable(configId);
   const replay = await replayCensus(configId, cfg.base_model);
+  const sweep = await sweepCensus(configId);
+  // THE BOARD, DERIVED ONCE AND USED TWICE: it is written below (after --yes) and
+  // it is what the two ranking censuses are scoped to. Same expression as the
+  // writeBoard call, kept here so the dry run reports on the set that would
+  // actually be published rather than on a second derivation of it.
+  const boardChunks = [...new Set(tunable.map((t) => t.chunk))];
+  const ideals = await idealCensus(configId, boardChunks);
+  const llmRanks = await llmRankingCensus(configId, boardChunks);
+  const tuning = await tuningCensus(configId, boardChunks, cfg.base_model);
 
   console.log(`\nmaster    ${master}`);
   console.log(`snapshot  ${snapshot}  (${profile.email})\n`);
@@ -601,9 +641,9 @@ async function main() {
         from.labeled === from.questions ? "" : ` (of ${from.questions} — the rest carry no label here)`
       }, ${from.scores} published scores, ${from.cached} cached answers`,
   );
-  // The composition, not just the count: twelve is the uninteresting half of this
-  // number and the spread is the half that decides whether the demo has a working
-  // autotune button.
+  // The composition, not just the count: the size of the set is the uninteresting
+  // half of this number and the spread is the half that decides whether the demo
+  // has a working autotune button.
   const tiers = QUOTAS.map((q) => {
     const n = tunable.filter((t) => t.tier === q.tier).length;
     return n > 0 ? `${n} ${q.label}` : null;
@@ -613,6 +653,41 @@ async function main() {
       `${new Set(tunable.map((t) => t.chunk)).size} chunks in ` +
       `${new Set(tunable.map((t) => t.document)).size} documents`,
   );
+  // AND THE PER-DOCUMENT SHARE, spelled out. The document count above says six
+  // without saying that five of the thirty are in one file and one is in each of
+  // the rest — and the document filter narrows WITHIN the board (§2), so a
+  // document holding one question is a filter that lands a visitor on an
+  // almost-empty board. Nothing else in the publish shows this.
+  const perDoc = await documentNames([...new Set(tunable.map((t) => t.document))]);
+  const share = [...perDoc.entries()]
+    .map(([id, name]) => ({ name, n: tunable.filter((t) => t.document === id).length }))
+    .sort((a, b) => b.n - a.n || a.name.localeCompare(b.name));
+  console.log(`    ${share.map((d) => `${d.name} ${d.n}`).join(" · ")}`);
+  // CAN A GUEST ACTUALLY ASK THE TWELVE? A guest carries a Voyage key and no
+  // answer-model key, so a tunable question with no banked answer under the
+  // lookup's exact key is a dead end (/api/chat → DEMO_BLOCKED). The total on the
+  // line above reads as plenty — 252 answers — while the twelve that the chips,
+  // the drilldown and the autotune button all point at can be uncovered, and
+  // until this line existed nothing said so.
+  //
+  // Reported before the dry-run exit, and named individually, because the fix is
+  // a SPEND on the master (`npm run demo:warm`) that has to happen before the
+  // publish rather than after it.
+  const answers = await tunableAnswerCensus(configId, tunable);
+  const dead = answers.filter((a) => !a.cached);
+  const key = await tunableCacheKey(configId);
+  console.log(
+    `  ${answers.length - dead.length}/${answers.length} of them have a banked answer` +
+      (key === null ? "" : ` (${key.keyModel} / ${key.llmModel} / ${key.fingerprint.slice(0, 12)}…)`),
+  );
+  if (dead.length > 0) {
+    console.log(
+      `\n⚠ ${dead.length} tunable question(s) have NO banked answer — a guest asking one\n` +
+        `  gets "the demo has no answer-model key" and nothing else:\n` +
+        dead.map((d) => `    - ${d.question}`).join("\n") +
+        `\n\n  Run \`npm run demo:warm\` on the master to buy them, then re-publish.\n`,
+    );
+  }
   // The model comparison, before the dry-run exit for the same reason the spread
   // assertion is: an operator deciding whether to publish should see that this
   // run is about to spend 92 MB warming it, or that it is about to publish a
@@ -627,6 +702,64 @@ async function main() {
           : `stale — ${replay.scored}/${replay.rows} scored over ${replay.corpus} chunks, ` +
             `but this config pools ${replay.pool}`
     }${replay.warm || has("--skip-replay") ? "" : " → will be computed before the copy (~92 MB)"}`,
+  );
+  // The cache-key sweep, on the same terms and before the same exit. Its cost is
+  // the one number an operator most needs in advance: on a warm embedding cache a
+  // re-run is minutes, on a cold one it is ~an hour of sequential embedding, and
+  // nothing on screen distinguishes those two until it is running.
+  const willSweep = !has("--skip-sweep") && (has("--sweep") || !sweep.warm);
+  console.log(
+    `  cache-key sweep: ${
+      sweep.warm
+        ? `${sweep.models} models with curves over ${sweep.pairs ?? "?"} pairs, ` +
+          `${(sweep.bytes / 1024).toFixed(0)} KB, computed ` +
+          `${sweep.computed?.toISOString().slice(0, 10)}`
+        : sweep.computed === null
+          ? "never published for this config"
+          : `published but only ${sweep.models} models carry a curve`
+    }${willSweep ? " → will be run before the copy (embedding spend)" : ""}`,
+  );
+
+  // THE TWO BANKED RANKINGS (phase 5 of docs/demo-real-flow-plan.md). Steps 4 and
+  // 5 of the demo's walk press "Add nDCG rankings" and "Add LLM nDCG rankings",
+  // and neither is affordable per visitor — so the publish banks the master's own
+  // answers for the questions the board can reach.
+  //
+  // The ideals cost nothing: the master already holds one for every question it
+  // has graded, so this line is a census and its only failure mode is a shortfall.
+  const idealsMissing = ideals.filter((q) => !q.hasRanking).length;
+  console.log(
+    `  nDCG ideals: ${ideals.length - idealsMissing}/${ideals.length} board questions ` +
+      `carry the master's aggregate ideal`,
+  );
+  // The LLM re-rankings are the ONE SPEND this plan adds, and it is a publish-time
+  // spend on the operator's own key rather than a per-visitor one. Reported before
+  // the dry-run exit for the same reason the sweep's cost is: an operator deciding
+  // whether to publish should see the calls it is about to make without having to
+  // type --yes to find out.
+  const llmMissing = llmRanks.filter((q) => !q.hasRanking).length;
+  const willBuyLlm = llmMissing > 0 && !has("--skip-llm-rank");
+  console.log(
+    `  LLM nDCG re-rankings: ${llmRanks.length - llmMissing}/${llmRanks.length} bought` +
+      (willBuyLlm
+        ? ` → will buy ${llmMissing} on the master (${cfg.llm_model ?? "the config's answer model"}, one call each)`
+        : llmMissing > 0
+          ? " → skipped, so that step greys out for a guest"
+          : ""),
+  );
+
+  // THE BANKED TUNING (phase 6). Free, like the ideals: the master autotuned
+  // these chunks long ago, so this is a census and its only failure mode is a
+  // shortfall. A shortfall is not a defect either — a board chunk the master
+  // never overrode is one its own search found nothing for, and the replayed run
+  // reports it unresolved exactly as a real one would. What matters is the
+  // number reaching ZERO, which is a build whose last step refuses.
+  console.log(
+    `  autotune winners: ${tuning.overridden - tuning.foreign}/${tuning.boardChunks} board chunks ` +
+      `carry a bankable one (${tuning.overrideRows} override rows, ${tuning.trials} saved trial(s))` +
+      (tuning.foreign > 0
+        ? `, ${tuning.foreign} dropped — won under a provider the demo has no key for`
+        : ""),
   );
 
   // Before the dry-run exit, so an operator sees the refusal without having to
@@ -682,43 +815,401 @@ async function main() {
     );
   }
 
+  // RUN THE CACHE-KEY SWEEP ON THE MASTER, AND SHELVE IT (phase 1 of
+  // docs/demo-cache-lab-plan.md).
+  //
+  // The second place the publish deliberately spends, and the first that spends
+  // on a PROVIDER rather than on egress: every pooled pair text embedded under
+  // every candidate model. It buys the thing a guest cannot buy — §4's
+  // leaderboard, and with it the precision slider, which re-derives every row
+  // client-side from the curves this produces and therefore costs a visitor
+  // nothing at all.
+  //
+  // Like the replay above it runs in the MASTER's own scope, before the clone,
+  // because runKeyModelSweep is an ordinary user- and config-scoped call: the
+  // pooled pair set is the master's, and scopedAcceptTarget reads the config's
+  // stored precision target. Step 5d then copies whatever is on the shelf.
+  //
+  // NOT re-run when one is already published, unlike the replay's "warm" check
+  // which is about staleness. Here it is about cost: embedQueryCached makes a
+  // re-run nearly free ONLY once every text is banked, and the first run on a
+  // cold cache is ~an hour. `--sweep` forces it when the pair set has moved.
+  if (willSweep) {
+    const [me] = await privilegedSql<{ email: string }[]>`
+      select email from user_profiles where id = ${master}
+    `;
+    if (!me) die(`no user_profiles row for the master account ${master}.`);
+    console.log("running the cache-key sweep on the master (embedding spend)…");
+    const started = Date.now();
+    const result = await withUser({ id: master, email: me.email }, async () => {
+      const scoped = await resolveConfig(configId);
+      if (!scoped) die(`config ${configId} did not resolve in the master's scope.`);
+      return withConfig(scoped, async () => {
+        // THE MATRIX FIRST, then the published sweep — phase 2 of
+        // docs/demo-cache-replay-plan.md, and the order is the cost argument.
+        // This run pools the quarantined pairs as well, so it is the one that
+        // buys their vectors; every text the published sweep then needs is
+        // already banked and content-addressed, so it runs warm. Reverse the two
+        // and the operator pays the cold-cache hour twice.
+        const capture = await captureReplayMatrix(await scopedAcceptTarget());
+        await writeMatrix(master, capture.matrix);
+        console.log(
+          `  banked a ${capture.matrix.pairs.length}×${capture.matrix.models.length} similarity matrix ` +
+            `(${capture.scoredModels} models scored, ${capture.quarantined} pairs quarantined) ` +
+            `at ${(capture.bytes / 1024).toFixed(0)} KB`,
+        );
+        // Soft, and reported for PUBLISHED_SWEEP_MAX_BYTES' reason exactly: the
+        // matrix rides in a guest's first payload, so the alternative to
+        // noticing here is noticing on a visitor's connection.
+        if (capture.bytes > DEMO_MATRIX_MAX_BYTES) {
+          console.log(
+            `⚠ the replay matrix is ${(capture.bytes / 1024).toFixed(0)} KB, over the ` +
+              `${(DEMO_MATRIX_MAX_BYTES / 1024).toFixed(0)} KB this is meant to stay under.`,
+          );
+        }
+        const out = await runKeyModelSweep(await scopedAcceptTarget());
+        await writePublishedSweep(configId, out);
+        return out;
+      });
+    });
+    const withCurves = result.rows.filter((r) => (r.calibration?.curve.length ?? 0) > 0).length;
+    // Raw vs thinned, reported rather than assumed — the plan's own sizing was
+    // out by 10x (it sketched ~50 KB for what measures ~500), and this is the
+    // number that decides whether the published row is something to hand out on
+    // page load at all.
+    const raw = sweepBytes(result);
+    const thin = sweepBytes(thinSweep(result));
+    // What is actually STORED, and therefore what every panel mount re-reads
+    // over the hop Supabase bills — thinning answered the page-load question,
+    // packing answers this one (phase 1.5).
+    const stored = sweepBytes(publishedForm(result));
+    console.log(
+      `  ${withCurves}/${result.rows.length} models with curves over ${result.pairs.total} pairs ` +
+        `in ${((Date.now() - started) / 1000).toFixed(0)}s — ` +
+        `${(raw / 1024).toFixed(0)} KB thinned to ${(thin / 1024).toFixed(0)} KB, ` +
+        `stored packed at ${(stored / 1024).toFixed(0)} KB` +
+        `${result.cancelled ? " (CANCELLED — partial)" : ""}\n`,
+    );
+    if (stored > PUBLISHED_SWEEP_MAX_BYTES) {
+      console.log(
+        `⚠ the published sweep is ${(stored / 1024).toFixed(0)} KB, over the ` +
+          `${(PUBLISHED_SWEEP_MAX_BYTES / 1024).toFixed(0)} KB this is meant to stay under.\n` +
+          "  It is still valid and the build still works — but it rides in the panel's first\n" +
+          "  payload, so at this size fetching it on demand starts to beat handing it out.\n",
+      );
+    }
+  }
+
+  // THE BOARD THE EVAL TAB IS SCOPED TO (phase 2 of docs/demo-real-flow-plan.md).
+  //
+  // Written on the MASTER, before the clone, for the same reason the matrix above
+  // is: these are the master's chunk ids, and clone step 5g is the one thing that
+  // knows how to rewrite an id into the destination's space. Written on every
+  // publish rather than under a flag — unlike the matrix it costs nothing to
+  // capture, and a build without one is a build whose demo has no scope.
+  //
+  // THE SAME CHUNKS THE TUNABLE SET SITS ON, deliberately: the board is what
+  // selectTunable already chose, promoted from an implication of the frozen set
+  // into a fact of its own. Today those two agree by construction; phase 4 empties
+  // the questions and this row is what survives that.
+  //
+  // Order is the selector's (tier desc, md5) and no reader depends on it —
+  // getSummary orders the chunk list by document and position, as it does for
+  // every account. It is banked as given so a re-publish of an unchanged build
+  // produces an identical payload rather than a reshuffled one.
+  // Through privilegedSql, like every other publish-time write in this script
+  // (seedPublishedBank, armAutotune): a script has no request scope, so the
+  // request-scoped `sql` writeBoard defaults to would throw before it wrote. The
+  // matrix above avoids this by running inside the sweep's own withUser block.
+  await writeBoard(
+    master,
+    { version: 1, chunks: [...new Set(tunable.map((t) => t.chunk))] },
+    privilegedSql,
+  );
+
+  // THE TWO RANKINGS THE WALK'S STEPS 4 AND 5 REPLAY (phase 5 of
+  // docs/demo-real-flow-plan.md).
+  //
+  // Banked on the MASTER and before the clone, exactly like the board above and
+  // for the same reason: the chunk ids in every entry are the master's, and clone
+  // step 5i is the one thing that knows how to rewrite them into a destination's
+  // id space.
+  //
+  // AND AFTER THE SELECTION, which is the ordering §4.5 insists on: what is bought
+  // here is scoped to the board, so a capture taken before the set was chosen
+  // would be the spend repeated over the wrong questions.
+  //
+  // The ideals are free — the master graded these questions long ago — so they are
+  // captured on every publish, unconditionally. The LLM re-rankings are bought,
+  // which is why they have a flag.
+  if (willBuyLlm) {
+    const [me] = await privilegedSql<{ email: string }[]>`
+      select email from user_profiles where id = ${master}
+    `;
+    if (!me) die(`no user_profiles row for the master account ${master}.`);
+    console.log(`buying ${llmMissing} LLM re-ranking(s) on the master (one answer-model call each)…`);
+    const started = Date.now();
+    // IN THE MASTER'S OWN SCOPE, like the sweep and the replay: buildLlmRanking is
+    // an ordinary user- and config-scoped call that reads the master's aggregate
+    // and writes the master's eval_rankings. It serves from its own cache when the
+    // signature still matches, so a re-publish of an unchanged build buys nothing
+    // and this loop is free.
+    const failures = await withUser({ id: master, email: me.email }, async () => {
+      const scoped = await resolveConfig(configId);
+      if (!scoped) die(`config ${configId} did not resolve in the master's scope.`);
+      return withConfig(scoped, async () => {
+        const pending = llmRanks.filter((q) => !q.hasRanking);
+        const errors: string[] = [];
+        let next = 0;
+        let done = 0;
+        // Three at a time, on bulkBuildLlmRankings' argument: enough to hide the
+        // per-call latency, low enough not to become a rate limit.
+        const worker = async () => {
+          for (let i = next++; i < pending.length; i = next++) {
+            try {
+              await buildLlmRanking(pending[i].questionId, "rerank");
+            } catch (err) {
+              errors.push(`${pending[i].question.slice(0, 60)}… — ${String(err)}`);
+            }
+            done += 1;
+            if (done % 10 === 0) console.log(`  ${done}/${pending.length}`);
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(3, pending.length) }, worker));
+        return errors;
+      });
+    });
+    console.log(
+      `  bought ${llmMissing - failures.length}/${llmMissing} in ` +
+        `${((Date.now() - started) / 1000).toFixed(0)}s\n`,
+    );
+    // Reported rather than fatal: a garbled reply on one question is a step that
+    // refuses for that one question, not a build worth throwing away.
+    for (const f of failures.slice(0, 5)) console.log(`  ⚠ ${f}`);
+  }
+
+  const bankedIdeals = await packIdeals(configId, boardChunks);
+  const bankedLlm = await packLlmRankings(configId, boardChunks);
+  await writeIdeals(master, bankedIdeals, privilegedSql);
+  await writeLlmRankings(master, bankedLlm, privilegedSql);
+  const rankingBytes = rankingsBytes(bankedIdeals) + rankingsBytes(bankedLlm);
+  console.log(
+    `banked ${bankedIdeals.entries.length} nDCG ideal(s) and ${bankedLlm.entries.length} ` +
+      `LLM re-ranking(s) at ${(rankingBytes / 1024).toFixed(0)} KB\n`,
+  );
+  // Soft and reported, on DEMO_MATRIX_MAX_BYTES' terms — except that these are
+  // read on a button press rather than on page load, so the bar is looser and the
+  // consequence of crossing it is a slow press, not a slow first paint.
+  if (rankingBytes > DEMO_RANKINGS_MAX_BYTES) {
+    console.log(
+      `⚠ the banked rankings are ${(rankingBytes / 1024).toFixed(0)} KB, over the ` +
+        `${(DEMO_RANKINGS_MAX_BYTES / 1024).toFixed(0)} KB this is meant to stay under.\n`,
+    );
+  }
+
+  // THE TUNING THE WALK'S LAST STEP INSTALLS (phase 6 of
+  // docs/demo-real-flow-plan.md).
+  //
+  // Banked on the MASTER and before the clone, exactly like the board and the two
+  // rankings above and for their reason: every entry names a chunk, and clone
+  // step 5j is what rewrites those ids into a destination's space.
+  //
+  // Unconditional and free — the master's own autotune paid for this search
+  // months ago, and what travels is the winner it confirmed. Board-scoped and
+  // never wider (§6): the other ~200 override rows name chunks no visitor can
+  // reach.
+  const bankedTuning = await packTuning(configId, boardChunks, cfg.base_model);
+  await writeTuning(master, bankedTuning, privilegedSql);
+  const tuningSize = tuningBytes(bankedTuning);
+  console.log(
+    `banked the autotune winner for ${bankedTuning.entries.length} board chunk(s) at ` +
+      `${(tuningSize / 1024).toFixed(0)} KB\n`,
+  );
+  if (tuningSize > DEMO_TUNING_MAX_BYTES) {
+    console.log(
+      `⚠ the banked tuning is ${(tuningSize / 1024).toFixed(0)} KB, over the ` +
+        `${(DEMO_TUNING_MAX_BYTES / 1024).toFixed(0)} KB this is meant to stay under.\n`,
+    );
+  }
+
   const summary = await cloneSeedWorkspace(master, snapshot, {
     onlyConfigId: configId,
     replaceDestination: true,
     tunableQuestionIds: tunable.map((t) => t.id),
   });
 
+  // THE "AS PUBLISHED" CARD, MEASURED BEFORE THE BUILD IS EMPTIED.
+  //
+  // Moved above the bank by §3.2, and the order is now load-bearing rather than
+  // incidental: this reads the copied eval_results and eval_rankings back to
+  // compute the headline, and the next step deletes every one of them. Run it
+  // afterwards and it finds nothing and prints "no scores were published" over a
+  // build that published 460 of them. Copy, then CORRECT, then empty.
+  await freezePublishedRun(snapshot, summary.runs);
+
+  // THE QUESTIONS "ADD CACHED" WILL HAND OUT — WHICH IS NOW THE WHOLE BOARD
+  // (docs/demo-question-bank-plan.md, re-cut by §3.2 of the real-flow plan).
+  //
+  // Runs on the SNAPSHOT, after the copy, because that is where both things it
+  // reads are already written down: the board scope as the demo_replay row step
+  // 5g remapped, and the questions as the rows the clone just minted. It replaces
+  // the bank the clone inherited from the master with sixty chosen ones and then
+  // DELETES EVERY QUESTION IN THE BUILD — see lib/demo/publishedBank.ts for why
+  // both halves, and why the delete is total rather than the picks.
+  //
+  // Nothing on the master changes, so a publish is still a copy: this only edits
+  // the account it just wrote.
+  const [snapCfg] = await privilegedSql<{ id: string; llm_model: string }[]>`
+    select id, llm_model from configs where user_id = ${snapshot} limit 1
+  `;
+  if (!snapCfg) die(`the publish wrote no config into ${snapshot}.`);
+  // The board in the SNAPSHOT's id space. Read back rather than derived from
+  // `tunable` above, whose ids are the master's: this is the same row a guest's
+  // getSummary will scope on, so a remap that dropped ids shows up here as a
+  // short bank in front of the operator rather than as a half-empty board in a
+  // visitor's browser.
+  const [boardRow] = await privilegedSql<{ payload: ReplayBoard }[]>`
+    select payload from demo_replay
+     where user_id = ${snapshot} and kind = 'board' and key = ${BOARD_KEY}
+  `;
+  const board = boardRow?.payload.chunks ?? [];
+  const picks = await selectBankable(snapCfg.id, cfg.base_model, board);
+  const bank = await seedPublishedBank(snapshot, snapCfg.llm_model, picks);
+
   console.log("published:");
   console.log(
     `  ${summary.configs} config, ${summary.documents} documents, ${summary.chunks} chunks, ` +
-      `${summary.questions} questions, ${summary.results} scores, ` +
-      `${summary.rankings} graded rankings, ${summary.frozen} frozen, ` +
+      `${bank.remaining} questions on the board, ${summary.results} scores measured, ` +
+      `${summary.rankings} graded rankings, ${bank.removed} questions emptied out, ` +
       `${summary.cachedAnswers} cached answers, ` +
-      `${summary.bankedQuestions} banked questions, ` +
-      `${summary.shadowEvents} shadow events (${summary.shadowQueued} unjudged), ` +
-      `${summary.replayRows} model rows (${summary.replayScored} scored)\n`,
+      `${bank.banked} banked questions, ` +
+      `${summary.shadowEvents} shadow events (${summary.shadowQueued} unjudged, ` +
+      `${summary.shadowVerdicts} verdicts banked, ${summary.shadowPoolable} poolable), ` +
+      `${summary.replayRows} model rows (${summary.replayScored} scored), ` +
+      `${summary.sweepRows === 0 ? "no cache-key sweep" : `a cache-key sweep (${summary.sweepModels} models)`}, ` +
+      `${summary.matrixPairs === 0 ? "NO replay matrix" : `a replay matrix over ${summary.matrixPairs} pairs`}, ` +
+      `${summary.boardChunks === 0 ? "NO board scope" : `a board scoped to ${summary.boardChunks} chunks`}, ` +
+      `${summary.bankedIdeals} banked ideals, ${summary.bankedLlmRankings} banked LLM re-rankings, ` +
+      `${summary.bankedTuning === 0 ? "NO banked tuning" : `banked tuning for ${summary.bankedTuning} chunks`}, ` +
+      `${summary.ledgerRows === 0 ? "NO savings ledger" : `${summary.ledgerRows} savings row`}\n`,
   );
+  // The payoff readout's money is the whole point of §4's bottom line, and its
+  // absence is silent by design: readCacheEconomics turns a zero-event ledger
+  // into `savedPerHitUsd: null`, which renders as a hit rate with no dollars
+  // rather than as an error. So the publish says it here or nobody finds out.
+  if (summary.ledgerRows === 0) {
+    console.log(
+      "\u26a0 no semantic_cache savings row reached the snapshot, so the payoff readout will\n" +
+        "  show a hit rate with no money. The master accrues that row by SERVING cache hits —\n" +
+        "  ask a repeated question on the published config and re-publish.\n",
+    );
+  }
+  // The board's own failure mode, and it is quieter than the matrix's below:
+  // readBoard returns null for a build without one, every reader falls through to
+  // the unscoped path, and the guest's Eval tab renders all 236 chunk cards
+  // exactly as it does today. That is a demo with no scope wearing the face of a
+  // working one, so the publish says it here.
+  if (summary.boardChunks === 0) {
+    console.log(
+      "\u26a0 no board scope reached the snapshot, so a guest's Eval tab is scoped to the\n" +
+        "  whole corpus. Either the master carries no board row, or none of its chunk ids\n" +
+        "  survived the clone's remap — check step 5g.\n",
+    );
+  }
+  // THE TWO RANKING SHELVES (phase 5). Their failure is the quiet kind again: a
+  // build with neither is a build whose steps 4 and 5 grey out and refuse with the
+  // policy sentence, which reads exactly like a demo that was always meant to
+  // forbid them. So the publish says which one is missing and why it matters.
+  if (summary.bankedIdeals === 0) {
+    console.log(
+      "⚠ no nDCG ideals reached the snapshot, so \"Add nDCG rankings\" is blocked for a\n" +
+        "  guest and the walk stops at step 3 — no graded nDCG, and autotune loses the\n" +
+        "  metric it tunes against. Either the master's board questions carry no truth\n" +
+        "  ranking, or the ids did not survive the clone's remap — check step 5i.\n",
+    );
+  }
+  if (summary.bankedLlmRankings === 0) {
+    console.log(
+      "⚠ no LLM re-rankings reached the snapshot, so step 5 of the walk greys out. The\n" +
+        "  build is still valid — nothing else reads them, and no headline number moves —\n" +
+        "  but re-publish without --skip-llm-rank to buy them.\n",
+    );
+  }
+  // AND THE TUNING SHELF (phase 6), whose absence is the loudest of the three:
+  // unlike the two ranking shelves this one is captured on EVERY publish, so a
+  // zero here means the remap dropped everything rather than that a flag was
+  // passed — and the walk's last step stops being live at all.
+  if (summary.bankedTuning === 0) {
+    console.log(
+      "⚠ no banked tuning reached the snapshot, so ⚙ Auto tune is BLOCKED for a guest and\n" +
+        "  the walk ends at step 5. Either the master has never autotuned a board chunk, or\n" +
+        "  the ids did not survive the clone's remap — check step 5j.\n",
+    );
+  }
+  // Louder than the count above, because a build with no matrix is the one
+  // failure of this phase that looks like a working publish: every other number
+  // on the line is unchanged, and §4 goes back to being a poster.
+  if (summary.matrixPairs === 0) {
+    console.log(
+      "⚠ no similarity matrix reached the snapshot, so the semantic-cache page has nothing\n" +
+        "  to replay. Re-run with --sweep, which is what captures it.\n",
+    );
+  }
   // The one thing a guest can ADD without a key: "Bulk actions → Add question →
-  // Add cached" reads question_cache, which step 4e of the clone now carries
-  // (phase 6.1 of docs/demo-analytics-plan.md).
+  // Add cached" reads question_cache, which the publish now CONSTRUCTS out of the
+  // build's own frozen questions (docs/demo-question-bank-plan.md) rather than
+  // inheriting whatever the master happened to have generated for this corpus.
   //
-  // Both directions are worth a line, because the count alone reads the same
-  // either way. A CAPPED build is working as designed and the number is not the
-  // master's — say which. An EMPTY one is not an error (the master's bank only
-  // fills as it generates) but it is a dead button on the published build, and it
-  // is invisible from the outside.
-  if (summary.bankedQuestions === 0) {
+  // The composition is the report, not the count — twelve is the uninteresting
+  // half, exactly as it is for the tunable set two screens up. What a visitor
+  // notices is which files the questions are about, and whether adding them gives
+  // autotune anything to find.
+  if (bank.banked === 0) {
     console.log(
-      "⚠ no banked questions published — the master's question_cache holds nothing for\n" +
-        "  this corpus's chunk text, so a guest's \u201cAdd cached\u201d will find nothing to add.\n" +
-        "  Generate some questions on the master and re-publish to give it something.\n",
+      "\u26a0 no banked questions published \u2014 nothing on the board was eligible, so a guest's\n" +
+        "  board stays EMPTY and \u201cAdd cached\u201d has nothing to put on it. The build's own\n" +
+        "  questions were left in place so the demo still shows something; check that the\n" +
+        "  board scope reached the snapshot and that its chunks carry scored questions.\n",
     );
-  } else if (summary.bankedAvailable > summary.bankedQuestions) {
+  } else {
+    const tierLabel = (t: number) => (t === 99 ? "missed" : `rank ${t}`);
     console.log(
-      `  (${summary.bankedAvailable} passages had banked wording; capped to ` +
-        `${BANKED_QUESTION_CAP} — a guest's tunable set tops out at ` +
-        `${tunable.length + summary.bankedQuestions}, which is what autotune runs over.)\n`,
+      `  the board a guest builds: ${bank.banked} banked question(s) over ${bank.documents} document(s) ` +
+        `(${bank.tiers.map((t) => `${t.n} ${tierLabel(t.tier)}`).join(", ")}; ` +
+        `${bank.difficulties.join(" + ")}), and the\n  published build emptied of all ` +
+        `${bank.removed} of its own \u2014 so a guest arrives at a board with nothing on it and\n` +
+        `  \u201cAdd cached\u201d is what fills it, up to ${bank.banked}, which is what scoring, nDCG and ` +
+        `autotune then run over.\n`,
     );
+    if (bank.banked < BANKED_QUESTION_CAP) {
+      console.log(
+        `\u26a0 only ${bank.banked} of ${BANKED_QUESTION_CAP} banked \u2014 the board's ${board.length} chunk(s) did not ` +
+          `supply two scored\n  questions each. The demo still works; the board a guest can ` +
+          `build is just smaller.\n`,
+      );
+    }
+    // The old failure mode, kept as a check rather than as a warning nothing
+    // could act on: selectBankable round-robins by document, so one document now
+    // means the eligible set was confined to one, not that the bank drifted.
+    if (bank.documents < 2) {
+      console.log(
+        `\u26a0 all ${bank.banked} banked questions come from ${bank.documents} document(s) \u2014 ` +
+          `\u201cAdd cached\u201d would hand\n  a guest a board about one file. ` +
+          `Check what else in this build is eligible.\n`,
+      );
+    }
+    // The half that is invisible afterwards, and it inverted with §3.2: the risk
+    // used to be a banked question LEFT in the build (fillChunksFromCache would
+    // count it and then decline to add it, because selectNewQuestions dedupes on
+    // wording). Now the delete is total, so ANY survivor is that same bug — a
+    // question sitting on a board the demo promises is empty.
+    if (bank.remaining !== 0) {
+      console.log(
+        `\u26a0 ${bank.remaining} question(s) survived the empty-out. A guest's board is meant to ` +
+          `start blank;\n  these will be on it, unadded and \u2014 if their wording is banked \u2014 ` +
+          `silently unaddable.\n`,
+      );
+    }
   }
   // The calibration curve (phase 6.2). Two failure modes, both silent from the
   // outside, and the second is the one that bites: a build can carry plenty of
@@ -737,6 +1228,23 @@ async function main() {
       "⚠ every published shadow event is already judged — the Accept / Reject queue\n" +
         "  will be empty, so the one calibration control a guest is allowed to touch\n" +
         "  does nothing. It needs unjudged probe rows above the shadow floor.\n",
+    );
+  } else if (summary.shadowPoolable === 0) {
+    // THE QUIET ONE, and the reason phase 4 counts this at all. A queue can be
+    // full, its verdicts banked, the button instant — and judging every row move
+    // nothing, because `poolPairs` drops a probe row that replayed a generated
+    // pair (F3) and those rows have no cosine in the matrix. That is a demo whose
+    // central claim is false and whose every visible number still looks right.
+    console.log(
+      "⚠ none of the queued rows are in the pooled set — judging them will not move\n" +
+        "  the leaderboard. The queue preferred poolable rows and found none, so the\n" +
+        "  master's probe rows are all F3 self-collisions. Re-run the probe replay.\n",
+    );
+  } else if (summary.shadowVerdicts < summary.shadowQueued) {
+    console.log(
+      `⚠ ${summary.shadowQueued - summary.shadowVerdicts} queued row(s) have no banked ` +
+        "verdict — \"Run judge over queue\" will skip them\n  rather than judge them. " +
+        "They are rows the copy's dedupe collapsed.\n",
     );
   }
 
@@ -757,6 +1265,25 @@ async function main() {
         "  table will render as dashes. A model is scored only at 100% chunk coverage in\n" +
         "  the master's embedding_cache, so this means the cache no longer covers this\n" +
         "  corpus. Re-publish without --skip-replay.\n",
+    );
+  }
+
+  // The cache-key sweep (phase 1 of docs/demo-cache-lab-plan.md). Same shape as
+  // the two above: the count that reads as success is the one with CURVES, since
+  // a curve is what the precision slider re-derives from and the slider is the
+  // whole point of publishing this. A row of models with no curves is §4 wearing
+  // the layout of a measurement and holding none.
+  if (summary.sweepRows === 0) {
+    console.log(
+      "⚠ no cache-key sweep published — Appraise → Semantic caching's §4 will show its\n" +
+        "  three disabled buttons and no table, which is the state this phase exists to fix.\n" +
+        "  Re-publish without --skip-sweep, or check the master's published_sweep row.\n",
+    );
+  } else if (summary.sweepModels < 2) {
+    console.log(
+      `⚠ a cache-key sweep was published but only ${summary.sweepModels} model(s) carry a curve — the\n` +
+        "  leaderboard renders as dashes and the precision slider has nothing to re-derive.\n" +
+        "  Check the master's pair set is populated, then re-publish with --sweep.\n",
     );
   }
 
@@ -784,7 +1311,6 @@ async function main() {
     );
   }
 
-  await freezePublishedRun(snapshot, summary.runs);
   await armAutotune(snapshot);
 
   const ok = await verifyFingerprints(snapshot);

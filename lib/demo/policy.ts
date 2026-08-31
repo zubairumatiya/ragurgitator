@@ -71,12 +71,13 @@ export const DEMO_BLOCKED = "demo_blocked";
 // below. This sentence is what a build published without one says, so it still
 // has to work standing alone on a blank panel.
 //
-// `judge` IS THE SECOND SENTENCE THAT POINTS AT A BUTTON (phase 6.2), and it is
-// true for the same kind of reason `generate` is: lib/demo/clone step 5b copies a
-// sample of semantic_cache_shadow, SHADOW_QUEUE_CAP of those rows with the verdict
-// cleared, so the queue it names is stocked. Only the LLM half of that route is
-// gated — a human verdict is one UPDATE and buys nothing from a provider — which
-// is why this sentence talks about the judge MODEL rather than about judging.
+// `judge` IS A FALLBACK NOW TOO (phase 5 of docs/demo-cache-replay-plan.md).
+// Only the LLM half of that route was ever gated — a human verdict is one UPDATE
+// and buys nothing from a provider — and phase 4 turned even that half into a
+// replay: clone step 5b banks the verdicts the operator's own judge returned over
+// the queued rows, so "Run judge over queue" applies them for free. This sentence
+// is what a build published without those verdicts says, which is why it consoles
+// with judging BY HAND rather than with the queue merely existing.
 //
 // `generate` NOW POINTS AT A BUTTON, which is only honest because phase 6 made
 // it true: lib/demo/clone step 4e copies question_cache, so "Bulk actions → Add
@@ -84,6 +85,45 @@ export const DEMO_BLOCKED = "demo_blocked";
 // question. That path is carved out of this gate in the route itself
 // (app/api/eval/bulk-generate), because `cachedOnly` is the one form of that
 // request that calls nothing.
+//
+// `sweep` IS A FALLBACK, for exactly `appraise`'s reason. A guest's Appraise →
+// Semantic caching §4 re-derives its leaderboard from the banked similarity
+// matrix (0080) at whatever `n` they have reached, so pressing "Run sweep"
+// replays real arithmetic instead of buying ~510 texts × every candidate model of
+// embeddings on keys the demo does not hold.
+//
+// THE FALLBACK IS NOT HYPOTHETICAL, which is the whole reason this entry survived
+// phase 5's copy pass. scripts/demo-snapshot captures the matrix only under
+// --sweep — the cold-cache hour — and WARNS rather than fails when it is absent,
+// so a routine cheap republish is exactly a build whose guests reach this line.
+// Without it their click runs the real sweep on the operator's key.
+//
+// `rank` AND `llmRank` ARE FALLBACKS NOW TOO — phase 5 of
+// docs/demo-real-flow-plan.md, and for `judge`'s reason exactly. Steps 4 and 5 of
+// the demo's walk are those two buttons, and a published build banks the master's
+// own answers for both (0082): the aggregate ideal per question, and the
+// llm_rerank order the publish buys once. With the shelf stocked neither is
+// blocked at all — the routes skip the gate, and lib/rag/evalStore drops both
+// entries from the summary's map so the buttons render live. These sentences are
+// what a build published WITHOUT them says, which is why both now name the
+// absence rather than only the cost.
+//
+// `keyModel` IS NEW, and it exists because `sweep` stopped covering the whole
+// route. POST /api/semantic-cache/key-model has three actions and one gate used
+// to blanket all of them; phase 2 splits them, because only `sweep` has a
+// published answer to hand back. `apply` and `backfill` both WRITE — one moves
+// which vector-space every incoming question is matched in, the other re-embeds
+// this config's banked questions under the new model — so they stay blocked,
+// and they need their own sentence: telling a visitor who pressed Apply that
+// "its results weren't published" would be answering a question they did not
+// ask.
+//
+// `pairs` IS `sweep`'s FALLBACK ONE SECTION UP, and stands or falls with the same
+// artifact. "Generate pairs" walks a guest further into the banked matrix — the
+// counts, the leaderboard and the pair-bank collision floor all re-derive from
+// the `n` it moves — and the carve-out lives in app/api/semantic-cache/pairs,
+// exactly as `cachedOnly` lives in bulk-generate. With no matrix there is nothing
+// to walk, and this is what that visitor reads.
 export const DEMO_ACTIONS = {
   ingest:
     "Uploading and ingesting documents is off in the demo — it would spend the " +
@@ -92,12 +132,15 @@ export const DEMO_ACTIONS = {
   reconfigure:
     "Re-chunking or switching embedding model re-embeds the whole corpus, which " +
     "the demo doesn't pay for. Everything else on this page is live.",
+  // Names “Add” rather than “Add cached”: on a demo board the two swapped roles,
+  // and pointing a visitor at the button greyed out beside this one is worse
+  // than saying nothing.
   generate:
     "Writing a NEW question needs an answer-model key, which the demo doesn't " +
-    "carry — the bank you're looking at was generated the same way. \u201cAdd " +
-    "cached\u201d does work: this workspace was published with the wording " +
-    "already paid for, so it hands chunks questions that cost nothing and scores " +
-    "them like any other.",
+    "carry — the bank you're looking at was generated the same way. Bulk " +
+    "actions → Add question → \u201cAdd\u201d does work: this workspace was " +
+    "published with the wording already paid for, so it hands chunks questions " +
+    "that cost nothing and scores them like any other.",
   tryModel:
     "Trying a chunk under a different embedding model re-embeds it and every " +
     "chunk it is ranked against, so it's off in the demo. The question it " +
@@ -118,8 +161,23 @@ export const DEMO_ACTIONS = {
     "the demo. Sign up with your own keys to run it on your corpus.",
   rank:
     "Rebuilding a question's ideal ranking embeds a pool of chunks under every " +
-    "model on the list, so it's off in the demo. The graded rankings you can " +
-    "open are real, and the nDCG on the Eval tab is scored against them.",
+    "model on the list, so it's off in the demo — and this build was published " +
+    "without the ideals that would otherwise replay it here, one ordering per " +
+    "question. The graded rankings you can open are real, and the nDCG on the " +
+    "Eval tab is scored against them.",
+  // SPLIT OFF `generate` (§5 of docs/demo-real-flow-plan.md). Both halves of
+  // this route need an answer-model key, so one entry covered them — but the
+  // sentence a visitor read on "Add LLM nDCG rankings" was the one about
+  // WRITING QUESTIONS, pointing them at "Add cached" for a button that has
+  // nothing to do with re-ranking. A tooltip that answers a question nobody
+  // asked is the same defect as a refusal pointing at an empty tab.
+  llmRank:
+    "Asking an LLM to re-order a question's top-k costs one answer-model call " +
+    "per question, which the demo doesn't carry a key for, and this build was " +
+    "published without the re-rankings that would stand in for it. The ranking " +
+    "builder on any question still opens: the aggregate ideal an LLM re-ranking " +
+    "would be compared against is there, and it's the one the Eval tab's nDCG " +
+    "is actually scored on.",
   appraise:
     "The model comparison replays the whole corpus from cached vectors — 92 MB " +
     "of them — which the demo doesn't have the bandwidth to do per visitor, so " +
@@ -130,21 +188,66 @@ export const DEMO_ACTIONS = {
     "Batch submission spends provider credit hours later, when the demo " +
     "workspace no longer exists. Sign up to use it.",
   judge:
-    "The LLM judge grades shadow events in bulk against an answer model, which " +
-    "the demo doesn’t carry a key for. The Accept / Reject queue below is " +
-    "yours: this workspace was published with real events waiting for a verdict, " +
-    "and each one you decide redraws the calibration curve above it.",
+    "The LLM judge grades queued events in bulk against an answer model, which " +
+    "the demo doesn’t carry a key for, and this build was published without " +
+    "the verdicts that would stand in for it. Judging by hand still works and " +
+    "is the same lever: every verdict you give re-pools the pair set the " +
+    "leaderboard is scored on and re-sweeps the threshold it recommends.",
   sweep:
-    "The cache-key sweep re-embeds the whole question bank in several models, " +
-    "so it's off in the demo and its results weren't published with this " +
-    "workspace. The cache it was measuring is live: ask a banked question two " +
+    "The cache-key sweep re-embeds the whole pair set in every candidate model, " +
+    "so it's off in the demo — and this build was published without the " +
+    "similarity matrix that would otherwise replay it here, cosine for cosine. " +
+    "The cache it was measuring is live either way: ask a banked question two " +
     "different ways and watch the second one hit.",
+  keyModel:
+    "Switching the cache-key model changes which vector-space every incoming " +
+    "question is matched in, and backfilling re-embeds this config's banked " +
+    "questions under it — spend the demo doesn't carry, and a write the next " +
+    "visitor would inherit. The cache it would be changing is live either way: " +
+    "ask a banked question two different ways and watch the second one hit.",
+  pairs:
+    "Writing NEW question pairs needs an answer model to phrase each variant, " +
+    "which the demo doesn't carry a key for, and this build was published " +
+    "without the measurement that would otherwise let you walk one. The " +
+    "would-hit queue is stocked either way: this workspace carries a sample of " +
+    "real shadow events waiting for a verdict, which is what pairs are " +
+    "generated to produce.",
+  // THE ONLY ENTRY HERE WITH NO REPLAY BEHIND IT, and the only one a guest cannot
+  // reach by pressing anything. A probe has to EMBED a question variant and look
+  // it up live, so unlike the judge's verdicts there is nothing about it a publish
+  // can bank — which is also why phase 5 removed the demo's single-probe button
+  // rather than replaying it. Two doors, both shut: probeReplayTrigger self-checks
+  // demoBlocks() so nothing auto-fires after a generate, and this sentence answers
+  // a hand-written POST /api/jobs. That second door is the enforcing one.
   probeReplay:
     "Stocking the queue replays generated question variants through the cache, " +
     "embedding each one — a spend the demo doesn’t carry. It also isn’t " +
     "needed here: this workspace was published with a sample of real shadow " +
     "events already waiting, which is what a signed-up account uses this to " +
-    "build for itself. The Accept / Reject queue below is the result either way.",
+    "build for itself. The would-hit queue is the result either way.",
+  // AUTOTUNE, AND IT IS A FALLBACK ONLY — phase 6 of docs/demo-real-flow-plan.md.
+  //
+  // This table's header has said for two phases that autotune is deliberately
+  // absent from it, and the reason was the frozen set: with the board held to
+  // twelve questions the search was bounded, so blocking it would have been a
+  // second limit disagreeing with the first. §3.2 removed that bound — a visitor
+  // now builds a sixty-question board — and the search is the half that spends:
+  // one candidate rung per failing chunk of real embedding, plausibly 150k–350k
+  // tokens against a 200,000-token budget.
+  //
+  // So the button is still live in the normal case, and it is live for a REASON
+  // rather than by omission: a published build banks the master's confirmed
+  // winners (0083) and the press installs them, then re-scores and reports for
+  // real. This sentence is what a build published WITHOUT that shelf says — the
+  // `sweep`/`judge` shape once more, and the same hazard, since a cheap
+  // republish from an older checkout is exactly the build whose guests reach it.
+  autotune:
+    "Autotune searches every failing chunk — a re-split and a re-embed per " +
+    "candidate — which is embedding spend the demo doesn\u2019t carry, and this " +
+    "build was published without the tuning that would stand in for it. The " +
+    "board is still yours to move: add the cached questions, score them and " +
+    "grade their rankings, and every number on this page is measured in your " +
+    "own workspace.",
   // Not an action anyone takes — the outcome of taking enough of them. It shares
   // this table because it shares the transport: a 403 with a sentence, from the
   // one catch site.
@@ -168,11 +271,49 @@ export type DemoAction = keyof typeof DEMO_ACTIONS;
 // So this is the same rule as every sentence above, pointed the other way: a
 // refusal may not point at something absent, and a MEASUREMENT may not imply a
 // computation that did not happen for this workspace.
+// THE OTHER HALF OF `autotune`, and it is PUBLISHED_REPLAY_NOTE's rule applied
+// to a run that really does move numbers (phase 6 of
+// docs/demo-real-flow-plan.md).
+//
+// A guest's ⚙ Auto tune installs the master's confirmed per-chunk winners and
+// then does everything else for real: the dirty-set re-score, the history row,
+// the holdout capture, all over the visitor's own questions in their own
+// workspace. So unlike Appraise → Models, this panel's numbers ARE theirs — and
+// that is exactly why the sentence is needed. Every rate that moves invites the
+// reading that the search found them here, and it did not.
+//
+// Worded as PUBLISHED SEARCH, LIVE RESULT, never as "autotune ran": the second
+// would be a measurement implying a computation that did not happen, which is
+// the one thing the notes in this file exist to prevent.
+export const PUBLISHED_SEARCH_NOTE =
+  "Published search, live result: the per-chunk winners installed here were " +
+  "found on this corpus before the workspace was cloned for you \u2014 searching " +
+  "for them again would re-embed every candidate, which the demo doesn\u2019t pay " +
+  "for. Everything after that is yours: the re-score, the rates and the run " +
+  "history are all measured on your own questions.";
+
 export const PUBLISHED_REPLAY_NOTE =
   "Published measurement: every model was ranked over this corpus before the " +
   "workspace was cloned for you. Re-running it needs each model's cached " +
   "vectors for every chunk — 92 MB the demo doesn't hand out — so these rows " +
   "are fixed. The Eval tab is the part you can move.";
+
+// WHY THERE ARE NO OTHER NOTES HERE — phase 5 of docs/demo-cache-replay-plan.md.
+//
+// Six sentences used to live below this one, all of them explaining Appraise →
+// Semantic caching to a guest: which half of the page was live, why “Generate”
+// said Reveal, why the leaderboard above a rising pair count never moved. They
+// were honest about the page as it was, and phases 1–4 made every one of them
+// false. The leaderboard moves now; the pair count that moves it is the same
+// count; the screen and the bulk judge resolve to the operator's own verdicts
+// over the visitor's own `n`.
+//
+// So they are not rewritten, they are gone. A demo that behaves like the product
+// has nothing to explain, and the global DemoBanner already says what a demo is
+// and what the rule is (bounded levers on, unbounded off). PUBLISHED_REPLAY_NOTE
+// survives because its panel genuinely cannot move: Appraise → Models needs the
+// 107 MB of cached vectors the clone leaves behind, and a measurement that
+// cannot be re-derived still owes the visitor a sentence saying so.
 
 export class DemoBlockedError extends Error {
   readonly action: DemoAction;
@@ -202,4 +343,49 @@ export async function assertDemoAllows(action: DemoAction): Promise<void> {
 // a disabled button is a courtesy, not a boundary.
 export async function demoBlocks(): Promise<boolean> {
   return isGuest();
+}
+
+// The same question again, answered for a WHOLE PAGE at once — the sentences a
+// guest's controls need in order to render themselves disabled instead of
+// answering with a 403 three layers down.
+//
+// Why the sentences travel rather than the action names: DEMO_ACTIONS is the one
+// copy of this wording, it is server-only, and a second copy on the client is a
+// second copy to keep true. So the summary carries the text.
+//
+// NULL FOR A REAL ACCOUNT, never an empty object — same carve-out rule as
+// lib/demo/replay's readers, so a non-guest payload is byte-for-byte what it was
+// and there is no per-lap egress to account for.
+export type DemoBlockedSentences = Partial<Record<DemoAction, string>>;
+
+// What the Eval tab can actually reach. `unfreeze` is here even though the
+// frozen questions hide their own Ignore button: the route gates every question,
+// so a TUNABLE one's Ignore is a 403 too.
+//
+// THREE OF THESE COME OFF WHEN THE DEMO HAS A PUBLISHED ANSWER, and `autotune`
+// is the one that is normally off: `rank` and `llmRank` are filtered out by
+// getSummary when the ranking shelves are stocked, and `autotune` when the
+// tuning shelf is (0083) — which is the ordinary build. It is listed here at
+// all because a build published WITHOUT that shelf has to grey the button and
+// refuse the press, rather than fall through to a real search on the operator's
+// key. Until phase 6 autotune was absent from DEMO_ACTIONS entirely, on the
+// grounds that the frozen set bounded it; §3.2 removed that bound.
+export const EVAL_DEMO_ACTIONS = [
+  "generate",
+  "rank",
+  "llmRank",
+  "autotune",
+  "tryModel",
+  "override",
+  "unfreeze",
+  "reconfigure",
+] as const satisfies readonly DemoAction[];
+
+export async function demoBlockedSentences(
+  actions: readonly DemoAction[],
+): Promise<DemoBlockedSentences | null> {
+  if (!(await demoBlocks())) return null;
+  const out: DemoBlockedSentences = {};
+  for (const a of actions) out[a] = DEMO_ACTIONS[a];
+  return out;
 }

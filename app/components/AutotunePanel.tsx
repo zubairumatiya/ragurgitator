@@ -10,6 +10,7 @@
 
 import { useState } from "react";
 import { apiFetch } from "@/lib/http/client";
+import { useDemoBlock } from "@/app/components/DemoBlocked";
 import { BackgroundOfferDialog, type Estimate } from "@/app/components/BackgroundOfferDialog";
 import { leftWork } from "@/lib/jobs/steps/autotuneSlice";
 import type {
@@ -121,6 +122,14 @@ export function AutotunePanel({
   onBusyChange: (b: boolean) => void;
   onDone: () => void;
 }) {
+  // The two things the demo changes about this panel, and both come off the
+  // summary rather than off an isGuest() branch — like every other consumer of
+  // that map. `blocked` is non-null only for a guest whose build was published
+  // WITHOUT the tuning shelf (0083), where the press would refuse; `replayNote`
+  // is non-null only when it was published WITH it, where the search is the
+  // master's and everything after it is the visitor's.
+  const blocked = useDemoBlock("autotune");
+  const replayNote = summary.demoPublishedSearch;
   const [open, setOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const [ran, setRan] = useState(false);
@@ -274,6 +283,16 @@ export function AutotunePanel({
             case "chunk-unresolved":
               pushLog(`✗ unresolved — ${event.reason}`);
               break;
+            // The demo's replay of the search (phase 6 of
+            // docs/demo-real-flow-plan.md). Said as INSTALLED rather than as
+            // resolved: whether it resolves anything is what the re-score two
+            // phases later measures, on this workspace's own questions.
+            case "chunk-published":
+              pushLog(
+                `↧ installed the published winner — ${event.detail}` +
+                  (event.trials > 0 ? ` (+${event.trials} saved trial(s))` : ""),
+              );
+              break;
             case "early-stop":
               pushLog(
                 `⏹ min-rates reached — skipped ${event.skippedChunks} remaining chunk(s) to save cost`,
@@ -384,11 +403,12 @@ export function AutotunePanel({
       <button
         type="button"
         onClick={openDialog}
-        disabled={busy || !hasTarget}
+        disabled={busy || !hasTarget || blocked !== null}
         title={
-          hasTarget
+          blocked ??
+          (hasTarget
             ? "Automatically search chunk sizes and embedding models to lift every question below its min-rate. More aggressive targets cost more."
-            : "Requires a min-rate on an enabled metric in Settings."
+            : "Requires a min-rate on an enabled metric in Settings.")
         }
         className="rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium cursor-pointer transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
       >
@@ -420,22 +440,43 @@ export function AutotunePanel({
                   {autotune.chunkScope !== null
                     ? ` on your ${autotune.chunkScope.length} selected chunk(s)`
                     : ""}{" "}
-                  are below their min-rate. The search tries chunk sizes
-                  first, then embedding models, then combos ({autotune.search ===
-                  "exhaustive"
-                    ? "best-of-best: every size × model"
-                    : "stopping at the first fix"}
-                  ; when several fixes pass:{" "}
-                  {autotune.apply === "auto_best" ? "auto-apply the best" : "you choose"}).
+                  are below their min-rate.{" "}
+                  {replayNote
+                    ? "The winning chunk shape or model for each of them was found " +
+                      "when this workspace was published; pressing Run installs those " +
+                      "and then re-scores your board against them."
+                    : null}
+                  {replayNote ? null : (
+                    <>
+                      The search tries chunk sizes first, then embedding models, then
+                      combos (
+                      {autotune.search === "exhaustive"
+                        ? "best-of-best: every size × model"
+                        : "stopping at the first fix"}
+                      ; when several fixes pass:{" "}
+                      {autotune.apply === "auto_best" ? "auto-apply the best" : "you choose"}
+                      ).
+                    </>
+                  )}
                 </p>
-                <p className="rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
-                  ⚠ Higher target rates mean more experiments and embedding usage
-                  {autotune.search === "exhaustive"
-                    ? " — best-of-best mode multiplies that cost"
-                    : ""}
-                  . Winning overrides are confirmed through real retrieval and
-                  reverted if they regress.
-                </p>
+                {/* The cost warning is about a search this run may not do. When
+                    the demo is replaying a published one there is no cost to
+                    warn about — and there IS something else the visitor is owed,
+                    which is which half of the run is theirs. */}
+                {replayNote ? (
+                  <p className="rounded border border-blue-300 bg-blue-50 px-2 py-1.5 text-xs text-blue-800 dark:border-blue-800 dark:bg-blue-900/25 dark:text-blue-300">
+                    {replayNote}
+                  </p>
+                ) : (
+                  <p className="rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+                    ⚠ Higher target rates mean more experiments and embedding usage
+                    {autotune.search === "exhaustive"
+                      ? " — best-of-best mode multiplies that cost"
+                      : ""}
+                    . Winning overrides are confirmed through real retrieval and
+                    reverted if they regress.
+                  </p>
+                )}
                 <div className="flex justify-end gap-2">
                   <button
                     type="button"

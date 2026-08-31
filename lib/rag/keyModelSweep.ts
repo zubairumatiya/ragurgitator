@@ -32,14 +32,8 @@ import { embedQueriesCached } from "@/lib/rag/embedCache";
 import { EMBEDDING_MODELS } from "@/lib/rag/embeddingModels";
 import { availableProviders } from "@/lib/rag/providerAvailability";
 import type { EffectiveAcceptTarget } from "@/lib/rag/semanticCache";
-import {
-  auc,
-  calibrateFromJudged,
-  cosine,
-  spaceOf,
-  type CalibrationResult,
-} from "@/lib/rag/semanticCacheCore";
-import { poolPairs, type SweepPair } from "@/lib/rag/keyModelSweepCore";
+import { cosine, spaceOf, type CalibrationResult } from "@/lib/rag/semanticCacheCore";
+import { poolPairs, scoreFromSims, type SweepPair } from "@/lib/rag/keyModelSweepCore";
 import {
   listPairs,
   quarantinedPairs,
@@ -52,6 +46,29 @@ import {
 // restated label vocabularies meet the real PairLabel and PairDifficulty — add a
 // third label to either and those assignments stop compiling.
 export type { SweepPair } from "@/lib/rag/keyModelSweepCore";
+
+// A SINK FOR THE SWEEP'S RAW ARITHMETIC — phase 2 of
+// docs/demo-cache-replay-plan.md.
+//
+// Everything the leaderboard prints is a pure function of `scored`, one
+// `{sim, label}[]` per candidate over one pooled pair set. The embeddings that
+// produce those cosines are what a guest cannot afford; the cosines themselves
+// are ~30 kB, which is why the demo banks them and replays the arithmetic rather
+// than banking the answer. This is how the publish gets at them.
+//
+// OFFLINE ONLY, exactly like `includeQuarantined` beside it: no route passes an
+// observer, and the only caller is lib/demo/captureMatrix at publish time. It is
+// a sink and not a return value so that a cancelled sweep still hands over what
+// it managed to score, and so the ordinary path allocates nothing.
+//
+// `onScored` fires ONLY for a model that scored the whole set — an unavailable
+// provider, a failure and a cancellation each push a leaderboard row without
+// ever calling it, which is what lets the capture record that model as null
+// rather than as a row of zeros.
+export type SweepObserver = {
+  onPairs?(pairs: SweepPair[]): void;
+  onScored?(model: string, scored: { sim: number; label: PairLabel }[]): void;
+};
 
 export type LeaderboardRow = {
   model: string;
@@ -207,27 +224,11 @@ async function scoreModel(
     label: p.label,
   }));
 
-  // calibrateFromJudged speaks accept/reject; 'same' IS 'accept' here — both
-  // mean "one answer serves both", which is why the pair labels were defined
-  // answer-level in the first place.
-  const calibration = calibrateFromJudged(
-    scored.map((s) => ({ sim: s.sim, verdict: s.label === "same" ? "accept" : "reject" })),
-    target,
-    config.semanticCache.minCalibrationSamples,
-  );
-  return {
-    threshold: calibration.recommended,
-    recall: calibration.coverageAtRecommended,
-    // Straight off the calibration now. This used to re-find the curve point by
-    // `sim === at`, which returns the FIRST point carrying that sim — but τ is
-    // chosen at the LAST one (the tie boundary), and the two have different n
-    // and so different rates whenever sims tie. Serving `sim >= τ` admits the
-    // whole tie group, so the boundary's rate is the one that describes it.
-    precision: calibration.precisionAtRecommended,
-    aucValue: auc(scored),
-    calibration,
-    scored,
-  };
+  // The rest of this model's row is a pure function of `scored`, and it lives in
+  // the core because the demo re-runs exactly it over the master's banked cosines
+  // (phase 3 of docs/demo-cache-replay-plan.md). The embedding above is the half
+  // a guest cannot afford; this half is the half they replay.
+  return { ...scoreFromSims(scored, target, config.semanticCache.minCalibrationSamples), scored };
 }
 
 // Run the sweep over `candidates` (defaults to the configured list). Models
@@ -239,10 +240,15 @@ export async function runKeyModelSweep(
   candidates: string[] = [...config.semanticCache.keyModelSweep.candidates],
   shouldStop: ShouldStop = NEVER_STOP,
   // `includeQuarantined` is an OFFLINE READ ONLY — the F3 before/after. No route
-  // passes it; see listPairs.
-  opts: { includeQuarantined?: boolean } = {},
+  // passes it; see listPairs. `observe` is offline-only for the same reason and
+  // is documented on SweepObserver.
+  opts: { includeQuarantined?: boolean; observe?: SweepObserver } = {},
 ): Promise<SweepResult> {
   const pairs = await pooledPairs(opts);
+  // Before anything is scored, so that a CANCELLED sweep still tells the observer
+  // which pairs the scores it did see were aligned to. The array and the per-model
+  // `scored` arrays are parallel, and that is the whole contract.
+  opts.observe?.onPairs?.(pairs);
   const counts = {
     total: pairs.length,
     shadow: pairs.filter((p) => p.source === "shadow").length,
@@ -321,6 +327,7 @@ export async function runKeyModelSweep(
         });
         continue;
       }
+      opts.observe?.onScored?.(model, s.scored);
       rows.push({
         ...base,
         available: true,

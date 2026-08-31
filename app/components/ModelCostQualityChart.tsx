@@ -65,11 +65,19 @@ export function ModelCostQualityChart({
   // plotting it at a guessed one would be the chart telling a lie the table
   // refuses to.
   const points: Point[] = [];
+  // Scored on this metric, but with no x we'd stand behind. Named under the
+  // chart rather than dropped in silence: a model showing real numbers in the
+  // table and no dot here is the one omission a reader cannot explain from the
+  // table alone (an unscored model's blank row explains itself).
+  const unpriced: string[] = [];
   for (const r of rows) {
     const y = r[metric];
     if (y === null) continue;
     const rate = embedRate(r.model);
-    if (!rate || !rate.verified) continue;
+    if (!rate || !rate.verified) {
+      unpriced.push(r.model);
+      continue;
+    }
     points.push({ model: r.model, x: rate.usdPerM, y, isBase: r.model === baseModel });
   }
   if (points.length < 2) return null;
@@ -222,10 +230,25 @@ export function ModelCostQualityChart({
         })}
       </svg>
 
-      <figcaption className="text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
-        Up and to the left is better quality per dollar. Models priced but not
-        scored, or scored without a price we&apos;d quote, are omitted — see the
-        table above.
+      <figcaption className="flex flex-col gap-1 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+        <p>
+          Up and to the left is better quality per dollar. A model needs both an{" "}
+          {active.label} score and a price we&apos;d quote to be placed; models
+          missing either are in the table above.
+        </p>
+        {unpriced.length > 0 && (
+          <p>
+            Scored but not plotted:{" "}
+            <span className="text-zinc-700 dark:text-zinc-300">
+              {unpriced.join(", ")}
+            </span>{" "}
+            — the published rate for{" "}
+            {unpriced.length === 1 ? "this model" : "these models"} isn&apos;t one
+            we&apos;ll quote (the &ldquo;—&rdquo; in the $ / 1M column), so there
+            is no x position the chart could claim. Their {active.label} scores
+            are in the table.
+          </p>
+        )}
       </figcaption>
     </figure>
   );

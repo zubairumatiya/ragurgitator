@@ -8,6 +8,10 @@ import test from "node:test";
 import {
   PROBE_CAP,
   PROBE_LOOKUP,
+  QuarantinedProbeError,
+  assertPoolSafe,
+  poolSafeProbes,
+  selectOneProbe,
   selectProbes,
   type ProbePair,
 } from "@/lib/rag/probeReplayCore";
@@ -16,12 +20,14 @@ const pair = (
   pairId: string,
   originQuestionId: string,
   difficulty: "hard-negative" | "paraphrase",
+  quarantined = false,
 ): ProbePair => ({
   pairId,
   originQuestionId,
   originText: `origin ${originQuestionId}`,
   variantText: `variant ${pairId}`,
   difficulty,
+  quarantined,
 });
 
 test("selectProbes: hard negatives come first", () => {
@@ -88,7 +94,10 @@ test("selectProbes: deterministic — the same input yields the same order", () 
 });
 
 test("selectProbes: does not mutate its input", () => {
-  const pairs = [pair("p2", "q2", "paraphrase"), pair("p1", "q1", "hard-negative")];
+  const pairs = [
+    pair("p2", "q2", "paraphrase"),
+    pair("p1", "q1", "hard-negative"),
+  ];
   const before = pairs.map((p) => p.pairId);
   selectProbes(pairs);
   assert.deepEqual(
@@ -140,4 +149,68 @@ test("PROBE_LOOKUP: carries nothing else — an unlisted key is an unreviewed on
     "shadow",
     "threshold",
   ]);
+});
+
+// --- the guest's single probe (docs/demo-cache-lab-plan.md, Phase 4) ---------
+//
+// One probe a visitor may run, against a bulk job that stays blocked. Everything
+// worth testing about it that does not need a database is the CHOICE: which pair,
+// and — the plan's named risk — never a quarantined one.
+
+test("poolSafeProbes: drops the pairs the label audit disproved", () => {
+  const kept = poolSafeProbes([
+    pair("p1", "q1", "hard-negative", true),
+    pair("p2", "q2", "hard-negative"),
+    pair("p3", "q3", "paraphrase", true),
+  ]);
+  assert.deepEqual(
+    kept.map((p) => p.pairId),
+    ["p2"],
+  );
+});
+
+test("assertPoolSafe: a quarantined pair is a THROW, not a filtered row", () => {
+  // The plan's risk list asks for "an assertion rather than a comment", and this
+  // is why it is not merely the filter above: cloning semantic_cache_pairs into a
+  // guest account and letting that guest write probe rows puts both halves of the
+  // F3 dedupe collision in one workspace. A probe row duplicating a generated
+  // pair carries the label F3 disproved, and poolPairs drops it for exactly that
+  // reason (keyModelSweepCore.ts). Silently skipping one here would leave a
+  // future eligibility query free to forget the filter.
+  assert.throws(
+    () => assertPoolSafe(pair("p1", "q1", "hard-negative", true)),
+    QuarantinedProbeError,
+  );
+  const clean = pair("p2", "q2", "hard-negative");
+  assert.equal(assertPoolSafe(clean), clean);
+});
+
+test("selectOneProbe: picks what the bulk job would have probed first", () => {
+  // The same rule, at a cap of 1 — hard negatives lead, because F7 counted 91
+  // judged traffic matches and 91 accepts, so the reject side of the queue is the
+  // empty one. A separate ordering here is how the two would drift apart.
+  const chosen = selectOneProbe([
+    pair("p1", "q1", "paraphrase"),
+    pair("p2", "q2", "hard-negative"),
+  ]);
+  assert.equal(chosen?.pairId, "p2");
+  assert.equal(
+    chosen?.pairId,
+    selectProbes(
+      [pair("p1", "q1", "paraphrase"), pair("p2", "q2", "hard-negative")],
+      1,
+    )[0].pairId,
+  );
+});
+
+test("selectOneProbe: never returns a quarantined pair, even as the only candidate", () => {
+  // The case that matters: the filter has to be inside the choice, or a workspace
+  // whose only eligible pair is an audited-wrong one probes it.
+  assert.equal(selectOneProbe([pair("p1", "q1", "hard-negative", true)]), null);
+});
+
+test("selectOneProbe: nothing eligible is null, not a throw", () => {
+  // The ordinary outcome on an account whose banked questions have no pairs, and
+  // on the second press once the first probe has consumed its own eligibility.
+  assert.equal(selectOneProbe([]), null);
 });

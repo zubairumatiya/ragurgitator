@@ -5,21 +5,21 @@
 // SAME pooled pair set, each gets its OWN τ at the same precision target, and
 // they're ranked by the recall that τ achieves.
 //
-// Last panel on the page, and the only one that isn't about a threshold: it changes
-// WHICH SPACE a config's threshold is read from.
+// The only section that isn't about a threshold's VALUE: it changes WHICH SPACE a
+// config's threshold is read from.
 //
-// Three actions, in the order you'd use them:
-//   1. Generate pairs — the one-off LLM cost the sweep is built on. Without hard
-//      negatives every model scores ~the same and the table says nothing.
-//   2. Run sweep      — embedding-only, cached, so re-runs are nearly free.
-//   3. Apply          — writes the per-config override. Refuses an uncalibrated
-//      target space unless explicitly confirmed.
+// THE PAIR SET IT SCORES IS NOT ITS OWN. It used to be generated here, which made
+// this panel the owner of an asset the probe also draws on; the bank is its own
+// section now (PairBankPanel) and this one only reads it. What is left is two
+// actions:
+//   1. Run sweep — embedding-only, cached, so re-runs are nearly free.
+//   2. Apply     — writes the per-config override. Refuses an uncalibrated target
+//      space unless explicitly confirmed.
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Tooltip } from "@/app/components/Tooltip";
-import { config } from "@/lib/config";
 import { apiFetch } from "@/lib/http/client";
 // The SAME function the server picks τ with (lib/rag/calibrationCurve.ts —
 // import-free precisely so it can be bundled here). Re-running it on the curve
@@ -28,19 +28,26 @@ import { apiFetch } from "@/lib/http/client";
 // arithmetically the number that would be applied.
 import {
   selectFromCurve,
+  TARGET_SLIDER,
   type Attainability,
 } from "@/lib/rag/calibrationCurve";
-import type { ConfigSummary } from "@/lib/rag/configStore";
 import type { LeaderboardRow, SweepResult } from "@/lib/rag/keyModelSweep";
-import type { PairStats } from "@/lib/rag/semanticCachePairs";
+// The published sweep arrives with its curves PACKED as [sim, n, accepts] —
+// phase 1.5 of docs/demo-cache-lab-plan.md. Precision and recall are exactly
+// accepts/n and accepts/totalAccepts, so they are divided back here rather than
+// stored, on the same operands and therefore bit-for-bit.
+import { unpackSweep, type PublishedSweep } from "@/lib/rag/publishedSweepCore";
+// TYPE-ONLY — the read side (lib/rag/cacheEconomics.ts) imports the DB client.
+// The arithmetic lives in the core, which is import-free for exactly this reason.
+import type { CacheEconomics } from "@/lib/rag/cacheEconomicsCore";
 
 import { SC_CHANGED } from "./events";
+import { PayoffReadout } from "./PayoffReadout";
 import {
   BTN,
   BTN_PRIMARY,
   NOTE_AMBER,
   Panel,
-  SELECT,
   TABLE_HEAD,
   TABLE_WRAP,
   WarnDot,
@@ -55,20 +62,6 @@ const ABOUT =
   "(the lowest threshold still meeting the accept target), then is scored on " +
   "how many servable pairs that τ actually catches. Holding precision equal is " +
   "what makes models comparable — raw cosine scales differ between spaces.";
-
-const PAIRS_ABOUT =
-  "The eval set the sweep scores. Two sources, pooled:\n\n" +
-  "Shadow — judged verdicts from real would-hit traffic. Free (already paid " +
-  "for), but CENSORED: a pair only got logged if it cleared the shadow floor " +
-  "under the model in use at the time, so a candidate's false positives are " +
-  "under-counted.\n\n" +
-  "Generated — paraphrases and HARD NEGATIVES written from your eval " +
-  "questions. Hard negatives are the point: random distinct questions are " +
-  "separated near-perfectly by every model and grade nothing.\n\n" +
-  "The counts above are ACCOUNT-WIDE — one pooled set, since a pair is a " +
-  "property of two question texts rather than of a config. Only the gap (and " +
-  "the generate run that fills it) is per-config, which is what the picker " +
-  "below selects.";
 
 const TARGET_ABOUT =
   "The precision every model's τ is held to, so their recall numbers are " +
@@ -86,17 +79,6 @@ const TARGET_ABOUT =
 const pct = (n: number | null) =>
   n === null ? "—" : `${(n * 100).toFixed(1)}%`;
 const num = (n: number | null) => (n === null ? "—" : n.toFixed(4));
-
-// What one origin question costs and yields, so the generate control can price
-// itself before it's clicked. Read from config rather than hard-coded, or the
-// estimate silently lies the day the counts are tuned.
-const PER_Q = config.semanticCache.keyModelSweep.pairsPerQuestion;
-const PAIRS_PER_QUESTION = PER_Q.paraphrase + PER_Q.hardNegative;
-// The inline path's own ceiling (GEN_MAX_LIMIT in semanticCachePairs): a bigger
-// ask is silently clamped there, so the slider must not offer one.
-const GEN_MAX = 200;
-// Its default, and a sane starting position — a run you can watch finish.
-const GEN_DEFAULT = 25;
 
 // A row read AT A GIVEN TARGET. The sweep ships each model's whole curve, so every
 // number below is re-derived on the client and the server's own
@@ -265,21 +247,27 @@ type Status = {
     dimension: number;
     provider: string;
   }[];
+  // The traffic census and realized per-hit saving for the space `threshold`
+  // names, for the payoff readout beside the slider. Optional: it rides this GET
+  // rather than having a route of its own, and a response predating it (or from
+  // a deployment ahead of its reads) simply leaves the readout off.
+  economics?: CacheEconomics | null;
 };
 
-// `configs` comes from the page's server render, the same list (open tabs then
-// closed) the collision-floor panel gets.
-export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
+// NO `notes` PROP EITHER, since phase 5 of docs/demo-cache-replay-plan.md. This
+// panel used to take one demo sentence and change three strings around it — the
+// button read "Show the published sweep", the spinner "Fetching…", the hint
+// "nothing is embedded" — because a guest's leaderboard was a banked row that
+// could not move. It moves now: the click re-runs calibrateFromJudged and auc
+// over the banked cosines at whatever `n` the visitor has reached, which is a
+// scoring run in every sense but the embedding. So the ordinary wording is the
+// true one, and the panel no longer knows whether it is in a demo.
+//
+// NO `configs` PROP ANY MORE: the only per-config thing this panel held was the
+// pair gap, and that left with the bank. The sweep pools every config's pairs and
+// the precision target is resolved by the route, so there is nothing here to scope.
+export function KeyModelPanel() {
   const [status, setStatus] = useState<Status | null>(null);
-  const [pairs, setPairs] = useState<PairStats | null>(null);
-  // WHICH CONFIG THE PAIR GAP DESCRIBES — and nothing else on this panel. The
-  // sweep is global by design and the precision target below is resolved by the
-  // route, so this picker deliberately scopes only the two things that read the
-  // eval bank: the gap, and the generate run that fills it.
-  //
-  // Opens on configs[0] — identical to CollisionFloorPanel, so both panels
-  // describe the same config until one of them is moved.
-  const [gapConfigId, setGapConfigId] = useState(configs[0]?.id ?? "");
   const [sweep, setSweep] = useState<SweepResult | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [scope, setScope] = useState<"config" | "all">("config");
@@ -290,14 +278,10 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
     fallbackThreshold: number;
   } | null>(null);
   const [busy, setBusy] = useState<
-    null | "sweep" | "pairs" | "screen" | "apply" | "backfill" | "target"
+    null | "sweep" | "apply" | "backfill" | "target"
   >(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
-  // How many origin questions the next generate run covers. Null = untouched, so
-  // the default tracks the gap as it shrinks instead of being pinned by an
-  // effect the moment the stats first land.
-  const [genLimit, setGenLimit] = useState<number | null>(null);
   // The precision the table is being READ at. Null = the config's stored target,
   // which is what a fresh sweep always opens on. Dragging it is a LENS — it
   // re-derives what's displayed and writes nothing; the stored acceptTarget is
@@ -308,39 +292,37 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
   // to travel outbound (see the route). Null whenever no sweep is running.
   const [sweepRunId, setSweepRunId] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
-
-  // The generate control's range and current position. Capped at the gap (asking
-  // for more questions than exist just generates the gap) and at the inline
-  // path's own ceiling, so the slider can never promise a run the server will
-  // silently trim.
-  const genMax = Math.min(pairs?.questionsRemaining ?? 0, GEN_MAX);
-  const genQuestions = Math.max(
-    1,
-    Math.min(genLimit ?? GEN_DEFAULT, genMax || 1),
-  );
-
+  // Whether a sweep this account COMPUTED is on screen. A ref because load()
+  // reads it from a callback that deliberately does not depend on the sweep, and
+  // because nothing renders off it — it only decides whether the published row
+  // may seed the table underneath.
+  const ownSweep = useRef(false);
   const load = useCallback(() => {
     // NOT scoped to the picker: the sweep pools every config's pairs into one
     // set, so a configId here would suggest a leaderboard that narrows with it.
     apiFetch("/api/semantic-cache/key-model")
       .then((r) => r.json())
-      .then((d: Status & { error?: string }) => {
-        if (!d.error) setStatus(d);
+      .then((d: Status & { publishedSweep?: PublishedSweep | null; error?: string }) => {
+        if (d.error) return;
+        setStatus(d);
+        // THE PUBLISHED SWEEP — a guest's whole §4, arriving with the status
+        // rather than from a button they may not press (phase 1 of
+        // docs/demo-cache-lab-plan.md). The route sends it to guests only, so
+        // this is null for an ordinary account and the panel opens empty as it
+        // always has.
+        //
+        // Seeded only when nothing is there. load() re-runs on every SC_CHANGED,
+        // and a result the visitor produced — or one a later phase reveals
+        // progressively — must never be replaced by the banked one underneath it.
+        //
+        // The ref, not the `sweep` state, is what "nothing is there" is read
+        // from: load() is a useCallback that must not re-create on every sweep,
+        // so the state it closes over is stale by definition. The ref is written
+        // in the same tick the result lands.
+        if (d.publishedSweep && !ownSweep.current) setSweep(unpackSweep(d.publishedSweep));
       })
       .catch(() => {});
-    if (!gapConfigId) return;
-    // Scoped, because the GAP inside this payload is. apiFetch adds no configId
-    // off a /c/<id> route, so this is the only one on the request.
-    apiFetch(`/api/semantic-cache/pairs?configId=${encodeURIComponent(gapConfigId)}`)
-      .then((r) => r.json())
-      .then((d: PairStats & { error?: string }) => {
-        // Drop a response that landed after the picker moved on, rather than
-        // clearing state in an effect: `gap` carries the config it describes, so
-        // the check is on the payload itself.
-        if (!d.error && d.gap?.configId === gapConfigId) setPairs(d);
-      })
-      .catch(() => {});
-  }, [gapConfigId]);
+  }, []);
 
   useEffect(() => {
     load();
@@ -400,7 +382,19 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
       setCancelling(false);
     });
     if (!d) return;
-    setSweep(d as unknown as SweepResult);
+    // A GUEST'S CLICK REPLAYS RATHER THAN RUNS. The route answers
+    // `{ published: true, sweep }` with the curves PACKED, so this is not a
+    // SweepResult and must be unpacked before anything reads a curve. The tag is
+    // still needed for that unpacking even though nothing renders off it any more:
+    // the two shapes are not interchangeable, whatever the panel says about them.
+    if ("published" in d) {
+      setSweep(unpackSweep(d.sweep as PublishedSweep));
+    } else {
+      setSweep(d as unknown as SweepResult);
+      // This account computed what is on screen, so load() must stop seeding the
+      // banked rows over the top of it on the next SC_CHANGED.
+      ownSweep.current = true;
+    }
     // A fresh sweep always opens at the config's stored target — an exploratory
     // position carried over from the last one would silently reinterpret new
     // numbers.
@@ -424,71 +418,6 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
       // The run is server-side either way; the button re-enables when it lands.
       setCancelling(false);
     }
-  };
-
-  const generate = async () => {
-    // Explicit every time. The route's own default is 25 questions, so the
-    // unlimited-looking button used to quietly do a fraction of the gap and
-    // report a number that looked like a failure.
-    // Scoped like the GET above, and for the same reason: generatePairs fills the
-    // ACTIVE config's gap (so does the batch path — lib/batch/jobs/pairGeneration
-    // calls the same query), so a run left unscoped would top up the Default
-    // config's bank rather than the one the panel just priced.
-    const d = await post(
-      "pairs",
-      `/api/semantic-cache/pairs?configId=${encodeURIComponent(gapConfigId)}`,
-      { limit: genQuestions },
-    );
-    if (!d) return;
-    if (d.mode === "batch") {
-      setNote(
-        d.job
-          ? // The batch path screens with a SECOND batch rather than in-line —
-            // thousands of sequential judge calls inside one apply step is what
-            // batching exists to avoid. It is chained automatically, so the only
-            // thing the user has to know is that the verdicts arrive later.
-            "Submitted a batch — pairs land when it completes (Batch API panel tracks it), " +
-            "and a judge screen is submitted automatically once they do. " +
-            "Mislabelled pairs are quarantined when its verdicts arrive, and a " +
-            "probe run stocks the shadow judge queue at the same time."
-          : String(d.reason ?? "Nothing to generate."),
-      );
-    } else {
-      setNote(
-        `Generated ${d.pairsInserted} pair(s) from ${d.questionsProcessed} question(s)` +
-          (Number(d.skipped) > 0 ? `; ${d.skipped} skipped` : "") +
-          // The screen is the reason the generator can be trusted at all, so its
-          // count is reported rather than folded into "skipped": a rejected pair
-          // is the gate working, not a question that produced nothing.
-          (Number(d.screenedOut) > 0
-            ? `; ${d.screenedOut} rejected by the judge as mislabelled.`
-            : ".") +
-          // What generation just did for §3, or why it did nothing. The route
-          // decides the wording (probeTriggerNote) so the batch path and this
-          // one cannot drift apart; absent = nothing worth saying.
-          (d.probeNote ? ` ${d.probeNote}` : ""),
-      );
-      if (d.stats) setPairs(d.stats as PairStats);
-    }
-    load();
-  };
-
-  // Screen the pairs no judge has ruled on — the batch generator's output, and
-  // anything generated before the screen existed. A second batch rather than an
-  // inline pass for the reason the generation leg is batched at all: one judge
-  // call per pair, at −50%, off the request's clock. Verdicts land on a later
-  // poll; a contradicted pair is then quarantined rather than deleted, because
-  // by this point the row exists.
-  const screen = async () => {
-    const d = await post("screen", "/api/batch/submit", { kind: "cache_pair_screen" });
-    if (!d) return;
-    setNote(
-      d.job
-        ? "Submitted a judge screen — verdicts land when it completes (Batch API panel tracks it). " +
-          "Pairs the judge contradicts are quarantined then."
-        : String(d.reason ?? "Nothing to screen."),
-    );
-    load();
   };
 
   const apply = async () => {
@@ -567,10 +496,6 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
     );
   };
 
-  // Hard negatives are what makes the table mean anything — a set that's all
-  // 'same' grades every model identically at the top of its ranking.
-  const noNegatives =
-    pairs !== null && pairs.total > 0 && pairs.different === 0;
   // The precision the table is being read at, and whether that's the config's
   // own setting or somewhere you've dragged to.
   const target = targetOverride ?? sweep?.target ?? 0;
@@ -598,6 +523,12 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
   // count: "too few pairs" and "the target is out of reach on this set" are the
   // difference between get-more-data and lower-the-target, and only the sweep
   // knows which prefix it actually got to consider.
+  // The row for the model this config ACTUALLY keys on, re-read at the dragged
+  // target — the anchor for the payoff readout. Undefined when the sweep did not
+  // score it (a cancelled run, or a model dropped from the candidate list), in
+  // which case the readout simply doesn't render.
+  const live = derived.find((d) => d.row.model === status?.keyModel);
+
   const scored = derived.filter((d) => d.attainability !== null);
   const noThresholds =
     derived.length > 0 && !derived.some((d) => d.kind === "at-target");
@@ -622,7 +553,6 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
 
   return (
     <Panel
-      step={4}
       title="Cache key model"
       about={ABOUT}
       subtitle="Which space a config reads its threshold FROM — not what it serves at."
@@ -695,183 +625,21 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
         </>
       }
     >
-      {/* --- the pair set ---------------------------------------------------- */}
-      {/* The set and the control that grows it, in one bordered block: the two
-          used to be loose rows floating between the heading and the table, which
-          read as page furniture rather than as this panel's inputs. */}
+      {/* --- the sweep ------------------------------------------------------ */}
+      {/* What it scores lives in the Pair bank section, not here: this panel
+          READS that set. The counts under a completed sweep say which set it
+          actually got (`sweep.pairs`), which is the honest place for them —
+          those are the pairs the leaderboard was measured on, not whatever the
+          bank holds now. */}
       <div className="flex flex-col gap-2 rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs">
-          <Tooltip align="left" text={PAIRS_ABOUT}>
-            <span className="text-zinc-500 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
-              Eval pairs
-            </span>
-          </Tooltip>
-          <span className="tabular-nums text-zinc-600 dark:text-zinc-300">
-            {pairs
-              ? `${pairs.total} generated (${pairs.same} same / ${pairs.different} different)`
-              : "—"}
-          </span>
-          {/* Named, because this is the ONE count on the line that isn't
-              account-wide — it belongs to the config in the picker below. */}
-          {pairs && pairs.questionsRemaining > 0 && (
-            <span className="text-zinc-400">
-              · {pairs.questionsRemaining} eval question
-              {pairs.questionsRemaining === 1 ? "" : "s"} in{" "}
-              <span className="font-mono">{pairs.gap.configLabel}</span> with none yet
-            </span>
-          )}
-          {/* Without this the count above reads as the set the sweep scores, which
-              it is not once any row is quarantined — the audited-wrong rows are
-              still generated, still occupy their origin question, and still count
-              toward "generated"; they are simply no longer scored. */}
-          {pairs && pairs.quarantined > 0 && (
-            <span className="text-amber-600 dark:text-amber-500">
-              · {pairs.quarantined} mislabelled, excluded from the sweep
-            </span>
-          )}
-          {/* Unjudged is not "unlabelled" — these rows carry the generator's own
-              label and the sweep scores them. It is the count of labels nothing
-              has checked, which is exactly what the screen buys down. */}
-          {pairs && pairs.unjudged > 0 && (
-            <span className="text-zinc-400">· {pairs.unjudged} unscreened</span>
-          )}
-        </div>
-
-        {/* How MANY questions the next run covers. Generation is the only paid
-            step here, and it's per-question, so the size of the ask is a real
-            decision — one button that took the route's invisible default meant
-            the spend was neither chosen nor visible. */}
-        {/* WHOSE gap. On the heading row this would read as scoping the whole
-            panel, which it does not — the leaderboard and the threshold above are
-            account-wide — so it sits on the row whose numbers it actually moves. */}
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <span className="text-zinc-500 dark:text-zinc-400">Gap for</span>
-          <select
-            value={gapConfigId}
-            onChange={(e) => setGapConfigId(e.target.value)}
-            aria-label="Config for the pair gap"
-            className={SELECT}
-          >
-            {configs.length === 0 && <option value="">No configs</option>}
-            {configs.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.label} · {c.baseModel}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {genMax > 0 && (
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-            <input
-              type="range"
-              min={1}
-              max={genMax}
-              value={genQuestions}
-              onChange={(e) => setGenLimit(Number(e.target.value))}
-              aria-label="Questions to generate pairs for"
-              disabled={busy !== null}
-              className="h-1 w-40 min-w-32 max-w-full cursor-pointer accent-zinc-900 dark:accent-zinc-100"
-            />
-            <span className="text-xs text-zinc-500 dark:text-zinc-400">
-              <span className="font-semibold tabular-nums text-zinc-800 dark:text-zinc-100">
-                {genQuestions}
-              </span>{" "}
-              question{genQuestions === 1 ? "" : "s"} → ~
-              <span className="tabular-nums">
-                {genQuestions * PAIRS_PER_QUESTION}
-              </span>{" "}
-              pairs
-            </span>
-            <div className="flex gap-1">
-              {/* The two ends of the range are the answers you actually want —
-                  dragging a slider to its own maximum is a fiddle. */}
-              <button
-                type="button"
-                className="rounded border border-zinc-200 px-1.5 py-0.5 text-[11px] text-zinc-500 cursor-pointer hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
-                onClick={() => setGenLimit(Math.min(GEN_DEFAULT, genMax))}
-              >
-                {Math.min(GEN_DEFAULT, genMax)}
-              </button>
-              <button
-                type="button"
-                className="rounded border border-zinc-200 px-1.5 py-0.5 text-[11px] text-zinc-500 cursor-pointer hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
-                onClick={() => setGenLimit(genMax)}
-              >
-                all {genMax}
-              </button>
-            </div>
-            <button
-              type="button"
-              className={BTN}
-              onClick={generate}
-              disabled={busy !== null}
-            >
-              {busy === "pairs" ? "Generating…" : "Generate pairs"}
-            </button>
-          </div>
-        )}
-        {/* The generate control is gated on knowing the gap, so say so rather
-            than rendering nothing — an empty space where a button was reads as
-            "the feature is gone", not "the count hasn't arrived". */}
-        {pairs === null && (
-          <p className="text-xs text-zinc-400">Loading pair stats…</p>
-        )}
-        {/* A ZERO GAP HAS TWO CAUSES WITH OPPOSITE FIXES, and saying only the
-            first one is what hid this control: the Appraise page carries no
-            configId, so the gap described the Default config's EMPTY bank while
-            the panel announced that every question was covered. `labeledQuestions`
-            is the field that tells them apart. */}
-        {pairs !== null &&
-          pairs.questionsRemaining === 0 &&
-          (pairs.gap.labeledQuestions === 0 ? (
-            <p className="text-xs text-zinc-400">
-              <span className="font-mono">{pairs.gap.configLabel}</span> has no labeled
-              eval questions — pairs are generated from a config&apos;s own eval bank,
-              so pick a config that has one.
-            </p>
-          ) : (
-            <p className="text-xs text-zinc-400">
-              Every eval question in{" "}
-              <span className="font-mono">{pairs.gap.configLabel}</span> already has
-              pairs — add eval questions to grow the set.
-            </p>
-          ))}
-
-        {/* Only offered when there is something to screen. Batch-generated pairs
-            chain their own screen on apply, so a non-zero count here means a run
-            that predates the chain — or one whose screen has not come back yet. */}
-        {pairs !== null && pairs.unjudged > 0 && (
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-            <span className="text-xs text-zinc-500 dark:text-zinc-400">
-              <span className="font-semibold tabular-nums text-zinc-800 dark:text-zinc-100">
-                {pairs.unjudged}
-              </span>{" "}
-              pair{pairs.unjudged === 1 ? "" : "s"} no judge has checked
-            </span>
-            <button
-              type="button"
-              className={BTN}
-              onClick={screen}
-              disabled={busy !== null}
-            >
-              {busy === "screen" ? "Submitting…" : "Screen pairs (batch)"}
-            </button>
-          </div>
-        )}
-
-        <div className="flex flex-wrap items-center gap-2 border-t border-zinc-100 pt-2 dark:border-zinc-800">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             className={BTN}
             onClick={runSweep}
             disabled={busy !== null}
           >
-            {busy === "sweep"
-              ? "Scoring…"
-              : sweep
-                ? "Re-run sweep"
-                : "Run sweep"}
+            {busy === "sweep" ? "Scoring…" : sweep ? "Re-run sweep" : "Run sweep"}
           </button>
           {busy === "sweep" && sweepRunId && (
             <button
@@ -895,14 +663,6 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
         </div>
       </div>
 
-      {noNegatives && (
-        <p className={NOTE_AMBER}>
-          Every generated pair is labeled &ldquo;same&rdquo;. Without hard
-          negatives the sweep can&apos;t separate models — they&apos;ll all look
-          equally good.
-        </p>
-      )}
-
       {error && (
         <p className="text-xs text-red-600 dark:text-red-400">{error}</p>
       )}
@@ -918,7 +678,8 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
             <span className="tabular-nums">
               {blocked.fallbackThreshold.toFixed(3)}
             </span>{" "}
-            (the default). Calibrate it above, or apply again to confirm.
+            (the default). Calibrate it in the Threshold section, or apply again
+            to confirm.
           </p>
         </div>
       )}
@@ -949,74 +710,100 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
               with the same function the server uses — no re-sweep, no request,
               no embedding spend. Comparability is untouched: wherever the slider
               sits, every model is still being held to the SAME precision. */}
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-zinc-200 px-3 py-2 dark:border-zinc-800">
-            <Tooltip align="left" text={TARGET_ABOUT}>
-              <span className="text-xs text-zinc-500 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
-                Precision held at
-              </span>
-            </Tooltip>
-            <span className="text-lg font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
-              {pct(target)}
-            </span>
-            <input
-              type="range"
-              min={50}
-              max={100}
-              step={0.5}
-              value={target * 100}
-              onChange={(e) => setTargetOverride(Number(e.target.value) / 100)}
-              aria-label="Precision target"
-              className="h-1 w-48 min-w-32 max-w-full cursor-pointer accent-zinc-900 dark:accent-zinc-100"
-            />
-            {/* An explored number must never be mistaken for the config's
-                setting — this is a lens, and nothing here writes. */}
-            {exploring ? (
-              <span className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500 dark:text-zinc-400">
-                exploring —{" "}
-                <span className="font-mono">
-                  {sweep.targetSource.configLabel}
-                </span>{" "}
-                is set to{" "}
-                <span className="tabular-nums">{pct(sweep.target)}</span>
-                <button
-                  type="button"
-                  onClick={() => setTargetOverride(null)}
-                  className="underline underline-offset-2 cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
-                >
-                  reset
-                </button>
-                {/* Named at length on purpose. The apply box at the foot of this
-                    panel writes a KEY MODEL, and a bare "Apply" a few hundred
-                    pixels away would read as a variation of it — so this one
-                    says whose setting it moves and what that setting governs. */}
-                <button
-                  type="button"
-                  onClick={saveTarget}
-                  disabled={busy !== null}
-                  title={
-                    "Stores this precision as the calibration target for " +
-                    `${sweep.targetSource.configLabel}. It governs which τ the sweeps ` +
-                    "RECOMMEND — not the cosine the cache serves at, which is the " +
-                    "threshold applied in step 3."
-                  }
-                  className="underline underline-offset-2 cursor-pointer hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:text-zinc-200"
-                >
-                  {busy === "target"
-                    ? "Setting…"
-                    : `set as ${sweep.targetSource.configLabel}'s calibration target`}
-                </button>
-              </span>
-            ) : (
-              <span className="text-[11px] text-zinc-400">
-                from{" "}
-                <span className="font-mono">
-                  {sweep.targetSource.configLabel}
+          {/* A COLUMN since phase 4: the dial on the first row, and under it what
+              that dial costs. They are one control — the readout is the only
+              thing on the page that says what a precision target BUYS — so they
+              share a box rather than sitting as two. */}
+          <div className="flex flex-col gap-2 rounded-lg border border-zinc-200 px-3 py-2 dark:border-zinc-800">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+              <Tooltip align="left" text={TARGET_ABOUT}>
+                <span className="text-xs text-zinc-500 underline decoration-dotted underline-offset-2 dark:text-zinc-400">
+                  Precision held at
                 </span>
-                {sweep.targetSource.source === "config"
-                  ? " (override)"
-                  : " (global default)"}{" "}
-                · drag to re-read the table
+              </Tooltip>
+              <span className="text-lg font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
+                {pct(target)}
               </span>
+              {/* Bounds from the shared constant, not literals: the published
+                  sweep's curves are thinned to exactly the positions this input
+                  can produce (lib/rag/publishedSweep), so a widened range or a
+                  finer step here would silently start reading positions those
+                  curves were never thinned for. */}
+              <input
+                type="range"
+                min={TARGET_SLIDER.min}
+                max={TARGET_SLIDER.max}
+                step={TARGET_SLIDER.step}
+                value={target * 100}
+                onChange={(e) => setTargetOverride(Number(e.target.value) / 100)}
+                aria-label="Precision target"
+                className="h-1 w-48 min-w-32 max-w-full cursor-pointer accent-zinc-900 dark:accent-zinc-100"
+              />
+              {/* An explored number must never be mistaken for the config's
+                  setting — this is a lens, and nothing here writes. */}
+              {exploring ? (
+                <span className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500 dark:text-zinc-400">
+                  exploring —{" "}
+                  <span className="font-mono">
+                    {sweep.targetSource.configLabel}
+                  </span>{" "}
+                  is set to{" "}
+                  <span className="tabular-nums">{pct(sweep.target)}</span>
+                  <button
+                    type="button"
+                    onClick={() => setTargetOverride(null)}
+                    className="underline underline-offset-2 cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-200"
+                  >
+                    reset
+                  </button>
+                  {/* Named at length on purpose. The apply box at the foot of this
+                      panel writes a KEY MODEL, and a bare "Apply" a few hundred
+                      pixels away would read as a variation of it — so this one
+                      says whose setting it moves and what that setting governs. */}
+                  <button
+                    type="button"
+                    onClick={saveTarget}
+                    disabled={busy !== null}
+                    title={
+                      "Stores this precision as the calibration target for " +
+                      `${sweep.targetSource.configLabel}. It governs which τ the sweeps ` +
+                      "RECOMMEND — not the cosine the cache serves at, which is the " +
+                      "threshold applied in the Threshold section."
+                    }
+                    className="underline underline-offset-2 cursor-pointer hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:text-zinc-200"
+                  >
+                    {busy === "target"
+                      ? "Setting…"
+                      : `set as ${sweep.targetSource.configLabel}'s calibration target`}
+                  </button>
+                </span>
+              ) : (
+                <span className="text-[11px] text-zinc-400">
+                  from{" "}
+                  <span className="font-mono">
+                    {sweep.targetSource.configLabel}
+                  </span>
+                  {sweep.targetSource.source === "config"
+                    ? " (override)"
+                    : " (global default)"}{" "}
+                  · drag to re-read the table
+                </span>
+              )}
+            </div>
+
+            {/* THE BUSINESS AXIS (phase 4 of docs/semantic-cache-page-plan.md).
+                Read through the config's LIVE key model, not the table's top
+                row: the census is real traffic, and this account's traffic only
+                exists in the space it is actually served from — a hit rate
+                quoted for some other model's space would be a projection onto
+                questions that space has never seen. */}
+            {status?.economics && live && (
+              <PayoffReadout
+                econ={status.economics}
+                tau={live.threshold}
+                keyModel={status.keyModel}
+                atTarget={live.kind === "at-target"}
+              />
             )}
           </div>
 
@@ -1110,10 +897,9 @@ export function KeyModelPanel({ configs }: { configs: ConfigSummary[] }) {
 
           {derived.some((d) => d.kind === "best-attainable") && (
             <p className="text-[11px] text-zinc-400">
-              ✳ best attainable — this model never reaches {pct(target)} on a
-              serve set of {sweep.minSamples}+, so its best operating point is
-              shown instead. Not comparable with an at-target row, and sorted
-              below them.
+              ✳ best attainable — never reaches {pct(target)}, so its best
+              operating point is shown instead. Not comparable with an at-target
+              row.
             </p>
           )}
         </div>

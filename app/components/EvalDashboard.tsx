@@ -65,6 +65,10 @@ import {
   type Estimate,
 } from "@/app/components/BackgroundOfferDialog";
 import { ConfigChangeDialog } from "@/app/components/ConfigChangeDialog";
+import {
+  DemoBlockedProvider,
+  useDemoBlock,
+} from "@/app/components/DemoBlocked";
 import { EVAL_CRITERIA_CHANGED } from "@/app/components/EvalSettings";
 import { NdcgRankingPanel } from "@/app/components/NdcgRankingPanel";
 import { Tooltip } from "@/app/components/Tooltip";
@@ -328,6 +332,12 @@ export function EvalDashboard() {
   // Bump to re-fetch the summary (used after process / edit / delete / add). A
   // reload means questions/scores may have changed, so reset transient UI.
   const [reloadKey, setReloadKey] = useState(0);
+  // Bumped ONLY by the demo's "Start over" (see DemoScope), and used as the
+  // AutotunePanel's key. The panel owns its own run log, and reload() cannot
+  // reach it — so a reset board would otherwise sit under the finished log of a
+  // run whose history row has just been deleted. Not reloadKey: that fires at
+  // the END of an autotune run, which would take the result away as it landed.
+  const [restartKey, setRestartKey] = useState(0);
   const reload = useCallback(() => {
     explainsRef.current = {};
     expandedIdRef.current = null;
@@ -752,10 +762,30 @@ export function EvalDashboard() {
     await runHere();
   };
 
+  // A guest whose build published a board (lib/demo/replay.readBoard, handed over
+  // as data at evalStore.ts:337 rather than inferred). Null for everyone else, so
+  // every use below falls back to exactly what it did before.
+  const onDemoBoard = summary?.demoBoard != null;
+  // Both add buttons land here on the third press: the published bank holds one
+  // row per (chunk, difficulty) and two presses of 30 spend it, so "nothing came
+  // back" is the walk's ending, not a failure. Say so, and point at the press
+  // that measures what is already there.
+  const bankSpentNotice =
+    `No new questions for these chunks — nothing added, nothing spent. ` +
+    `The published question bank is spent: every question it holds is already ` +
+    `on its chunk. Score pending scores anything still unscored.`;
+
   // Bulk actions → Add question → {difficulty ×N} → Add: add N questions at each
   // requested difficulty to every chunk in scope (corpus-wide, or the selected
-  // documents), or with `topUp` top each chunk up TO N, then score. Same NDJSON
-  // stream.
+  // documents), or with `topUp` top each chunk up TO N. Same NDJSON stream.
+  //
+  // The run scores nothing, so the notice reports what landed and points at the
+  // press that measures it. Quoting recall here would quote the summary the
+  // PREVIOUS press left behind.
+  //
+  // On a demo board this same button REUSES rather than generates (the route
+  // derives that from the shelf, §1.4), so the notice reads whichever count the
+  // run's own `done` event carries rather than branching on who is logged in.
   const onBulkAdd = (
     counts: DifficultyCounts,
     documentIds: string[] | null,
@@ -767,10 +797,14 @@ export function EvalDashboard() {
     return runStream(
       "/api/eval/bulk-generate",
       (r) =>
-        `Added ${r.generated} question(s) (${mix} per chunk${
-          topUp ? ", topped up" : ""
-        }), scored ${r.scored}. ` +
-        `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`,
+        r.reused
+          ? `Added ${r.reused} banked question(s) for $0, unscored. ` +
+            `Press Score pending to retrieve and score them.`
+          : r.generated === 0 && onDemoBoard
+            ? bankSpentNotice
+            : `Added ${r.generated} question(s) (${mix} per chunk${
+                topUp ? ", topped up" : ""
+              }), unscored. Press Score pending to retrieve and score them.`,
       { counts, documentIds: documentIds ?? undefined, topUp },
     );
   };
@@ -780,24 +814,25 @@ export function EvalDashboard() {
   // it generates nothing — chunks with nothing banked are simply left alone, and
   // anything a chunk already shows is skipped, so pressing it twice adds nothing.
   //
-  // THIS IS THE ONE ADD A GUEST CAN PRESS (phase 6 of docs/demo-analytics-plan
-  // .md): the demo clones question_cache and carves `cachedOnly` out of the
-  // generate gate, so the empty-handed sentence must not send a visitor back to
-  // the Add button that will refuse them. Detected the way DemoScope detects a
-  // demo — a frozen row, which only a publish writes — rather than by asking who
-  // is logged in.
+  // On a demo board this button is GREYED (§1.5) — `Add` is the one a visitor
+  // presses, and it reuses too. The empty-handed sentence still has to be right
+  // for both, so it is shared with `onBulkAdd` above.
+  //
+  // The demo detector used to be "any frozen question", which §3.2 of the
+  // real-flow plan retired when it emptied the published board: it now reads
+  // false on every demo, and a guest with a spent bank was being sent back to a
+  // button that would refuse them. The board is the detector.
   const onBulkAddCached = (documentIds: string[] | null) => {
-    const published = summary?.questions.some((q) => q.frozen) ?? false;
     return runStream(
       "/api/eval/bulk-generate",
       (r) =>
         r.reused
-          ? `Added ${r.reused} cached question(s) for $0, scored ${r.scored}. ` +
-            `Recall@k ${pct(r.recall)} · MRR ${fmtScore(r.mrr)} · nDCG ${fmtScore(r.ndcg)}.`
-          : `No new cached questions for these chunks — nothing added, nothing spent. ` +
-            (published
-              ? `Every question this workspace was published with is already on its chunk.`
-              : `Use Add to generate them.`),
+          ? `Added ${r.reused} cached question(s) for $0, unscored. ` +
+            `Press Score pending to retrieve and score them.`
+          : onDemoBoard
+            ? bankSpentNotice
+            : `No new cached questions for these chunks — nothing added, nothing spent. ` +
+              `Use Add to generate them.`,
       { documentIds: documentIds ?? undefined, cachedOnly: true },
     );
   };
@@ -1049,6 +1084,114 @@ export function EvalDashboard() {
     return merged;
   }, [summary]);
 
+  // Split the chunk cards into the ones a visitor can move and the ones they can
+  // only read. A demo is a dozen tunable questions scattered through ~460 frozen
+  // ones, so an unsplit list buries the entire point of the page under cards
+  // whose every control is either absent or a 403.
+  //
+  // DERIVED FROM DATA THE PUBLISH WROTE DOWN, never from who is asking: a real
+  // account has neither a board scope nor a frozen row, so this is null and the
+  // list renders exactly as it always did — one ungrouped sequence, no headers.
+  //
+  // THE BOARD IS THE INPUT NOW, and the frozen set is the fallback (0081,
+  // docs/demo-real-flow-plan.md §3.1). The old derivation — a card is tunable
+  // when it holds an unfrozen question — cannot survive the build that EMPTIES
+  // the board for the visitor to fill: with no questions there are no frozen
+  // rows, so `split` would go null and the page would render one card per corpus
+  // chunk with nothing on it. A published board says which cards are the walk
+  // whether or not anything hangs off them yet. The fallback is what keeps a
+  // workspace cloned from an older build (no board row) rendering as it did.
+  //
+  // `tunableCount` stays a count of UNFROZEN QUESTIONS either way, because it is
+  // what the headline rates are computed over: a board chunk's frozen second
+  // question is on screen but out of every rate, and counting it live would put a
+  // number above three rates it does not feed.
+  const split = useMemo(() => {
+    if (summary === null) return null;
+    const onBoard = summary.demoBoard === null ? null : new Set(summary.demoBoard);
+    const frozenTotal = summary.questions.filter((q) => q.frozen).length;
+    if (onBoard === null && frozenTotal === 0) return null;
+    const tunable: ChunkGroup[] = [];
+    const frozen: ChunkGroup[] = [];
+    for (const g of groups) {
+      const live = onBoard
+        ? onBoard.has(g.chunkId)
+        : g.questions.some((q) => !q.frozen);
+      (live ? tunable : frozen).push(g);
+    }
+    const tunableCount = tunable.reduce(
+      (n, g) => n + g.questions.filter((q) => !q.frozen).length,
+      0,
+    );
+    return {
+      tunable,
+      frozen,
+      tunableCount,
+      frozenCount: summary.questions.length - tunableCount,
+    };
+  }, [groups, summary]);
+
+  // WHAT THE HEADLINE ROW IS ACTUALLY MEASURING.
+  //
+  // The rates beside these counts already exclude the frozen half — a frozen row
+  // is `ignored`, and reduceRates drops those — so `Recall`, `MRR` and `nDCG` are
+  // over the twelve live questions. But `summary.total` and `summary.chunkCount`
+  // are raw sizes of the whole config, so the row read "12 scored of 460
+  // questions" and "Chunks (236)" beside three rates none of those rows fed. The
+  // frozen set has its own numbers in the "As published" card below; here it is
+  // simply not what is being measured.
+  //
+  // Display-only, and only when the demo split exists: summary.total stays the
+  // config's real size for everything that gates on it, and a real account (no
+  // frozen rows, `split === null`) prints exactly what it always did.
+  const liveTotal = split ? split.tunableCount : (summary?.total ?? 0);
+  const liveChunks = split ? split.tunable.length : (summary?.chunkCount ?? 0);
+
+  // One chunk card. A function because the demo split renders the same card in
+  // two sections, and a card that drifted between them would make the page mean
+  // two different things depending on which half you were reading. `summary` is
+  // passed in rather than closed over so the call sites keep their non-null
+  // narrowing.
+  const renderGroup = (group: ChunkGroup, s: EvalSummary) => (
+    <ChunkGroupCard
+      key={group.chunkId}
+      group={group}
+      summary={s}
+      busy={busy}
+      // Each "which row is open" prop is narrowed to this group, so opening a
+      // row in one card leaves the other 79 cards' props referentially equal
+      // and memo skips re-rendering them.
+      editingId={idInGroup(group, editingId)}
+      expandedId={idInGroup(group, expandedId)}
+      explain={
+        idInGroup(group, expandedId) === null
+          ? undefined
+          : explains[expandedId as string]
+      }
+      rankingOpenId={idInGroup(group, rankingOpenId)}
+      addOpen={addingChunkId === group.chunkId}
+      genDifficulty={addingChunkId === group.chunkId ? genDifficulty : null}
+      trials={trialsByChunk?.[group.chunkId] ?? NO_TRIALS}
+      trialsLoading={trialsLoading}
+      onTrialRemoved={onTrialRemoved}
+      onTrialSaved={onTrialSaved}
+      onStartEdit={startEdit}
+      onCancelEdit={cancelEdit}
+      onSaveEdit={saveEdit}
+      onRemove={remove}
+      onToggleIgnore={toggleIgnore}
+      onToggleExpand={toggleExpand}
+      onToggleRanking={toggleRanking}
+      onCloseRanking={closeRanking}
+      onRankingChange={refreshSummary}
+      onOpenAdd={openAdd}
+      onCloseAdd={closeAdd}
+      onAddQuestion={addQuestion}
+      onGenerate={generateQuestion}
+      onDelegateChange={reload}
+    />
+  );
+
   // Disable the actions when they'd be no-ops. "Score pending" scores whatever
   // has no fresh result (new, edited, or retrieval-stale); "Re-score" re-runs
   // every labeled question. While the summary is still loading we leave them
@@ -1057,6 +1200,10 @@ export function EvalDashboard() {
   const canRescore = summary === null || summary.total > 0;
 
   return (
+    // Every gated control on this page reads its sentence out of here, so a
+    // guest sees WHICH actions the demo withholds and why, instead of pressing
+    // one and collecting a 403 (§5 of docs/demo-real-flow-plan.md).
+    <DemoBlockedProvider value={summary?.demoBlocked ?? null}>
     <div className="flex flex-col gap-6">
       {/* Retrieval changed shape (a delegate/override was set or cleared) after
           some results were scored — they still count toward the rates, badged
@@ -1092,9 +1239,11 @@ export function EvalDashboard() {
           onRescore={onRescore}
           canRescore={canRescore}
           canAddQuestion={summary === null || summary.chunkCount > 0}
+          onDemoBoard={onDemoBoard}
         />
         {summary && (
           <AutotunePanel
+            key={restartKey}
             summary={summary}
             busy={busy}
             onBusyChange={setBusy}
@@ -1152,23 +1301,28 @@ export function EvalDashboard() {
         <p className="text-sm text-zinc-500">Loading…</p>
       ) : (
         <>
-          {/* The sentence that makes the two sections below legible (phase 5). */}
-          <DemoScope summary={summary} />
+          {/* The sentence that makes the frozen/live split legible (phase 5). */}
+          <DemoScope
+            summary={summary}
+            onRestart={() => {
+              // The last run's notice describes a board that has just stopped
+              // existing ("Added 60 cached question(s)… Recall 70.0%"), so it
+              // goes with it; the page emptying under the button is the
+              // feedback, and the empty state says what to press next.
+              setNotice(null);
+              setRestartKey((k) => k + 1);
+              reload();
+            }}
+          />
 
-          {/* THE DEMO'S TWO SECTIONS (docs/demo-analytics-plan.md, phase 2).
-              "As published" is the frozen build a visitor was handed; "Now" is
-              what their own tuning has made of it. Neither heading appears for a
-              real account — summary.asPublished is null there and the headline
-              row renders bare, exactly as it always has. */}
-          {summary.asPublished && (
-            <AsPublished run={summary.asPublished} summary={summary} />
-          )}
-
-          {summary.asPublished && (
-            <h2 className="-mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-              Now
-            </h2>
-          )}
+          {/* The "As published" card used to sit HERE, above the live headline,
+              under a "Now" heading. It has moved down beside the frozen chunks
+              (see the Chunks section): the top of the page belongs to the
+              numbers a visitor can actually move, and the published build's
+              frozen numbers belong with the frozen questions they were measured
+              over. With nothing above it to contrast against, the bare "Now"
+              heading was labelling the only headline row on the page, so it is
+              gone too — DemoScope already says which set is live. */}
 
           {/* Headline metrics — one labeled card per eval */}
           <div className="flex flex-wrap gap-4">
@@ -1243,14 +1397,14 @@ export function EvalDashboard() {
                   </>
                 }
                 sub={
-                  `${summary.ndcgCovered}/${summary.total} graded` +
+                  `${summary.ndcgCovered}/${liveTotal} graded` +
                   (summary.criteria.ndcg.minRate != null
                     ? ` · min ${summary.criteria.ndcg.minRate.toFixed(2)}`
                     : "")
                 }
               />
             )}
-            <Stat label="Questions" value={String(summary.total)} />
+            <Stat label="Questions" value={String(liveTotal)} />
             <Stat label="Scored" value={String(summary.scored)} />
             <Stat label="Hits" value={String(summary.hits)} />
           </div>
@@ -1269,24 +1423,47 @@ export function EvalDashboard() {
           )}
 
           {/* Disappears the moment any question exists, added by hand or
-              generated. The two cases read differently: with chunks below, the
-              page is working and just has nothing scored yet; with none, there
-              is genuinely nothing ingested under this config. */}
+              generated. The three cases read differently: with chunks below,
+              the page is working and just has nothing scored yet; with none,
+              there is genuinely nothing ingested under this config.
+              AND IN THE DEMO THIS IS THE FIRST THING A VISITOR READS. §3.2
+              emptied the published build, so an empty board stopped being an
+              edge case and became the demo's opening screen — and the sentence
+              it had been showing all along points at "Bulk actions → Add", the
+              one button a guest is not allowed to press. Pointing a visitor at
+              a disabled control is exactly the failure §5 greyed the controls
+              out to end, so the demo gets the sentence for the button that
+              works. Keyed on the BOARD, not on the `generate` block: generate
+              stays blocked for a guest either way, so that key no longer picks
+              out the case this sentence is about (§1.5). */}
           {summary.total === 0 && (
             <p className="text-sm text-zinc-500">
-              {summary.chunkCount > 0
-                ? "No eval questions yet — your chunks are listed below. Add one by hand on any chunk, or pick a difficulty in Bulk actions → Add to generate them."
-                : "Nothing ingested under this config yet. Add a document, and its chunks will appear here."}
+              {summary.chunkCount === 0
+                ? "Nothing ingested under this config yet. Add a document, and its chunks will appear here."
+                : onDemoBoard
+                  ? "No eval questions yet — the chunks below are the board. Bulk actions → Add question → Add fills it from the published question bank, for free; then Score pending retrieves them against the whole corpus."
+                  : "No eval questions yet — your chunks are listed below. Add one by hand on any chunk, or pick a difficulty in Bulk actions → Add to generate them."}
             </p>
           )}
 
-          {/* Per-document breakdown */}
+          {/* Per-document breakdown — closed by default, for every account and
+              not just a demo: it is a per-file drill-down, read when a headline
+              rate needs explaining rather than on the way past, and under a
+              corpus of any size it is the longest thing between the headline
+              and the chunks. The count rides in the heading so the shut section
+              still says how many files it holds. */}
           {summary.perDocument.length > 0 && (
-            <section className="flex flex-col gap-2">
-              <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
+            <details className="group">
+              {/* list-none alone leaves Safari's marker in place, so the
+                  caret is drawn by hand. */}
+              <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium uppercase tracking-wide text-zinc-500 hover:text-zinc-700 [&::-webkit-details-marker]:hidden dark:hover:text-zinc-300">
+                <Caret />
                 By document
-              </h2>
-              <ul className="flex flex-col divide-y divide-zinc-200 rounded-lg border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800">
+                <span className="text-xs font-normal normal-case tracking-normal text-zinc-400">
+                  ({summary.perDocument.length})
+                </span>
+              </summary>
+              <ul className="mt-2 flex flex-col divide-y divide-zinc-200 rounded-lg border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800">
                 {summary.perDocument.map((d) => (
                   <li
                     key={d.documentId}
@@ -1300,7 +1477,7 @@ export function EvalDashboard() {
                   </li>
                 ))}
               </ul>
-            </section>
+            </details>
           )}
 
           {/* Run history — collapsible; grows over time so it folds away by default. */}
@@ -1348,63 +1525,66 @@ export function EvalDashboard() {
 
           {/* One card per chunk under the config, carrying whatever questions are
               labeled to it. Keyed off `groups` rather than `summary.questions`
-              because a chunk with no questions still gets a card. */}
+              because a chunk with no questions still gets a card — which is also
+              why an empty chunk sits with the frozen ones under a demo: it holds
+              nothing a visitor can move either. */}
           {groups.length > 0 && (
             <section className="flex flex-col gap-2">
               <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
                 Chunks
                 <span className="ml-2 text-xs font-normal normal-case tracking-normal text-zinc-400">
-                  ({summary.chunkCount})
+                  ({liveChunks})
                 </span>
               </h2>
               <div className="flex flex-col gap-3">
-                {groups.map((group) => (
-                  <ChunkGroupCard
-                    key={group.chunkId}
-                    group={group}
-                    summary={summary}
-                    busy={busy}
-                    // Each "which row is open" prop is narrowed to this group, so
-                    // opening a row in one card leaves the other 79 cards' props
-                    // referentially equal and memo skips re-rendering them.
-                    editingId={idInGroup(group, editingId)}
-                    expandedId={idInGroup(group, expandedId)}
-                    explain={
-                      idInGroup(group, expandedId) === null
-                        ? undefined
-                        : explains[expandedId as string]
-                    }
-                    rankingOpenId={idInGroup(group, rankingOpenId)}
-                    addOpen={addingChunkId === group.chunkId}
-                    genDifficulty={
-                      addingChunkId === group.chunkId ? genDifficulty : null
-                    }
-                    trials={trialsByChunk?.[group.chunkId] ?? NO_TRIALS}
-                    trialsLoading={trialsLoading}
-                    onTrialRemoved={onTrialRemoved}
-                    onTrialSaved={onTrialSaved}
-                    onStartEdit={startEdit}
-                    onCancelEdit={cancelEdit}
-                    onSaveEdit={saveEdit}
-                    onRemove={remove}
-                    onToggleIgnore={toggleIgnore}
-                    onToggleExpand={toggleExpand}
-                    onToggleRanking={toggleRanking}
-                    onCloseRanking={closeRanking}
-                    onRankingChange={refreshSummary}
-                    onOpenAdd={openAdd}
-                    onCloseAdd={closeAdd}
-                    onAddQuestion={addQuestion}
-                    onGenerate={generateQuestion}
-                    onDelegateChange={reload}
-                  />
-                ))}
+                {split === null ? (
+                  groups.map((group) => renderGroup(group, summary))
+                ) : (
+                  <>
+                    {/* No "Demo — N" heading over these: the Chunks count above
+                        is now that same number, and two labels for one list is
+                        one more than the list needs. */}
+                    {split.tunable.map((group) => renderGroup(group, summary))}
+                    {/* The published build's own numbers, immediately above the
+                        frozen questions they were measured over. It rides
+                        inside this branch on purpose: `split` is non-null
+                        exactly when frozen rows exist, which is exactly when
+                        summary.asPublished is set, so the two appear and vanish
+                        together. */}
+                    {summary.asPublished && (
+                      <AsPublished run={summary.asPublished} summary={summary} />
+                    )}
+                    {/* Closed on open: these cards are here to be read, and a
+                        few hundred of them between a visitor and the rest of
+                        the page is the clutter the split exists to remove.
+                        Absent entirely when there is nothing frozen, which is
+                        the ordinary case since §3.2 emptied the build: the
+                        board is now scoped by the published board row, so a
+                        guest has a scope and no frozen questions at all, and a
+                        "Frozen — 0" heading would be a section advertising its
+                        own emptiness. */}
+                    {split.frozenCount > 0 && (
+                      <details className="group">
+                        {/* list-none alone leaves Safari's marker in place, so
+                            the caret is drawn by hand. */}
+                        <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 hover:text-zinc-700 [&::-webkit-details-marker]:hidden dark:hover:text-zinc-300">
+                          <Caret />
+                          Frozen — {split.frozenCount}
+                        </summary>
+                        <div className="mt-3 flex flex-col gap-3">
+                          {split.frozen.map((group) => renderGroup(group, summary))}
+                        </div>
+                      </details>
+                    )}
+                  </>
+                )}
               </div>
             </section>
           )}
         </>
       )}
     </div>
+    </DemoBlockedProvider>
   );
 }
 
@@ -1687,6 +1867,7 @@ const QuestionRow = memo(function QuestionRow({
   onCloseRanking: () => void;
   onRankingChange: () => void;
 }) {
+  const blockUnfreeze = useDemoBlock("unfreeze");
   const [draft, setDraft] = useState(q.question);
   // Delete confirmation, inline rather than a modal: window.confirm can't carry
   // the uncache checkbox, and an expanding row suits this dense list better than
@@ -1724,8 +1905,8 @@ const QuestionRow = memo(function QuestionRow({
               its own word. "ignored" on a held-out question would read as a
               judgement about the question rather than as membership of the test
               set; "ignored" on one of a demo's frozen questions would be worse
-              still, since nobody ignored it — the publish froze it so that one
-              visitor's experiment cannot cost the next one their demo. */}
+              still, since nobody ignored it — a publish did, and the row's own
+              badge is the only place that distinction is visible. */}
           {q.ignored && (
             <span
               title={
@@ -1844,13 +2025,17 @@ const QuestionRow = memo(function QuestionRow({
               {!q.frozen && (q.ignored || failsBar(q, criteria)) && (
                 <button
                   onClick={() => onToggleIgnore(q)}
-                  disabled={busy}
+                  disabled={busy || blockUnfreeze !== null}
                   title={
-                    q.heldOut
+                    // The route gates EVERY question, not only the frozen ones
+                    // that hide this button — so a tunable question's Ignore is
+                    // a 403 too, and it says so rather than finding out.
+                    blockUnfreeze ??
+                    (q.heldOut
                       ? "Pull this question out of the held-out test set — the next holdout draw may put it back"
                       : q.ignored
                         ? "Count this question in rates again"
-                        : "Exclude this question from rates and autotune targeting (manual false-positive mode)"
+                        : "Exclude this question from rates and autotune targeting (manual false-positive mode)")
                   }
                   className="cursor-pointer hover:underline disabled:cursor-not-allowed disabled:opacity-50"
                 >
@@ -1950,6 +2135,9 @@ function AddQuestionForm({
   onAdd: (chunkId: string, draft: string) => void;
   onGenerate: (chunkId: string, difficulty: Difficulty) => void;
 }) {
+  // Only the SYNTHETIC half needs an answer model; typing one by hand is free,
+  // so the Manual tab stays live and the difficulty buttons go dark.
+  const blockGenerate = useDemoBlock("generate");
   const [mode, setMode] = useState<"synthetic" | "manual">("synthetic");
 
   return (
@@ -1986,12 +2174,19 @@ function AddQuestionForm({
                 <button
                   key={d}
                   onClick={() => onGenerate(chunkId, d)}
-                  disabled={busy}
+                  disabled={busy || blockGenerate !== null}
+                  title={blockGenerate ?? undefined}
                   className="cursor-pointer rounded border border-zinc-300 px-2 py-0.5 font-medium capitalize text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
                 >
                   {genDifficulty === d ? "Generating…" : d}
                 </button>
               ))}
+              {blockGenerate && (
+                <span className="text-zinc-500">
+                  Use the Manual tab, or Bulk actions → Add question →
+                  “Add”.
+                </span>
+              )}
             </div>
           ) : (
             <ManualAdd
@@ -2185,6 +2380,7 @@ function BulkActions({
   onRescore,
   canRescore,
   canAddQuestion,
+  onDemoBoard,
 }: {
   busy: boolean;
   onAddDifficulty: (
@@ -2202,7 +2398,18 @@ function BulkActions({
   onRescore: (documentIds: string[] | null) => void;
   canRescore: boolean;
   canAddQuestion: boolean;
+  // A guest whose published build carries a board. The route derives the same
+  // fact server-side from the shelf and serves their Add from the bank, so the
+  // two Add buttons swap roles here: Add goes live, Add cached goes dark.
+  onDemoBoard: boolean;
 }) {
+  // The demo's three refusals that live in this menu. Null for a real account,
+  // so every use below is a plain "is this off, and what do I say about it".
+  const blockGenerate = useDemoBlock("generate");
+  const blockRank = useDemoBlock("rank");
+  const blockLlmRank = useDemoBlock("llmRank");
+  const blockOverride = useDemoBlock("override");
+  const blockReconfigure = useDemoBlock("reconfigure");
   const [open, setOpen] = useState(false);
   const [subOpen, setSubOpen] = useState(false);
   // "Add question": clicking a difficulty stages one more question per chunk at
@@ -2279,6 +2486,11 @@ function BulkActions({
         (id) => docs?.find((d) => d.id === id)?.fileName ?? "unknown document",
       )
     : null;
+
+  // The config dialog does one of two blocked things depending on the scope —
+  // a whole-config reconfigure, or per-document chunk overrides — so the
+  // sentence its buttons carry follows the scope rather than being picked once.
+  const configBlock = scopeIds ? blockOverride : blockReconfigure;
 
   return (
     <div className="relative">
@@ -2400,13 +2612,17 @@ function BulkActions({
                       <button
                         key={d}
                         type="button"
+                        disabled={blockGenerate !== null}
                         onClick={(e) => bumpDifficulty(d, e.shiftKey ? -1 : 1)}
                         onContextMenu={(e) => {
                           e.preventDefault();
                           bumpDifficulty(d, -1);
                         }}
-                        title={`Click to add one more ${d} question per chunk; shift-click (or right-click) to remove one`}
-                        className={`relative cursor-pointer rounded border px-2 py-0.5 text-xs font-medium capitalize ${
+                        title={
+                          blockGenerate ??
+                          `Click to add one more ${d} question per chunk; shift-click (or right-click) to remove one`
+                        }
+                        className={`relative cursor-pointer rounded border px-2 py-0.5 text-xs font-medium capitalize disabled:cursor-not-allowed disabled:opacity-50 ${
                           count > 0
                             ? "border-blue-500 bg-blue-50 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300"
                             : "border-zinc-300 text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
@@ -2422,7 +2638,9 @@ function BulkActions({
                     );
                   })}
                 </div>
-                <span className="text-zinc-500">
+                {/* Nothing to say to a guest: the staged-count hint only makes
+                    sense to someone who can stage a count. */}
+                <span className={`text-zinc-500 ${blockGenerate ? "hidden" : ""}`}>
                   {stagedTotal === 0
                     ? "Click a difficulty once per question you want."
                     : `${addTopUp ? "Tops every chunk in scope up to" : "Adds to every chunk in scope"} ${(
@@ -2437,14 +2655,20 @@ function BulkActions({
                     clicking twice buys twice. Ticking it restores fill-to-N,
                     which skips chunks already there — cheaper, and idempotent. */}
                 <label
-                  className="flex cursor-pointer items-start gap-1.5 text-zinc-500"
-                  title="Only add what a chunk is missing — chunks already at N get nothing. Off, every chunk in scope gets N more however many it already has."
+                  className={`flex items-start gap-1.5 text-zinc-500 ${
+                    blockGenerate ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+                  }`}
+                  title={
+                    blockGenerate ??
+                    "Only add what a chunk is missing — chunks already at N get nothing. Off, every chunk in scope gets N more however many it already has."
+                  }
                 >
                   <input
                     type="checkbox"
                     checked={addTopUp}
+                    disabled={blockGenerate !== null}
                     onChange={(e) => setAddTopUp(e.target.checked)}
-                    className="mt-0.5 cursor-pointer"
+                    className="mt-0.5 cursor-pointer disabled:cursor-not-allowed"
                   />
                   <span>
                     Top up{" "}
@@ -2464,9 +2688,24 @@ function BulkActions({
                   </span>
                 )}
                 <div className="flex items-center gap-2">
+                  {/* The PAID half — EXCEPT on a demo board, where the route
+                      serves this press from the published bank instead (§1.4).
+                      Then it is the free one and the only one enabled, so both
+                      of its disjuncts have to be stood down: `generate` stays
+                      blocked (the badges above depend on that) and a guest can
+                      stage nothing to clear `stagedTotal === 0`. */}
                   <button
                     type="button"
-                    disabled={stagedTotal === 0}
+                    disabled={
+                      onDemoBoard
+                        ? false
+                        : stagedTotal === 0 || blockGenerate !== null
+                    }
+                    title={
+                      onDemoBoard
+                        ? "Hand every chunk on the board its next question from the published bank — free, and it generates nothing"
+                        : (blockGenerate ?? undefined)
+                    }
                     onClick={() => {
                       const counts = addCounts;
                       const topUp = addTopUp;
@@ -2484,7 +2723,12 @@ function BulkActions({
                       is. Generates nothing — what isn't banked, Add buys. */}
                   <button
                     type="button"
-                    title="Add every question already generated for identical chunks from all configs at any difficulty — skips dupe questions"
+                    disabled={onDemoBoard}
+                    title={
+                      onDemoBoard
+                        ? "Not needed here — on the demo board Add itself serves the published bank, free"
+                        : "Add every question already generated for identical chunks from all configs at any difficulty — skips dupe questions"
+                    }
                     onClick={() => {
                       close();
                       onAddCached(scopeIds);
@@ -2505,10 +2749,12 @@ function BulkActions({
                 </div>
                 {/* Says the quiet part out loud: the badges size the PAID run
                     only, so "Add cached" staying live at zero staged questions
-                    is the design, not a bug. */}
+                    is the design, not a bug. On a demo board the two buttons
+                    have swapped, so the sentence describes Add instead. */}
                 <span className="text-zinc-500">
-                  Add every question already generated for identical chunks from
-                  all configs at any difficulty — skips dupe questions
+                  {onDemoBoard
+                    ? "Add hands every chunk on the board its next question from the published bank — free, one per chunk per press, and it generates nothing."
+                    : "Add every question already generated for identical chunks from all configs at any difficulty — skips dupe questions"}
                 </span>
               </div>
             )}
@@ -2519,11 +2765,12 @@ function BulkActions({
             <button
               type="button"
               onClick={() => setNdcgOpen((s) => !s)}
-              disabled={!canRescore}
+              disabled={!canRescore || blockRank !== null}
               title={
-                canRescore
+                blockRank ??
+                (canRescore
                   ? "Builds + promotes the aggregate ranking for every question in scope that has no ground truth yet"
-                  : "No labeled questions to grade yet"
+                  : "No labeled questions to grade yet")
               }
               className="flex w-full cursor-pointer items-center justify-between px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
@@ -2576,11 +2823,12 @@ function BulkActions({
             <button
               type="button"
               onClick={() => setLlmNdcgOpen((s) => !s)}
-              disabled={!canRescore}
+              disabled={!canRescore || blockLlmRank !== null}
               title={
-                canRescore
+                blockLlmRank ??
+                (canRescore
                   ? "Ask the LLM to re-order the aggregate's top-k for every question in scope (costs LLM calls; skips questions with no aggregate and ones already cached)"
-                  : "No labeled questions to rank yet"
+                  : "No labeled questions to rank yet")
               }
               className="flex w-full cursor-pointer items-center justify-between px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
@@ -2632,33 +2880,41 @@ function BulkActions({
               Re-score all
             </button>
             <div className="my-1 border-t border-zinc-200 dark:border-zinc-800" />
+            {/* Both of these open the same dialog, and both ends of what it can
+                do are blocked for a guest: the whole-config path is a
+                reconfigure and the per-document path writes overrides. So they
+                go dark on either sentence, whichever the scope would hit. */}
             <button
               type="button"
+              disabled={configBlock !== null}
               onClick={() => {
                 close();
                 onChangeConfig(scopeIds, scopeNames);
               }}
               title={
-                scopeIds
+                configBlock ??
+                (scopeIds
                   ? "Overrides the selected documents' chunks to another model (config unchanged)"
-                  : "Changes THIS config in place — re-embeds but keeps question(s)"
+                  : "Changes THIS config in place — re-embeds but keeps question(s)")
               }
-              className="block w-full cursor-pointer px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              className="block w-full cursor-pointer px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               Change base model…
             </button>
             <button
               type="button"
+              disabled={configBlock !== null}
               onClick={() => {
                 close();
                 onChangeConfig(scopeIds, scopeNames);
               }}
               title={
-                scopeIds
+                configBlock ??
+                (scopeIds
                   ? "Re-splits the selected documents' chunks via per-chunk overrides (config unchanged)"
-                  : "Changes THIS config in place — re-embeds but keeps question(s)"
+                  : "Changes THIS config in place — re-embeds but keeps question(s)")
               }
-              className="block w-full cursor-pointer px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              className="block w-full cursor-pointer px-3 py-1.5 text-left text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               Adjust chunk size / overlap…
             </button>
@@ -2669,44 +2925,105 @@ function BulkActions({
   );
 }
 
-// THE BANNER THAT SAYS WHAT THE TWO SECTIONS BELOW MEAN (phase 5 of
-// docs/demo-analytics-plan.md).
+// THE DEMO BANNER (phase 5 of docs/demo-analytics-plan.md).
 //
-// By phase 4 the demo's Eval tab had a frozen headline, a live headline, a
-// per-question "frozen" chip and a set of buttons quietly pointed at a dozen
-// questions — and nothing on the page said so. A visitor could re-score, watch
-// "12 questions" go by, and reasonably conclude the workbench was broken. This
-// is not decoration: an app that leaves its own scope to be inferred is telling
-// the visitor the same lie by omission that phase 2 removed from the cards.
+// A visitor can press a button, have it refuse, and reasonably conclude the
+// workbench is broken. This says up front that the limits are deliberate.
 //
-// IT COUNTS RATHER THAN ASSERTS. Every number here comes off the questions the
-// page already has, so a re-publish that lands 9 tunable questions instead of 12
-// (scripts/demo-snapshot's assertSpread accepts 8) prints 9, and a visitor who
-// adds one of their own prints 13 — their question is unfrozen by construction
-// (nothing writes FROZEN_REASON but a publish), which is exactly the promise
-// this paragraph makes.
+// It used to spell the split out in numbers (N frozen, N live, and where to add
+// more). The counts are on the page already — the headline row and the
+// "Frozen — N" heading down in Chunks — so the banner keeps only the part
+// nothing else says.
 //
 // IT IS NOT AN isGuest() BRANCH, for the reason lib/demo/frozen.ts gives at
-// length: a real account has no frozen rows, so `frozen === 0` and this renders
-// nothing — by construction rather than by a test of who is asking. That also
-// makes an UNPUBLISHED guest build silent rather than boastful, which is the
-// honest outcome: with no frozen set there is no scope to announce.
-function DemoScope({ summary }: { summary: EvalSummary }) {
+// length: a real account has neither a published board nor frozen rows, so both
+// tests below are false and this renders nothing — by construction rather than
+// by a test of who is asking. That also makes an UNPUBLISHED guest build silent
+// rather than boastful, which is the honest outcome: with no scope of either
+// kind there is nothing to announce.
+//
+// THE BOARD FIRST, the frozen set second, exactly as `split` above reads them
+// and for the same reason: the build this plan is heading for has a scope and no
+// frozen questions at all, and a banner that vanished the moment the board was
+// emptied would take the page's only statement that the limits are deliberate
+// with it.
+function DemoScope({
+  summary,
+  onRestart,
+}: {
+  summary: EvalSummary;
+  onRestart: () => void;
+}) {
   const frozen = summary.questions.filter((q) => q.frozen).length;
-  if (frozen === 0) return null;
-  const tunable = summary.questions.length - frozen;
+  // Two-click confirm rather than window.confirm: this deletes a board someone
+  // may have spent ten minutes building, and a native dialog in a demo is a
+  // modal a visitor cannot read the page behind.
+  const [armed, setArmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function restart() {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await apiFetch("/api/demo/restart", { method: "POST" });
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status}).`);
+      setArmed(false);
+      onRestart();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Network error.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (summary.demoBoard === null && frozen === 0) return null;
+  // The button is a guest's, on demoBlocked's own rule — it is null for a real
+  // account, so this cannot render for one even if the board scope somehow did.
+  const canRestart = summary.demoBlocked !== null;
   return (
     <section className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/50 dark:text-amber-200">
-      <p>
-        <strong className="font-semibold">This demo is deliberately scoped.</strong>{" "}
-        All {summary.questions.length} questions carry the scores they were
-        measured with before this workspace was published
-        {summary.asPublished ? " — that is the “As published” row, and it never moves." : "."}{" "}
-        <strong className="font-semibold">{tunable} of them are live</strong>,
-        picked to span a first-place hit through to a complete miss: re-score
-        them, autotune them, add your own. The other {frozen} are frozen, so one
-        visitor’s experiment cannot cost the next one their demo.
-      </p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p>
+          <strong className="font-semibold">Demo</strong> — restrictions and limits
+          apply to some actions on this page.
+        </p>
+        {canRestart &&
+          (armed ? (
+            <span className="flex items-center gap-2">
+              <span className="text-xs">
+                Clears the questions you added, their scores, and any tuning.
+              </span>
+              <button
+                type="button"
+                onClick={restart}
+                disabled={busy}
+                className="rounded border border-amber-400 bg-amber-100 px-2 py-1 text-xs font-medium hover:bg-amber-200 disabled:opacity-50 dark:border-amber-800 dark:bg-amber-900/60 dark:hover:bg-amber-900"
+              >
+                {busy ? "Clearing…" : "Yes, start over"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setArmed(false)}
+                disabled={busy}
+                className="rounded px-2 py-1 text-xs underline underline-offset-2 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setArmed(true)}
+              title="Empty the board and hand the sixty cached questions back, so the walk can be done again from the start."
+              className="rounded border border-amber-400 px-2 py-1 text-xs font-medium hover:bg-amber-100 dark:border-amber-800 dark:hover:bg-amber-900/60"
+            >
+              Start over
+            </button>
+          ))}
+      </div>
+      {error && <p className="mt-2 text-xs text-red-700 dark:text-red-400">{error}</p>}
     </section>
   );
 }
@@ -2741,14 +3058,22 @@ function AsPublished({
 }) {
   const recall = run.questionCount > 0 ? run.hitCount / run.questionCount : null;
   return (
-    <section className="flex flex-col gap-2">
-      <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+    // Closed on open, like the frozen chunk list it now sits above: these three
+    // numbers never move, so they are reference rather than news, and a visitor
+    // scrolling past the twelve live questions should reach the frozen set
+    // without a second headline row in the way. The heading still carries the
+    // question count, so the section says what it holds while shut.
+    <details className="group">
+      {/* list-none alone leaves Safari's marker in place, so the caret is
+          drawn by hand. */}
+      <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-semibold uppercase tracking-wide text-zinc-500 hover:text-zinc-700 [&::-webkit-details-marker]:hidden dark:hover:text-zinc-300">
+        <Caret />
         As published
-        <span className="ml-2 font-normal normal-case tracking-normal text-zinc-400">
+        <span className="font-normal normal-case tracking-normal text-zinc-400">
           frozen — {run.questionCount} questions, measured before this demo went out
         </span>
-      </h2>
-      <div className="flex flex-wrap gap-4">
+      </summary>
+      <div className="mt-3 flex flex-wrap gap-4">
         {summary.criteria.recall.enabled && (
           <Stat label={`Recall@${run.k}`} value={pct(recall)} big />
         )}
@@ -2768,7 +3093,19 @@ function AsPublished({
           />
         )}
       </div>
-    </section>
+    </details>
+  );
+}
+
+// The open/shut caret every <details> on this page opens with, matching the ▸/▾
+// the Runs button has always drawn. CSS-only: `group-open:` reads the parent
+// <details>, so no section needs React state of its own to draw it.
+function Caret() {
+  return (
+    <span aria-hidden className="text-zinc-400">
+      <span className="group-open:hidden">▸</span>
+      <span className="hidden group-open:inline">▾</span>
+    </span>
   );
 }
 
@@ -3686,6 +4023,10 @@ function ModelTrial({
   chunkId: string;
   onSaved: (trial: SavedModelTrial) => void;
 }) {
+  // The whole panel is one blocked action: running a trial re-embeds the chunk
+  // and its pool. So a guest never gets it open — the collapsed link is the
+  // thing that goes dark, and it carries the sentence.
+  const blockTryModel = useDemoBlock("tryModel");
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<TrialState | null>(null);
 
@@ -3977,7 +4318,9 @@ function ModelTrial({
       <div className="border-t border-zinc-200 px-3 py-2 dark:border-zinc-800">
         <button
           onClick={toggleOpen}
-          className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-700 hover:underline dark:hover:text-zinc-300"
+          disabled={blockTryModel !== null}
+          title={blockTryModel ?? undefined}
+          className="cursor-pointer text-xs text-zinc-500 hover:text-zinc-700 hover:underline disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:no-underline dark:hover:text-zinc-300"
         >
           Try a different configuration
         </button>
@@ -4873,6 +5216,8 @@ function SavedTrialRow({
   onApply: () => void;
   onDelete: () => void;
 }) {
+  // Persisting a variation writes an override, which the demo doesn't buy.
+  const blockOverride = useDemoBlock("override");
   const [open, setOpen] = useState(false);
   const sim = avgTrialSim(trial.results);
   const fusedHits = fusedHitCount(trial);
@@ -4980,11 +5325,12 @@ function SavedTrialRow({
             <button
               type="button"
               onClick={onApply}
-              disabled={delegating || !canApply}
+              disabled={delegating || !canApply || blockOverride !== null}
               title={
-                canApply
+                blockOverride ??
+                (canApply
                   ? "Persist this variation to represent this chunk in this config — its questions re-score immediately"
-                  : "Custom-border shapes can't be persisted as an override yet"
+                  : "Custom-border shapes can't be persisted as an override yet")
               }
               className="self-start cursor-pointer rounded border border-blue-300 px-1.5 py-0.5 font-medium text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-800 dark:text-blue-300 dark:hover:bg-blue-900/20"
             >
@@ -5055,6 +5401,9 @@ function BaselineRow({
   delegating: boolean;
   onRestore: () => void;
 }) {
+  // Clearing a delegate is the same route as setting one, and just as blocked —
+  // reachable for a guest, since autotune (which they MAY press) writes one.
+  const blockOverride = useDemoBlock("override");
   const [open, setOpen] = useState(false);
   // Per-question BASELINE top-k drill-down: what pure base-model retrieval
   // returned (the newest result with the 'baseline' 0022 fingerprint), fetched
@@ -5122,8 +5471,11 @@ function BaselineRow({
         <button
           type="button"
           onClick={onRestore}
-          disabled={delegating}
-          title="Clear the delegate — rank this chunk under the base model again (its questions re-score immediately)"
+          disabled={delegating || blockOverride !== null}
+          title={
+            blockOverride ??
+            "Clear the delegate — rank this chunk under the base model again (its questions re-score immediately)"
+          }
           className="shrink-0 cursor-pointer text-amber-700 underline hover:no-underline disabled:opacity-50 dark:text-amber-400"
         >
           {delegating ? "Restoring & re-scoring…" : "Restore as delegate"}

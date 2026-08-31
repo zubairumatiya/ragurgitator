@@ -5,14 +5,24 @@
 //
 // GET  — the model in force for the scoped config, where it came from, what its
 //        space serves at, and the full candidate list. Every REGISTERED model is a
-//        candidate: the key vector never touches a chunks_* table.
+//        candidate: the key vector never touches a chunks_* table. For a GUEST it
+//        also carries `publishedSweep`, the leaderboard the publish banked (0077),
+//        because the POST that would produce one is a spend the demo won't make.
+//        It also carries `economics` — the census and the realized per-hit saving
+//        the precision slider's payoff readout is derived from.
 // POST — three actions:
 //        • sweep    — score every candidate on the pooled pair set. Embedding-only
 //                     and cached, so a re-run is nearly free. NOT folded into GET:
 //                     the first run pays for real embeddings and a page load must
-//                     never do that silently.
+//                     never do that silently. For a GUEST this REPLAYS the
+//                     published row instead of running — see the gate below.
 //        • apply    — write the per-config override, for one config or all.
 //        • backfill — re-embed this config's cached questions under the key model.
+//
+// THE DEMO GATE IS PER-ACTION (phase 2 of docs/demo-cache-lab-plan.md). It used
+// to be one assertDemoAllows("sweep") over the whole handler, which blocked all
+// three — but only `sweep` has a banked answer to hand back, and only `sweep`
+// writes nothing.
 //
 // The UNCALIBRATED-SPACE REFUSAL lives on `apply` here exactly as on PATCH
 // /api/batch: switching key models moves a config into a new vector-space, and an
@@ -40,6 +50,7 @@ import { registerRunId, isCancelled, unregisterRun } from "@/lib/http/cancelRegi
 import { withRequestConfig } from "@/lib/http/configScope";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { getBatchSavings, updateBatchSavings } from "@/lib/rag/batchStore";
+import { readCacheEconomics } from "@/lib/rag/cacheEconomics";
 import { listClosedConfigs, listConfigs } from "@/lib/rag/configStore";
 import { runKeyModelSweep } from "@/lib/rag/keyModelSweep";
 import {
@@ -50,6 +61,8 @@ import {
   uncalibratedKeyModelSpace,
 } from "@/lib/rag/semanticCache";
 import { assertDemoAllows } from "@/lib/demo/policy";
+import { replaySweepResult } from "@/lib/demo/replayView";
+import { publishedForm } from "@/lib/rag/publishedSweep";
 
 const msg = (err: unknown, fallback: string) =>
   err instanceof Error ? err.message : fallback;
@@ -58,7 +71,44 @@ export async function GET(request: Request) {
   return withRequestConfig(request, async () => {
     try {
       const savings = await getBatchSavings(activeConfig().id);
-      return Response.json(await keyModelStatus(savings.semanticCache.keyModel));
+      const status = await keyModelStatus(savings.semanticCache.keyModel);
+      const replay = await replaySweepResult();
+      return Response.json({
+        ...status,
+        // WHAT THE PRECISION TARGET COSTS, for the space the key model actually
+        // serves in — the payoff readout beside the slider. Folded into this GET
+        // rather than given a route of its own: it is read once, at the same
+        // moment as the threshold it is scored against, and a second round trip
+        // would paint the slider before the only number that says what moving it
+        // is worth. Three small aggregates; nothing here embeds or judges.
+        economics: await readCacheEconomics(
+          status.threshold.space,
+          status.threshold.threshold,
+        ),
+        // THE REPLAYED SWEEP, for a guest only (phase 3 of
+        // docs/demo-cache-replay-plan.md). It seeds the panel's `sweep` state,
+        // which is the whole unlock: §4's leaderboard and its precision slider
+        // render inside `{sweep && …}` and cost nothing to re-derive, so handing
+        // the panel a result turns three disabled buttons into a live control
+        // with zero further requests.
+        //
+        // AND IT MOVES. The panel re-runs this GET on every SC_CHANGED, so a
+        // visitor who generates pairs or judges a queued row gets a leaderboard
+        // re-derived over the set they now hold — the same rows a real sweep at
+        // that size would have printed, because it is the same calibration over
+        // the same cosines.
+        //
+        // PACKED on the way out, as the banked row used to arrive: the panel
+        // calls unpackSweep before it reads a curve, and thinning the curves to
+        // the slider's own grid is what keeps ~11 models off the wire whole.
+        //
+        // GATED ON GUEST — replaySweepResult returns null for everyone else — and
+        // the reason is the rule lib/demo/policy holds everywhere: a MEASUREMENT
+        // may not imply a computation that did not happen. The operator's own
+        // account can run the real sweep, and pre-filling their table with a
+        // replay would be exactly that.
+        publishedSweep: replay && publishedForm(replay),
+      });
     } catch (err) {
       return Response.json(
         { error: msg(err, "Failed to load the cache-key model.") },
@@ -102,7 +152,41 @@ export async function POST(request: Request) {
   const data = body.data;
 
   return withRequestConfig(request, async () => {
-    await assertDemoAllows("sweep");
+    // THE WRITES STAY BLOCKED, under their own sentence. `apply` moves which
+    // vector-space every incoming question is matched in and `backfill`
+    // re-embeds this config's banked questions — a spend AND a write the next
+    // visitor would inherit — so neither has a replay to offer. They get
+    // DEMO_ACTIONS.keyModel rather than .sweep because since phase 2 that
+    // sentence answers a different question ("this build published no sweep"),
+    // and answering a question nobody asked is the failure lib/demo/policy's
+    // copy rule exists to prevent.
+    if (data.action !== "sweep") await assertDemoAllows("keyModel");
+    // THE CARVE-OUT, in the shape bulk-generate's `cachedOnly` established: one
+    // condition, greppable, pinned as a needle in scripts/guards.ts DEMO_SCOPED,
+    // because the difference between "a guest may read a sweep the operator paid
+    // for" and "a guest may spend ~510 texts × every candidate model of the
+    // operator's embedding key" is exactly this line.
+    //
+    // GATED ON GUEST BY THE FUNCTION, which is the shape lib/demo/replayView
+    // holds throughout: replaySweepResult returns null for a real account, so the
+    // operator still runs the real sweep. Serving them a replay instead would be
+    // a MEASUREMENT implying a computation that did not happen — and the operator
+    // is the one account whose matrix describes their own workspace, so it would
+    // be the hardest one to catch.
+    //
+    // The response is TAGGED and PACKED: `{ published: true, sweep }` rather
+    // than a bare SweepResult, because the two are not interchangeable to the
+    // panel. It must unpackSweep before reading a curve, and it must render
+    // PUBLISHED_SWEEP_NOTE rather than let a visitor believe their click bought
+    // the numbers. A shape it cannot tell apart from a live run would make both
+    // of those depend on the panel remembering it is in a demo.
+    const replay = data.action === "sweep" ? await replaySweepResult() : null;
+    if (replay) return Response.json({ published: true, sweep: publishedForm(replay) });
+    // No banked matrix, so there is nothing to replay and DEMO_ACTIONS.sweep is the
+    // fallback sentence — exactly how `appraise` degrades on a build published
+    // without a warm replay. A no-op for a real account, which is what makes the
+    // line above the only thing separating the two.
+    if (data.action === "sweep") await assertDemoAllows("sweep");
     try {
       if (data.action === "sweep") {
         // A runId already in flight yields no channel rather than stealing the

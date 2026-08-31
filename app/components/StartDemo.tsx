@@ -49,7 +49,19 @@ export function StartDemo({ label = "Try the demo" }: { label?: string }) {
 
   return (
     <div className="flex flex-col items-start gap-2">
-      <button type="button" onClick={start} disabled={pending} className={BUTTON}>
+      <button
+        type="button"
+        onClick={start}
+        disabled={pending}
+        aria-busy={pending}
+        className={`${BUTTON} inline-flex items-center gap-2`}
+      >
+        {pending && (
+          <svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 animate-spin" fill="none">
+            <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" className="opacity-25" />
+            <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+          </svg>
+        )}
         {pending ? "Setting up your workspace…" : label}
       </button>
       {pending ? (

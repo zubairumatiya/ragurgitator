@@ -1,27 +1,29 @@
 // Appraise → Semantic caching. A peer page of Costs and the cross-config metrics
 // table, under the shared AppraiseNav. Surfaces Phase 2 of the semantic cache: the
-// eval-bank collision floor, the per-space thresholds, and the shadow-judge
-// calibration.
+// eval-bank collision floor, the per-space thresholds, and the would-hit queue.
 //
-// Panel order follows the order you'd actually work in, cheapest evidence first,
-// and each panel is NUMBERED with its place in it:
-//   1. Collision floor — pure arithmetic over the eval bank, no LLM spend, usable
-//      the moment a config has labeled questions. The apply control sits in its
-//      footer so the recommendation and the box that makes it live are one reading
-//      order apart.
-//   2. Thresholds by vector-space — what's live now, read-only.
-//   3. Shadow judge — needs real would-hit traffic and costs judge tokens, so it's
-//      the refinement you reach for after (1).
-//   4. Cache key model — the only panel that isn't about a threshold's VALUE: it
-//      changes WHICH SPACE a config reads its threshold from.
+// FOUR SECTIONS, EACH OWNING EXACTLY ONE OUTPUT. They were five panels numbered
+// 1–4 as steps of one workflow, which they never were: two stand alone, and the
+// numbering implied an order nobody works in.
+//   • Pair bank      — the labeled pair set. Extracted from the leaderboard, which
+//     was only one of its two consumers; the probe is the other.
+//   • Would-hit queue — judged verdicts on real traffic.
+//   • Threshold      — the live τ. "Thresholds by vector-space" and "Collision
+//     floor" merged: the floor is a CONSTRAINT on the live value, not a peer
+//     recommendation beside it, and the apply box — the page's only threshold
+//     write — moved into its footer from the floor's. The floor runs over three
+//     populations (eval bank / pair bank / real traffic), of which only the eval
+//     bank's may be applied.
+//   • Cache key model — which vector-space a config reads its threshold FROM.
 //
-// All four wear the same card, so they read as four steps of one workflow.
+// Evidence first, then the number it justifies, then the space that number is read
+// in. Nothing enforces this order; it is the order the outputs depend on.
 //
 // The page frame is a Server Component. It reads the config list and the first
 // config's SAVED collision floor here, on the server, and hands them to
-// CollisionFloorPanel as props: that panel used to fetch the list and then — a
-// second round trip deep — the floor, so opening this tab painted an empty panel
-// and popped the numbers in a moment later.
+// ThresholdPanel as props: it used to fetch the list and then — a second round
+// trip deep — the floor, so opening this tab painted an empty panel and popped the
+// numbers in a moment later.
 //
 // Everything else is still self-fetching Client Components, talking to each other
 // over window events (see semanticCache/events.ts): calibration panels
@@ -33,14 +35,25 @@ import { AppraiseNav } from "@/app/components/AppraiseNav";
 import { BackToConfigs } from "@/app/components/BackToConfigs";
 import { InfoDot } from "@/app/components/InfoDot";
 import { ApplyThresholdPanel } from "@/app/components/semanticCache/ApplyThresholdPanel";
-import {
-  CollisionFloorPanel,
-  type CollisionFloorPreload,
-} from "@/app/components/semanticCache/CollisionFloorPanel";
 import { KeyModelPanel } from "@/app/components/semanticCache/KeyModelPanel";
+import { PairBankPanel } from "@/app/components/semanticCache/PairBankPanel";
 import { ShadowJudgePanel } from "@/app/components/semanticCache/ShadowJudgePanel";
-import { ThresholdsPanel } from "@/app/components/semanticCache/ThresholdsPanel";
+import {
+  ThresholdPanel,
+  type CollisionFloorPreload,
+} from "@/app/components/semanticCache/ThresholdPanel";
 import { withPageUser } from "@/lib/auth/dal";
+// NO DEMO COPY CROSSES HERE ANY MORE — phase 5 of docs/demo-cache-replay-plan.md.
+// Six sentences used to be read on the server and handed down as `notes` props,
+// because lib/demo/policy is `import "server-only"` and every panel below is a
+// Client Component. They explained a page that behaved differently for a guest:
+// a frozen leaderboard, a "Generate" that revealed, a screen that resolved. Every
+// one of those now does the same arithmetic a real account's does, over a banked
+// similarity matrix instead of a paid embedding run, so THIS PAGE RENDERS
+// IDENTICALLY FOR A GUEST AND FOR AN ACCOUNT. With nothing behaving differently
+// there is nothing to explain, and the global DemoBanner already states what a
+// demo is. The one thing a guest does not see is the probe, and PairBankPanel
+// hides it off the banked matrix rather than off a flag from here.
 import { resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { readCollisionFloorState } from "@/lib/rag/collisionFloorStore";
 import { listClosedConfigs, listConfigs } from "@/lib/rag/configStore";
@@ -51,7 +64,7 @@ const ABOUT =
   "Semantic answer cache calibration — the per-space cosine threshold that " +
   "decides when a past answer is served for a new question.\n\n" +
   "Lower it only where it's proven safe: the collision floor from the eval " +
-  "bank, or the shadow judge over real would-hit traffic.";
+  "bank, or judged verdicts over the would-hit queue.";
 
 // The saved floor for the config the panel opens on — the FIRST in the picker's
 // order, which is what the panel selects by default. Best-effort, matching
@@ -78,7 +91,10 @@ export default async function SemanticCachePage() {
     // open tabs then closed ones.
     const [open, closed] = await Promise.all([listConfigs(), listClosedConfigs()]);
     const configs = [...open, ...closed];
-    return { configs, preload: await preloadFirstFloor(configs[0]?.id) };
+    return {
+      configs,
+      preload: await preloadFirstFloor(configs[0]?.id),
+    };
   });
 
   return (
@@ -97,25 +113,25 @@ export default async function SemanticCachePage() {
             their own borders and padding, so they need less air between them
             than the unboxed header block does. */}
         <div className="flex flex-col gap-3">
-          {/* The apply control goes in the collision-floor panel's FOOTER: the
-              floor is where a threshold starts, so the number and the control
-              that puts it live are one card apart rather than one page apart.
-              Both panels that recommend into it (collision floor here, shadow
-              judge below) stay within a screen. */}
-          <CollisionFloorPanel
+          {/* The bank's GAP is config-scoped and this page carries no configId of
+              its own, so without the list it would silently describe the Default
+              config. */}
+          <PairBankPanel configs={configs} />
+
+          <ShadowJudgePanel />
+
+          {/* The apply control goes in the Threshold section's FOOTER — the one
+              place on the page a threshold is written, directly under the live
+              table it changes and the floor that constrains it. Both panels that
+              recommend into it (the would-hit queue above, the floor here) send a
+              number; nothing is live until it is applied here. */}
+          <ThresholdPanel
             configs={configs}
             preload={preload}
             action={<ApplyThresholdPanel />}
           />
 
-          <ThresholdsPanel />
-
-          <ShadowJudgePanel />
-
-          {/* Same list, same order, as the collision floor above: its pair GAP is
-              config-scoped, and this page carries no configId of its own, so
-              without a picker the gap silently described the Default config. */}
-          <KeyModelPanel configs={configs} />
+          <KeyModelPanel />
         </div>
       </main>
     </div>

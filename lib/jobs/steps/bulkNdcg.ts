@@ -14,13 +14,27 @@
 // terminate, and the running count is what keeps the progress bar honest across
 // slices in both modes.
 //
+// THE DEMO GRADES FROM A SHELF (§4.3 of docs/demo-real-flow-plan.md). A guest
+// cannot afford buildAggregateRanking — it embeds a 30-chunk pool under every
+// model on the list, per question — so a published build banks the master's own
+// ideals and the grading phase applies a copy. `readIdeals` is null for every
+// account but a guest and for a guest whose build shipped without the shelf, so
+// the ordinary path below is byte-for-byte what it was; the ROUTE is what refuses
+// a guest with an empty shelf, before any of this runs.
+//
+// A STOCKED SHELF NEVER FALLS THROUGH TO THE BUILDER. A question the publish
+// missed is reported as a failed grade, not quietly built on the operator's key —
+// which is the whole reason the lookup is a miss rather than a fallback.
+//
 // UNITS ARE QUESTIONS GRADED, not graded-plus-scored. The scoring tail's size is
 // not knowable at plan() time (it depends on what grading produces), and padding
 // the denominator with a guess would leave every run finishing at "83%". The tail
 // reports itself through `message` instead, with the bar full.
 import { NEVER_STOP } from "@/lib/http/cancelRegistry";
+import { readIdeals } from "@/lib/demo/replay";
+import { questionIdentity } from "@/lib/demo/replayCore";
 import type { JobStep } from "@/lib/jobs/types";
-import { buildAggregateRanking, setOfficialRanking } from "@/lib/rag/ranking";
+import { buildAggregateRanking, replayAggregateRanking, setOfficialRanking } from "@/lib/rag/ranking";
 import { scoreQuestions, type EvalEvent } from "@/lib/rag/eval";
 import {
   allLabeledQuestions,
@@ -106,6 +120,10 @@ export const bulkNdcgStep: JobStep<
       const gradeTotal = graded + pending.length;
       emit({ doneUnits: graded, event: { type: "ranking-start", total: gradeTotal } });
 
+      // Read once per slice rather than per question: it is one row, memoed per
+      // process, and null for everyone outside the demo.
+      const ideals = await readIdeals();
+
       let last = state.afterQuestionId;
       for (let i = 0; i < pending.length; i += GRADE_BATCH) {
         if (shouldStop()) {
@@ -123,8 +141,17 @@ export const bulkNdcgStep: JobStep<
           let ok = true;
           let error: string | undefined;
           try {
-            const candidate = await buildAggregateRanking(q.questionId);
-            if (!(await setOfficialRanking(q.questionId, candidate.id))) {
+            let rankingId: string;
+            if (ideals) {
+              const banked = ideals.get(questionIdentity(q.question));
+              if (!banked) {
+                throw new Error("This workspace was published without an ideal for that question.");
+              }
+              rankingId = await replayAggregateRanking(q.questionId, banked);
+            } else {
+              rankingId = (await buildAggregateRanking(q.questionId)).id;
+            }
+            if (!(await setOfficialRanking(q.questionId, rankingId))) {
               throw new Error("Could not promote the ranking to ground truth.");
             }
           } catch (err) {

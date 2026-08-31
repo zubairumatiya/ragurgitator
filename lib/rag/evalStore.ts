@@ -9,7 +9,15 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { sql, toJsonb } from "@/lib/db";
 import { FROZEN_REASON, PUBLISHED_RUN_NOTE } from "@/lib/demo/frozen";
 import { isGuest } from "@/lib/demo/guest";
+import { readBoard, readIdeals, readLlmRankings, readTuning } from "@/lib/demo/replay";
+import {
+  demoBlockedSentences,
+  EVAL_DEMO_ACTIONS,
+  PUBLISHED_SEARCH_NOTE,
+  type DemoBlockedSentences,
+} from "@/lib/demo/policy";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";
+import { cacheKey, DigestMemo } from "@/lib/rag/digestMemo";
 import { reciprocalRank, ndcg } from "@/lib/rag/evalMetrics";
 import { reduceRates } from "@/lib/rag/evalRates";
 import {
@@ -288,7 +296,10 @@ export type EvalSummary = {
   // first — the stale badge's hover list. Empty when nothing is stale.
   retrievalChanges: { description: string; at: number }[];
   // Total chunks under the active config — gates bulk "Add question" (no chunks
-  // = nothing to generate against). Always equals `chunks.length`.
+  // = nothing to generate against). Always equals `chunks.length`, which for a
+  // demo guest is the BOARD's size rather than the corpus's (see demoBoard): the
+  // corpus is still 236 chunks and retrieval still ranks against all of them,
+  // but the workbench lists the ~30 a visitor walks.
   chunkCount: number;
   // EVERY chunk under the active config, in document order — not just the ones
   // that have questions. The dashboard groups questions by chunk, and seeding
@@ -296,6 +307,34 @@ export type EvalSummary = {
   // straight away: you get a card per chunk with the "add question" and "try a
   // model" affordances on it, before any question exists to hang them off.
   chunks: ChunkRef[];
+  // WHAT THIS VISITOR MAY NOT PRESS — action name to the sentence explaining it,
+  // and null for everyone but a guest (lib/demo/policy.demoBlockedSentences).
+  //
+  // The gate itself is still the boundary; this is what lets the page render a
+  // blocked control DISABLED instead of leaving it looking live until a 403 comes
+  // back from three layers down. Confirmed 2026-08-29 that every one of them did.
+  demoBlocked: DemoBlockedSentences | null;
+  // WHICH HALF OF AUTOTUNE THIS WORKSPACE WILL RUN — the sentence, or null.
+  //
+  // Non-null only for a guest whose build carries the banked tuning (0083), i.e.
+  // exactly when ⚙ Auto tune will install the master's confirmed winners rather
+  // than search for its own. The sentence travels rather than a boolean for
+  // demoBlocked's reason: lib/demo/policy is the one copy of this wording and it
+  // is server-only.
+  demoPublishedSearch: string | null;
+  // WHICH CHUNKS THE DEMO'S BOARD IS, and null for everyone but a guest whose
+  // build published one (0081, lib/demo/replay.readBoard).
+  //
+  // It is what the frozen set used to imply. The dashboard's split — "Chunks
+  // (12)" over a "Frozen — 448" section — is derived from `frozenCount > 0`
+  // today, which is a scope that evaporates the moment the board is emptied for
+  // the visitor to build it themselves (docs/demo-real-flow-plan.md §3.1). So the
+  // scope is handed over as data instead of inferred, and `chunks` above is
+  // already filtered to it: a guest's payload carries the board, not the corpus.
+  //
+  // Null for a real account means every derivation downstream falls back to
+  // exactly what it does today, by construction rather than by a branch.
+  demoBoard: string[] | null;
   // The saved eval criteria (metrics/k/min-rate/difficulties/autotune) and the
   // active config basics — for the Settings dropdown and Bulk-actions pre-fill.
   criteria: EvalCriteria;
@@ -2305,6 +2344,182 @@ type EvalDetailRow = {
   frozen: boolean;
 };
 
+// --- the frozen half of the detail read, and the memo in front of it ---------
+//
+// THE DEMO'S BIGGEST PER-NAVIGATION READ, measured against a live guest on
+// 2026-08-26: getSummary returns 372 KB, and 339 KB of it is the ~460 FROZEN
+// question rows (lib/demo/frozen) — the ones a visitor is deliberately not
+// allowed to move. The twelve tunable ones are 9 KB. Every switch to the Eval tab
+// paid for all of it again.
+//
+// So the detail query is now read in two halves against the same CTEs, and the
+// frozen half goes through a digest-keyed memo (lib/rag/digestMemo): Postgres is
+// asked for an md5 over exactly the rows it would have sent, and the rows
+// themselves are fetched only when that 48-byte answer is one this process has
+// not already seen. On a hit the Eval tab's frozen half costs 48 bytes instead of
+// 339 KB, and it is also FASTER — the digest and the tunable half run in the same
+// Promise.all the rest of the summary already uses (~160 ms), where the single
+// combined query was ~450 ms.
+//
+// WHY A DIGEST RATHER THAN A PLAIN MEMO, which is what publishedSweep gets away
+// with. "Frozen" bounds SPEND, not writes: `notFrozen()` keeps re-scoring off
+// these rows and /ignore refuses to unfreeze one, but PATCH and DELETE on
+// /api/eval/questions/[id] are not demo-gated, and an autotune apply moves
+// `currentState`, which changes which result row `latest` picks for every
+// question at once. A memo hooked to a hand-written list of writers would be one
+// un-hooked route away from showing a visitor their own edit not taking effect.
+// The digest cannot be wrong about that: if any byte of the answer changes, the
+// key changes.
+//
+// NOT A GUEST BRANCH, for the reason lib/demo/frozen's header gives: a real
+// account has no frozen rows, so its "frozen" half is empty, its "not frozen"
+// half is byte-for-byte the query that ran before, and the only thing this costs
+// it is one aggregate over nothing, riding a Promise.all it was already waiting
+// on.
+const frozenDetailMemo = new DigestMemo<FrozenDetailRow[]>();
+
+// getSummary orders by `d.file_name, c.position, q.created_at` and the dashboard
+// groups by chunk on the strength of it, so splitting the read means the halves
+// have to be merged back into that order in JS. `created_at` rides along as the
+// tiebreak; it is ~30 bytes a row on a MISS and free on a hit, which is the right
+// side of the trade for not having to guess at ties within a chunk.
+type FrozenDetailRow = EvalDetailRow & { created_at: Date };
+
+// The projection, written once, because the digest and the row fetch describing
+// different column sets is the one way a content-addressed key could lie. A
+// frozen constant, so sql.unsafe carries no input here.
+const DETAIL_COLUMNS =
+  "question_id, question, source, difficulty, document_id, updated_at, file_name, " +
+  "source_chunk_id, expected_position, hit, found_rank, retrieved_ids, " +
+  "retrieved_scores, scored_at, retrieval_state, ignored, held_out, frozen";
+
+// The shared body of both halves and both forms. `frozen` selects the half:
+// comparing the marker test to a boolean rather than emitting two different
+// predicates keeps the two reads provably complementary — every row that has a
+// label under this config lands in exactly one of them.
+function detailSource(table: string, currentState: string, frozen: boolean) {
+  return sql`
+    with active_labels as (
+      select l.id as label_id, l.eval_question_id, l.source_chunk_id
+      from eval_labels l
+      join document_embeddings de on de.id = l.document_embedding_id
+      where de.config_id = ${activeConfig().id}
+    ),
+    latest as (
+      -- The newest result scored under the CURRENT override state (0022),
+      -- falling back to the newest overall (shown stale) when none matches.
+      -- So reverting a delegate resurrects the pre-delegate results instead
+      -- of leaving the chunk stale until a redundant re-score.
+      select distinct on (r.eval_question_id)
+        r.eval_question_id, r.hit, r.found_rank, r.retrieved_ids,
+        r.retrieved_scores, r.scored_at, r.retrieval_state
+      from eval_results r
+      join active_labels al on al.label_id = r.eval_label_id
+      where not r.is_baseline
+      order by r.eval_question_id,
+        (r.retrieval_state is not distinct from ${currentState}) desc,
+        r.scored_at desc
+    ),
+    detail_rows as (
+      select
+        q.id as question_id,
+        q.question,
+        q.source,
+        q.difficulty,
+        q.document_id,
+        q.updated_at,
+        q.created_at,
+        d.file_name,
+        al.source_chunk_id,
+        c.position as expected_position,
+        lt.hit,
+        lt.found_rank,
+        lt.retrieved_ids,
+        lt.retrieved_scores,
+        lt.scored_at,
+        lt.retrieval_state,
+        (ig.eval_question_id is not null) as ignored,
+        (ig.reason is not distinct from 'holdout') as held_out,
+        (ig.reason is not distinct from ${FROZEN_REASON}) as frozen
+      from eval_questions q
+      join active_labels al on al.eval_question_id = q.id
+      join documents d on d.id = q.document_id
+      left join ${sql(table)} c on c.id = al.source_chunk_id
+      left join latest lt on lt.eval_question_id = q.id
+      left join config_question_ignores ig
+        on ig.eval_question_id = q.id and ig.config_id = ${activeConfig().id}
+      where (ig.reason is not distinct from ${FROZEN_REASON}) = ${frozen}
+    )
+  `;
+}
+
+// The 48-byte form. Ordered by question_id INSIDE the aggregate rather than
+// inheriting a scan order, because an md5 over a set whose order Postgres is free
+// to change would miss for reasons that are not changes.
+//
+// `created_at` is deliberately outside the digested projection: it is an ordering
+// key this function reproduces from other columns' company, not a value any
+// caller reads, and digesting it would only add ways to miss.
+async function detailDigest(
+  table: string,
+  currentState: string,
+  frozen: boolean,
+): Promise<string | null> {
+  const [row] = await sql<{ digest: string | null }[]>`
+    ${detailSource(table, currentState, frozen)}
+    select md5(string_agg(t::text, '|' order by t.question_id)) as digest
+      from (select ${sql.unsafe(DETAIL_COLUMNS)} from detail_rows) t
+  `;
+  return row?.digest ?? null;
+}
+
+// The rows themselves, in the order the dashboard expects. The ORDER BY lives on
+// the outer select rather than inside the CTE because a CTE's order is not
+// something Postgres promises to carry through.
+async function detailRows(
+  table: string,
+  currentState: string,
+  frozen: boolean,
+): Promise<FrozenDetailRow[]> {
+  return sql<FrozenDetailRow[]>`
+    ${detailSource(table, currentState, frozen)}
+    select ${sql.unsafe(DETAIL_COLUMNS)}, created_at from detail_rows
+    -- Document order so questions group cleanly by chunk on /eval; within a
+    -- chunk, oldest first (generated, then any manual additions).
+    --
+    -- question_id is a TIEBREAK THIS QUERY ADDED. A bulk generation writes every
+    -- question for a chunk in one statement, so created_at ties to the
+    -- millisecond and the old single query left those rows in whatever order the
+    -- plan produced — which is also the order the two halves would have to be
+    -- merged back into, and there is none to reproduce. Ordering the tie by id
+    -- makes the dashboard's within-chunk sequence stable across reloads instead
+    -- of merely usually stable, and costs nothing: it only decides rows the
+    -- previous ORDER BY declined to.
+    order by file_name, expected_position, created_at, question_id
+  `;
+}
+
+// Re-interleave the two halves into the single ordering the one query used to
+// produce. Mirrors `order by d.file_name, c.position, q.created_at` including
+// Postgres's default NULLS LAST — `expected_position` is null when a label points
+// at a chunk that is gone, and sorting those to the front here would silently
+// reorder the dashboard for anyone whose corpus has one.
+function byDocumentOrder(a: FrozenDetailRow, b: FrozenDetailRow): number {
+  if (a.file_name !== b.file_name) return a.file_name < b.file_name ? -1 : 1;
+  if (a.expected_position !== b.expected_position) {
+    if (a.expected_position === null) return 1;
+    if (b.expected_position === null) return -1;
+    return a.expected_position - b.expected_position;
+  }
+  if (a.created_at.getTime() !== b.created_at.getTime()) {
+    return a.created_at.getTime() - b.created_at.getTime();
+  }
+  // The tiebreak detailRows added — see its ORDER BY. Both are uuids, so a
+  // code-point comparison here matches Postgres's uuid ordering; the collation
+  // caveat that applies to file_name does not arise.
+  return a.question_id < b.question_id ? -1 : a.question_id > b.question_id ? 1 : 0;
+}
+
 type DetailContext = {
   currentState: string;
   retrievalChangedAt: Date | null;
@@ -2543,6 +2758,38 @@ export async function getChunkQuestions(
 export async function getSummary(): Promise<EvalSummary> {
   const cfg = activeConfig();
   const criteria = await getActiveCriteria();
+  // Asked once per lap, before the early return: an empty config's page has the
+  // same blocked buttons on it as a full one.
+  //
+  // TWO OF THE SEVEN COME OFF WHEN THE SHELF IS STOCKED (phase 5 of
+  // docs/demo-real-flow-plan.md). "Add nDCG rankings" and "Add LLM nDCG rankings"
+  // are steps 4 and 5 of the demo's walk, and a build published with the master's
+  // banked rankings (0082) lets both run for free — so rendering them disabled
+  // would grey out the two buttons the visitor is there to press. The routes make
+  // the same call in the same order, so the tooltip and the 403 cannot disagree:
+  // a build published WITHOUT the shelf greys them and refuses, as before.
+  //
+  // AUTOTUNE IS THE THIRD (phase 6), and the one whose blocked state is the
+  // ABNORMAL one: it survives the filter only when the tuning shelf is empty,
+  // which is exactly the build in which lib/jobs/steps/autotune refuses the
+  // press. Same expression and same order as the step's own gate, so the tooltip
+  // and the 403 cannot disagree.
+  const [bankedIdeals, bankedLlm, bankedTuning] = await Promise.all([
+    readIdeals(),
+    readLlmRankings(),
+    readTuning(),
+  ]);
+  const demoBlocked = await demoBlockedSentences(
+    EVAL_DEMO_ACTIONS.filter(
+      (a) =>
+        !(a === "rank" && bankedIdeals) &&
+        !(a === "llmRank" && bankedLlm) &&
+        !(a === "autotune" && bankedTuning),
+    ),
+  );
+  // Only when the search really will be replayed: a build without the shelf
+  // refuses instead, and the sentence above is what that visitor reads.
+  const demoPublishedSearch = bankedTuning === null ? null : PUBLISHED_SEARCH_NOTE;
   const recallK = effectiveK(criteria.recall, cfg.topK);
   const mrrK = effectiveK(criteria.mrr, cfg.topK);
   const ndcgK = effectiveK(criteria.ndcg, cfg.topK);
@@ -2583,6 +2830,9 @@ export async function getSummary(): Promise<EvalSummary> {
     retrievalChanges: [],
     chunkCount: 0,
     chunks: [],
+    demoBlocked,
+    demoPublishedSearch,
+    demoBoard: null,
     criteria,
     config: configInfo,
     overrides: [],
@@ -2592,11 +2842,28 @@ export async function getSummary(): Promise<EvalSummary> {
   if (!table) return empty;
 
   // Fetched first: the detail query below prefers results scored under the
-  // CURRENT override state, so it needs the fingerprint as a parameter.
-  const currentState = await retrievalStateFingerprint();
+  // CURRENT override state, so it needs the fingerprint as a parameter — and the
+  // chunk query below needs the demo's board scope, for the same reason. Both
+  // ride one Promise.all so the pair costs one round trip rather than two, and
+  // readBoard is memoed per process besides.
+  const [currentState, board] = await Promise.all([
+    retrievalStateFingerprint(),
+    readBoard(),
+  ]);
+  // Null for every account but a demo guest, so the chunk query below is
+  // byte-for-byte the query it has always been for everyone else — the rule
+  // lib/demo/frozen's header states and the reason this is a bound parameter
+  // rather than a branch.
+  const boardIds = board?.chunks ?? null;
 
+  // THE FROZEN HALF IS ASKED FOR BY DIGEST FIRST — see frozenDetailMemo above.
+  // Both of these ride the same Promise.all the rest of the summary already
+  // waits on, so the split costs no extra wall-clock round trip; only the
+  // frozen-half FETCH below is sequential, and only on a miss.
+  const frozenKey = cacheKey(activeUserId(), activeConfig().id);
   const [
-    detail,
+    tunableDetail,
+    frozenDigest,
     runRows,
     pendingChunkRows,
     chunkRows,
@@ -2605,79 +2872,8 @@ export async function getSummary(): Promise<EvalSummary> {
     changeLog,
     holdoutRunRows,
   ] = await Promise.all([
-    sql<
-      {
-        question_id: string;
-        question: string;
-        source: string;
-        difficulty: string | null;
-        document_id: string;
-        updated_at: Date;
-        file_name: string;
-        source_chunk_id: string;
-        expected_position: number | null;
-        hit: boolean | null;
-        found_rank: number | null;
-        retrieved_ids: string[] | null;
-        retrieved_scores: number[] | null;
-        scored_at: Date | null;
-        retrieval_state: string | null;
-        ignored: boolean;
-        held_out: boolean;
-        frozen: boolean;
-      }[]
-    >`
-      with active_labels as (
-        select l.id as label_id, l.eval_question_id, l.source_chunk_id
-        from eval_labels l
-        join document_embeddings de on de.id = l.document_embedding_id
-        where de.config_id = ${activeConfig().id}
-      ),
-      latest as (
-        -- The newest result scored under the CURRENT override state (0022),
-        -- falling back to the newest overall (shown stale) when none matches.
-        -- So reverting a delegate resurrects the pre-delegate results instead
-        -- of leaving the chunk stale until a redundant re-score.
-        select distinct on (r.eval_question_id)
-          r.eval_question_id, r.hit, r.found_rank, r.retrieved_ids,
-          r.retrieved_scores, r.scored_at, r.retrieval_state
-        from eval_results r
-        join active_labels al on al.label_id = r.eval_label_id
-        where not r.is_baseline
-        order by r.eval_question_id,
-          (r.retrieval_state is not distinct from ${currentState}) desc,
-          r.scored_at desc
-      )
-      select
-        q.id as question_id,
-        q.question,
-        q.source,
-        q.difficulty,
-        q.document_id,
-        q.updated_at,
-        d.file_name,
-        al.source_chunk_id,
-        c.position as expected_position,
-        lt.hit,
-        lt.found_rank,
-        lt.retrieved_ids,
-        lt.retrieved_scores,
-        lt.scored_at,
-        lt.retrieval_state,
-        (ig.eval_question_id is not null) as ignored,
-        (ig.reason is not distinct from 'holdout') as held_out,
-        (ig.reason is not distinct from ${FROZEN_REASON}) as frozen
-      from eval_questions q
-      join active_labels al on al.eval_question_id = q.id
-      join documents d on d.id = q.document_id
-      left join ${sql(table)} c on c.id = al.source_chunk_id
-      left join latest lt on lt.eval_question_id = q.id
-      left join config_question_ignores ig
-        on ig.eval_question_id = q.id and ig.config_id = ${activeConfig().id}
-      -- Document order so questions group cleanly by chunk on /eval; within a
-      -- chunk, oldest first (generated, then any manual additions).
-      order by d.file_name, c.position, q.created_at
-    `,
+    detailRows(table, currentState, false),
+    detailDigest(table, currentState, true),
     sql<
       {
         id: string;
@@ -2727,6 +2923,13 @@ export async function getSummary(): Promise<EvalSummary> {
       join document_embeddings de on de.id = c.document_embedding_id
       join documents doc on doc.id = c.document_id
       where de.config_id = ${activeConfig().id}
+        -- THE DEMO'S BOARD, applied here and nowhere else (0081). A guest's
+        -- workspace holds the whole 236-chunk corpus — retrieval is measured
+        -- against all of it, which is what makes their scores real — while the
+        -- Eval tab is a walk over the ~30 the publish chose. Filtering in SQL
+        -- rather than in the client is what turns 236 chunk refs on every lap
+        -- into 30. Null (every real account) leaves the predicate true.
+        and (${boardIds}::uuid[] is null or c.id = any(${boardIds}::uuid[]))
       order by doc.file_name, c.position
     `,
     listChunkOverrideInfo(table),
@@ -2741,6 +2944,27 @@ export async function getSummary(): Promise<EvalSummary> {
       where config_id = ${activeConfig().id} and holdout_n is not null
     `,
   ]);
+
+  // THE MEMO'S ONE DECISION. A hit costs the 48 bytes of digest already paid for
+  // above; a miss pays the frozen fetch here, sequentially, because there was
+  // nothing to fetch until the digest said so. Empty for any account with no
+  // frozen rows, which is every account but a demo guest — so `frozen` is [] and
+  // `detail` below is exactly the row set the single query used to return.
+  let frozenDetail = frozenDetailMemo.get(frozenKey, frozenDigest);
+  if (frozenDetail === undefined) {
+    frozenDetail = await detailRows(table, currentState, true);
+    // Stored under the digest we ASKED with, not one re-derived from the rows: a
+    // write landing between the two reads must leave this entry unreachable
+    // rather than blessed, and the next request's digest is what notices.
+    frozenDetailMemo.set(frozenKey, frozenDigest, frozenDetail);
+  }
+  // Back into the one ordering the dashboard groups on — see byDocumentOrder.
+  // sort() is stable in V8, but the comparator is total over the three keys the
+  // SQL ordered by, so stability is not being leaned on.
+  const detail: EvalDetailRow[] =
+    frozenDetail.length === 0
+      ? tunableDetail
+      : [...tunableDetail, ...frozenDetail].sort(byDocumentOrder);
 
   // Each question's official (is_truth) ideal ranking, if any — what its graded
   // nDCG scores against. One query for all questions.
@@ -2940,6 +3164,9 @@ export async function getSummary(): Promise<EvalSummary> {
       fileName: r.file_name,
       position: r.position,
     })),
+    demoBlocked,
+    demoPublishedSearch,
+    demoBoard: boardIds,
     criteria,
     config: configInfo,
     overrides,

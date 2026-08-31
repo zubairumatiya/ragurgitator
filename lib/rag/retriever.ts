@@ -34,11 +34,10 @@ import { embedQuery } from "@/lib/rag/embeddings";
 import { sameVectorSpace } from "@/lib/rag/embeddingModels";
 import {
   listOverrides,
-  overrideEmbeddings,
+  overrideSims,
   type ChunkOverride,
-  type OverrideEmbedding,
 } from "@/lib/rag/overrideStore";
-import { query, queryExcluding, resolveChunks } from "@/lib/rag/vectorStore";
+import { query, queryExcluding, queryExcludingIds, resolveChunks } from "@/lib/rag/vectorStore";
 import type { RetrievedChunk } from "@/types/rag";
 
 // Base candidates pulled for fusion when overrides exist (vs the final top-k).
@@ -92,40 +91,52 @@ export type ScreenCutoffs = {
 // dominant repeat cost of "Re-score all" on a warm embedding cache.
 export type ChunkMeta = { documentId: string; position: number; text: string };
 
+// The override half of one fusion lane: the best piece sim per overridden chunk
+// under `model`, for THIS query. `text` is the query's text and is only a cache
+// key — (model, text) determines `qv` the same way annKey below argues it
+// determines the base ANN, and a 1024-float key would be absurd.
+export type SimsFor = (
+  model: string,
+  qv: number[],
+  text: string,
+) => Promise<Map<string, number>>;
+
 export type RetrievalContext = {
   overrides: ChunkOverride[];
-  piecesFor: (model: string) => Promise<OverrideEmbedding[]>;
-  // Same cross-call caching as piecesFor — see resolveCached below.
+  simsFor: SimsFor;
+  // Same cross-call caching as simsFor — see resolveCached below.
   resolve: (ids: string[]) => Promise<Map<string, ChunkMeta>>;
 };
 
-// The per-context memo above only lives as long as one buildRetrievalContext
-// call, and autotune scores ONE question per call — so every override row for the
-// config, with its vectors, was re-pulled per question (measured at 68.4s).
+// A sim is QUERY-dependent, so the cross-call cache that used to hold one entry
+// per model — the whole config's vectors, re-downloaded per question at 68.4s —
+// no longer has a per-model shape to hold. It is now one entry per (model,
+// query), which is a thing that grows without bound if a module-level Map keeps
+// it, so it is CALLER-OWNED instead: the memo below lives exactly as long as one
+// buildRetrievalContext, the way annCache lives exactly as long as one chunk's
+// autotune search (§1.1). The reuse that mattered — autotune asking the SAME
+// question across many rungs — is preserved by autotune's own per-chunk memo,
+// which is where that repetition actually happens.
 //
-// This survives across calls, keyed by the override-state fingerprint. That key
-// is what makes it safe: the fingerprint IS the hash of the override rows, so a
-// kept or reverted override changes it and the old entry can never be served. A
-// run-scoped context WITHOUT this key would be a correctness bug — overrides
-// change constantly mid-confirm.
-//
-// One state at a time, so it self-evicts.
-let pieceCacheState: string | null = null;
-let pieceCacheByModel = new Map<string, Promise<OverrideEmbedding[]>>();
+// Nothing is lost by dropping the fingerprint key here: the read it protected is
+// now ~1 kB, and a sim map that is never shared across override states cannot go
+// stale.
 
-// The same idea for resolveChunks. A chunk's metadata is a property of the CHUNK
+// The cross-call cache for resolveChunks. A chunk's metadata is a property of the CHUNK
 // ROW, which an override never touches, so this could in principle be cached for
 // longer. It's keyed on the same fingerprint anyway: one eviction rule means one
 // staleness question to reason about instead of two, and the reuse that matters
 // (many re-scores under one override state) is captured either way.
+// A chunk's metadata is a property of the CHUNK ROW, which an override never
+// touches, so this could in principle be cached for longer. It stays keyed on the
+// override-state fingerprint anyway: that key can only ever be too CONSERVATIVE,
+// and one eviction rule is one staleness question to reason about.
+let metaCacheState: string | null = null;
 let metaCacheById = new Map<string, ChunkMeta>();
 
-// One state variable for both caches — they are evicted together, so a second
-// would only be a way for them to disagree.
 function resetCachesFor(state: string): void {
-  if (pieceCacheState === state) return;
-  pieceCacheState = state;
-  pieceCacheByModel = new Map();
+  if (metaCacheState === state) return;
+  metaCacheState = state;
   metaCacheById = new Map();
 }
 
@@ -137,24 +148,15 @@ export async function buildRetrievalContext(
   state?: Promise<string>,
 ): Promise<RetrievalContext> {
   const overrides = await listOverrides();
-  const localCache = new Map<string, Promise<OverrideEmbedding[]>>();
+  const simCache = new Map<string, Promise<Map<string, number>>>();
   return {
     overrides,
-    piecesFor: async (model) => {
-      const fingerprint = state ? await state : null;
-      if (fingerprint !== null) {
-        resetCachesFor(fingerprint);
-        let shared = pieceCacheByModel.get(model);
-        if (!shared) {
-          shared = overrideEmbeddings(model);
-          pieceCacheByModel.set(model, shared);
-        }
-        return shared;
-      }
-      let p = localCache.get(model);
+    simsFor: (model, qv, text) => {
+      const key = `${model}\0${text}`;
+      let p = simCache.get(key);
       if (!p) {
-        p = overrideEmbeddings(model);
-        localCache.set(model, p);
+        p = overrideSims(model, qv);
+        simCache.set(key, p);
       }
       return p;
     },
@@ -196,8 +198,9 @@ export async function retrieve(question: string): Promise<RetrievedChunk[]> {
 }
 
 // Rank-interleave fusion against an explicit override state. Returns the FULL
-// merged list plus resolved metadata for the base candidates; callers slice as
-// needed. Live retrieval passes the stored overrides, the trial dry-run a
+// merged list plus whatever metadata the merge happened to have in hand —
+// EMPTY unless a foreign-space lane forced the pool's text to be fetched
+// (§1.2). Callers slice the merged list and resolve the ids they keep. Live retrieval passes the stored overrides, the trial dry-run a
 // hypothetical set.
 //
 // ⚠ If you change the SEMANTICS of this merge (rank formula, candidate set, what
@@ -208,7 +211,10 @@ export async function fuseWithOverrides(
   baseVector: number[],
   k: number,
   overrides: ChunkOverride[],
-  piecesFor: (model: string) => Promise<OverrideEmbedding[]>,
+  // Best override sim per overridden chunk, per model. Live retrieval passes the
+  // SQL-side reader; a dry-run passes one that folds its in-memory candidate
+  // vectors into that map (overrideSimMerge.withCandidateSims).
+  simsFor: SimsFor,
   // Fusion pool override (0027); omitted = the config's retrieval_fusion_pool, then
   // the auto formula.
   pool?: number | null,
@@ -235,23 +241,41 @@ export async function fuseWithOverrides(
   // already-cached deeper candidates can compete for free (see header).
   const paidN = effectiveFusionPool(k, pool);
   const deepN = Math.max(paidN * FUSION_DEEP_FACTOR, FUSION_DEEP_FLOOR);
+  // Does anything in this merge actually READ the pool's text? Only a
+  // FOREIGN-space override model does: it re-embeds the paid pool and looks the
+  // deeper candidates up in cachedDocVectors BY TEXT, so the text is that
+  // cache's key and all deepN rows are required (§1.2 — resolving only paidN
+  // there would drop the free deeper candidates, i.e. change the candidate set
+  // and cost a FUSION_VERSION bump). Every other path wants (id, score) alone,
+  // and pays ~480 kB a query for text it discards.
+  const needsPoolText = models.some((m) => !sameVectorSpace(m, cfg.embeddingModel));
   // Keyed on everything the ANN result depends on: the query, the excluded set
-  // (sorted so ordering can't produce a false miss), and the depth. `text` stands in
-  // for baseVector — they're 1:1 under a fixed base model, and the vector itself
-  // would be a 1024-float key.
+  // (sorted so ordering can't produce a false miss), the depth, and WHICH of the
+  // two reads produced it — a text-free entry must never be served to a call that
+  // needs text (a trial can inject a foreign-space model the stored overrides
+  // don't have, so this can vary within one annCache's life).
   const annKey = annCache
-    ? `${text}\0${deepN}\0${[...overriddenIds].sort().join(",")}`
+    ? `${text}\0${deepN}\0${needsPoolText ? "T" : "L"}\0${[...overriddenIds].sort().join(",")}`
     : null;
   const cachedAnn = annKey !== null ? annCache!.get(annKey) : undefined;
-  const baseChunks = cachedAnn ?? (await queryExcluding(baseVector, deepN, overriddenIds));
+  const baseChunks =
+    cachedAnn ??
+    (needsPoolText
+      ? await queryExcluding(baseVector, deepN, overriddenIds)
+      : await queryExcludingIds(baseVector, deepN, overriddenIds));
   if (annKey !== null && cachedAnn === undefined) annCache!.set(annKey, baseChunks);
-  baseChunks.forEach((rc) =>
-    meta.set(rc.chunk.chunk.id, {
-      documentId: rc.chunk.chunk.documentId,
-      position: rc.chunk.chunk.position,
-      text: rc.chunk.chunk.text,
-    }),
-  );
+  // Seed `meta` only when the rows actually carry it. On the light path the map
+  // starts EMPTY and retrieveForQuery's existing resolveChunks fallback fills the
+  // topK that survive — the same path override winners have always taken.
+  if (needsPoolText) {
+    baseChunks.forEach((rc) =>
+      meta.set(rc.chunk.chunk.id, {
+        documentId: rc.chunk.chunk.documentId,
+        position: rc.chunk.chunk.position,
+        text: rc.chunk.chunk.text,
+      }),
+    );
+  }
   lists.push(
     baseChunks.map((rc, i) => ({ id: rc.chunk.chunk.id, rank: i + 1, sim: rc.score })),
   );
@@ -275,13 +299,11 @@ export async function fuseWithOverrides(
   for (const model of models) {
     const isBaseSpace = sameVectorSpace(model, cfg.embeddingModel);
     const qv = isBaseSpace ? baseVector : await embedQueryCached(text, model);
-    const pieces = await piecesFor(model);
-    const bestByChunk = new Map<string, number>();
-    for (const p of pieces) {
-      const sim = cosine(qv, p.embedding);
-      const prev = bestByChunk.get(p.chunkId);
-      if (prev === undefined || sim > prev) bestByChunk.set(p.chunkId, sim);
-    }
+    // max-cosine over the model's pieces, grouped by source chunk. Computed in
+    // Postgres now rather than by downloading every piece vector — same
+    // arithmetic, ~300 kB less on the wire (docs/fusion-egress-plan.md §1.1).
+    // Treat it as READ-ONLY: it may be a memoized map shared with another call.
+    const bestByChunk = await simsFor(model, qv, text);
 
     // The competition: this query's base candidates, in THIS model's space.
     // Base space (incl. same-space folds) → every deep candidate's cosine is
@@ -394,7 +416,7 @@ export async function retrieveWithCutoffs(
     baseVector,
     k,
     overrides,
-    ctx?.piecesFor ?? overrideEmbeddings,
+    ctx?.simsFor ?? ((model, qv) => overrideSims(model, qv)),
   );
   const top = merged.slice(0, k);
 

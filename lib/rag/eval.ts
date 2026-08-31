@@ -32,12 +32,13 @@ import {
   clearRetrievalChanges,
   listOverrides,
   overrideEmbeddings,
+  overrideSims,
   retrievalStateFingerprint,
   setChunkOverride,
   setChunkOverridePieces,
   type ChunkOverride,
-  type OverrideEmbedding,
 } from "@/lib/rag/overrideStore";
+import { withCandidateSims } from "@/lib/rag/overrideSimMerge";
 import type Anthropic from "@anthropic-ai/sdk";
 import { meteredMessage } from "@/lib/rag/meter";
 import { fingerprintFrom } from "@/lib/rag/semanticCacheCore";
@@ -63,6 +64,7 @@ import {
   buildRetrievalContext,
   fuseWithOverrides,
   retrieveWithCutoffs,
+  type SimsFor,
 } from "@/lib/rag/retriever";
 import { chunkEmbeddings } from "@/lib/rag/vectorStore";
 import {
@@ -792,9 +794,14 @@ export async function scorePendingQuestions(
 
 // "Bulk actions → Add question → {difficulty ×N} → Add": persist each requested
 // difficulty into the config's mix, then add N questions at that difficulty to
-// every chunk in scope (or, with `topUp`, top each chunk up TO N), score the
-// unscored, and freeze a snapshot. Streams the same EvalEvents as the other runs
-// so the dashboard reuses the same progress UI.
+// every chunk in scope (or, with `topUp`, top each chunk up TO N). Streams the
+// same EvalEvents as the other runs so the dashboard reuses the same progress UI.
+//
+// IT DOES NOT SCORE, and it writes no eval_runs row. An eval_runs row is a
+// measurement of the board and an add measures nothing; "Score pending" scores
+// what this landed and snapshots it. Single add has always worked this way, and
+// so has the batch backend this button routes to when the question_generation
+// savings lever is on — so the button now means one thing either way.
 export async function bulkAddDifficulties(
   targets: DifficultyTarget[],
   emit: Emit = () => {},
@@ -810,33 +817,21 @@ export async function bulkAddDifficulties(
     topUp,
     shouldStop,
   );
-  // Cancelling the generation half skips the scoring half outright rather than
-  // scoring the part that landed: the user asked the run to stop, and what it
-  // generated is left pending for "Score pending".
-  const scored = shouldStop() ? 0 : await scoreUnscoredQuestions(emit, shouldStop);
-
-  const summary = await getSummary();
-  if (generated > 0 || scored > 0) {
-    await createRunSnapshot({
-      questionCount: summary.scored,
-      hitCount: summary.hits,
-      mrr: summary.mrr,
-      ndcg: summary.ndcg,
-      ndcgCovered: summary.ndcgCovered,
-      k: summary.recallK,
-    });
-  }
-
+  // AN ADD ADDS. Scoring is "Score pending", which the unscored questions this
+  // just landed turn enabled — the same two steps a single add has always taken,
+  // and the same two the batch backend has always taken (jobs/questionGeneration
+  // scores nothing). The metrics stay null rather than reporting the board's
+  // pre-existing summary, which measures the PREVIOUS press, not this one.
   emit({
     type: "done",
     cancelled: shouldStop(),
     generated,
-    scored,
-    recall: summary.recall,
-    mrr: summary.mrr,
-    ndcg: summary.ndcg,
+    scored: 0,
+    recall: null,
+    mrr: null,
+    ndcg: null,
   });
-  return { generated, scored, recall: summary.recall };
+  return { generated, scored: 0, recall: null };
 }
 
 // "Bulk actions → Add question → Add cached": the free counterpart to
@@ -850,10 +845,18 @@ export async function bulkAddDifficulties(
 //
 // Duplicates are impossible by construction — fillChunksFromCache compares
 // question TEXT against everything the chunk already shows.
+//
+// `opts.perChunk` caps a press at that many questions per chunk, so a caller can
+// hand the bank out a difficulty at a time instead of all at once. No caller
+// passes it yet; without it the press takes everything banked, as it always has.
+//
+// Like bulkAddDifficulties it scores nothing and snapshots nothing: "Score
+// pending" is the second press.
 export async function bulkAddCachedQuestions(
   emit: Emit = () => {},
   documentIds?: string[],
   shouldStop: ShouldStop = NEVER_STOP,
+  opts: { perChunk?: number } = {},
 ): Promise<{ reused: number; scored: number; recall: number | null }> {
   const chunks = await chunksWithQuestions(documentIds);
   let total = 0;
@@ -873,27 +876,12 @@ export async function bulkAddCachedQuestions(
       total = n;
       emit({ type: "generate-start", total });
     },
+    opts,
   );
   // Reflect what actually landed in the config's mix — a record of which
   // difficulties this config has used, which is what eval_difficulties is now
   // that nothing auto-generates from it.
   for (const d of difficulties) await addDifficulty(d as Difficulty);
-  // The fill itself is one free query — the cancellable half is the scoring
-  // that follows it, which is where this run's time actually goes.
-  const scored = shouldStop() ? 0 : await scoreUnscoredQuestions(emit, shouldStop);
-
-  const summary = await getSummary();
-  if (reused > 0 || scored > 0) {
-    await createRunSnapshot({
-      questionCount: summary.scored,
-      hitCount: summary.hits,
-      mrr: summary.mrr,
-      ndcg: summary.ndcg,
-      ndcgCovered: summary.ndcgCovered,
-      k: summary.recallK,
-    });
-  }
-
   console.log(
     `[rag:eval] bulkAddCachedQuestions: reused=${reused} across ${chunks.length} chunk(s)`,
   );
@@ -902,12 +890,14 @@ export async function bulkAddCachedQuestions(
     cancelled: shouldStop(),
     generated: 0,
     reused,
-    scored,
-    recall: summary.recall,
-    mrr: summary.mrr,
-    ndcg: summary.ndcg,
+    // As above: the fill is one free query and it scores nothing. "Score pending"
+    // is the second press, and it is what writes the eval_runs row.
+    scored: 0,
+    recall: null,
+    mrr: null,
+    ndcg: null,
   });
-  return { reused, scored, recall: summary.recall };
+  return { reused, scored: 0, recall: null };
 }
 
 // "Re-score all" MOVED to lib/jobs/steps/rescore.ts, where it is expressed as a
@@ -985,12 +975,17 @@ export async function screenAffectedQuestions(
   }
   const piecesByChunk = new Map<string, number[][]>();
   for (const m of models) {
-    const pieces = await overrideEmbeddings(m);
-    for (const c of changed) {
-      if (c.finalModel !== m) continue;
+    // Only the CHANGED chunks' pieces. This screen wants raw vectors (it cosines
+    // them against a question vector here in JS), so it cannot use the retriever's
+    // SQL-side sims — but it was reading every piece under the model to keep a
+    // handful, which is the same egress defect one level up
+    // (docs/fusion-egress-plan.md §1.1, "the fourth consumer").
+    const wanted = changed.filter((c) => c.finalModel === m).map((c) => c.chunkId);
+    const pieces = await overrideEmbeddings(m, wanted);
+    for (const chunkId of wanted) {
       piecesByChunk.set(
-        c.chunkId,
-        pieces.filter((p) => p.chunkId === c.chunkId).map((p) => p.embedding),
+        chunkId,
+        pieces.filter((p) => p.chunkId === chunkId).map((p) => p.embedding),
       );
     }
   }
@@ -1653,22 +1648,26 @@ export async function runModelTrial(
   // by the trial variation — what promotion would actually persist. Pieces for
   // the trial model are the in-memory trial vectors; other models keep their
   // stored pieces (minus this chunk's, if it's currently overridden elsewhere).
-  // Memoized per model: fuseWithOverrides asks once per model per question.
+  // Memoized per (model, question): a sim is query-dependent, so unlike the piece
+  // vectors this replaced it cannot be shared across the question loop below.
   const hypOverrides: ChunkOverride[] = [
     ...(await listOverrides()).filter((o) => o.sourceChunkId !== chunkId),
     { sourceChunkId: chunkId, model, kind: variation.kind },
   ];
-  const pieceCache = new Map<string, Promise<OverrideEmbedding[]>>();
-  const piecesFor = (m: string): Promise<OverrideEmbedding[]> => {
-    let p = pieceCache.get(m);
+  const simCache = new Map<string, Promise<Map<string, number>>>();
+  const simsFor: SimsFor = (m, qv, text) => {
+    const key = `${m}\0${text}`;
+    let p = simCache.get(key);
     if (!p) {
-      p = overrideEmbeddings(m).then((stored) => {
-        const kept = stored.filter((piece) => piece.chunkId !== chunkId);
-        return m === model
-          ? [...kept, ...pieceVectors.map((embedding) => ({ chunkId, embedding }))]
-          : kept;
-      });
-      pieceCache.set(m, p);
+      // Postgres collapses the STORED pieces (this chunk's excluded — the trial
+      // replaces them); the trial's own vectors exist only in memory, so they are
+      // cosined here and folded in by max (DECISION 3).
+      p = overrideSims(m, qv, chunkId).then((stored) =>
+        m === model
+          ? withCandidateSims(stored, chunkId, pieceVectors.map((v) => cosine(qv, v)))
+          : stored,
+      );
+      simCache.set(key, p);
     }
     return p;
   };
@@ -1713,7 +1712,7 @@ export async function runModelTrial(
       baseQVec,
       k,
       hypOverrides,
-      piecesFor,
+      simsFor,
     );
     const fusedRank = merged.findIndex((c) => c.id === chunkId) + 1;
 

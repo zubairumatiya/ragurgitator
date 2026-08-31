@@ -29,8 +29,20 @@ import { withUser } from "../../lib/auth/userScope";
 import { config } from "../../lib/config";
 import { fragment, privilegedSql } from "../../lib/db";
 import { cloneSeedWorkspace } from "../../lib/demo/clone";
-import { SHADOW_QUEUE_CAP } from "../../lib/demo/frozen";
+import { forgetMatrix, readMatrix, writeMatrix } from "../../lib/demo/replay";
+import { packMatrix, pairIdentity, type ReplayPair } from "../../lib/demo/replayCore";
+import {
+  PAIR_BANK_CAP,
+  PAIR_BLANK_CAP,
+  PAIR_VISIBLE_CAP,
+  SHADOW_QUEUE_CAP,
+} from "../../lib/demo/frozen";
 import { resolveConfig, withConfig } from "../../lib/rag/activeConfig";
+import {
+  PUBLISHED_SWEEP_FINGERPRINT,
+  forgetPublishedSweep,
+  readPublishedSweep,
+} from "../../lib/rag/publishedSweep";
 import {
   listPublishedReplays,
   PUBLISHED_REPLAY_FINGERPRINT,
@@ -39,7 +51,7 @@ import {
 import { chunksTable, modelDimension, vectorLiteral } from "../../lib/rag/vectorStore";
 import type { CachedResult } from "../../lib/rag/semanticCache";
 import { semanticCacheLookup, semanticCacheStore } from "../../lib/rag/semanticCache";
-import { adminClient, createUser, ensureAppRole, truncateAll } from "../support/harness";
+import { adminClient, createUser, deleteUser, ensureAppRole, truncateAll } from "../support/harness";
 
 type Sql = ReturnType<typeof adminClient>;
 
@@ -112,6 +124,10 @@ after(async () => {
 // exactly, which is why the counts below are literals rather than derived.
 beforeEach(async () => {
   await truncateAll(admin);
+  // The replay matrix is memoed per process and per user (lib/demo/replay), on
+  // the argument that no request path writes it. A truncate IS a write, and the
+  // only one that argument does not cover.
+  forgetMatrix();
   seed = await createUser(admin);
   guest = await createUser(admin);
 
@@ -848,6 +864,91 @@ describe("cloneSeedWorkspace shadow sample", () => {
     assert.ok(queued.every((r) => r.sim >= FLOOR), "a sub-floor verdict would move no curve");
   });
 
+  // --- phase 4: the queue's verdicts, and which rows earn a place in it -----
+
+  // Bank a matrix on the SEED whose shadow half is exactly the probe rows named,
+  // which is what "in the pooled set" means at clone time: `poolPairs` decided
+  // this on the master, and a pair it dropped has no cosine here to be moved.
+  async function seedMatrixOver(questionNumbers: number[]) {
+    const pairs: ReplayPair[] = questionNumbers.map((n) => ({
+      hash: pairIdentity(`shadow question ${n}`, "the banked question"),
+      label: "same",
+      source: "shadow",
+      origin: "probe",
+      difficulty: null,
+      quarantined: false,
+    }));
+    await withUser(seed, () =>
+      writeMatrix(
+        seed.id,
+        packMatrix({
+          models: [KEY_MODEL],
+          pairs,
+          sims: [pairs.map(() => 0.9)],
+          target: 0.9,
+          minSamples: 2,
+        }),
+      ),
+    );
+  }
+
+  it("banks the verdicts it blanks, pointed at the guest's own rows", async () => {
+    await seedShadow();
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+
+    const banked = await admin<{ key: string; payload: { verdict: string; judge_model: string } }[]>`
+      select key, payload from demo_replay
+       where user_id = ${guest.id} and kind = 'shadow_verdict'`;
+    assert.equal(banked.length, summary.shadowQueued, "every queued row keeps its answer");
+    assert.equal(summary.shadowVerdicts, banked.length, "summary must count what landed");
+
+    // KEYED BY THE GUEST'S ROW, not the seed's — the join back is the whole of
+    // phase 4, and a key from the wrong id space would look like a full bank and
+    // apply to nothing.
+    const queued = await admin<{ id: string }[]>`
+      select s.id from semantic_cache_shadow s
+       join configs c on c.id = s.config_id
+       where c.user_id = ${guest.id} and s.verdict is null`;
+    assert.deepEqual(
+      banked.map((b) => b.key).sort(),
+      queued.map((q) => q.id).sort(),
+      "a banked verdict names a row in the destination",
+    );
+    // And it is the operator's real answer, not a placeholder.
+    assert.ok(banked.every((b) => ["accept", "reject"].includes(b.payload.verdict)));
+    assert.ok(banked.every((b) => b.payload.judge_model === "judge-model"));
+  });
+
+  it("prefers queueing rows a verdict would actually move", async () => {
+    await seedShadow();
+    // Twelve poolable rows, all of them in the top third of the range — a blind
+    // ntile spreads across the whole band and would pick at most a few.
+    const poolable = [45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56];
+    await seedMatrixOver(poolable);
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+
+    assert.equal(summary.shadowQueued, SHADOW_QUEUE_CAP);
+    assert.equal(summary.shadowPoolable, SHADOW_QUEUE_CAP, "every queued row is poolable");
+    const queued = await admin<{ new_query: string }[]>`
+      select s.new_query from semantic_cache_shadow s
+       join configs c on c.id = s.config_id
+       where c.user_id = ${guest.id} and s.verdict is null`;
+    assert.deepEqual(
+      queued.map((q) => q.new_query).sort(),
+      poolable.map((n) => `shadow question ${n}`).sort(),
+    );
+  });
+
+  it("tops the queue up from the rest rather than shipping a short one", async () => {
+    await seedShadow();
+    // Only three poolable rows exist, so nine come from the general probe set: a
+    // queue with some inert rows in it is a better demo than a queue of three.
+    await seedMatrixOver([10, 11, 12]);
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    assert.equal(summary.shadowQueued, SHADOW_QUEUE_CAP, "the cap is still filled");
+    assert.equal(summary.shadowPoolable, 3, "and the census says how many of them count");
+  });
+
   it("rewrites the fingerprint, so a guest's own traffic dedupes against the sample", async () => {
     await seedShadow();
     const { configId } = await cloneSeedWorkspace(seed.id, guest.id);
@@ -1014,5 +1115,706 @@ describe("cloneSeedWorkspace published replay", () => {
       rows.every((r) => r.fingerprint === "seed-md5"),
       "the rewrite happens on the COPY, never in place — the master keeps a live cache",
     );
+  });
+});
+
+// THE PUBLISHED CACHE-KEY SWEEP (step 5d) — phase 1 of docs/demo-cache-lab-plan.
+//
+// Same shape as the replay above and the same two silent failures, but one more
+// thing can go wrong here: this row has NO other writer. Nothing in a request
+// path creates it and nothing recomputes it, so if the copy misses, a guest's §4
+// is dark and every other panel on the page still works — which is precisely the
+// state the phase set out to fix, wearing the same appearance.
+describe("cloneSeedWorkspace published sweep", () => {
+  const MODELS_SWEPT = ["voyage-4-lite", "voyage-4"];
+
+  // A SweepResult reduced to the fields the panel actually reads: two models,
+  // each with a curve, since a curve is what the precision slider re-derives from.
+  const result = (models: number) => ({
+    cancelled: false,
+    target: 0.95,
+    targetSource: { target: 0.95, source: "config", configId: seedConfigId, configLabel: "seed" },
+    minSamples: 2,
+    pairs: { total: 6, shadow: 2, generated: 4, same: 3, different: 3 },
+    rows: Array.from({ length: models }, (_, i) => ({
+      model: MODELS_SWEPT[i],
+      space: "voyage",
+      dimension: 4,
+      provider: "voyage",
+      available: true,
+      reason: null,
+      threshold: 0.9,
+      recallAtThreshold: 0.5,
+      auc: 0.8,
+      precisionAtThreshold: 1,
+      pairsScored: 6,
+      samePairs: 3,
+      differentPairs: 3,
+      calibration: {
+        recommended: 0.9,
+        target: 0.95,
+        minSamples: 2,
+        totalJudged: 3,
+        overallAcceptRate: 0.667,
+        totalAccepts: 2,
+        coverageAtRecommended: 0.5,
+        precisionAtRecommended: 1,
+        // PACKED as [sim, n, accepts] — phase 1.5. This is the form
+        // writePublishedSweep stores and the form the panel unpacks, so the
+        // fixture is written in it rather than in the fuller shape: a fixture
+        // that did not match the writer would test a row nothing produces.
+        curve: [
+          [0.95, 1, 1],
+          [0.9, 2, 2],
+          [0.4, 3, 2],
+        ],
+        attainability: {
+          blocker: null,
+          bestRate: 1,
+          bestRateAt: { sim: 0.9, n: 2 },
+          coverageAtBest: 1,
+          rejectsInBest: 0,
+          requiredN: null,
+        },
+      },
+      error: null,
+    })),
+  });
+
+  async function seedSweep(fingerprint = PUBLISHED_SWEEP_FINGERPRINT, models = 2) {
+    await admin`
+      insert into published_sweep (config_id, fingerprint, result)
+      values (${seedConfigId}, ${fingerprint}, ${admin.json(result(models) as never)})
+      on conflict (config_id, fingerprint)
+        do update set result = excluded.result, computed_at = now()`;
+  }
+
+  it("carries the sweep under the sentinel, remapped to the guest's config", async () => {
+    await seedSweep();
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+
+    const rows = await admin<{ config_id: string; fingerprint: string }[]>`
+      select s.config_id, s.fingerprint
+        from published_sweep s
+        join configs c on c.id = s.config_id
+       where c.user_id = ${guest.id}`;
+    assert.equal(rows.length, 1, "one published sweep for the cloned config");
+    assert.equal(summary.sweepRows, 1, "the summary must count what landed");
+    assert.equal(summary.sweepModels, MODELS_SWEPT.length, "…and the models inside it");
+    assert.notEqual(rows[0].config_id, seedConfigId, "remapped to the guest's own config");
+    assert.equal(rows[0].fingerprint, PUBLISHED_SWEEP_FINGERPRINT);
+  });
+
+  it("is reachable through the guest's own read path", async () => {
+    // Rows existing is not the claim. The claim is that the panel finds them —
+    // readPublishedSweep addresses them by the sentinel and by ownership, and a
+    // sweep the guest cannot read is a §4 that stays dark with the row in place.
+    await seedSweep();
+    await cloneSeedWorkspace(seed.id, guest.id);
+
+    const got = await withUser(guest, () => readPublishedSweep());
+    assert.ok(got, "the guest's panel must find a sweep");
+    assert.equal(got.rows.length, MODELS_SWEPT.length);
+    assert.equal(got.target, 0.95);
+    // The curve is the payload that matters: without it the leaderboard renders
+    // and the precision slider still has nothing to re-derive.
+    assert.equal(got.rows[0].calibration?.curve.length, 3);
+    // And it comes back PACKED, which is what the panel is written against —
+    // unpacking on the server would put the bytes packing removed straight back
+    // on the wire.
+    assert.deepEqual(got.rows[0].calibration?.curve[0], [0.95, 1, 1]);
+  });
+
+  it("memoises the read, and lets it be forgotten", async () => {
+    // Phase 1.5. The row has NO writer in any request path, so within a guest's
+    // life it is immutable and a second read can only return what the first did
+    // — which is what makes a per-user memo safe in front of a hop Supabase
+    // bills on every panel mount. Deleting the row underneath the memo is how
+    // the test tells a cached answer from a fresh query.
+    await seedSweep();
+    await cloneSeedWorkspace(seed.id, guest.id);
+    assert.ok(await withUser(guest, () => readPublishedSweep()), "the first read must find it");
+
+    await admin`
+      delete from published_sweep s
+        using configs c
+       where c.id = s.config_id and c.user_id = ${guest.id}`;
+    assert.ok(
+      await withUser(guest, () => readPublishedSweep()),
+      "the second read must not have gone back to Postgres",
+    );
+
+    forgetPublishedSweep(guest.id);
+    assert.equal(
+      await withUser(guest, () => readPublishedSweep()),
+      null,
+      "forgetting must put the truth back",
+    );
+  });
+
+  it("does not memoise a miss, so provisioning can still fill it in", async () => {
+    // The one asymmetry: the clone writes the guest's row DURING provisioning,
+    // in this same process. "No sweep yet" legitimately changes; "here is the
+    // sweep" does not. Caching the miss would be the one way this memo could
+    // leave a guest's §4 permanently dark.
+    await seedSweep();
+    assert.equal(await withUser(guest, () => readPublishedSweep()), null);
+    await cloneSeedWorkspace(seed.id, guest.id);
+    assert.ok(
+      await withUser(guest, () => readPublishedSweep()),
+      "a miss cached before provisioning would never be revisited",
+    );
+  });
+
+  it("prefers the published row when the seed holds another generation", async () => {
+    // Both rows collapse onto one primary key under the rewrite, so without the
+    // dedupe this does not pick the wrong row — it aborts the whole publish.
+    await seedSweep();
+    await seedSweep("some-other-generation", 1);
+
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    assert.equal(summary.sweepRows, 1, "one row per destination config");
+    assert.equal(summary.sweepModels, MODELS_SWEPT.length, "the published generation won");
+  });
+
+  it("reports nothing when the seed has no sweep, without failing the publish", async () => {
+    // The demo shipped for its whole life in this state, and it must stay a valid
+    // build: §4 falls back to the disabled buttons it always had.
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    assert.equal(summary.sweepRows, 0);
+    assert.equal(summary.sweepModels, 0);
+    assert.equal(await withUser(guest, () => readPublishedSweep()), null);
+  });
+
+  it("leaves the seed's own row untouched", async () => {
+    await seedSweep();
+    await cloneSeedWorkspace(seed.id, guest.id);
+    const rows = await admin<{ config_id: string }[]>`
+      select config_id from published_sweep where config_id = ${seedConfigId}`;
+    assert.equal(rows.length, 1, "the rewrite happens on the COPY, never in place");
+  });
+});
+
+// THE GENERATED PAIR SET (step 5e) — phases 3 and 3b of docs/demo-cache-lab-plan.
+//
+// Unlike the sweep above, this copy is WITHHELD in two directions at once: a
+// tranche never reaches the pair table at all (demo_pair_bank, kind='pair'), and
+// a handful of the rows that do reach it arrive with their verdicts stripped
+// (kind='verdict'). Both are reveals of work the publish already paid for, so
+// both failure modes are quiet ones — a bank that leaked into the pair table
+// would move the panel's counts before the guest pressed anything, and a blanked
+// verdict with no bank row behind it would make "Screen pairs" resolve an
+// unscreened count to nothing.
+describe("cloneSeedWorkspace generated pairs", () => {
+  // 100 pairs in three strata, sized so the caps divide them exactly: the whole
+  // point of the stride is that each stratum contributes its own share, and a
+  // fixture with ragged arithmetic could not tell a preserved mix from a lucky
+  // one. created_at is explicit and ascending so the stride is deterministic —
+  // ties on created_at would fall through to a random uuid.
+  const STRATA = [
+    { label: "same", difficulty: "paraphrase", n: 50 },
+    { label: "different", difficulty: "hard-negative", n: 40 },
+    { label: "different", difficulty: "paraphrase", n: 10 },
+  ] as const;
+
+  async function seedPairs() {
+    let n = 0;
+    for (const stratum of STRATA) {
+      for (let i = 0; i < stratum.n; i++) {
+        const a = `origin question ${n}`;
+        const b = `variant ${n}`;
+        // Rejects first inside the hard-negative stratum, then accepts, then a
+        // tail of unjudged rows — F3's shape, where the quarantine is the
+        // minority and some of the set was never audited at all.
+        let verdict: string | null = null;
+        if (stratum.difficulty === "hard-negative") {
+          verdict = i < 16 ? "reject" : i < 30 ? "accept" : null;
+        } else if (stratum.label === "same") {
+          verdict = "accept";
+        }
+        await admin`
+          insert into semantic_cache_pairs
+            (origin_question_id, text_a, text_b, hash_a, hash_b, label, difficulty,
+             generated_by, created_at, verdict, verdict_source, judge_model,
+             judge_reason, judged_at)
+          select q.id, ${a}, ${b}, ${sha256(a)}, ${sha256(b)},
+                 ${stratum.label}, ${stratum.difficulty}, 'test-judge',
+                 ${`2026-01-01T00:00:00Z`}::timestamptz + ${n} * interval '1 minute',
+                 ${verdict},
+                 ${verdict ? "llm" : null},
+                 ${verdict ? "judge-model" : null},
+                 ${verdict ? `because ${n}` : null},
+                 ${verdict ? new Date("2026-02-01T00:00:00Z") : null}
+            from eval_questions q
+            join documents d on d.id = q.document_id
+           where d.user_id = ${seed.id} and q.question = 'what?'`;
+        n++;
+      }
+    }
+  }
+
+  type Pair = {
+    label: string;
+    difficulty: string;
+    text_b: string;
+    verdict: string | null;
+    verdict_source: string | null;
+    judge_model: string | null;
+    judge_reason: string | null;
+    judged_at: Date | null;
+  };
+
+  async function guestPairs(userId = guest.id): Promise<Pair[]> {
+    return admin<Pair[]>`
+      select s.label, s.difficulty, s.text_b, s.verdict, s.verdict_source,
+             s.judge_model, s.judge_reason, s.judged_at
+        from semantic_cache_pairs s
+        join eval_questions q on q.id = s.origin_question_id
+        join documents d on d.id = q.document_id
+       where d.user_id = ${userId}
+       order by s.created_at`;
+  }
+
+  type BankRow = { kind: string; pair_id: string | null; payload: Record<string, unknown> };
+
+  async function bank(userId = guest.id): Promise<BankRow[]> {
+    return admin<BankRow[]>`
+      select kind, pair_id, payload from demo_pair_bank where user_id = ${userId}`;
+  }
+
+  it("takes a capped sample that keeps the master's (label, difficulty) mix", async () => {
+    await seedPairs();
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    const got = await guestPairs();
+
+    assert.equal(got.length, PAIR_VISIBLE_CAP, "the cap is a ceiling and this fixture exceeds it");
+    assert.equal(summary.pairRows, got.length, "summary must count what landed");
+
+    // THE MIX IS THE ASSERTION. A flat 60-row cut off the top of the set would
+    // satisfy a count check and still hand the guest a pair set whose
+    // same:different and paraphrase:hard-negative ratios are not the ones the
+    // banked leaderboard was measured on — and hard negatives are the entire
+    // discriminating power of the set (0040).
+    const count = (label: string, difficulty: string) =>
+      got.filter((p) => p.label === label && p.difficulty === difficulty).length;
+    const rate = PAIR_VISIBLE_CAP / 100;
+    for (const s of STRATA) {
+      assert.equal(count(s.label, s.difficulty), s.n * rate, `${s.label}/${s.difficulty} share`);
+    }
+  });
+
+  it("carries the quarantine — an audited reject keeps its verdict and its reason", async () => {
+    await seedPairs();
+    await cloneSeedWorkspace(seed.id, guest.id);
+    const got = await guestPairs();
+
+    // F3 proved 15 of the master's pairs mislabelled, and the quarantine is what
+    // keeps the sweep from consuming them. A clone that dropped the verdict would
+    // hand a guest exactly those rows as truth.
+    const rejects = got.filter((p) => p.verdict === "reject");
+    assert.ok(rejects.length > 0, "the sample must keep rejects or the quarantine is decorative");
+    for (const r of rejects) {
+      assert.equal(r.verdict_source, "llm");
+      assert.ok(r.judge_reason, "the reason is the sentence explaining the quarantine");
+      assert.ok(r.judged_at, "a verdict with no judged_at reads as a bug in the judge");
+    }
+    // The unjudged tail travels as it is: those rows were never audited on the
+    // master either, and inventing a verdict for them would be the one thing the
+    // screen button must not do.
+    assert.ok(got.some((p) => p.verdict === null), "the master's unaudited rows come too");
+  });
+
+  it("blanks a slice and stashes its true verdicts, rejects included", async () => {
+    await seedPairs();
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    const rows = await bank();
+    const verdicts = rows.filter((r) => r.kind === "verdict");
+
+    assert.equal(verdicts.length, PAIR_BLANK_CAP, "the unscreened slice is capped");
+    assert.equal(summary.blankedVerdicts, verdicts.length, "summary must count what landed");
+    // At least one reject, so pressing screen actually quarantines something. Safe
+    // only because the guest's leaderboard is banked (0077) and never recomputed,
+    // so an unjudged reject cannot reach a sweep.
+    assert.ok(
+      verdicts.some((r) => r.payload.verdict === "reject"),
+      "a screen pass that quarantines nothing teaches the wrong thing",
+    );
+
+    // EVERY BLANKED ROW HAS ITS ANSWER BEHIND IT. The pair the bank names must be
+    // the guest's own, and it must be genuinely unscreened — all five columns, or
+    // the panel's count is wrong in the other direction.
+    for (const r of verdicts) {
+      assert.ok(r.pair_id, "a verdict row with no pair resolves nothing");
+      const [pair] = await admin<Pair[]>`
+        select s.label, s.difficulty, s.text_b, s.verdict, s.verdict_source,
+               s.judge_model, s.judge_reason, s.judged_at
+          from semantic_cache_pairs s
+          join eval_questions q on q.id = s.origin_question_id
+          join documents d on d.id = q.document_id
+         where s.id = ${r.pair_id} and d.user_id = ${guest.id}`;
+      assert.ok(pair, "the banked verdict must point at a pair the guest owns");
+      assert.equal(pair.verdict, null);
+      assert.equal(pair.verdict_source, null);
+      assert.equal(pair.judge_model, null);
+      assert.equal(pair.judge_reason, null);
+      assert.equal(pair.judged_at, null);
+      assert.ok(r.payload.judge_reason, "…and must hold the reason back, not lose it");
+    }
+  });
+
+  it("holds the reveal tranche OUT of the pair table", async () => {
+    await seedPairs();
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    const rows = await bank();
+    const banked = rows.filter((r) => r.kind === "pair");
+    const got = await guestPairs();
+
+    assert.equal(banked.length, PAIR_BANK_CAP, "the reveal tranche is capped too");
+    assert.equal(summary.bankedPairs, banked.length, "summary must count what landed");
+
+    // If a banked pair were also in the pair table, every reader of that table —
+    // pooledPairs, listPairs, the unscreened count — would already be counting a
+    // row "Generate pairs" has not handed over, and the slider would move a number
+    // that was never wrong.
+    const visible = new Set(got.map((p) => p.text_b));
+    for (const r of banked) {
+      assert.ok(!visible.has(r.payload.text_b as string), "a banked pair is not visible yet");
+      // Remapped on the way IN, because the id map is a temp table that dies with
+      // the clone's transaction: the master's question id would be a foreign key
+      // nobody downstream could resolve.
+      const [q] = await admin<{ id: string }[]>`
+        select q.id from eval_questions q
+          join documents d on d.id = q.document_id
+         where d.user_id = ${guest.id} and q.question = 'what?'`;
+      assert.equal(r.payload.origin_question_id, q.id, "banked payloads carry the GUEST's question");
+      assert.equal(r.payload.id, undefined, "an insertable payload carries no id");
+    }
+  });
+
+  it("clones a second guest from the same master", async () => {
+    // 0050 made the pair key (origin_question_id, hash_a, hash_b) per ORIGIN
+    // QUESTION, and every guest gets freshly-minted question ids — so two guests
+    // holding the same text pair cannot collide. If they could, the second
+    // provisioning of the day would abort with a unique violation and the demo
+    // would be a one-visitor demo.
+    await seedPairs();
+    const first = await cloneSeedWorkspace(seed.id, guest.id);
+    const other = await createUser(admin);
+    const second = await cloneSeedWorkspace(seed.id, other.id);
+
+    assert.equal(second.pairRows, first.pairRows, "the second guest gets the same publish");
+    assert.equal(second.bankedPairs, first.bankedPairs);
+    assert.equal(second.blankedVerdicts, first.blankedVerdicts);
+    assert.equal((await guestPairs(other.id)).length, PAIR_VISIBLE_CAP);
+    assert.equal((await bank(other.id)).length, PAIR_BANK_CAP + PAIR_BLANK_CAP);
+    // And neither guest can see the other's bank: it is root-owned by user_id
+    // (0078), the one table in this step with no config or question above it.
+    assert.equal((await bank()).length, PAIR_BANK_CAP + PAIR_BLANK_CAP);
+  });
+
+  it("carries the bank across a SECOND hop, which is the one production runs", async () => {
+    // THE HOP THE OTHER TESTS DO NOT MAKE, and the reason phase 3 shipped
+    // invisible. Every test above clones master→guest once, which is the hop that
+    // works: the master holds 100 pairs, the visible sample takes 60 and the bank
+    // tranche takes 20 of the 40 left over.
+    //
+    // Production never makes that hop. It makes master→SNAPSHOT (demo:snapshot)
+    // and then snapshot→guest (every visitor), and the second one has no leftovers
+    // to draw on: the snapshot's pair TABLE holds only the 60 that were made
+    // visible, its own 20 banked rows living in demo_pair_bank. PAIR_VISIBLE_CAP
+    // swallows all 60, `p.banked` matches nothing, and the guest opens with an
+    // empty bank — so "Generate pairs" is sized off zero and never renders.
+    //
+    // This cannot be caught by a one-hop test at any fixture size, because the cap
+    // that empties the pool is the same cap that filled it.
+    await seedPairs();
+    const snapshot = await createUser(admin);
+    const published = await cloneSeedWorkspace(seed.id, snapshot.id);
+    assert.equal(published.bankedPairs, PAIR_BANK_CAP, "the first hop banks from leftovers");
+
+    const provisioned = await cloneSeedWorkspace(snapshot.id, guest.id);
+
+    assert.equal(
+      provisioned.bankedPairs,
+      PAIR_BANK_CAP,
+      "the second hop must FORWARD the bank, having no leftovers of its own",
+    );
+    const banked = (await bank()).filter((r) => r.kind === "pair");
+    assert.equal(banked.length, PAIR_BANK_CAP, "and the rows must actually land");
+
+    // Forwarded payloads must name the GUEST's questions, not the snapshot's —
+    // _map_question dies with each transaction, so a payload that kept the
+    // previous hop's id would be a foreign key nobody downstream can resolve.
+    const guestQuestions = new Set(
+      (
+        await admin<{ id: string }[]>`
+          select q.id from eval_questions q
+            join documents d on d.id = q.document_id
+           where d.user_id = ${guest.id}`
+      ).map((r) => r.id),
+    );
+    for (const r of banked) {
+      assert.ok(
+        guestQuestions.has(r.payload.origin_question_id as string),
+        "a forwarded payload must be remapped onto the guest's own question",
+      );
+    }
+
+    // And the verdicts, for the symptom that hid behind the same cause: each hop
+    // blanks a fresh PAIR_BLANK_CAP rows, so without forwarding the guest arrives
+    // holding two hops' worth of unscreened pairs and one hop's worth of answers —
+    // leaving PAIR_BLANK_CAP of them permanently unscreenable, since the only copy
+    // of the audited verdict stayed in the snapshot's bank.
+    // BOTH HOPS' WORTH, not one. Deliberately not compared against the guest's
+    // total unjudged count: the fixture also carries pairs that were never judged
+    // in the first place, and those correctly have no banked answer — only a row
+    // whose verdict was CLEARED on the way in is owed one.
+    const verdicts = (await bank()).filter((r) => r.kind === "verdict");
+    assert.equal(
+      verdicts.length,
+      PAIR_BLANK_CAP * 2,
+      "without forwarding this is PAIR_BLANK_CAP, and the first hop's six are unscreenable forever",
+    );
+    // Each one must point at a pair the guest actually holds, and at one that is
+    // genuinely blanked — a verdict aimed at a row that already has its answer
+    // would resolve nothing and inflate the screen's count.
+    const blankedIds = new Set(
+      (
+        await admin<{ id: string }[]>`
+          select s.id from semantic_cache_pairs s
+            join eval_questions q on q.id = s.origin_question_id
+            join documents d on d.id = q.document_id
+           where d.user_id = ${guest.id} and s.verdict is null`
+      ).map((r) => r.id),
+    );
+    for (const v of verdicts) {
+      assert.ok(
+        v.pair_id && blankedIds.has(v.pair_id),
+        "a forwarded verdict must name a blanked pair of the guest's own",
+      );
+    }
+  });
+
+  it("leaves the seed's own pair set untouched", async () => {
+    await seedPairs();
+    await cloneSeedWorkspace(seed.id, guest.id);
+    const [{ n, unjudged }] = await admin<{ n: number; unjudged: number }[]>`
+      select count(*)::int as n,
+             count(*) filter (where s.verdict is null)::int as unjudged
+        from semantic_cache_pairs s
+        join eval_questions q on q.id = s.origin_question_id
+        join documents d on d.id = q.document_id
+       where d.user_id = ${seed.id}`;
+    assert.equal(n, 100, "the master keeps its whole set");
+    // 20 unjudged in the fixture and not one more: blanking happens on the COPY,
+    // exactly as the shadow queue's does.
+    assert.equal(unjudged, 20, "clearing a verdict never happens in place");
+  });
+});
+
+// THE SIMILARITY MATRIX (step 5g) — phase 2 of docs/demo-cache-replay-plan.md.
+//
+// The demo's semantic-cache page replays the master's own arithmetic rather than
+// shipping a sample of its inputs, and the matrix is that arithmetic: one cosine
+// per pair per candidate model, plus each pair's label and a hash of its two
+// texts. Three properties are asserted here and none of them is visible on a
+// page that renders:
+//
+//   1. IT SURVIVES BOTH HOPS. The publish is master → snapshot → guest, and the
+//      last banked artifact to cross this seam (demo_pair_bank, phase 3 of the
+//      lab plan) shipped INVISIBLE in production for exactly this reason: the
+//      first hop worked, the second found nothing to forward, and an itest that
+//      clones once could not see it. So this one clones twice.
+//   2. A REPUBLISH REPLACES IT. demo_replay hangs off user_profiles alone, so no
+//      cascade in step 0's list reaches it, and 0080's primary key would keep the
+//      OLD payload on a conflict — the previous build's matrix under the new
+//      build's pairs, arriving as a perfectly successful copy.
+//   3. THE COUNT IS OUT OF THE PAYLOAD. `matrixPairs` reports pairs, not rows: a
+//      matrix over nothing is a leaderboard with nothing to score and it copies
+//      just as successfully as a full one.
+// THE SAVINGS LEDGER — step 5h, phase 6 of docs/demo-cache-replay-plan.md.
+//
+// `PayoffReadout` is the only line on the semantic-cache page that quotes money,
+// and it derives it from a rate: readCacheEconomics divides `savings_totals`'
+// saved_usd by its event_count for lever 'semantic_cache'. With no row the
+// quotient is deliberately null rather than 0 — "no hit has been priced" and "a
+// hit is worth nothing" are different claims — so the money simply vanishes and
+// nothing renders as broken. That is why it is asserted here rather than trusted
+// to a page that looks fine either way.
+//
+// Two properties: the row is REMAPPED onto the destination's config (the reader
+// scopes by owned configs, so a row still pointing at the seed's config is a row
+// no guest can see), and the copy is SCOPED TO ONE LEVER (money for embedding or
+// cascade work the guest's workspace never performed would land on the Costs
+// page as a claim about them).
+describe("cloneSeedWorkspace savings ledger", () => {
+  const bankLever = (lever: string, events: number, usd: string) =>
+    admin`
+      insert into savings_totals (config_id, lever, event_count, tokens_saved, saved_usd)
+      values (${seedConfigId}, ${lever}, ${events}, 0, ${usd})
+      on conflict (config_id, lever) do update set event_count = excluded.event_count,
+                                                   saved_usd = excluded.saved_usd`;
+
+  const landed = (userId: string) =>
+    admin<{ lever: string; event_count: string; saved_usd: string; config_id: string }[]>`
+      select s.lever, s.event_count, s.saved_usd, s.config_id
+        from savings_totals s join configs c on c.id = s.config_id
+       where c.user_id = ${userId} order by s.lever`;
+
+  it("carries the semantic_cache row onto the guest's own config", async () => {
+    await bankLever("semantic_cache", 51, "0.200294");
+    const summary = await cloneSeedWorkspace(seed.id, guest.id, { onlyConfigId: seedConfigId });
+
+    const rows = await landed(guest.id);
+    assert.equal(summary.ledgerRows, 1);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].lever, "semantic_cache");
+    assert.equal(Number(rows[0].event_count), 51);
+    // The dollars travel exactly, because what the readout uses is the quotient
+    // and a rounded copy would quote a price the Costs page never printed.
+    assert.equal(Number(rows[0].saved_usd), 0.200294);
+    assert.notEqual(rows[0].config_id, seedConfigId, "remapped, or no guest can read it");
+  });
+
+  it("leaves every other lever behind", async () => {
+    await bankLever("semantic_cache", 4, "0.04");
+    await bankLever("embed_cache", 900, "12.5");
+    await bankLever("cascade", 30, "-0.9");
+    const summary = await cloneSeedWorkspace(seed.id, guest.id, { onlyConfigId: seedConfigId });
+
+    assert.equal(summary.ledgerRows, 1);
+    assert.deepEqual((await landed(guest.id)).map((r) => r.lever), ["semantic_cache"]);
+  });
+
+  it("survives the second hop, master \u2192 snapshot \u2192 guest", async () => {
+    await bankLever("semantic_cache", 51, "0.200294");
+    await cloneSeedWorkspace(seed.id, guest.id, { onlyConfigId: seedConfigId });
+
+    const second = await createUser(admin);
+    const summary = await cloneSeedWorkspace(guest.id, second.id);
+    assert.equal(summary.ledgerRows, 1);
+    assert.equal(Number((await landed(second.id))[0].saved_usd), 0.200294);
+    await deleteUser(admin, second.id);
+  });
+
+  it("publishes without one, since a master that has served no hit has no row", async () => {
+    const summary = await cloneSeedWorkspace(seed.id, guest.id, { onlyConfigId: seedConfigId });
+    assert.equal(summary.ledgerRows, 0);
+    assert.equal((await landed(guest.id)).length, 0);
+  });
+});
+
+describe("cloneSeedWorkspace replay matrix", () => {
+  const matrix = (pairs: number, models = ["voyage-4-lite", "voyage-4"]) => ({
+    version: 1,
+    models,
+    pairs: Array.from({ length: pairs }, (_, i) => ({
+      hash: `hash-${i}`,
+      label: i % 2 === 0 ? "same" : "different",
+      source: i < pairs - 1 ? "generated" : "shadow",
+      difficulty: i % 2 === 0 ? "paraphrase" : "hard-negative",
+      quarantined: false,
+    })),
+    // A model that did not score is null rather than a row of zeros; the copy
+    // must carry that distinction through unchanged.
+    sims: [Array.from({ length: pairs }, (_, i) => 0.5 + i / 100), null],
+    target: 0.95,
+    minSamples: 2,
+  });
+
+  async function bankMatrix(userId: string, pairs = 4) {
+    await admin`
+      insert into demo_replay (user_id, kind, key, payload)
+      values (${userId}, 'matrix', 'pooled', ${admin.json(matrix(pairs))})
+      on conflict (user_id, kind, key)
+        do update set payload = excluded.payload`;
+  }
+
+  const banked = (userId: string) =>
+    admin<{ kind: string; key: string; payload: Record<string, unknown> }[]>`
+      select kind, key, payload from demo_replay where user_id = ${userId} order by kind, key`;
+
+  it("forwards the matrix byte for byte, with no remapping at all", async () => {
+    await bankMatrix(seed.id);
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+
+    const rows = await banked(guest.id);
+    assert.equal(rows.length, 1, "one matrix, and nothing else banked yet");
+    assert.equal(rows[0].kind, "matrix");
+    // The whole payload, not a field of it. A matrix names no row in either
+    // account — pairs are identified by a hash of their own text — so unlike
+    // every other banked thing the clone carries there is nothing here to
+    // rewrite, and any difference at all would be a bug rather than a remap.
+    assert.deepEqual(rows[0].payload, matrix(4));
+    assert.equal(summary.matrixPairs, 4, "counted out of the payload");
+  });
+
+  it("survives the second hop, which is the one that has shipped broken before", async () => {
+    await bankMatrix(seed.id);
+    await cloneSeedWorkspace(seed.id, guest.id);
+
+    const second = await createUser(admin);
+    await cloneSeedWorkspace(guest.id, second.id);
+
+    const rows = await banked(second.id);
+    assert.equal(rows.length, 1, "the snapshot forwards what it was given");
+    assert.deepEqual(rows[0].payload, matrix(4), "and forwards it unchanged");
+    await deleteUser(admin, second.id);
+  });
+
+  it("replaces the previous build's matrix on a republish", async () => {
+    await bankMatrix(seed.id, 4);
+    await cloneSeedWorkspace(seed.id, guest.id, { replaceDestination: true });
+    await bankMatrix(seed.id, 7);
+    const summary = await cloneSeedWorkspace(seed.id, guest.id, { replaceDestination: true });
+
+    const rows = await banked(guest.id);
+    assert.equal(rows.length, 1, "not two, and not the first one kept by the primary key");
+    assert.deepEqual(rows[0].payload, matrix(7));
+    assert.equal(summary.matrixPairs, 7);
+  });
+
+  it("reports nothing when the seed has no matrix, without failing the publish", async () => {
+    // Every build published before this phase is in this state, and it must stay
+    // a valid one: the page falls back to what it does for a real account.
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+    assert.equal(summary.matrixPairs, 0);
+    assert.equal((await banked(guest.id)).length, 0);
+  });
+
+  it("carries only the matrix — progress and verdicts belong to the destination", async () => {
+    // The visitor's walk into the matrix is theirs, and a forwarded `progress`
+    // would open a fresh workspace part-way through someone else's session. The
+    // banked verdicts name the destination's own shadow rows, so they are written
+    // by the step that mints those rows and cannot be copied by key.
+    await bankMatrix(seed.id);
+    await admin`
+      insert into demo_replay (user_id, kind, key, payload)
+      values (${seed.id}, 'progress', 'pairs', ${admin.json({ generated: 3, screened: true })}),
+             (${seed.id}, 'shadow_verdict', 'some-shadow-id', ${admin.json({ verdict: "accept" })})`;
+
+    await cloneSeedWorkspace(seed.id, guest.id);
+    assert.deepEqual([...(await banked(guest.id))].map((r) => r.kind), ["matrix"]);
+  });
+
+  it("is read back only by a guest, so a real account still computes its own", async () => {
+    await bankMatrix(seed.id);
+    await cloneSeedWorkspace(seed.id, guest.id);
+
+    // The carve-out is the function (lib/demo/replay), which is what lets a route
+    // call it unconditionally and still fail closed.
+    assert.equal(await withUser(guest, () => readMatrix()), null, "not a guest yet");
+    await admin`
+      update user_profiles set is_guest = true, expires_at = now() + interval '2 hours'
+       where id = ${guest.id}`;
+    const read = await withUser(guest, () => readMatrix());
+    assert.equal(read?.pairs.length, 4);
+    assert.equal(read?.sims[1], null, "an unscored model stays unscored");
+  });
+
+  it("leaves the seed's own matrix untouched", async () => {
+    await bankMatrix(seed.id);
+    await cloneSeedWorkspace(seed.id, guest.id);
+    assert.equal((await banked(seed.id)).length, 1);
   });
 });

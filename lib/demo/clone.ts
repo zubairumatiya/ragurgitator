@@ -39,9 +39,15 @@ import { privilegedSql } from "@/lib/db";
 import {
   BANKED_QUESTION_CAP,
   FROZEN_REASON,
+  PAIR_BANK_CAP,
+  PAIR_BLANK_CAP,
+  PAIR_VISIBLE_CAP,
   SHADOW_CURVE_CAP,
   SHADOW_QUEUE_CAP,
 } from "@/lib/demo/frozen";
+import { MATRIX_KEY, pairIdentity, type ReplayMatrix } from "@/lib/demo/replayCore";
+import { writeShadowVerdicts } from "@/lib/demo/replay";
+import { PUBLISHED_SWEEP_FINGERPRINT } from "@/lib/rag/publishedSweep";
 import { PUBLISHED_REPLAY_FINGERPRINT } from "@/lib/rag/replayStore";
 import { answerFingerprint } from "@/lib/rag/semanticCacheCore";
 import { chunksTable, modelDimension } from "@/lib/rag/vectorStore";
@@ -177,10 +183,30 @@ async function buildMap(
 //     phase that fixed it named the wrong table (eval_model_trials, which the
 //     replay REPLACED in 0043), which is what a table nobody has written down
 //     costs you.
+//   published_sweep IS cloned now — step 5d. It is the same trade as
+//     replay_metrics: the sweep's INPUTS are ~510 texts under eleven models of
+//     embedding spend a guest cannot make, so the publish carries one jsonb
+//     answer instead. Unlike every other entry in either list, the master does
+//     not keep this row on its own — scripts/demo-snapshot writes it at publish
+//     time, because runKeyModelSweep stores nothing.
+//   semantic_cache_pairs IS cloned now — step 5e, as a SAMPLE and in three
+//     parts. It spent the demo's whole life in neither list, exactly as the
+//     shadow log below did, and it is the table §4's two remaining buttons read.
+//     What makes it unlike every other copy here is that some of it is copied
+//     WITHHELD: a tranche goes to demo_pair_bank (0078) for "Generate pairs" to
+//     reveal, and a handful of cloned rows arrive with their verdict columns
+//     blanked so "Screen pairs" has something to resolve. Both buttons are LLM
+//     spend the demo carries no key for, so both are served as reveals of work
+//     the publish already paid for.
 //   semantic_cache_shadow IS cloned now, as a SAMPLE — see step 5b. It is listed
 //     here because it spent two phases in neither list, which is how the demo
 //     shipped its most distinctive chart empty: a table that is merely unmentioned
 //     looks identical to one that was considered and rejected.
+//   savings_totals, ONE LEVER OF IT — step 5h. 'semantic_cache' travels because
+//     the payoff readout prices a hit off it and renders no money without it; the
+//     other levers stay behind, since money for work the guest's workspace never
+//     did is worse than no money. spend_totals is not cloned at all: nothing in
+//     the demo reads a rate off it.
 //   user_provider_keys   Cannot be cloned even in principle: aadFor(userId,
 //     provider) binds the AAD to the user id, so a copied row fails its GCM tag
 //     check on first use. The key is re-sealed instead — see lib/demo/provision.
@@ -200,12 +226,25 @@ export type CloneSummary = {
   rankings: number; // graded-nDCG truth rows — the size of the drilldown set
   frozen: number; // questions a visitor may look at but not move (step 4d)
   bankedQuestions: number; // spare wording "Add cached" can hand out for free (step 4e)
-  bankedAvailable: number; // passages that HAD banked wording, before the cap
+  bankedAvailable: number; // (passage, difficulty) pairs that HAD banked wording, pre-cap
   cachedAnswers: number;
   shadowEvents: number; // judged + queued shadow rows behind the calibration curve
   shadowQueued: number; // of those, the ones arriving unjudged for the human queue
+  shadowVerdicts: number; // banked answers "Run judge over queue" replays (phase 4)
+  shadowPoolable: number; // queued rows whose verdict actually moves the leaderboard
   replayRows: number; // the published model comparison, one row per model (step 5c)
   replayScored: number; // of those, the ones with metrics rather than "not scorable"
+  sweepRows: number; // the published cache-key sweep — 0 or 1 (step 5d)
+  sweepModels: number; // leaderboard rows inside it, i.e. whether §4 has a table
+  pairRows: number; // generated pairs visible in the guest's own pair table (step 5e)
+  bankedPairs: number; // of the master's rest, the ones "Generate pairs" may reveal
+  blankedVerdicts: number; // cloned pairs arriving unscreened, verdict held in the bank
+  matrixPairs: number; // pairs in the banked similarity matrix the demo replays (step 5g)
+  boardChunks: number; // chunks the demo's Eval tab is scoped to (step 5g's second half)
+  bankedIdeals: number; // questions whose aggregate ideal "Add nDCG rankings" replays (5i)
+  bankedLlmRankings: number; // questions whose llm_rerank order "Add LLM nDCG rankings" replays
+  bankedTuning: number; // board chunks whose autotune winner ⚙ Auto tune installs (step 5j)
+  ledgerRows: number; // savings rows priced the payoff readout's money (step 5h)
 };
 
 // THE PUBLISH OPTIONS — used by scripts/demo-snapshot.ts, never by a guest.
@@ -241,6 +280,47 @@ export type CloneOptions = {
   // complement, [] freezes the whole bank rather than thawing it.
   tunableQuestionIds?: string[];
 };
+
+// WHICH OF THE SOURCE'S PROBE ROWS ARE IN THE POOLED SET — step 5b's queue
+// preference, phase 4 of docs/demo-cache-replay-plan.md.
+//
+// A queued row is worth queueing only if judging it MOVES something. It moves the
+// leaderboard when its pair has a banked cosine, and `poolPairs` already decided
+// which do: a probe row that merely replayed a generated pair is dropped (the F3
+// self-collision rule), so it never reached the matrix and a verdict on it
+// re-derives nothing. The matrix's shadow hashes are therefore the exact list of
+// probe rows a verdict is live on.
+//
+// Returns [] when the source banked no matrix, which is not a failure — it is a
+// build published before phase 1, and the caller reads [] as "no preference".
+async function pooledShadowIds(tx: Tx, sourceId: string): Promise<string[]> {
+  const [banked] = await tx<{ payload: ReplayMatrix }[]>`
+    select payload from demo_replay
+     where user_id = ${sourceId} and kind = 'matrix' and key = ${MATRIX_KEY}
+  `.catch((err: unknown) => {
+    // Same 42P01 tolerance every other reader of this store holds: a deploy
+    // predating 0080 has no shelf, which takes the same path as an empty one.
+    if ((err as { code?: string }).code === "42P01") return [];
+    throw err;
+  });
+  if (!banked) return [];
+  const shadowHashes = new Set(
+    banked.payload.pairs.filter((p) => p.source === "shadow").map((p) => p.hash),
+  );
+  if (shadowHashes.size === 0) return [];
+  // The candidates the pick itself considers, and no more — the texts are read
+  // here and hashed here, and nothing but the ids leaves this function.
+  const rows = await tx.unsafe<{ id: string; new_query: string; matched_query: string }[]>(
+    `select s.id, s.new_query, s.matched_query
+       from semantic_cache_shadow s
+       join _map_config mc on mc.old_id = s.config_id
+      where s.origin = 'probe' and s.verdict is not null and s.sim >= $1::real`,
+    [config.semanticCache.shadowLogFloor] as never[],
+  );
+  return rows
+    .filter((r) => shadowHashes.has(pairIdentity(r.new_query, r.matched_query)))
+    .map((r) => r.id);
+}
 
 // Freeze every question in the DESTINATION account except the ones the publisher
 // selected — step 4d's publish half.
@@ -302,6 +382,20 @@ export async function cloneSeedWorkspace(
     // question bank; configs cascade to everything keyed by tab.
     if (opts.replaceDestination) {
       await tx`delete from question_cache where user_id = ${guestId}`;
+      // demo_pair_bank (0078) is here for question_cache's reason exactly: its
+      // kind='pair' rows hang off user_profiles ALONE — an unrevealed pair has no
+      // pair row to hang off, which is what makes it banked — so no cascade in
+      // this list reaches them, and a republish would stack a second build's
+      // reveals on top of the last one's.
+      await tx`delete from demo_pair_bank where user_id = ${guestId}`;
+      // demo_replay (0080) hangs off user_profiles alone for demo_pair_bank's
+      // reason exactly — a banked measurement describes work no row in the
+      // guest's workspace performed — so no cascade in this list reaches it, and
+      // a republish would leave the last build's matrix under the new build's
+      // pairs. The primary key would silently keep the OLD payload on a conflict
+      // the copy below does not resolve, which is the quietest possible version
+      // of that failure.
+      await tx`delete from demo_replay where user_id = ${guestId}`;
       await tx`delete from semantic_cache where user_id = ${guestId}`;
       await tx`delete from semantic_cache_thresholds where user_id = ${guestId}`;
       await tx`delete from documents where user_id = ${guestId}`;
@@ -736,21 +830,37 @@ export async function cloneSeedWorkspace(
     //      fingerprint here would mean a publish silently dropping the bank the
     //      moment someone edits a prompt constant.
     //   3. BANKED_QUESTION_CAP — the one that is a spend limit rather than a
-    //      correctness filter, and the reason this step reads as carefully as
-    //      step 4d does. A question a guest ADDS is unfrozen by construction
-    //      (only a publish writes FROZEN_REASON), so every row copied here is a
-    //      row autotune may later run over. Uncapped, the demo's tunable set is
-    //      whatever the master happens to have banked — 43 today, unknown after
-    //      the master's next generation run, and nothing would report the drift.
-    //      Capped, the ceiling is 12 + 12 and it is written down in
-    //      lib/demo/frozen.ts next to the other two halves of the same scope.
+    //      correctness filter. A question a guest ADDS is unfrozen by
+    //      construction (only a publish writes FROZEN_REASON), so every row
+    //      copied here is a row autotune may later run over. Since §3.2 the
+    //      published build carries NO questions of its own, so this cap is not a
+    //      ceiling on top of a board — it IS the board, written down in
+    //      lib/demo/frozen.ts.
     //
-    // ONE PER PASSAGE, then the cap. `distinct on (text_hash)` spreads the twelve
-    // across twelve different chunks rather than stacking four slots onto three,
-    // which is what makes them worth something to a visitor: twelve passages to
-    // ask about, and twelve distinct chunks for autotune to find an override on.
+    // WHAT THE SNAPSHOT'S BANK NOW IS, which changes what this step is doing
+    // without changing a line of it (docs/demo-question-bank-plan.md). This used
+    // to be the ONLY thing deciding the demo's spare wording, and it decided it by
+    // accident: whatever the master had generated, twelve of it in hash order.
+    // That shipped twelve questions about one file, three of them on chunks that
+    // already carried a tunable question — which "Add cached" then silently
+    // declined to add, because selectNewQuestions dedupes on wording.
+    // scripts/demo-snapshot now CONSTRUCTS the snapshot's bank out of the build's
+    // own frozen questions and deletes those questions from the build, so a
+    // GUEST clone (snapshot → guest) copies a set that was chosen. The MASTER →
+    // snapshot clone still runs this step first and its rows are then replaced,
+    // which is why this reads as unchanged.
+    //
+    // ONE PER (PASSAGE, DIFFICULTY), then the cap. This used to dedupe on
+    // text_hash ALONE, which spread twelve rows across twelve chunks rather than
+    // stacking four slots onto three — the right rule while the bank was a set of
+    // spares. §3.2 of docs/demo-real-flow-plan.md made the bank the BOARD: sixty
+    // rows over thirty passages, an easy one and a medium one each (Q5), and
+    // deduping on the hash alone would silently halve that on the guest hop,
+    // handing every visitor one difficulty per chunk and a board of thirty.
+    // Difficulty is part of question_cache's key (0055), so this is the table's
+    // own grain rather than a widening of it.
     // The ordering is arbitrary but STABLE (hash, then difficulty, then slot), so
-    // two publishes of an unchanged master carry the same twelve.
+    // two publishes of an unchanged master carry the same sixty.
     await tx.unsafe(
       `create temp table _hash_scope (text_hash text primary key) on commit drop`,
     );
@@ -769,7 +879,7 @@ export async function cloneSeedWorkspace(
     // What the cap turned away, so the publish can say so out loud rather than
     // leaving "12" to be read as "that is all there was".
     const [{ count: bankedAvailable }] = await tx.unsafe<{ count: number }[]>(
-      `select count(distinct s.text_hash)::int as count
+      `select count(distinct (s.text_hash, s.difficulty))::int as count
          from question_cache s join _hash_scope h on h.text_hash = s.text_hash
         where ${bankedScope}`,
       // $1 only: the census does not rewrite user_id, and a $2 this statement
@@ -781,7 +891,7 @@ export async function cloneSeedWorkspace(
       joins: `join _hash_scope h on h.text_hash = s.text_hash`,
       where: bankedScope,
       overrides: { user_id: "$2" },
-      dedupe: { on: `s.text_hash`, tieBreak: `s.difficulty, s.slot` },
+      dedupe: { on: `s.text_hash, s.difficulty`, tieBreak: `s.slot` },
       limit: BANKED_QUESTION_CAP,
       params: ids,
     });
@@ -863,18 +973,45 @@ export async function cloneSeedWorkspace(
     // stride below because here the count is exact and small — one row from each
     // of twelve equal slices of the similarity range, so the queue spans easy
     // matches and obvious misses instead of twelve rows that all look alike.
-    await tx.unsafe(
-      `insert into _shadow_pick (id, judged)
-       select distinct on (t.slice) t.id, false
-         from (
-           select s.id, s.sim, ntile($1::int) over (order by s.sim, s.id) as slice
-             from semantic_cache_shadow s
-             join _map_config mc on mc.old_id = s.config_id
-            where s.origin = 'probe' and s.verdict is not null and s.sim >= $2::real
-         ) t
-        order by t.slice, t.sim, t.id`,
-      [SHADOW_QUEUE_CAP, config.semanticCache.shadowLogFloor] as never[],
-    );
+    const pickQueue = (cap: number, only: string[] | null) =>
+      tx.unsafe(
+        `insert into _shadow_pick (id, judged)
+         select distinct on (t.slice) t.id, false
+           from (
+             select s.id, s.sim, ntile($1::int) over (order by s.sim, s.id) as slice
+               from semantic_cache_shadow s
+               join _map_config mc on mc.old_id = s.config_id
+              where s.origin = 'probe' and s.verdict is not null and s.sim >= $2::real
+                and ($3::uuid[] is null or s.id = any($3::uuid[]))
+                and not exists (select 1 from _shadow_pick p where p.id = s.id)
+           ) t
+          order by t.slice, t.sim, t.id`,
+        [cap, config.semanticCache.shadowLogFloor, only] as never[],
+      );
+
+    // POOLED ROWS FIRST — what the phase 3 browser pass found and phase 4 owes it.
+    // Judging a queued row is supposed to move the leaderboard, and it can only do
+    // that if the row is IN the pooled set: `poolPairs` drops a probe row that
+    // merely replayed a generated pair (the F3 self-collision rule), so 73 of the
+    // master's 119 judged probe rows have no shadow entry in the matrix at all and
+    // a verdict on one of them re-derives nothing. Picking blind, exactly one of
+    // twelve queued rows was poolable.
+    //
+    // The membership test is the matrix's own, computed here rather than in SQL
+    // because `pairIdentity` is a sha256 over `pairKey`'s canonical form and a
+    // second implementation of that in Postgres is a second thing to keep in step.
+    // ~240 rows of two short texts, once per clone.
+    //
+    // A PREFERENCE, NOT A FILTER. If the pooled candidates cannot fill the cap the
+    // rest of the probe set tops it up, because a shorter queue is a worse demo
+    // than a queue with some inert rows in it — and on a build published without a
+    // matrix there are no pooled ids at all, which must still yield twelve.
+    const pooled = await pooledShadowIds(tx, seedId);
+    if (pooled.length > 0) await pickQueue(SHADOW_QUEUE_CAP, pooled);
+    const [{ picked }] = await tx<{ picked: number }[]>`
+      select count(*)::int as picked from _shadow_pick where not judged
+    `;
+    if (picked < SHADOW_QUEUE_CAP) await pickQueue(SHADOW_QUEUE_CAP - picked, null);
 
     // The curve's own rows, verdicts intact — everything above the floor that the
     // queue did not claim, thinned to the caps.
@@ -942,6 +1079,63 @@ export async function cloneSeedWorkspace(
        where c.user_id = ${guestId} and s.verdict is null
     `;
 
+    // THE VERDICTS clearIfQueued JUST BLANKED, banked instead of thrown away —
+    // phase 4. The demo's "Run judge over queue" is a button pointing at an LLM
+    // pass the demo carries no key for; what the operator's judge really answered
+    // for these exact rows is a measurement already made, and this is the last
+    // moment it exists in this transaction.
+    //
+    // KEYED BY THE GUEST'S OWN ROW ID, which is why this is here and not in the
+    // matrix: unlike a cosine, a verdict names a row in the destination. The join
+    // back is (config_id, new_query_hash) — 0035's unique key, and the same pair
+    // of columns the copy's own dedupe is expressed in, so it cannot match two.
+    //
+    // `g.verdict is null` is the guard that keeps this honest across the dedupe:
+    // when a queue row collapsed into a curve row, the row that landed is judged
+    // already, and banking a second verdict for it would be banking an answer to
+    // a question nobody is going to ask.
+    const discarded = await tx.unsafe<{
+      id: string;
+      source_id: string;
+      verdict: string;
+      judge_source: string | null;
+      judge_model: string | null;
+      judge_reason: string | null;
+      judged_at: string | null;
+    }[]>(
+      `select g.id, s.id as source_id, s.verdict, s.judge_source, s.judge_model, s.judge_reason,
+              s.judged_at::text as judged_at
+         from semantic_cache_shadow s
+         join _shadow_pick p on p.id = s.id and not p.judged
+         join _map_config mc on mc.old_id = s.config_id
+         join semantic_cache_shadow g
+           on g.config_id = mc.new_id and g.new_query_hash = s.new_query_hash
+        where g.verdict is null`,
+      [],
+    );
+    await writeShadowVerdicts(
+      guestId,
+      new Map(
+        discarded.map((r) => [
+          r.id,
+          {
+            verdict: r.verdict,
+            judge_source: r.judge_source,
+            judge_model: r.judge_model,
+            judge_reason: r.judge_reason,
+            judged_at: r.judged_at,
+          },
+        ]),
+      ),
+      tx,
+    );
+    // WHAT THE PREFERENCE ACHIEVED, counted from the rows that LANDED. The publish
+    // census is where a silently-degraded queue would show up first: a build whose
+    // probe set has drifted away from the pooled one ships twelve rows that judge
+    // to nothing, and every number on the page still looks right.
+    const pooledSet = new Set(pooled);
+    const poolableQueued = discarded.filter((r) => pooledSet.has(r.source_id)).length;
+
     // --- 5c. the model comparison, which a guest cannot compute -------------
     //
     // Phase 6.3. Appraise → Models is two rate cards above a full-corpus replay:
@@ -1003,6 +1197,518 @@ export async function cloneSeedWorkspace(
         join configs c on c.id = r.config_id
        where c.user_id = ${guestId} and r.mrr is not null
     `;
+
+    // --- 5d. the cache-key sweep, which a guest cannot run either ------------
+    //
+    // Phase 1 of docs/demo-cache-lab-plan.md, and the same move as 5c one panel
+    // over: publish the ANSWER instead of the inputs.
+    //
+    // WHAT IT BUYS. Appraise → Semantic caching's §4 renders inside `{sweep &&
+    // …}`, so a guest gets three disabled buttons and no table — including the
+    // PRECISION SLIDER, which costs nothing and never did: it re-derives every
+    // row from the curves the sweep already shipped, using the same
+    // selectFromCurve the server picks tau with. It is dark only because `sweep`
+    // is client state set by a POST a guest may not make. Carrying the row makes
+    // the whole control live on page load, with zero requests.
+    //
+    // WHY IT COULD NOT SIMPLY BE UNGATED. The sweep is ~510 texts under eleven
+    // candidate models of real embedding spend, on a guest's cold cache, for
+    // models the demo has no key for beyond Voyage. Not affordable and mostly
+    // not possible.
+    //
+    // WHY THIS ONE IS A SINGLE ROW AND NOT A TABLE OF THEM. runKeyModelSweep
+    // computes on demand and returns to the response; nothing stores it. So
+    // unlike replay_metrics there is nothing here to clone until the publish
+    // puts it there — 0077 is that shelf, and scripts/demo-snapshot is the only
+    // writer. The whole SweepResult travels as one jsonb, thinned to the 101
+    // positions the slider can reach (lib/rag/publishedSweep).
+    //
+    // The fingerprint is rewritten to the sentinel for exactly 5c's reason: the
+    // read path addresses it by that constant, and any other value would be a
+    // key nobody in the destination will ever compute.
+    const sweepRows = await copyRows(tx, {
+      table: "published_sweep",
+      joins: `join _map_config mc on mc.old_id = s.config_id`,
+      where: `true`,
+      overrides: {
+        config_id: "mc.new_id",
+        fingerprint: `'${PUBLISHED_SWEEP_FINGERPRINT}'`,
+      },
+      // One row per destination config. A publish carries one config today, but
+      // the master may hold a published row under an older fingerprint beside
+      // the sentinel one, and the rewrite would collide them on 0077's primary
+      // key. Preferring the sentinel keeps a guest cloned from the build.
+      dedupe: {
+        on: `mc.new_id`,
+        tieBreak: `(s.fingerprint = '${PUBLISHED_SWEEP_FINGERPRINT}') desc, s.computed_at desc`,
+      },
+      params: [],
+    });
+    // The count that decides whether §4 renders at all — a guest with no row
+    // here sees the same three disabled buttons the demo shipped before this
+    // phase, which is a working fallback but not the one being published.
+    // Counted from what landed, like the shadow queue above.
+    const [landed] = await tx<{ models: number }[]>`
+      select coalesce(jsonb_array_length(s.result -> 'rows'), 0)::int as models
+        from published_sweep s
+        join configs c on c.id = s.config_id
+       where c.user_id = ${guestId}
+       order by s.computed_at desc
+       limit 1
+    `;
+    const sweepModels = landed?.models ?? 0;
+
+    // --- 5e. the generated pairs, in three parts -----------------------------
+    //
+    // Phases 3 and 3b of docs/demo-cache-lab-plan.md. 5d gave §4 its leaderboard;
+    // this is what gives its two remaining buttons something honest to do.
+    //
+    // WHY IT SAMPLES, like 5b and unlike everything else here. The pair set has no
+    // natural boundary either — it grows every time the operator pays for a
+    // generation run — so "all of it" would mean each guest's disk tracking the
+    // master's bookkeeping. But the mix matters more here than the size does: the
+    // sample is stride-taken WITHIN each (label, difficulty) stratum, so the
+    // same:different and paraphrase:hard-negative ratios a guest sees are the ones
+    // the operator measured. A sample that skewed either would hand the visitor a
+    // differently-shaped set behind a leaderboard computed on the real one — and
+    // hard negatives are the whole discriminating power of the set (0040's header),
+    // so losing them silently is losing the measurement.
+    //
+    // THREE PARTS, because two of §4's buttons are LLM spend the demo carries no
+    // key for and are therefore served as REVEALS (the same carve-out `cachedOnly`
+    // makes for "Add cached"):
+    //
+    //   visible  copied into the guest's own semantic_cache_pairs — the counts the
+    //            panel opens with.
+    //   banked   copied into demo_pair_bank (0078) as kind='pair' — what "Generate
+    //            pairs" hands out. Not in the pair table, because every reader of
+    //            that table (pooledPairs, listPairs, the unscreened count) would
+    //            count a row that has not been revealed yet.
+    //   blanked  visible rows whose five verdict columns are cleared on the way in
+    //            and stashed as kind='verdict' — what "Screen pairs" resolves.
+    await tx.unsafe(
+      `create temp table _pair_pick (
+         id uuid primary key,
+         banked boolean not null,
+         blanked boolean not null
+       ) on commit drop`,
+    );
+
+    // Scoped through _map_question, which IS the ownership check: 0050 keyed this
+    // table by origin question precisely because eval_questions → documents →
+    // user_id is the only owner it has. Ordering is arbitrary but STABLE, so two
+    // publishes of an unchanged master carry the same pairs.
+    const stratified = (banked: boolean, exclude: boolean) =>
+      `insert into _pair_pick (id, banked, blanked)
+       select u.id, ${banked}, false
+         from (
+           select t.*, least(t.cap::numeric / t.tot, 1) as rate
+             from (
+               select s.id,
+                      row_number() over (
+                        partition by s.label, s.difficulty order by s.created_at, s.id
+                      ) as rn,
+                      count(*) over () as tot,
+                      $1::int as cap
+                 from semantic_cache_pairs s
+                 join _map_question mq on mq.old_id = s.origin_question_id
+                ${exclude ? "where not exists (select 1 from _pair_pick p where p.id = s.id)" : ""}
+             ) t
+         ) u
+        -- Bresenham, step 5b's exactly: floor(rn * rate) ticks over once every
+        -- 1/rate rows, so a stratum of m rows yields about m*rate picks spread
+        -- evenly through it rather than clustered at one end.
+        where floor(u.rn * u.rate) > floor((u.rn - 1) * u.rate)`;
+
+    await tx.unsafe(stratified(false, false), [PAIR_VISIBLE_CAP] as never[]);
+    // The reveal tranche is drawn from what the visible sample left, and stratified
+    // the same way: a guest who drags the slider to the end should arrive at a set
+    // shaped like the one they started with, not at a pile of paraphrases.
+    await tx.unsafe(stratified(true, true), [PAIR_BANK_CAP] as never[]);
+
+    // THE UNSCREENED SLICE, and REJECTS FIRST ON PURPOSE. F3 found the generator
+    // wrong on ~20% of its hard negatives, and the quarantine is what stops the
+    // sweep consuming those rows — so a screen pass that turns up nothing to
+    // quarantine teaches a visitor the wrong thing about why the button exists.
+    // Ordering rejects to the front guarantees at least one, whenever the sample
+    // holds one at all.
+    //
+    // BLANKING A REJECT IS SAFE HERE, AND ONLY HERE: an unjudged pair is a pair
+    // pooledPairs would feed to a sweep with its unaudited label intact, which is
+    // the collision the plan's risk list names. It cannot bite because the guest's
+    // leaderboard is BANKED (0077, step 5d) and never recomputed — nothing in a
+    // guest workspace re-runs pooledPairs. That is the load-bearing reason, not the
+    // small size of the slice.
+    //
+    // Only rows that HAVE a verdict are eligible: blanking an unjudged row would
+    // bank five nulls and make the screen button resolve to nothing.
+    await tx.unsafe(
+      `update _pair_pick p set blanked = true
+        where p.id in (
+          select x.id
+            from _pair_pick x
+            join semantic_cache_pairs s on s.id = x.id
+           where not x.banked and s.verdict is not null
+           order by (s.verdict = 'reject') desc, s.created_at, s.id
+           limit $1
+        )`,
+      [PAIR_BLANK_CAP] as never[],
+    );
+
+    // The pairs need a map, unlike the shadow rows: demo_pair_bank's verdict rows
+    // point AT the cloned pair, so the new ids have to exist before the copy
+    // rather than being minted by it.
+    await buildMap(tx, "_map_pair", `select p.id from _pair_pick p where not p.banked`, []);
+
+    // Same shape as 5b's clearIfQueued, and the five columns move together for the
+    // same reason: a row with a verdict but no judged_at reads as a bug in the
+    // judge rather than as an unscreened pair.
+    //
+    // WHAT IS NOT BLANKED KEEPS ITS QUARANTINE. F3's audited labels are the part of
+    // this table with real value — the 15 rows it proved mislabelled are exactly
+    // the ones a guest must not be handed as truth — so a cloned 'reject' arrives
+    // with its verdict AND its judge_reason, which is the sentence explaining why.
+    const clearIfBlanked = (col: string) => `case when p.blanked then null else s."${col}" end`;
+    const pairRows = await copyRows(tx, {
+      table: "semantic_cache_pairs",
+      joins: `join _pair_pick p on p.id = s.id and not p.banked
+              join _map_pair mp on mp.old_id = s.id
+              join _map_question mq on mq.old_id = s.origin_question_id`,
+      where: `true`,
+      overrides: {
+        id: "mp.new_id",
+        origin_question_id: "mq.new_id",
+        verdict: clearIfBlanked("verdict"),
+        verdict_source: clearIfBlanked("verdict_source"),
+        judge_model: clearIfBlanked("judge_model"),
+        judge_reason: clearIfBlanked("judge_reason"),
+        judged_at: clearIfBlanked("judged_at"),
+      },
+      // No dedupe, and none is needed: 0050 made the key (origin_question_id,
+      // hash_a, hash_b) and every guest gets their own freshly-minted question
+      // ids, so two clones of the same master cannot collide with each other.
+      params: [],
+    });
+
+    // The true verdicts, read off the SEED's rows (p.id is a seed id) and pointed
+    // at the guest's clone of each. This is the whole of phase 3b's publish: the
+    // answer was already a column, so cloning the table IS shipping it.
+    const blanked = await tx.unsafe(
+      `insert into demo_pair_bank (user_id, kind, pair_id, payload)
+       select $1, 'verdict', mp.new_id,
+              jsonb_build_object(
+                'verdict',        s.verdict,
+                'verdict_source', s.verdict_source,
+                'judge_model',    s.judge_model,
+                'judge_reason',   s.judge_reason,
+                'judged_at',      s.judged_at)
+         from semantic_cache_pairs s
+         join _pair_pick p on p.id = s.id and p.blanked
+         join _map_pair mp on mp.old_id = s.id`,
+      [guestId] as never[],
+    );
+
+    // And the withheld pairs. `to_jsonb(s) - 'id'` rather than a written-out column
+    // list for this file's usual reason — a hand-written list banks a pair silently
+    // missing whatever column 0079 adds — and origin_question_id is remapped HERE
+    // rather than at reveal time because _map_question is a temp table that dies
+    // with this transaction: a payload carrying the master's question id would be a
+    // foreign key nobody downstream could resolve.
+    const banked = await tx.unsafe(
+      `insert into demo_pair_bank (user_id, kind, payload)
+       select $1, 'pair',
+              (to_jsonb(s) - 'id') || jsonb_build_object('origin_question_id', mq.new_id)
+         from semantic_cache_pairs s
+         join _pair_pick p on p.id = s.id and p.banked
+         join _map_question mq on mq.old_id = s.origin_question_id`,
+      [guestId] as never[],
+    );
+
+    // AND THE SEED'S OWN BANK, FORWARDED — without which phase 3 cannot survive a
+    // second hop, and the demo has exactly two.
+    //
+    // The tranche above is drawn from what the visible sample LEFT OVER, which
+    // works once: the master holds 186 pairs, the sample takes 60 and the bank
+    // takes 20 of the remaining 126. It cannot work twice. The snapshot's pair
+    // TABLE holds only the 58 that were made visible — its own 20 banked rows live
+    // in demo_pair_bank, which the select above never reads — so on the
+    // snapshot→guest hop the visible cap (60) swallows all 58 and `p.banked`
+    // matches nothing. Every guest then opens with an empty bank, and "Generate
+    // pairs" renders a slider bounded by zero, i.e. does not render at all.
+    //
+    // That is not a shortfall that shows up as a smaller number: PAIR_VISIBLE_CAP
+    // is what caps the seed's visible set in the first place, so the seed's pair
+    // table is ALWAYS at or under the cap on the next hop and the leftover pool is
+    // ALWAYS empty. Phase 3 ships invisible in production and only in production —
+    // an itest cloning straight from a fixture master sees the one hop that works.
+    //
+    // So the bank is forwarded as a bank. origin_question_id is re-remapped out of
+    // the payload (the seed's ids → the guest's) exactly as the insert above maps
+    // it out of the row, and for the same reason: _map_question dies with this
+    // transaction, so a payload that kept the seed's question id would name a row
+    // the guest does not have.
+    const carried = await tx.unsafe(
+      `insert into demo_pair_bank (user_id, kind, payload)
+       select $1, 'pair',
+              b.payload || jsonb_build_object('origin_question_id', mq.new_id)
+         from demo_pair_bank b
+         join _map_question mq
+           on mq.old_id = (b.payload->>'origin_question_id')::uuid
+        where b.user_id = $2 and b.kind = 'pair'`,
+      [guestId, seedId] as never[],
+    );
+
+    // The seed's banked VERDICTS, forwarded for the same reason and with the same
+    // consequence if they are not. Each hop blanks a fresh PAIR_BLANK_CAP rows, but
+    // the previous hop's answers stay behind in the seed's bank — so a guest
+    // arrived with 12 unjudged pairs and only 6 verdicts to resolve them, and
+    // "Screen pairs" left 6 permanently unscreenable. There is no way for the guest
+    // to ever learn those six, because the only copy of the audited answer was the
+    // seed's bank row.
+    //
+    // Keyed through _map_pair rather than _map_question: a verdict names the PAIR it
+    // describes. A seed verdict whose pair was banked rather than made visible has
+    // no clone to point at and is dropped by the join — correctly, since the pair it
+    // describes will arrive through the bank above carrying its verdict in-payload.
+    const carriedVerdicts = await tx.unsafe(
+      `insert into demo_pair_bank (user_id, kind, pair_id, payload)
+       select $1, 'verdict', mp.new_id, b.payload
+         from demo_pair_bank b
+         join _map_pair mp on mp.old_id = b.pair_id
+        where b.user_id = $2 and b.kind = 'verdict'`,
+      [guestId, seedId] as never[],
+    );
+
+    // --- 5g. the similarity matrix, and the board's scope ---------------------
+    //
+    // Phase 2 of docs/demo-cache-replay-plan.md. The demo's §4 replays the
+    // master's own arithmetic over the first `n` pairs a visitor has reached, and
+    // this is the arithmetic: one cosine per pair per candidate model, ~30 kB,
+    // with each pair's label and a hash of its two texts and NOTHING ELSE — no
+    // question, no pair text, nothing that could be read.
+    //
+    // THE SIMPLEST COPY IN THIS FUNCTION, and that is a property of the artifact
+    // rather than luck. Every other banked thing here needs a remap (5d rewrites
+    // config_id and the fingerprint; 5e rewrites origin_question_id twice over,
+    // once per hop) because it names rows in the destination. A matrix names
+    // nothing: pairs are identified by a hash of their own text, which is
+    // invariant across every clone and both hops, which is exactly why phase 1
+    // made identity text-derived rather than positional.
+    //
+    // So the same statement serves the master→seed hop and the seed→guest one,
+    // and the seed forwards what it was given rather than having to re-derive it
+    // — the failure mode 5e's `carried` had to be taught the hard way, where the
+    // second hop found nothing to bank and phase 3 shipped invisible.
+    //
+    // MATRIX ONLY, in this statement. `progress` is the visitor's own walk into
+    // it and starts fresh in every workspace; `shadow_verdict` names the
+    // destination's shadow rows and is written by the step that mints them
+    // (phase 4); `board` travels too, but through the remapping statement below
+    // rather than this one.
+    const matrixRows = await tx.unsafe(
+      `insert into demo_replay (user_id, kind, key, payload)
+       select $1, r.kind, r.key, r.payload
+         from demo_replay r
+        where r.user_id = $2 and r.kind = 'matrix'`,
+      [guestId, seedId] as never[],
+    );
+    // Counted out of the payload rather than from the insert, because "one row
+    // landed" is not the fact §4 depends on — a matrix of zero pairs is a
+    // leaderboard with nothing to score, and it would arrive as a perfectly
+    // successful copy.
+    const [bankedMatrix] = await tx<{ pairs: number }[]>`
+      select coalesce(jsonb_array_length(r.payload -> 'pairs'), 0)::int as pairs
+        from demo_replay r
+       where r.user_id = ${guestId} and r.kind = 'matrix'
+       limit 1
+    `;
+
+    // THE BOARD, which is the one banked thing here that DOES name rows.
+    //
+    // Phase 2 of docs/demo-real-flow-plan.md. `board` (0081) is the ~30 chunk ids
+    // the demo's Eval tab is scoped to, and unlike the matrix above it cannot be
+    // forwarded byte-for-byte: chunk uuids are minted fresh in every workspace,
+    // so a copied payload would name the source's rows and scope the destination
+    // to nothing — a board that arrives as a perfectly successful copy and
+    // renders an empty page. Remapped through `_map_chunk` on both hops, the same
+    // rewrite step 4b gives `retrieved_ids` and 4c gives an ideal's `chunk_ids`.
+    //
+    // AN INNER JOIN, WHERE THOSE TWO USE A LEFT ONE, and the difference is what
+    // the array means. There, position is rank and a dropped element renumbers a
+    // measurement, so an unmappable id has to hold its place as a null. Here the
+    // array is a SET of things to show: a chunk that did not travel is not on the
+    // board, and a null in the list would be a card with no chunk behind it.
+    const boardRows = await tx.unsafe(
+      `insert into demo_replay (user_id, kind, key, payload)
+       select $1, r.kind, r.key,
+              jsonb_set(r.payload, '{chunks}', coalesce(
+                (select jsonb_agg(mch.new_id::text order by u.ord)
+                   from jsonb_array_elements_text(r.payload -> 'chunks')
+                        with ordinality u(old_id, ord)
+                   join _map_chunk mch on mch.old_id = u.old_id::uuid),
+                '[]'::jsonb))
+         from demo_replay r
+        where r.user_id = $2 and r.kind = 'board'`,
+      [guestId, seedId] as never[],
+    );
+    // Counted out of the payload for bankedMatrix's reason, and here it is the
+    // number that decides whether the Eval tab has a demo at all: a board of zero
+    // chunks (every id failed to map) inserts one perfectly good row and scopes
+    // the page to nothing.
+    const [bankedBoard] = await tx<{ chunks: number }[]>`
+      select coalesce(jsonb_array_length(r.payload -> 'chunks'), 0)::int as chunks
+        from demo_replay r
+       where r.user_id = ${guestId} and r.kind = 'board'
+       limit 1
+    `;
+
+    // --- 5i. the banked rankings, remapped like the board --------------------
+    //
+    // Phase 5 of docs/demo-real-flow-plan.md. `ndcg_ideal` and `llm_ranking`
+    // (0082) are the two rankings a guest may not buy: the master's cross-model
+    // aggregate ideal per question, and the llm_rerank order the publish bought
+    // once. Steps 4 and 5 of the walk apply a copy of these instead of calling a
+    // provider, and the nDCG that follows is then graded live against the
+    // visitor's own retrieval.
+    //
+    // ONE STATEMENT FOR BOTH KINDS, because they are one payload shape: an array
+    // of entries, each an ordered list of chunk ids belonging to a question. Like
+    // the board they NAME ROWS, so they are remapped rather than forwarded — and
+    // unlike the board, the entries are nested, so the rewrite is two levels of
+    // jsonb_agg rather than one.
+    //
+    // A LEFT JOIN, WHERE THE BOARD USES AN INNER ONE, and it is the same
+    // distinction step 4c draws: here POSITION IS RANK. An id that fails to map
+    // holds its place as a null, because dropping it would silently promote every
+    // chunk behind it and turn a copy that half-failed into a measurably better
+    // ideal. A null matches no retrieved id, so it scores zero gain at that rank,
+    // which is what a chunk that did not travel is worth.
+    //
+    // The keys are hashes of question TEXT and so are invariant across both hops
+    // — which is the whole reason 0082 keys by wording rather than by a question
+    // id that does not survive the publish.
+    const rankingRows = await tx.unsafe(
+      `insert into demo_replay (user_id, kind, key, payload)
+       select $1, r.kind, r.key,
+              jsonb_set(r.payload, '{entries}', coalesce((
+                select jsonb_agg(
+                         jsonb_set(e.entry, '{order}', coalesce((
+                           select jsonb_agg(mch.new_id::text order by u.ord)
+                             from jsonb_array_elements_text(e.entry -> 'order')
+                                  with ordinality u(old_id, ord)
+                             left join _map_chunk mch on mch.old_id = u.old_id::uuid),
+                           '[]'::jsonb))
+                         order by e.ord)
+                  from jsonb_array_elements(r.payload -> 'entries')
+                       with ordinality e(entry, ord)),
+                '[]'::jsonb))
+         from demo_replay r
+        where r.user_id = $2 and r.kind in ('ndcg_ideal', 'llm_ranking')`,
+      [guestId, seedId] as never[],
+    );
+    // Counted out of the payloads for bankedMatrix's reason: a shelf of zero
+    // entries inserts two perfectly good rows and leaves both bulk buttons
+    // refusing in front of a visitor.
+    const [bankedRankings] = await tx<{ ideals: number; llm: number }[]>`
+      select
+        coalesce(max(case when r.kind = 'ndcg_ideal'
+                          then jsonb_array_length(r.payload -> 'entries') end), 0)::int as ideals,
+        coalesce(max(case when r.kind = 'llm_ranking'
+                          then jsonb_array_length(r.payload -> 'entries') end), 0)::int as llm
+        from demo_replay r
+       where r.user_id = ${guestId} and r.kind in ('ndcg_ideal', 'llm_ranking')
+    `;
+
+    // --- 5j. the banked tuning, remapped two levels deep ---------------------
+    //
+    // Phase 6 of docs/demo-real-flow-plan.md. `tuning` (0083) is the master's
+    // confirmed autotune winner for each board chunk — model, kind, and every
+    // piece with its own vector — plus the saved model trials that chunk's
+    // "Models tried" list reads. A guest's ⚙ Auto tune installs these instead of
+    // searching for them, and then re-scores and reports for real.
+    //
+    // TWO LEVELS OF IDS, which is what makes this the deepest rewrite in the
+    // function: an entry names the CHUNK it overrides, and each of its trials
+    // names the candidate POOL it re-ranked inside. Both are sets rather than
+    // rankings, so both take the board's inner join rather than an ideal's left
+    // one (5i): a chunk that did not travel is not a chunk to tune, and a pool
+    // member that did not travel is not a candidate — where in a ranking the
+    // same drop would promote everything behind it.
+    //
+    // The VECTORS ride through untouched. They are base64 float32 (see
+    // lib/demo/replayCore), which names nothing and so needs no rewrite — the
+    // same property that lets the matrix above be forwarded byte-for-byte.
+    const tuningRows = await tx.unsafe(
+      `insert into demo_replay (user_id, kind, key, payload)
+       select $1, r.kind, r.key,
+              jsonb_set(r.payload, '{entries}', coalesce((
+                select jsonb_agg(
+                         jsonb_set(
+                           jsonb_set(e.entry, '{chunk}', to_jsonb(mch.new_id::text)),
+                           '{trials}', coalesce((
+                             select jsonb_agg(
+                                      jsonb_set(t.trial, '{pool}', coalesce((
+                                        select jsonb_agg(mp.new_id::text order by u.ord)
+                                          from jsonb_array_elements_text(t.trial -> 'pool')
+                                               with ordinality u(old_id, ord)
+                                          join _map_chunk mp on mp.old_id = u.old_id::uuid),
+                                        '[]'::jsonb))
+                                      order by t.ord)
+                               from jsonb_array_elements(e.entry -> 'trials')
+                                    with ordinality t(trial, ord)),
+                             '[]'::jsonb))
+                         order by e.ord)
+                  from jsonb_array_elements(r.payload -> 'entries')
+                       with ordinality e(entry, ord)
+                  join _map_chunk mch on mch.old_id = (e.entry ->> 'chunk')::uuid),
+                '[]'::jsonb))
+         from demo_replay r
+        where r.user_id = $2 and r.kind = 'tuning'`,
+      [guestId, seedId] as never[],
+    );
+    // Counted out of the payload for bankedMatrix's reason, and here the count
+    // is the difference between a finale and a refusal: an empty shelf is what
+    // the step's own gate reads to decide whether to replay or to refuse.
+    const [bankedTuning] = await tx<{ chunks: number }[]>`
+      select coalesce(jsonb_array_length(r.payload -> 'entries'), 0)::int as chunks
+        from demo_replay r
+       where r.user_id = ${guestId} and r.kind = 'tuning'
+       limit 1
+    `;
+
+    // --- 5h. the savings ledger, so the payoff readout has money -------------
+    //
+    // Phase 6 of docs/demo-cache-replay-plan.md. `PayoffReadout` renders a hit
+    // rate over the guest's own traffic census and then prices it from
+    // `savings_totals` — `readCacheEconomics`'s third read, `sum(saved_usd) /
+    // sum(event_count)` for lever 'semantic_cache'. The clone did not copy that
+    // table, so a guest got a zero-event ledger, which the reader deliberately
+    // turns into `savedPerHitUsd: null` rather than $0 — and the money line
+    // disappears. The section's whole reason for existing is the money.
+    //
+    // WHAT TRAVELS IS A RATE, not a balance. The row lands beside a census the
+    // guest computes themselves, and only the QUOTIENT is read: the operator's
+    // realized dollars per served hit, ~$0.0039 over 51 priced hits. So the
+    // number a visitor sees is the master's real published figure multiplied by
+    // their own traffic, which is the same construction the rest of this page
+    // uses — replay the measurement, recompute the reading.
+    //
+    // ONE LEVER, NOT THE LEDGER. 'semantic_cache' is the only total any surface
+    // in the demo reads a rate off. Copying the other levers would put money on
+    // the Costs page attributed to work the guest's workspace never did, and
+    // nothing there needs it.
+    //
+    // No dedupe and no rewrite: the primary key is (config_id, lever), the
+    // config is remapped like everywhere else, and one source config can hold at
+    // most one row for the lever — so the copy cannot collide with itself, on
+    // either hop.
+    const ledgerRows = await copyRows(tx, {
+      table: "savings_totals",
+      joins: `join _map_config mc on mc.old_id = s.config_id`,
+      where: `s.lever = 'semantic_cache'`,
+      overrides: { config_id: "mc.new_id" },
+      params: [],
+    });
 
     // --- 6. REWRITE THE CACHE FINGERPRINTS, or step 5 was for nothing --------
     //
@@ -1092,8 +1798,23 @@ export async function cloneSeedWorkspace(
       cachedAnswers,
       shadowEvents,
       shadowQueued: queued,
+      shadowVerdicts: discarded.length,
+      shadowPoolable: poolableQueued,
       replayRows,
       replayScored: scored,
+      sweepRows,
+      sweepModels,
+      pairRows,
+      // Freshly withheld PLUS forwarded: from the guest's side these are one bank,
+      // and on the hop that matters (snapshot→guest) the first term is always 0.
+      bankedPairs: (banked.count ?? 0) + (carried.count ?? 0),
+      blankedVerdicts: (blanked.count ?? 0) + (carriedVerdicts.count ?? 0),
+      matrixPairs: matrixRows.count > 0 ? (bankedMatrix?.pairs ?? 0) : 0,
+      boardChunks: boardRows.count > 0 ? (bankedBoard?.chunks ?? 0) : 0,
+      bankedIdeals: rankingRows.count > 0 ? (bankedRankings?.ideals ?? 0) : 0,
+      bankedLlmRankings: rankingRows.count > 0 ? (bankedRankings?.llm ?? 0) : 0,
+      bankedTuning: tuningRows.count > 0 ? (bankedTuning?.chunks ?? 0) : 0,
+      ledgerRows,
     };
   }) as Promise<CloneSummary>;
 }

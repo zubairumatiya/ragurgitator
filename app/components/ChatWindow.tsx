@@ -114,9 +114,10 @@ export function ChatWindow({
 
       {/* Above the input, not below it: they are a prompt to act, and a guest
           who has to scroll past the box to find them has already been asked to
-          think of a question themselves. Hidden once the conversation starts —
-          by then the user knows what the box is for. */}
-      {suggestions.length > 0 && messages.length === 0 ? (
+          think of a question themselves. Hidden only while a question is in
+          flight: a guest who typed their own question still has no answer-model
+          key, so the banked questions are their way back to a working chat. */}
+      {suggestions.length > 0 && !loading ? (
         <div className="flex flex-col gap-2">
           <p className="text-xs text-zinc-500">Try one of these — each has a banked answer:</p>
           <div className="flex flex-wrap gap-2">

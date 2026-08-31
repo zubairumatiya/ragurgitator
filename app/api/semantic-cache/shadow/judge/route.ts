@@ -18,6 +18,7 @@ import {
   setHumanVerdict,
 } from "@/lib/rag/semanticCacheCalibration";
 import { assertDemoAllows } from "@/lib/demo/policy";
+import { replayJudgeQueue } from "@/lib/demo/replayView";
 
 const Body = z.discriminatedUnion("mode", [
   z.object({
@@ -51,6 +52,20 @@ export async function POST(request: Request) {
     // Widening this condition widens the demo's spend surface, which is why the
     // condition itself — not merely the presence of a gate call — is pinned as a
     // needle in scripts/guards.ts (sweep 6b).
+    //
+    // THE BULK PASS IS REPLAYED FOR A GUEST (phase 4 of
+    // docs/demo-cache-replay-plan.md) rather than refused. Clone step 5b blanks
+    // the queued rows' verdicts and now BANKS the operator's own answers beside
+    // them, so "Run judge over queue" applies the verdicts the judge really
+    // returned over those exact pairs: no provider call, and a causal chain to
+    // the leaderboard that is real rather than staged.
+    //
+    // GATED ON GUEST BY THE FUNCTION, the rule lib/demo/replayView holds
+    // throughout: replayJudgeQueue returns null for a real account, which walks
+    // straight into the unconditional gate below and then into the paid pass, so
+    // this branch cannot widen what anyone else may do.
+    const replayed = body.mode === "llm" ? await replayJudgeQueue(body) : null;
+    if (replayed) return Response.json({ result: replayed });
     if (body.mode !== "human") await assertDemoAllows("judge");
     try {
       if (body.mode === "human") {

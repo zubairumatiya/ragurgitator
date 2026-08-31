@@ -21,6 +21,8 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { config } from "@/lib/config";
+import { readLlmRankings } from "@/lib/demo/replay";
+import { questionIdentity } from "@/lib/demo/replayCore";
 import {
   canonicalModelOrder,
   keyedModels,
@@ -391,7 +393,7 @@ export async function buildLlmRanking(
   });
   const block = response.content.find((b) => b.type === "text");
   if (!block) throw new Error("LLM ranker returned no text content.");
-  const parsed = LlmOrder.parse(JSON.parse(stripFences(block.text)));
+  const parsed = LlmOrder.parse(JSON.parse(jsonArrayIn(block.text)));
 
   // Map 1-based chunk numbers back to ids, keeping the LLM's order; dedupe and
   // drop out-of-range numbers. Chunks the LLM omits are simply absent from the
@@ -444,6 +446,78 @@ export async function setManualRanking(
     details: { source: "manual", derivedFromKind },
   });
   return resolve(await pickStored(questionId, id));
+}
+
+// --- the demo's replay of the two rankings a guest may not buy --------------
+//
+// Phase 5 of docs/demo-real-flow-plan.md. Both of the builders above spend on a
+// provider — the aggregate embeds a 30-chunk pool under every model on the list,
+// the LLM re-rank costs one answer-model call — and both are steps of the demo's
+// walk. So a published build banks the master's own answers (0082,
+// lib/demo/captureRankings) and these two write them into the guest's workspace
+// as ordinary eval_rankings rows.
+//
+// THEY ARE ORDINARY ROWS ON PURPOSE. Nothing downstream is taught about the
+// replay: the drilldown resolves them, setTruth promotes them, and the nDCG the
+// Eval tab prints is ndcg(ideal, retrieved_ids, k) over the visitor's OWN
+// retrieval, computed here and not banked. What the visitor did not do is build
+// the ranking — which is the sentence the UI owes them, and the reason these are
+// named `replay*` rather than folded into the builders they stand in for.
+//
+// NULLS ARE KEPT IN THE IDEAL and dropped from the LLM order, which is the same
+// distinction clone step 5i draws. In the ideal, position is rank, so an id that
+// failed the clone's remap has to hold its place or every chunk behind it is
+// promoted; in an llm_rerank it is a comparison candidate list, and buildLlmRanking
+// itself already drops chunks the model omitted.
+export async function replayAggregateRanking(
+  questionId: string,
+  order: (string | null)[],
+): Promise<string> {
+  const scope = await getQuestionScope(questionId);
+  if (!scope) throw new Error("Question has no label under the active config.");
+  if (order.length === 0) throw new Error("The published ideal for that question is empty.");
+  return upsertRanking({
+    questionId,
+    documentEmbeddingId: scope.documentEmbeddingId,
+    kind: "aggregate",
+    chunkIds: order as string[],
+    // NO perModelRanks, deliberately. The panel renders per-model provenance for
+    // an aggregate it built, and this workspace did not rank anything under any
+    // model — carrying the master's columns would be a measurement implying a
+    // computation that did not happen here. `source` is what the demo's own
+    // wording keys off.
+    details: { source: "published" },
+  });
+}
+
+export async function replayLlmRerank(
+  questionId: string,
+  order: (string | null)[],
+): Promise<string> {
+  const scope = await getQuestionScope(questionId);
+  if (!scope) throw new Error("Question has no label under the active config.");
+  const rankings = await listRankings(questionId);
+  const aggregate = rankings.find((r) => r.kind === "aggregate");
+  if (!aggregate) throw new Error("Build the aggregate ranking first.");
+  const chunkIds = order.filter((id): id is string => id !== null);
+  if (chunkIds.length === 0) throw new Error("The published LLM ranking for that question is empty.");
+  return upsertRanking({
+    questionId,
+    documentEmbeddingId: scope.documentEmbeddingId,
+    kind: "llm_rerank",
+    chunkIds,
+    // The SIGNATURE is recomputed here rather than banked, and it has to be: it
+    // covers the pool ids, which are this workspace's own, and the point of it is
+    // that a repeat press reads 'fresh' and spends nothing. The master's copy
+    // would name the master's chunks and read permanently stale.
+    details: {
+      llmModel: activeConfig().llmModel,
+      variant: "rerank",
+      basedOnAggregateId: aggregate.id,
+      source: "published",
+      signature: llmSignature("rerank", scope.question, llmPoolIds(aggregate.chunkIds, "rerank")),
+    },
+  });
 }
 
 // Promote one ranking to ground truth (clears any previous truth for the
@@ -592,6 +666,14 @@ export async function bulkBuildRankings(
 //
 // Per-question failures are streamed and skipped: a garbled reply on one question
 // shouldn't waste the spend already made on the rest.
+//
+// AND IN THE DEMO IT SPENDS NOTHING (§4.5 of docs/demo-real-flow-plan.md): the
+// publish bought these orders once on the master and banked them (0082), so a
+// guest's press applies replayLlmRerank per question instead of calling the
+// model. The plan phase above is unchanged and still does its job — a question
+// with no aggregate has nothing to re-rank whether the order is bought or
+// replayed, and a fresh signature still means the press is a no-op. Only the
+// paid call in the worker is swapped, and a stocked shelf never falls back to it.
 const BULK_LLM_RANKING_CONCURRENCY = 2;
 
 export async function bulkBuildLlmRankings(
@@ -604,6 +686,9 @@ export async function bulkBuildLlmRankings(
   const rankingsByQuestion = await listRankingsByQuestions(
     questions.map((q) => q.questionId),
   );
+  // Null for every account but a demo guest, and for a guest whose build shipped
+  // without the shelf — the route is what refuses that second case.
+  const banked = await readLlmRankings();
 
   // Plan: partition into "will call the LLM" vs. the two skip reasons. The
   // freshness test re-derives the signature exactly as getRankingContext's
@@ -651,7 +736,15 @@ export async function bulkBuildLlmRankings(
       let ok = true;
       let error: string | undefined;
       try {
-        await buildLlmRanking(q.questionId, "rerank");
+        if (banked) {
+          const order = banked.get(questionIdentity(q.question));
+          if (!order) {
+            throw new Error("This workspace was published without an LLM ranking for that question.");
+          }
+          await replayLlmRerank(q.questionId, order);
+        } else {
+          await buildLlmRanking(q.questionId, "rerank");
+        }
         built += 1;
       } catch (err) {
         ok = false;
@@ -711,4 +804,27 @@ function stripFences(text: string): string {
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();
+}
+
+// THE RANKER'S REPLY, WHICH IS NOT ALWAYS ONLY THE ARRAY the prompt asks for.
+// Measured while capturing the demo's re-rankings (phase 5 of
+// docs/demo-real-flow-plan.md): 4 of 60 questions came back as "Looking at these
+// chunks…" with the array underneath, and the same 4 did it again on a retry — so
+// it is a property of those questions rather than a flake worth re-buying. Every
+// one of them was a perfectly good ranking thrown away over a preamble.
+//
+// So: fences first, as before, and then the first bracketed run in what is left,
+// ALWAYS — not only when the reply fails to start with one. The last of the four
+// held out through a retry by putting its commentary AFTER a perfectly good
+// array, which is a parse error at position 16 rather than at position 0 and is
+// the same defect from the other end.
+//
+// Deliberately the first bracketed run and not the longest: a reply that talks
+// around its answer still puts the answer somewhere, and the array is the only
+// bracketed thing this prompt can produce. Still parsed and schema-checked
+// afterwards, so a stray "[1, 2]" inside prose fails exactly as it did before
+// rather than being trusted for looking like an array.
+function jsonArrayIn(text: string): string {
+  const stripped = stripFences(text);
+  return /\[[^[\]]*\]/.exec(stripped)?.[0] ?? stripped;
 }

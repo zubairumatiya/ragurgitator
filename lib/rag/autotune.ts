@@ -31,7 +31,7 @@ import { autotuneModelLadder } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { listIgnoredQuestionIds, type AutotuneStopReason } from "@/lib/rag/autotuneStore";
 import { splitText } from "@/lib/rag/chunker";
-import { embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
+import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
 import { modelSpec } from "@/lib/rag/embeddingModels";
 import { availableProviders } from "@/lib/rag/providerAvailability";
 import {
@@ -57,12 +57,12 @@ import {
   clearChunkOverride,
   getChunkOverridePieces,
   listOverrides,
-  overrideEmbeddings,
+  overrideSims,
   setChunkOverridePieces,
   type ChunkOverride,
-  type OverrideEmbedding,
 } from "@/lib/rag/overrideStore";
-import { fuseWithOverrides } from "@/lib/rag/retriever";
+import { withCandidateSims } from "@/lib/rag/overrideSimMerge";
+import { fuseWithOverrides, type SimsFor } from "@/lib/rag/retriever";
 import type { RetrievedChunk } from "@/types/rag";
 
 // Re-exported so the client panel can name a run's ending without importing the
@@ -132,6 +132,20 @@ export type AutotuneEvent =
       candidates: AutotuneCandidate[];
     }
   | { type: "chunk-unresolved"; chunkId: string; reason: string }
+  | {
+      // THE DEMO'S REPLAY OF A SEARCH IT DID NOT RUN (phase 6 of
+      // docs/demo-real-flow-plan.md). A guest's press installs the master's
+      // confirmed winner for the chunk instead of searching for one, so there is
+      // no AutotuneCandidate to report: `chunk-resolved` carries the ranks a
+      // search produced, and inventing a set of them here would be the exact
+      // move lib/demo/policy's notes exist to prevent. What there IS to say is
+      // what was installed, which is what this carries.
+      type: "chunk-published";
+      chunkId: string;
+      detail: string; // the change-log phrasing, e.g. "re-split into 3 pieces"
+      pieces: number;
+      trials: number; // saved model trials that came with it, 0 if none
+    }
   | {
       // autotune.stopEarly: every targeted metric's aggregate rate reached its
       // min-rate mid-run, so the remaining below-bar chunks were skipped.
@@ -314,7 +328,12 @@ async function usableModelLadder(scope: string[] | null): Promise<string[]> {
 // it while it lives.
 type SearchContext = {
   storedOverrides: ChunkOverride[];
-  storedPieces: Map<string, Promise<OverrideEmbedding[]>>;
+  // (model, question) -> the stored override sims for that query, this chunk's own
+  // pieces excluded in SQL. Query-dependent, so it is keyed by the question and not
+  // just the model — but a chunk's search asks the SAME target questions on every
+  // rung, so the reuse this cache exists for is intact
+  // (docs/fusion-egress-plan.md §1.1).
+  storedSims: Map<string, Promise<Map<string, number>>>;
   annCache: Map<string, RetrievedChunk[]>;
 };
 
@@ -322,7 +341,7 @@ async function buildSearchContext(chunkId: string): Promise<SearchContext> {
   return {
     // This chunk's own override never competes — the candidate replaces it.
     storedOverrides: (await listOverrides()).filter((o) => o.sourceChunkId !== chunkId),
-    storedPieces: new Map(),
+    storedSims: new Map(),
     annCache: new Map(),
   };
 }
@@ -341,20 +360,21 @@ async function fusedTrialRanks(
     ...search.storedOverrides,
     { sourceChunkId: chunkId, model, kind: family },
   ];
-  // Pieces per model: the stored overrides minus this chunk's (fetched once per
-  // chunk, not once per rung), plus the in-memory candidate vectors under the
-  // trial model. The candidate part DOES change per rung, so only the stored
-  // half is shared.
-  const piecesFor = (m: string): Promise<OverrideEmbedding[]> => {
-    let stored = search.storedPieces.get(m);
+  // Sims per (model, question): the stored overrides minus this chunk's, collapsed
+  // by Postgres (fetched once per question per chunk, not once per rung), plus the
+  // in-memory candidate vectors under the trial model cosined here. The candidate
+  // part DOES change per rung, so only the stored half is shared.
+  const simsFor: SimsFor = (m, qv, text) => {
+    const key = `${m}\0${text}`;
+    let stored = search.storedSims.get(key);
     if (!stored) {
-      stored = overrideEmbeddings(m).then((all) =>
-        all.filter((piece) => piece.chunkId !== chunkId),
-      );
-      search.storedPieces.set(m, stored);
+      stored = overrideSims(m, qv, chunkId);
+      search.storedSims.set(key, stored);
     }
     return stored.then((kept) =>
-      m === model ? [...kept, ...candVecs.map((embedding) => ({ chunkId, embedding }))] : kept,
+      m === model
+        ? withCandidateSims(kept, chunkId, candVecs.map((v) => cosine(qv, v)))
+        : kept,
     );
   };
 
@@ -367,7 +387,7 @@ async function fusedTrialRanks(
         baseQVec,
         cfg.topK,
         hypOverrides,
-        piecesFor,
+        simsFor,
         pool,
       search.annCache,
     );

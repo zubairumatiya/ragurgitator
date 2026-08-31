@@ -20,7 +20,7 @@ export const JOB_LABELS: Record<JobKind, string> = {
   rescore: "Re-score all questions",
   bulk_ndcg: "Bulk nDCG grading",
   autotune: "Autotune",
-  probe_replay: "Stock the shadow judge queue",
+  probe_replay: "Stock the would-hit queue",
 };
 
 // What one unit of work IS, per kind — the noun the progress bar and the ETA are

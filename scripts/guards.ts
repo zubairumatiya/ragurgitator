@@ -423,6 +423,7 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
       "SHADOW_CURVE_CAP.probe",
       "SHADOW_QUEUE_CAP",
       "PUBLISHED_REPLAY_FINGERPRINT",
+      "PUBLISHED_SWEEP_FINGERPRINT",
     ],
     why:
       "the publish hop that writes the frozen set, the cap on the banked " +
@@ -433,7 +434,10 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
       "guest's disk tracking the master's bookkeeping), and the sentinel step 5c " +
       "rewrites the replay's fingerprint to (copied under the master's own md5, " +
       "the rows are present but unreachable and the demo's model comparison " +
-      "renders empty while the table says it is populated)",
+      "renders empty while the table says it is populated), and the same sentinel " +
+      "for the cache-key sweep step 5d carries (0077 has no other reader, so a " +
+      "copied real fingerprint would leave a guest's §4 dark with the row sitting " +
+      "right there)",
   },
   // Phase 6.3 makes the demo's model comparison a BUILD ARTIFACT living in a
   // cache table. The read path can only find it under the sentinel, and
@@ -448,25 +452,157 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
     why: "the published generation is exempt from the cache's own eviction",
   },
   // Phase 6 opened ONE form of bulk-generate to a guest: `cachedOnly`, which
-  // reads question_cache and calls no model. Sweep 6 above still passes if that
-  // condition WIDENS — the file keeps its assertDemoAllows() either way — so the
-  // condition itself is pinned here. This is the whole difference between "a
-  // guest may add a question that was already paid for" and "a guest may spend
-  // the operator's answer-model key", and it is one boolean long.
+  // reads question_cache and calls no model. Phase 3 of
+  // docs/demo-add-flow-plan.md opened a second — a guest whose build carries a
+  // published BOARD, whose plain "Add" is a press of that bank rather than a
+  // generation. Sweep 6 above still passes if either condition WIDENS — the file
+  // keeps its assertDemoAllows() either way — so the condition itself is pinned
+  // here. This is the whole difference between "a guest may add a question that
+  // was already paid for" and "a guest may spend the operator's answer-model
+  // key".
+  //
+  // THREE needles, not one, because pinning only the gate leaves the other half
+  // of the argument undetectable: "the gate opened, and then the generator ran
+  // anyway". The first is the shelf read the widening hangs on — DERIVED from a
+  // guest-only reader, never from the body, since the flip is precisely "the
+  // button that meant generate now means bank" and a client-set flag is a
+  // carve-out the client can widen. The second is the gate, unconditional behind
+  // it. The third is the branch, which must test the SAME boolean the gate did,
+  // so a boarded guest cannot reach bulkAddDifficulties or the batch submit.
   {
     file: "app/api/eval/bulk-generate/route.ts",
-    needles: ['if (!body.data.cachedOnly) await assertDemoAllows("generate")'],
-    why: "the carve-out is exactly the cachedOnly flag and nothing wider",
+    needles: [
+      "const boarded = (await readBoard()) !== null;",
+      "const fromBank = body.data.cachedOnly || boarded;",
+      'if (!fromBank) await assertDemoAllows("generate");',
+      "if (fromBank) {",
+    ],
+    why:
+      "the carve-out is the cachedOnly flag or a guest with a published board, " +
+      "derived server-side, and a boarded guest cannot reach the generating branch",
   },
   // Phase 6.2 opened the same shape on the shadow judge: `human` is one UPDATE on
   // a row the caller owns, `llm` buys tokens. Sweep 6 keeps passing however wide
   // this condition grows, since the file keeps its gate call either way, so the
   // condition is the needle. The demo's calibration workbench is downstream of
-  // this one line, and so is the promise lib/demo/policy's `judge` sentence makes.
+  // this one line.
   {
     file: "app/api/semantic-cache/shadow/judge/route.ts",
-    needles: ['if (body.mode !== "human") await assertDemoAllows("judge")'],
-    why: "the carve-out is exactly the human verdict mode and nothing wider",
+    needles: [
+      'if (body.mode !== "human") await assertDemoAllows("judge")',
+      // Phase 4 of docs/demo-cache-replay-plan.md turned the OTHER mode from a
+      // refusal into a replay: the bulk pass applies the verdicts the operator's
+      // judge really returned. The gate above still stands unconditionally behind
+      // it — replayJudgeQueue answers only a guest — so this needle is what keeps
+      // the two lines in that order, which is the whole of the spend argument.
+      "const replayed = body.mode === \"llm\" ? await replayJudgeQueue(body) : null;",
+    ],
+    why: "the carve-out is exactly the human verdict mode, plus a replay that spends nothing",
+  },
+  // Phase 2 of docs/demo-cache-lab-plan.md SPLIT one gate into three lines, and
+  // the split is the only thing separating "a guest may read a sweep the operator
+  // paid for" from "a guest may re-embed ~510 texts under every candidate model".
+  // Sweep 6 cannot see any of it: the file keeps calling assertDemoAllows
+  // whatever these three lines say. Each is pinned:
+  //   1. the WRITES stay blocked, and under their own sentence;
+  //   2. the replay is gated on being a GUEST — replaySweepResult refuses every
+  //      other account — because the operator's own workspace owns a matrix too
+  //      (it is the account that captured it), and handing that back instead of
+  //      running the sweep would be a measurement implying a computation that did
+  //      not happen;
+  //   3. the fallback for a build published WITHOUT a matrix is still a refusal.
+  //      Phase 5 kept this line where the plan had it deleted, and the reason is
+  //      in scripts/demo-snapshot: the matrix is captured only under --sweep, and
+  //      its absence WARNS rather than fails. A routine cheap republish is exactly
+  //      a build whose guests reach line 3, and without it their click buys ~510
+  //      texts under every candidate model on the operator's key.
+  {
+    file: "app/api/semantic-cache/key-model/route.ts",
+    needles: [
+      'if (data.action !== "sweep") await assertDemoAllows("keyModel");',
+      'const replay = data.action === "sweep" ? await replaySweepResult() : null;',
+      'if (data.action === "sweep") await assertDemoAllows("sweep");',
+    ],
+    why: "the per-action gate: only `sweep` replays, and only for a guest",
+  },
+  // The generate and screen carve-outs, whose needles are shaped differently from
+  // cachedOnly's on purpose: there is no body flag to pin, because THE CARVE-OUT
+  // IS THE FUNCTION. Every read in lib/demo/replayView returns null for anyone who
+  // is not a guest, so both routes keep an UNCONDITIONAL assertDemoAllows after
+  // the branch (sweep 6 keeps meaning what it says) and both fail closed — delete
+  // the line and a guest is simply refused, as they were before the demo had a
+  // matrix to replay.
+  {
+    file: "app/api/semantic-cache/pairs/route.ts",
+    needles: [
+      "const advanced = await advanceReplay(body.data.limit ?? DEFAULT_REVEAL);",
+      'await assertDemoAllows("pairs")',
+    ],
+    why: "the generate carve-out walks the banked matrix, with the gate still unconditional behind it",
+  },
+  {
+    file: "app/api/batch/submit/route.ts",
+    needles: [
+      'const banked = kind === "cache_pair_screen" ? await screenReplay() : null;',
+      'await assertDemoAllows("batch")',
+    ],
+    why: "the pair-screen carve-out is one named kind, and no other",
+  },
+  // The Eval tab's three shelf-before-gate lines (phases 5 and 6 of
+  // docs/demo-real-flow-plan.md). Each is the same one-expression shape the
+  // key-model sweep's three lines are, and sweep 6 cannot see any of it: all
+  // three files keep calling assertDemoAllows whatever the condition says.
+  // What each line buys, and what its loss costs:
+  //
+  //   • the READ COMES FIRST, so a build published WITH the master's answer
+  //     replays it and a build published WITHOUT one is refused. Invert the two
+  //     and every guest is refused, which is a silent regression to phase 4 —
+  //     the buttons render live (the summary asks the same shelf) and then 403.
+  //   • the gate is UNCONDITIONAL behind the read, so the fallback is a refusal
+  //     and never a real embed on the operator's key. `sweep`'s lesson, and the
+  //     routine cheap republish is exactly the build that reaches it.
+  {
+    file: "app/api/eval/bulk-ndcg/route.ts",
+    needles: ['if ((await readIdeals()) === null) await assertDemoAllows("rank");'],
+    why: "the ideals carve-out: replay a published aggregate order, refuse without one",
+  },
+  {
+    file: "app/api/eval/bulk-llm-ndcg/route.ts",
+    needles: ['if ((await readLlmRankings()) === null) await assertDemoAllows("llmRank");'],
+    why: "the llm_rerank carve-out, on the ideals' terms exactly",
+  },
+  // The autotune's copy of the same shape, one layer in: the gate lives in the
+  // STEP rather than the route, because the search phase is what spends and a
+  // sliced job re-enters it. The ternary is pinned beside the gate for a reason
+  // the other two do not have — here the two branches are a replay and a REAL
+  // per-chunk search under every candidate model, so a `tuning ?? …` slip would
+  // run the expensive one for a guest whose shelf is stocked.
+  {
+    file: "lib/jobs/steps/autotune.ts",
+    needles: [
+      "const tuning = await readTuning();",
+      'if (tuning === null) await assertDemoAllows("autotune");',
+      "? runSearch(planned, emit, shouldStop)",
+      ": runReplay(planned, tuning, emit, shouldStop)",
+    ],
+    why: "the tuning carve-out, and that a stocked shelf takes runReplay rather than runSearch",
+  },
+  // Start over spends nothing, so it is deliberately outside DEMO_ACTIONS (§4.7)
+  // — which means the ONE thing standing between a real account and a request
+  // that deletes its eval board is this line. The route reads a null and answers
+  // 403; delete the line and the null never comes.
+  {
+    file: "lib/demo/restart.ts",
+    needles: ["if (!(await isGuest())) return null;"],
+    why: "the reset is guest-only from the module, since no gate covers it",
+  },
+  // The needle that matters most of the four. Every carve-out above is safe only
+  // because the matrix's readers refuse everyone who is not a guest; lose this and
+  // a replayed measurement can be served to the account that made it.
+  {
+    file: "lib/demo/replay.ts",
+    needles: ["if (!(await isGuest())) return null;"],
+    why: "the matrix's readers are guest-only, which is what stops every carve-out on that page widening",
   },
 ];
 
@@ -496,7 +632,66 @@ function sweepDemoScope() {
       fail(`${path} — gated again, but still relied on as SCOPED in lib/demo/policy.ts`);
     }
   }
-  console.log(`   ${DEMO_SCOPED.length} scope sites intact, ${expectedOpen.length} routes open`);
+  const readers = sweepDemoReaders();
+  console.log(
+    `   ${DEMO_SCOPED.length} scope sites intact, ${expectedOpen.length} routes open, ` +
+      `${readers} readers guest-only`,
+  );
+}
+
+// 6c. EVERY reader of the demo's store answers a real account with null.
+//
+// The single needle in DEMO_SCOPED above pinned the carve-out when replay.ts had
+// one reader in it. It now has seven — the matrix, the board, the two ranking
+// kinds, progress, the shadow verdicts and the tuning — and a needle that only
+// asks whether the string appears SOMEWHERE in the file passes just as happily
+// with six of them guarded. So the readers are enumerated instead: a new kind
+// added without the line fails by name, which is the shape this whole file is.
+//
+// A reader is covered if it carries the line itself, or if it delegates to one
+// that does — readIdeals and readLlmRankings are two views of readRankings, and
+// making them repeat the check would be the duplication, not the guard.
+const GUEST_CARVE_OUT = "if (!(await isGuest())) return null;";
+
+function sweepDemoReaders(): number {
+  const file = "lib/demo/replay.ts";
+  const source = read(join(ROOT, file));
+  // Declaration sites in order, so each body is the slice up to the next one.
+  const decls = [...source.matchAll(/^(?:export )?async function (\w+)\b/gm)];
+  const bodies = new Map<string, string>();
+  decls.forEach((d, i) => {
+    const start = d.index ?? 0;
+    const end = i + 1 < decls.length ? (decls[i + 1].index ?? source.length) : source.length;
+    bodies.set(d[1], source.slice(start, end));
+  });
+  const readers = [...bodies.keys()].filter((name) => /^read[A-Z]/.test(name));
+  if (readers.length === 0) {
+    fail(`${file} — no read* functions found at all; the census below asserts nothing`);
+    return 0;
+  }
+  const covered = new Set(readers.filter((n) => bodies.get(n)!.includes(GUEST_CARVE_OUT)));
+  // One pass of delegation is enough today; loop anyway so a second layer of
+  // indirection does not turn into a false failure that invites deleting this.
+  for (let pass = 0; pass < readers.length; pass++) {
+    for (const name of readers) {
+      if (covered.has(name)) continue;
+      const body = bodies.get(name)!;
+      for (const [other, otherBody] of bodies) {
+        if (other === name || !body.includes(`${other}(`)) continue;
+        if (otherBody.includes(GUEST_CARVE_OUT) || covered.has(other)) covered.add(name);
+      }
+    }
+  }
+  for (const name of readers) {
+    if (!covered.has(name)) {
+      fail(
+        `${file}:${name} — reads the demo's store without \`${GUEST_CARVE_OUT}\` and ` +
+          `without delegating to a reader that has it. Every carve-out in DEMO_SCOPED ` +
+          `is safe only because a real account reads null here.`,
+      );
+    }
+  }
+  return readers.length;
 }
 
 function sweepDemoGates() {
@@ -543,7 +738,44 @@ const PROBE_FILES = [
   "lib/rag/probeReplayCore.ts",
   "lib/rag/probeReplayTrigger.ts",
   "lib/jobs/steps/probeReplay.ts",
+  // Phase 4 of docs/demo-cache-lab-plan.md: a SECOND entry into the same work,
+  // one probe at a time and by hand. It shares the path's rails for the same
+  // reason the job does — it lands rows in the queue a live τ is swept from.
+  // Phase 5 took it out of the DEMO, not out of the app; it is a real account's
+  // button now, and every rail below applies to it unchanged.
+  "app/api/semantic-cache/probe/route.ts",
 ];
+
+// 7f's requirements on that route.
+//
+// The floor is the load-bearing one. A research pass records everything (F2's
+// origin split), but this route stocks a queue whose other rows came from
+// lib/demo/clone step 5b, which strides a sample at the CONFIGURED floor — so a
+// 0.4 near-miss landing among them would be a row about the demo rather than
+// about the cache, judged by a visitor who cannot tell the difference. That
+// argument survives phase 5 hiding the button: the queue it describes is the
+// operator's own, and a real account's probe lands in it beside the same rows.
+const REQUIRED_IN_PROBE_ROUTE: Record<string, string> = {
+  "config.semanticCache.shadowLogFloor":
+    "the probe must record at the CONFIGURED floor, not PROBE_LOOKUP's 0",
+  poolSafeProbes: "quarantined pairs are dropped before the choice, not after",
+  selectOneProbe: "the F3 collision assertion is what makes the choice safe",
+};
+
+// What this route may never become. The bulk job stays blocked in the demo
+// (DEMO_ACTIONS.probeReplay, 40 probes nobody pressed a button for); a route
+// that grew a cap or reached launchJob would be a second door into exactly what
+// the gate refuses, opened from the side that has no gate at all.
+//
+// STILL TRUE AFTER PHASE 5, which HID this route's button from the demo rather
+// than gating the route. A guest reaching it now has no eligible pair and gets
+// NOTHING_ELIGIBLE — but "the UI does not offer it" is not a spend limit, and the
+// day something makes a pair eligible again this cap is the only thing standing
+// between one probe and forty.
+const FORBIDDEN_IN_PROBE_ROUTE: Record<string, string> = {
+  launchJob: "one probe by hand is the whole point — the bulk job stays blocked",
+  PROBE_CAP: "a cap means this route is running more than one probe",
+};
 
 // Symbols that BANK an answer or WRITE a verdict. Neither belongs anywhere in the
 // probe path: probe rows stock the queue, and a human or the metered judge fills
@@ -640,6 +872,33 @@ function sweepProbeReplay() {
       `lib/rag/semanticCache.ts — ${bankers} writers of semantic_cache, expected 2 ` +
         "(semanticCacheStore, backfillKeyModel); a new one needs adding to " +
         "FORBIDDEN_IN_PROBE_PATH before a probe can reach it",
+    );
+  }
+
+  // 7f. The single-probe route, checked from both ends — what it must do, and
+  // what it must never grow into.
+  const route = codeOnly(read(join(ROOT, "app/api/semantic-cache/probe/route.ts")));
+  for (const [symbol, why] of Object.entries(REQUIRED_IN_PROBE_ROUTE)) {
+    if (!route.includes(symbol)) {
+      fail(`app/api/semantic-cache/probe/route.ts — lost ${symbol}: ${why}`);
+    }
+  }
+  for (const [symbol, why] of Object.entries(FORBIDDEN_IN_PROBE_ROUTE)) {
+    if (new RegExp(`\\b${symbol}\\b`).test(route)) {
+      fail(`app/api/semantic-cache/probe/route.ts — references ${symbol}: ${why}`);
+    }
+  }
+
+  // 7g. The floor stays the ONLY key the caller can override. replayPairs takes
+  // it as a parameter, and it spreads PROBE_LOOKUP.shadow underneath — so a
+  // caller can move where rows start being recorded and nothing else. Written as
+  // a fresh object literal, that same parameter becomes a way to drop origin:
+  // "probe" or serve: false from the outside, which 7a/7b cannot see because the
+  // constant they check is still there.
+  if (!source.includes("shadow: { ...PROBE_LOOKUP.shadow, floor }")) {
+    fail(
+      "lib/rag/probeReplay.ts — the shadow options are no longer PROBE_LOOKUP.shadow " +
+        "with only `floor` overridden; a literal here lets a caller drop origin/serve",
     );
   }
 

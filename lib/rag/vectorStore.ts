@@ -334,6 +334,47 @@ export async function queryExcluding(
   }));
 }
 
+// queryExcluding without the `text` column — the deep fusion pool
+// (docs/fusion-egress-plan.md §1.2). The merge only ever reads `score` and `id`
+// off these rows; text is needed for the topK that SURVIVE, and those are
+// resolved by id through resolveChunks. Pulling text on all deepN rows shipped
+// ~480 kB a query to compute a rank.
+//
+// Returns the same RetrievedChunk shape so the caller (and its ANN cache) needs
+// no second type — but `text`/`documentId`/`position` are EMPTY, not merely
+// unread. A caller that needs them must resolve, and must not seed a `meta` map
+// from these rows.
+export async function queryExcludingIds(
+  vector: number[],
+  limit: number,
+  excludeIds: string[],
+): Promise<RetrievedChunk[]> {
+  const cfg = activeConfig();
+  const queryVec = vectorLiteral(vector);
+
+  const rows = await sql.begin(async (tx) => {
+    await tx.unsafe(`set local hnsw.ef_search = ${EF_SEARCH}`);
+    return tx<{ id: string; score: number }[]>`
+      select
+        id,
+        1 - (embedding <=> ${queryVec}::vector) as score
+      from ${tx(cfg.chunksTable)}
+      where config_id = ${cfg.id}
+        and not (id = any(${excludeIds}::uuid[]))
+      order by embedding <=> ${queryVec}::vector
+      limit ${limit}
+    `;
+  });
+
+  return rows.map((r) => ({
+    score: Number(r.score),
+    chunk: {
+      embedding: [],
+      chunk: { id: r.id, documentId: "", text: "", position: 0 },
+    },
+  }));
+}
+
 // Base-space embeddings for a set of chunk ids in the active config — for
 // similarity screens that need a chunk's own stored vector rather than an ANN
 // (eval.rescoreAffectedQuestions). pgvector's text form '[1,2,3]' is valid

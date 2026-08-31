@@ -517,7 +517,43 @@ export async function listReplays(): Promise<ReplayReport[]> {
 // pool the master scored over — which is the guest's pool too, since the clone
 // copies chunks byte for byte — and `questions` is what actually scored. Both
 // come back as a max() because unscorable models store zeros.
+//
+// PER-PROCESS, PER-USER MEMO, on exactly publishedSweep's terms and for exactly
+// its reason: ~5 KB re-read on every visit to Appraise → Models, and nothing in
+// any request path can change it. writeCached's delete exempts
+// PUBLISHED_REPLAY_FINGERPRINT by name (see line above it), no insert in the app
+// uses the sentinel, and the only writer is lib/demo/clone at provisioning time
+// — which runs before the guest has a page to load.
+//
+// This one gets the PLAIN form rather than the digest-keyed form the Eval tab and
+// /cache use, and the difference is worth stating: a digest costs a round trip of
+// its own, which is a poor trade for 5 KB, and it buys nothing here because there
+// is no writer for it to catch. Where a guest CAN move the rows, the digest is
+// what makes the memo safe; where they provably cannot, it would just be
+// ceremony.
+//
+// Negative results are not cached, the same asymmetry publishedSweep documents:
+// the clone writes these rows DURING provisioning, in this same process, so "no
+// published replay yet" is a state that legitimately changes while "here are the
+// rows" is not.
+const publishedMemo = new Map<string, ReplayReport[]>();
+
+// Enough for every guest a process sees before recycling; eviction oldest-first
+// as a backstop against a long-lived one.
+const PUBLISHED_MEMO_MAX = 200;
+
+// Exported for the tests and for the day this gains a writer. A memo whose only
+// invalidation story is "there is no writer" needs the door to exist before that
+// stops being true.
+export function forgetPublishedReplays(userId?: string): void {
+  if (userId === undefined) publishedMemo.clear();
+  else publishedMemo.delete(userId);
+}
+
 export async function listPublishedReplays(): Promise<ReplayReport[]> {
+  const userId = activeUserId();
+  const memoed = publishedMemo.get(userId);
+  if (memoed) return memoed;
   let rows: (MetricRow & {
     config_id: string;
     name: string | null;
@@ -561,5 +597,13 @@ export async function listPublishedReplays(): Promise<ReplayReport[]> {
 
   const out = [...byConfig.values()];
   for (const report of out) sortRows(report.rows);
+  // Empty means the build published no replay — the state clone.ts is about to
+  // change — so it is deliberately not banked. See the header.
+  if (out.length > 0) {
+    if (publishedMemo.size >= PUBLISHED_MEMO_MAX) {
+      publishedMemo.delete(publishedMemo.keys().next().value as string);
+    }
+    publishedMemo.set(userId, out);
+  }
   return out;
 }
