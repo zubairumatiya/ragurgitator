@@ -385,7 +385,8 @@ export async function getChunkOverridePieces(
         token_end: number | null;
       }[]
     >`
-      select model, kind, text, dimension, embedding, token_start, token_end
+      select model, kind, text, dimension, embedding::real[] as embedding,
+             token_start, token_end
       from config_chunk_overrides
       where config_id = ${cfg.id} and source_chunk_id = ${sourceChunkId}
       order by piece_index
@@ -430,7 +431,7 @@ export async function overrideEmbeddings(
   const only =
     chunkIds === undefined ? sql`` : sql`and source_chunk_id = any(${chunkIds}::uuid[])`;
   const rows = await sql<{ source_chunk_id: string; embedding: number[] }[]>`
-    select source_chunk_id, embedding
+    select source_chunk_id, embedding::real[] as embedding
     from config_chunk_overrides
     where config_id = ${cfg.id} and model = ${model} ${only}
   `;
@@ -443,8 +444,11 @@ export async function overrideEmbeddings(
 // where the vectors already live — ~300 kB per query per model becomes ~1 kB.
 //
 // Three things this depends on, none of them incidental:
-//   • `embedding` is real[] (_float4), NOT pgvector, so BOTH sides need ::vector.
-//     The cast is exact — pgvector stores float4 too — not a re-encoding.
+//   • `embedding` IS pgvector since 0084 (it was real[], and both sides used to
+//     need a ::vector cast — 162 ms per call over 232 pieces, re-parsed on every
+//     scan). The query vector still arrives as a JS array, hence its own cast.
+//     Reads that want the raw floats back ask for ::real[]; that direction is
+//     exact, because pgvector stores float4 too.
 //   • The table carries btree indexes only (no HNSW), so `<=>` scans exactly the
 //     rows the JS loop scanned. Nothing here became ANN.
 //   • `<=>` requires equal dimensions, and `model = $2` is what guarantees that:
@@ -455,6 +459,33 @@ export async function overrideEmbeddings(
 // chunk's stored override with a hypothetical one, so its stored pieces must not
 // compete. It used to be a JS `.filter` after the download; in the where clause it
 // is free. scripts/fusion-equiv.ts replays both forms and asserts they agree.
+// overrideSims for a WHOLE BATCH of queries under one model. One statement for
+// what was one per question — see vectorStore.queryExcludingIdsBatch for why
+// that is the number that matters on a pinned connection.
+//
+// No `excludeChunkId`: the exclusion is the trial dry-run's, and a trial scores
+// ONE question against many rungs, which is the opposite shape. Batching is for
+// the eval scorer, where no chunk is excluded.
+export async function overrideSimsBatch(
+  model: string,
+  queryVectors: number[][],
+): Promise<Map<string, number>[]> {
+  if (queryVectors.length === 0) return [];
+  const cfg = activeConfig();
+  const literals = queryVectors.map((v) => `[${v.join(",")}]`);
+  const rows = await sql<{ i: string; source_chunk_id: string; sim: number }[]>`
+    select q.i, o.source_chunk_id,
+           max(1 - (o.embedding <=> q.v)) as sim
+    from unnest(${literals}::text[]::vector[]) with ordinality as q(v, i)
+    cross join config_chunk_overrides o
+    where o.config_id = ${cfg.id} and o.model = ${model}
+    group by q.i, o.source_chunk_id
+  `;
+  const out: Map<string, number>[] = queryVectors.map(() => new Map());
+  for (const r of rows) out[Number(r.i) - 1].set(r.source_chunk_id, Number(r.sim));
+  return out;
+}
+
 export async function overrideSims(
   model: string,
   queryVector: number[],
@@ -466,7 +497,7 @@ export async function overrideSims(
     : sql``;
   const rows = await sql<{ source_chunk_id: string; sim: number }[]>`
     select source_chunk_id,
-           max(1 - (embedding::vector <=> ${queryVector}::real[]::vector)) as sim
+           max(1 - (embedding <=> ${queryVector}::real[]::vector)) as sim
     from config_chunk_overrides
     where config_id = ${cfg.id} and model = ${model} ${exclude}
     group by source_chunk_id

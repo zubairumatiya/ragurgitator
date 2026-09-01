@@ -40,6 +40,7 @@ import {
   estimateTokensFromChars,
 } from "@/lib/rag/pricing";
 import { recordSaving, recordSpend } from "@/lib/rag/savingsStore";
+import { vectorLiteral } from "@/lib/rag/vectorStore";
 
 const uniq = (xs: string[]): string[] => [...new Set(xs)];
 
@@ -189,7 +190,7 @@ async function readPersisted(
 
   try {
     const rows = await sql<{ text_hash: string; embedding: number[] }[]>`
-      select text_hash, embedding
+      select text_hash, embedding::real[] as embedding
       from embedding_cache
       where user_id = ${userId}
         and model = ${model} and input_kind = ${kind}
@@ -259,7 +260,11 @@ async function writePersisted(
       input_kind: kind,
       text_hash: hashText(text),
       dimension: vector.length,
-      embedding: vector,
+      // pgvector's text form since 0084 — the column is `vector`, and a JS array
+      // reaches the server as '{...}', which vector_in rejects ("contents must
+      // start with ["). Same literal the chunks tables have always been written
+      // with (vectorStore.vectorLiteral).
+      embedding: vectorLiteral(vector),
     }));
     try {
       await isolated(

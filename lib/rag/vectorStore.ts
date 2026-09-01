@@ -343,6 +343,121 @@ export async function queryExcludingIds(
   }));
 }
 
+// query() for a WHOLE BATCH — the baseline leg's twin of queryExcludingIdsBatch.
+// Same rows, same order, text included, one statement. The eval scorer's
+// no-override BASELINE measurement (0057) runs this once per question, and on a
+// pinned connection that was 60 sequential round trips for one ticker.
+export async function queryBatch(
+  vectors: number[][],
+  topK: number,
+): Promise<RetrievedChunk[][]> {
+  if (vectors.length === 0) return [];
+  const cfg = activeConfig();
+  const literals = vectors.map(vectorLiteral);
+
+  const rows = await sql.begin(async (tx) => {
+    await tx.unsafe(`set local hnsw.ef_search = ${EF_SEARCH}`);
+    return tx<
+      {
+        i: string;
+        id: string;
+        document_id: string;
+        position: number;
+        text: string;
+        score: number;
+      }[]
+    >`
+      select q.i, c.id, c.document_id, c.position, c.text,
+             1 - (c.embedding <=> q.v) as score
+      from unnest(${literals}::text[]::vector[]) with ordinality as q(v, i)
+      cross join lateral (
+        select id, document_id, position, text, embedding
+        from ${tx(cfg.chunksTable)}
+        where config_id = ${cfg.id}
+        order by embedding <=> q.v
+        limit ${topK}
+      ) c
+    `;
+  });
+
+  const out: RetrievedChunk[][] = vectors.map(() => []);
+  for (const r of rows) {
+    out[Number(r.i) - 1].push({
+      score: Number(r.score),
+      chunk: {
+        embedding: [],
+        chunk: {
+          id: r.id,
+          documentId: r.document_id,
+          text: r.text,
+          position: r.position,
+        },
+      },
+    });
+  }
+  return out;
+}
+
+// queryExcludingIds for a WHOLE BATCH of queries — one statement, one round trip,
+// the same rows.
+//
+// WHY IT EXISTS, and it is not "SQL is faster". Every store call inside a request
+// scope runs on the ONE connection that scope's transaction pins (lib/db.ts), so
+// N per-question reads are strictly sequential no matter how many workers the
+// caller wraps around them — the same argument embedCache.embedQueriesCached
+// makes about the key-model sweep, applied to retrieval. Measured on the fusion
+// path (scripts/fusion-timing.ts): a base ANN costs ~6 ms of server time and
+// ~265 ms of wall, and a 60-question re-score paid that 60 times.
+//
+// IDENTICAL ROWS, DELIBERATELY. Same filter, same exclusion, same distance, same
+// ef_search, same limit — only the query vector varies, and it varies through a
+// LATERAL so each query gets its own ordered top-N rather than a shared one. The
+// caller gets back one list per input vector, IN INPUT ORDER, so a batched call
+// and N single calls are interchangeable; scripts/fusion-equiv.ts and
+// fusion-replay both replay the merged ranks that come out of them.
+//
+// Egress is unchanged (the same N x limit rows cross the wire either way) and so
+// is the work Postgres does; what collapses is the round trips.
+export async function queryExcludingIdsBatch(
+  vectors: number[][],
+  limit: number,
+  excludeIds: string[],
+): Promise<RetrievedChunk[][]> {
+  if (vectors.length === 0) return [];
+  const cfg = activeConfig();
+  // text[] -> vector[] rather than a vector[] parameter: postgres.js has no
+  // pgvector type, and the array I/O cast is exact (pgvector parses '[x,y,z]').
+  const literals = vectors.map(vectorLiteral);
+
+  const rows = await sql.begin(async (tx) => {
+    await tx.unsafe(`set local hnsw.ef_search = ${EF_SEARCH}`);
+    return tx<{ i: string; id: string; score: number }[]>`
+      select q.i, c.id, 1 - (c.embedding <=> q.v) as score
+      from unnest(${literals}::text[]::vector[]) with ordinality as q(v, i)
+      cross join lateral (
+        select id, embedding
+        from ${tx(cfg.chunksTable)}
+        where config_id = ${cfg.id}
+          and not (id = any(${excludeIds}::uuid[]))
+        order by embedding <=> q.v
+        limit ${limit}
+      ) c
+    `;
+  });
+
+  // `with ordinality` numbers from 1 and the lateral preserves each query's own
+  // ordering within its group, so appending in row order rebuilds each list
+  // exactly as the single-query form returned it.
+  const out: RetrievedChunk[][] = vectors.map(() => []);
+  for (const r of rows) {
+    out[Number(r.i) - 1].push({
+      score: Number(r.score),
+      chunk: { embedding: [], chunk: { id: r.id, documentId: "", text: "", position: 0 } },
+    });
+  }
+  return out;
+}
+
 // One pooled candidate's competitor sim under a FOREIGN override model, computed
 // in Postgres (docs/demo-egress-plan.md §1.2).
 //
@@ -377,6 +492,12 @@ export type PoolDocSim = {
 // The cosine is pgvector's, against a float4 rendering of the query vector — the
 // same arithmetic overrideStore.overrideSims already does, and measured against
 // the JS path at ~1e-7 (scripts/fusion-equiv.ts).
+//
+// `ec.embedding` carries NO ::vector cast, and that is the whole of 0084: while
+// the column was real[] this statement re-parsed every pooled row into a vector
+// datum on every scan — 348 ms over 515 rows, of which ~265 ms was the cast,
+// paid once per question per delegate model. The same rows stored as `vector`
+// cosine in 3.7 ms. Putting the cast back would silently restore a ~90x cost.
 export async function poolDocSims(
   ids: string[],
   model: string,
@@ -398,7 +519,7 @@ export async function poolDocSims(
       p.id,
       p.text_hash as text_hash,
       p.text_len as text_len,
-      1 - (ec.embedding::vector <=> ${modelVec}::vector) as msim
+      1 - (ec.embedding <=> ${modelVec}::vector) as msim
     from (
       select id,
              encode(sha256(text::bytea), 'hex') as text_hash,
@@ -425,6 +546,68 @@ export async function poolDocSims(
       },
     ]),
   );
+}
+
+// poolDocSims for a WHOLE BATCH of queries under ONE model — the batched twin,
+// for the same round-trip reason queryExcludingIdsBatch exists.
+//
+// THE POOL IS THE UNION, NOT PER QUERY, and that is a deliberate widening: each
+// question's pool is its own ~200 base candidates, but they are all drawn from
+// one config's chunks, so asking for the union once and letting the caller read
+// back only its own ids returns a superset that the caller narrows EXACTLY as
+// before. Membership per question is therefore untouched — which matters,
+// because membership decides merged ranks (retriever.foreignCompetitorSims) and
+// a change there is a FUSION_VERSION bump.
+//
+// Rows are (query, chunk) pairs, so this is |union| x |queries| rather than
+// |pool| x |queries| — on a corpus whose pools overlap (they always do; they are
+// the same ANN over the same chunks) that is the same order of egress the
+// per-question calls already paid, and never more than the corpus x the batch.
+export async function poolDocSimsBatch(
+  ids: string[],
+  model: string,
+  modelVectors: number[][],
+): Promise<Map<string, PoolDocSim>[]> {
+  if (ids.length === 0 || modelVectors.length === 0) return modelVectors.map(() => new Map());
+  const cfg = activeConfig();
+  const userId = activeUserId();
+  const literals = modelVectors.map(vectorLiteral);
+
+  const rows = await sql<
+    { i: string; id: string; text_hash: string; text_len: number; msim: string | null }[]
+  >`
+    select
+      q.i,
+      p.id,
+      p.text_hash as text_hash,
+      p.text_len as text_len,
+      1 - (ec.embedding <=> q.v) as msim
+    from unnest(${literals}::text[]::vector[]) with ordinality as q(v, i)
+    cross join (
+      select id,
+             encode(sha256(text::bytea), 'hex') as text_hash,
+             char_length(text) as text_len
+      from ${sql(cfg.chunksTable)}
+      where config_id = ${cfg.id}
+        and id = any(${ids}::uuid[])
+    ) p
+    left join embedding_cache ec
+      on ec.user_id = ${userId}
+     and ec.model = ${model}
+     and ec.input_kind = 'document'
+     and ec.text_hash = p.text_hash
+  `;
+
+  const out: Map<string, PoolDocSim>[] = modelVectors.map(() => new Map());
+  for (const r of rows) {
+    out[Number(r.i) - 1].set(r.id, {
+      id: r.id,
+      textHash: r.text_hash,
+      textLen: Number(r.text_len),
+      msim: r.msim === null ? null : Number(r.msim),
+    });
+  }
+  return out;
 }
 
 // Base-space embeddings for a set of chunk ids in the active config — for

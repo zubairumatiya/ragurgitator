@@ -30,6 +30,7 @@ import { sameVectorSpace } from "../../lib/rag/embeddingModels";
 import {
   buildRetrievalContext,
   fuseWithOverrides,
+  prefetchRetrieval,
   retrieveWithCutoffs,
 } from "../../lib/rag/retriever";
 import { listOverrides, overrideSims } from "../../lib/rag/overrideStore";
@@ -86,7 +87,7 @@ async function bank(kind: "query" | "document", model: string, text: string, vec
   await admin`
     insert into embedding_cache (user_id, model, input_kind, text_hash, dimension, embedding)
     values (${user.id}, ${model}, ${kind}, ${sha256(text)}, ${vec.length},
-            ${`{${vec.join(",")}}`})
+            ${`{${vec.join(",")}}`}::real[])
     on conflict do nothing`;
 }
 
@@ -210,8 +211,8 @@ describe("the deep fusion pool", () => {
   });
 
   describe("with a FOREIGN-space override", () => {
-    // 4 dims: config_chunk_overrides.embedding and embedding_cache.embedding are
-    // untyped real[], so the foreign lane can use a width a human can read.
+    // 4 dims: both vector columns are untyped `vector` (0084), so the foreign
+    // lane can use a width a human can read.
     const FDIM = 4;
     // The deeper candidates' cosines under the foreign model. c2 is the STRONGEST
     // competitor in this space — deliberately, because if the deeper rows were
@@ -259,6 +260,79 @@ describe("the deep fusion pool", () => {
       assert.ok(
         Math.abs(cutoffs.models[FOREIGN_MODEL] - 0.3) < 1e-6,
         `expected the 2nd-strongest of four competitors (0.3), got ${cutoffs.models[FOREIGN_MODEL]}`,
+      );
+    });
+
+    // The batched reads (docs/fusion-latency-plan.md §3) exist to remove round
+    // trips, so the ONE thing worth asserting about them is that they remove
+    // nothing else. This is the foreign fixture on purpose: it is the shape with
+    // a pool read, a query-vector read and an override-sims read per question,
+    // i.e. everything a prefetch replaces.
+    it("prefetching a batch changes no answer", async () => {
+      const k = 2;
+      // Through retrieveWithCutoffs the paid pool is the config's default (50),
+      // not the 2 the cutoff test passes explicitly — so EVERY chunk is inside
+      // it, and the one the fixture deliberately leaves uncached would be
+      // BOUGHT. Bank it: this test is about the prefetch, not about the paid
+      // boundary, and a provider call here would fail the run rather than
+      // measure anything.
+      await bank("document", FOREIGN_MODEL, TEXT(3), atCosine(0.05, FDIM));
+      const both = await inScope(async () => {
+        const cold = await buildRetrievalContext();
+        const warm = await buildRetrievalContext();
+        await prefetchRetrieval(warm, [{ text: QUESTION, vector: E0(DIM) }], k);
+        return {
+          cold: await retrieveWithCutoffs(QUESTION, E0(DIM), k, cold),
+          warm: await retrieveWithCutoffs(QUESTION, E0(DIM), k, warm),
+        };
+      });
+
+      assert.deepEqual(
+        both.warm.retrieved.map((r) => r.chunk.chunk.id),
+        both.cold.retrieved.map((r) => r.chunk.chunk.id),
+      );
+      assert.deepEqual(
+        both.warm.retrieved.map((r) => r.score),
+        both.cold.retrieved.map((r) => r.score),
+      );
+      // The cutoffs are STORED with the eval result and the dirty screen reasons
+      // over them (0028), so a prefetch that moved one would be a silent
+      // correctness change, not a performance one.
+      assert.deepEqual(both.warm.cutoffs, both.cold.cutoffs);
+    });
+
+    it("prefetches the pool as a UNION and each question still reads its own", async () => {
+      // Two questions whose pools differ is the case the union could get wrong:
+      // poolDocSimsBatch asks for every id either question pooled, and each
+      // question must still see exactly the sims its own pool implies. Same
+      // question twice would not exercise it, so the second is a different
+      // query vector over the same corpus.
+      const k = 2;
+      const other = "a second wording";
+      await bank("query", FOREIGN_MODEL, other, E0(FDIM));
+      await bank("document", FOREIGN_MODEL, TEXT(3), atCosine(0.05, FDIM));
+
+      const out = await inScope(async () => {
+        const cold = await buildRetrievalContext();
+        const warm = await buildRetrievalContext();
+        await prefetchRetrieval(
+          warm,
+          [
+            { text: QUESTION, vector: E0(DIM) },
+            { text: other, vector: E0(DIM) },
+          ],
+          k,
+        );
+        return {
+          cold: await retrieveWithCutoffs(other, E0(DIM), k, cold),
+          warm: await retrieveWithCutoffs(other, E0(DIM), k, warm),
+        };
+      });
+
+      assert.deepEqual(out.warm.cutoffs, out.cold.cutoffs);
+      assert.deepEqual(
+        out.warm.retrieved.map((r) => r.chunk.chunk.id),
+        out.cold.retrieved.map((r) => r.chunk.chunk.id),
       );
     });
   });

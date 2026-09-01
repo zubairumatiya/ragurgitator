@@ -189,7 +189,9 @@ const PATTERNS: Pattern[] = [
     key: "doc_vectors",
     label: "doc vectors  (cachedDocVectors: a vector per free candidate)",
     width: "cacheVec",
-    ilike: ["select text_hash, embedding from embedding_cache%"],
+    // 0084 made the column pgvector, so the read asks for ::real[] by name;
+    // pg_stat_statements keeps the projection verbatim, so match on that.
+    ilike: ["select text_hash, embedding::real[] as embedding from embedding_cache%"],
     headline: true,
   },
   {

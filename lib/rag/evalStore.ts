@@ -1047,7 +1047,7 @@ export async function screenSims(
       ? await sql<{ question_id: string; chunk_id: string; sim: string }[]>`
           select qe.eval_question_id as question_id,
                  o.source_chunk_id as chunk_id,
-                 max(1 - (o.embedding::vector <=> qe.embedding::vector)) as sim
+                 max(1 - (o.embedding <=> qe.embedding::vector)) as sim
           from eval_question_embeddings qe
           join config_chunk_overrides o
             on o.config_id = ${cfg.id}
@@ -1060,7 +1060,7 @@ export async function screenSims(
       : await sql<{ question_id: string; chunk_id: string; sim: string }[]>`
           select q.id as question_id,
                  o.source_chunk_id as chunk_id,
-                 max(1 - (o.embedding::vector <=> ec.embedding::vector)) as sim
+                 max(1 - (o.embedding <=> ec.embedding)) as sim
           from eval_questions q
           join embedding_cache ec
             on ec.user_id = ${activeUserId()}

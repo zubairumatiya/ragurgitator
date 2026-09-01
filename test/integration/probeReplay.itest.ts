@@ -90,7 +90,7 @@ async function seedEmbedding(text: string, vector: number[]) {
   await admin`
     insert into embedding_cache (user_id, model, input_kind, text_hash, dimension, embedding)
     values (${alice.id}, ${KEY_MODEL}, 'query', ${sha256(text)}, ${vector.length},
-            ${`{${vector.join(",")}}`})
+            ${`{${vector.join(",")}}`}::real[])
     on conflict do nothing`;
 }
 

@@ -66,7 +66,8 @@ const sha256 = (t: string) => createHash("sha256").update(t, "utf8").digest("hex
 
 // TWO VECTOR WIDTHS, and the split is forced by the schema rather than chosen.
 //
-// semantic_cache.query_vector and embedding_cache.embedding are untyped real[],
+// semantic_cache.query_vector is untyped real[] (embedding_cache.embedding became
+// pgvector in 0084),
 // so the cache path can use four readable dimensions exactly as
 // semanticCache.itest.ts does — and no provider is ever called, because
 // embedQueryCached finds the seeded row first.
@@ -98,7 +99,7 @@ async function seedEmbedding(userId: string, text: string) {
   await admin`
     insert into embedding_cache (user_id, model, input_kind, text_hash, dimension, embedding)
     values (${userId}, ${KEY_MODEL}, 'query', ${sha256(text)}, ${V.length},
-            ${`{${V.join(",")}}`})
+            ${`{${V.join(",")}}`}::real[])
     on conflict do nothing`;
 }
 
@@ -1844,7 +1845,7 @@ describe("cloneSeedWorkspace delegate vectors", () => {
   async function cacheRow(userId: string, model: string, kind: string, text: string) {
     await admin`
       insert into embedding_cache (user_id, model, input_kind, text_hash, dimension, embedding)
-      values (${userId}, ${model}, ${kind}, ${sha256(text)}, ${V.length}, ${`{${V.join(",")}}`})
+      values (${userId}, ${model}, ${kind}, ${sha256(text)}, ${V.length}, ${`{${V.join(",")}}`}::real[])
       on conflict do nothing`;
   }
 

@@ -27,6 +27,7 @@ import {
   cosine,
   diskDocVectorsByHash,
   embedDocsCached,
+  embedQueriesCached,
   embedQueryCached,
   meterEmbedHitsByChars,
   meterEmbeds,
@@ -36,13 +37,18 @@ import { sameVectorSpace } from "@/lib/rag/embeddingModels";
 import {
   listOverrides,
   overrideSims,
+  overrideSimsBatch,
   type ChunkOverride,
 } from "@/lib/rag/overrideStore";
 import {
   poolDocSims,
+  poolDocSimsBatch,
   query,
+  queryBatch,
   queryExcludingIds,
+  queryExcludingIdsBatch,
   resolveChunks,
+  type PoolDocSim,
 } from "@/lib/rag/vectorStore";
 import type { RetrievedChunk } from "@/types/rag";
 
@@ -107,11 +113,63 @@ export type SimsFor = (
   text: string,
 ) => Promise<Map<string, number>>;
 
+// The foreign lane's competitor sims for ONE query, by chunk id. Same signature
+// as vectorStore.poolDocSims plus the query text, which is only a memo key — the
+// (model, text) pair determines `qv` exactly as it does for SimsFor.
+export type PoolSimsFor = (
+  ids: string[],
+  model: string,
+  qv: number[],
+  text: string,
+) => Promise<Map<string, PoolDocSim>>;
+
+// The base lane's ANN for ONE query. `text` is the memo key; everything else is
+// what queryExcludingIds takes.
+export type AnnFor = (
+  text: string,
+  vector: number[],
+  deepN: number,
+  excludeIds: string[],
+) => Promise<RetrievedChunk[]>;
+
 export type RetrievalContext = {
   overrides: ChunkOverride[];
   simsFor: SimsFor;
   // Same cross-call caching as simsFor — see resolveCached below.
   resolve: (ids: string[]) => Promise<Map<string, ChunkMeta>>;
+  // The two READS that scale with the batch rather than with the query. Both are
+  // plain pass-throughs to the single-query store call until prefetchRetrieval
+  // has filled their memo — so a context that never prefetches behaves exactly
+  // as it did before this existed, one round trip at a time.
+  poolSimsFor: PoolSimsFor;
+  annFor: AnnFor;
+  // The no-override fast path's read (the eval scorer's BASELINE leg), memoized
+  // on the same terms.
+  fullFor: (text: string, vector: number[], k: number) => Promise<RetrievedChunk[]>;
+  // The foreign lane's QUERY VECTOR under an override model. Memoized because
+  // embedQueryCached is not free even on a hit: it books the avoided embed on
+  // the savings ledger, which is a WRITE, once per question per model. A batch
+  // that prefetched these already metered exactly those texts under exactly that
+  // model (embedQueriesCached), so paying again per question would double-count
+  // the saving as well as the round trip.
+  queryVectorFor: (text: string, model: string) => Promise<number[]>;
+  // Filled by prefetchRetrieval; the accessors above read it. Exposed on the
+  // type because prefetchRetrieval is a free function, not a method.
+  readonly memo: PrefetchMemo;
+  // simsFor's memo is a private Map of PROMISES, so a prefetched answer is
+  // planted through here rather than by writing to `memo` — same key, already
+  // resolved, so the next simsFor call is a memo hit and never a read.
+  seedSims: (model: string, text: string, sims: Map<string, number>) => void;
+};
+
+// The prefetched answers, keyed by what the accessor was asked for. A miss is
+// not an error — it means this question was not in the prefetched batch (or
+// nothing prefetched at all), and the accessor falls through to the store.
+export type PrefetchMemo = {
+  ann: Map<string, RetrievedChunk[]>;
+  full: Map<string, RetrievedChunk[]>;
+  pool: Map<string, Map<string, PoolDocSim>>;
+  qv: Map<string, number[]>;
 };
 
 // A sim is QUERY-dependent, so the cross-call cache that used to hold one entry
@@ -155,8 +213,15 @@ export async function buildRetrievalContext(
 ): Promise<RetrievalContext> {
   const overrides = await listOverrides();
   const simCache = new Map<string, Promise<Map<string, number>>>();
+  const memo: PrefetchMemo = {
+    ann: new Map(),
+    full: new Map(),
+    pool: new Map(),
+    qv: new Map(),
+  };
   return {
     overrides,
+    memo,
     simsFor: (model, qv, text) => {
       const key = `${model}\0${text}`;
       let p = simCache.get(key);
@@ -165,6 +230,36 @@ export async function buildRetrievalContext(
         simCache.set(key, p);
       }
       return p;
+    },
+    // Prefetched or not, the ANSWER is the same rows; only the number of round
+    // trips differs. Keyed on the text alone because a context is built under
+    // one override state and one config, which is what `deepN`/`excludeIds`
+    // derive from — the same reasoning simsFor's key rests on.
+    annFor: (text, vector, deepN, excludeIds) => {
+      const hit = memo.ann.get(text);
+      if (hit) return Promise.resolve(hit);
+      return queryExcludingIds(vector, deepN, excludeIds);
+    },
+    fullFor: (text, vector, k) => {
+      const hit = memo.full.get(text);
+      if (hit) return Promise.resolve(hit);
+      return query(vector, k);
+    },
+    queryVectorFor: (text, model) => {
+      const hit = memo.qv.get(`${model}\0${text}`);
+      if (hit) return Promise.resolve(hit);
+      return embedQueryCached(text, model);
+    },
+    seedSims: (model, text, sims) => {
+      simCache.set(`${model}\0${text}`, Promise.resolve(sims));
+    },
+    poolSimsFor: (ids, model, qv, text) => {
+      const hit = memo.pool.get(`${model}\0${text}`);
+      // The prefetched map covers the union of the batch's pools, so a caller's
+      // own ids are a subset of it — narrowing is the caller's job (it reads by
+      // id), exactly as it was with a per-question read.
+      if (hit) return Promise.resolve(hit);
+      return poolDocSims(ids, model, qv);
     },
     resolve: async (ids) => {
       if (ids.length === 0) return new Map();
@@ -190,6 +285,100 @@ export async function buildRetrievalContext(
       return out;
     },
   };
+}
+
+// PREFETCH A WHOLE BATCH OF QUESTIONS INTO ONE CONTEXT.
+//
+// THE PROBLEM IT SOLVES is round trips, not arithmetic. Every store call inside a
+// request scope runs on the one connection that scope's transaction pins
+// (lib/db.ts), so the eval scorer's four workers do not overlap their reads —
+// they queue. Measured on the fusion path before this existed
+// (scripts/fusion-timing.ts, 60 questions, 4 override models, 3 of them foreign):
+//
+//   per question   1 base ANN + 3 query-vector reads + 4 overrideSims
+//                  + 3 poolDocSims + 1 baseline ANN  ~= 12 statements
+//   wall           221.6 s, of which ~7 ms per statement was server time
+//
+// Roughly 780 sequential round trips to compute ~9 s of work. This collapses
+// them to a handful of batched statements — one per model per leg — leaving the
+// per-question path to read them out of a memo.
+//
+// IT CHANGES NO ANSWER. Every batched read returns the same rows as the
+// per-question read it replaces (see the batch functions' own headers), and a
+// question that is NOT in the memo still falls through to the store call. So
+// this is not a FUSION_VERSION concern: nothing about the candidate set, the
+// merge, or the arithmetic moves. scripts/fusion-equiv.ts and
+// scripts/fusion-replay.ts are the two checks that hold it to that.
+//
+// BEST EFFORT, ALWAYS. A prefetch is an optimisation; if one of these statements
+// fails, the ordinary path is still correct and still there. So a failure warns
+// and leaves the memo empty rather than failing a re-score that would otherwise
+// have worked.
+//
+// SPEND IS UNCHANGED. The only leg that can cost money is the override models'
+// query vectors, and it is the same texts under the same models the per-question
+// path would have embedded — through embedQueriesCached, which meters hits and
+// misses exactly as embedQueryCached does, once for the batch instead of per
+// question.
+export async function prefetchRetrieval(
+  ctx: RetrievalContext,
+  questions: { text: string; vector: number[] }[],
+  depth: number,
+  // The baseline leg (0057) reads the no-override path for the same questions;
+  // pass its k to prefetch that too. Omitted = no baseline prefetch.
+  baselineK?: number,
+): Promise<void> {
+  if (questions.length === 0) return;
+  const cfg = activeConfig();
+  const texts = questions.map((q) => q.text);
+  const vectors = questions.map((q) => q.vector);
+
+  try {
+    if (ctx.overrides.length > 0) {
+      const overriddenIds = ctx.overrides.map((o) => o.sourceChunkId);
+      const models = [...new Set(ctx.overrides.map((o) => o.model))];
+      const paidN = effectiveFusionPool(depth);
+      const deepN = Math.max(paidN * FUSION_DEEP_FACTOR, FUSION_DEEP_FLOOR);
+
+      const lists = await queryExcludingIdsBatch(vectors, deepN, overriddenIds);
+      texts.forEach((t, i) => ctx.memo.ann.set(t, lists[i]));
+
+      for (const model of models) {
+        const isBaseSpace = sameVectorSpace(model, cfg.embeddingModel);
+        // One read for the batch's query vectors under this model — and it warms
+        // the same L1 the per-question embedQueryCached reads, so the fusion
+        // lane finds them in memory rather than asking again.
+        const qVecs = isBaseSpace
+          ? new Map(texts.map((t, i) => [t, vectors[i]]))
+          : await embedQueriesCached(texts, model);
+        const ordered = texts.map((t, i) => qVecs.get(t) ?? vectors[i]);
+        if (!isBaseSpace) {
+          texts.forEach((t, i) => ctx.memo.qv.set(`${model}\0${t}`, ordered[i]));
+        }
+
+        // simsFor memoizes on first call, so the batched answer is planted in
+        // that memo directly — letting the per-question call reach the database
+        // is exactly what this is here to stop.
+        const sims = await overrideSimsBatch(model, ordered);
+        texts.forEach((t, i) => ctx.seedSims(model, t, sims[i]));
+
+        if (!isBaseSpace) {
+          // The union of the batch's pools — every id any of these ANN lists
+          // produced. Each question still reads back only its own.
+          const union = [...new Set(lists.flatMap((l) => l.map((rc) => rc.chunk.chunk.id)))];
+          const pools = await poolDocSimsBatch(union, model, ordered);
+          texts.forEach((t, i) => ctx.memo.pool.set(`${model}\0${t}`, pools[i]));
+        }
+      }
+    }
+
+    if (baselineK !== undefined) {
+      const base = await queryBatch(vectors, baselineK);
+      texts.forEach((t, i) => ctx.memo.full.set(t, base[i]));
+    }
+  } catch (err) {
+    console.warn(`[rag:retriever] batch prefetch failed, falling back to per-question reads: ${(err as Error).message}`);
+  }
 }
 
 export async function retrieve(question: string): Promise<RetrievedChunk[]> {
@@ -229,8 +418,12 @@ async function foreignCompetitorSims(
   paidN: number,
   model: string,
   qv: number[],
+  // The pool read, so a batch-prefetched context can answer it from memo. The
+  // default is the store call this used to make unconditionally.
+  poolSimsFor: PoolSimsFor,
+  text: string,
 ): Promise<number[]> {
-  const sims = await poolDocSims(ids, model, qv);
+  const sims = await poolSimsFor(ids, model, qv, text);
 
   // Split the database's misses at the paid boundary before doing anything about
   // them, so each tier's fallback is asked for its own rows and only those.
@@ -313,6 +506,14 @@ export async function fuseWithOverrides(
   // because the caller knows the lifetime: one chunk's search, during which no
   // override is persisted. Live retrieval passes nothing.
   annCache?: Map<string, RetrievedChunk[]>,
+  // The two reads a batch can prefetch. Live retrieval passes the context's
+  // memoized accessors; a trial dry-run passes nothing and every read is a store
+  // call, exactly as before.
+  lanes?: {
+    poolSimsFor?: PoolSimsFor;
+    annFor?: AnnFor;
+    queryVectorFor?: (text: string, model: string) => Promise<number[]>;
+  },
 ): Promise<{
   merged: FusedCandidate[];
   meta: Map<string, { documentId: string; position: number; text: string }>;
@@ -345,7 +546,11 @@ export async function fuseWithOverrides(
     ? `${text}\0${deepN}\0${[...overriddenIds].sort().join(",")}`
     : null;
   const cachedAnn = annKey !== null ? annCache!.get(annKey) : undefined;
-  const baseChunks = cachedAnn ?? (await queryExcludingIds(baseVector, deepN, overriddenIds));
+  const baseChunks =
+    cachedAnn ??
+    (await (lanes?.annFor
+      ? lanes.annFor(text, baseVector, deepN, overriddenIds)
+      : queryExcludingIds(baseVector, deepN, overriddenIds)));
   if (annKey !== null && cachedAnn === undefined) annCache!.set(annKey, baseChunks);
   // `meta` therefore starts EMPTY, always: retrieveForQuery's resolveChunks
   // fallback fills the topK that survive — the same path override winners have
@@ -372,7 +577,11 @@ export async function fuseWithOverrides(
   // FUSION_VERSION (overrideStore.ts).
   for (const model of models) {
     const isBaseSpace = sameVectorSpace(model, cfg.embeddingModel);
-    const qv = isBaseSpace ? baseVector : await embedQueryCached(text, model);
+    const qv = isBaseSpace
+      ? baseVector
+      : await (lanes?.queryVectorFor
+          ? lanes.queryVectorFor(text, model)
+          : embedQueryCached(text, model));
     // max-cosine over the model's pieces, grouped by source chunk. Computed in
     // Postgres now rather than by downloading every piece vector — same
     // arithmetic, ~300 kB less on the wire (docs/fusion-egress-plan.md §1.1).
@@ -393,6 +602,8 @@ export async function fuseWithOverrides(
         paidN,
         model,
         qv,
+        lanes?.poolSimsFor ?? ((ids, m, v) => poolDocSims(ids, m, v)),
+        text,
       );
     }
 
@@ -468,7 +679,7 @@ export async function retrieveWithCutoffs(
   // deep is null (no fusion pools existed) and the base cutoff is simply the
   // k-th retrieved score.
   if (overrides.length === 0) {
-    const retrieved = await query(baseVector, k);
+    const retrieved = ctx ? await ctx.fullFor(text, baseVector, k) : await query(baseVector, k);
     return {
       retrieved,
       cutoffs: {
@@ -488,6 +699,15 @@ export async function retrieveWithCutoffs(
     k,
     overrides,
     ctx?.simsFor ?? ((model, qv) => overrideSims(model, qv)),
+    undefined,
+    undefined,
+    ctx
+      ? {
+          poolSimsFor: ctx.poolSimsFor,
+          annFor: ctx.annFor,
+          queryVectorFor: ctx.queryVectorFor,
+        }
+      : undefined,
   );
   const top = merged.slice(0, k);
 

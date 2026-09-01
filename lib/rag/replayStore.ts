@@ -222,7 +222,7 @@ async function cachedVectors(
   if (texts.length === 0) return new Map();
   const hashes = texts.map(sha256);
   const rows = await sql<{ text_hash: string; embedding: number[] }[]>`
-    select text_hash, embedding
+    select text_hash, embedding::real[] as embedding
     from embedding_cache
     where user_id = ${activeUserId()}
       and model = ${model} and input_kind = ${kind} and text_hash = any(${hashes})

@@ -59,6 +59,7 @@ import { screenStoredResult, type ChangedChunkSims } from "@/lib/rag/dirtyScreen
 import { stitchChunks } from "@/lib/rag/reconstruct";
 import {
   buildRetrievalContext,
+  prefetchRetrieval,
   fuseWithOverrides,
   retrieveWithCutoffs,
   type SimsFor,
@@ -603,6 +604,24 @@ export async function scoreQuestions(
   const haveBaseline = baselineCtx
     ? await labelsWithBaseline(questions.map((q) => q.labelId))
     : new Set<string>();
+
+  // ONE SET OF READS FOR THE WHOLE BATCH, before any worker starts. Every store
+  // call in this scope shares one pinned connection (lib/db.ts), so the four
+  // workers below do not overlap their reads — they queue behind each other.
+  // Prefetching turns ~12 statements per question into a handful for the batch;
+  // it changes no answer, and a question it could not cover (no cached vector,
+  // or a failed statement) still takes the ordinary per-question path.
+  // docs/fusion-latency-plan.md §3.
+  await prefetchRetrieval(
+    ctx,
+    questions
+      .filter((q) => cached.has(q.questionId))
+      .map((q) => ({ text: q.question, vector: cached.get(q.questionId)! })),
+    depth,
+    // The baseline leg reads the no-override path at the same depth — prefetch it
+    // only when this batch is actually going to measure one.
+    baselineCtx && questions.some((q) => !haveBaseline.has(q.labelId)) ? depth : undefined,
+  );
 
   const results: ResultInsert[] = new Array<ResultInsert>(questions.length);
   const baselineResults: ResultInsert[] = new Array<ResultInsert>(questions.length);

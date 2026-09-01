@@ -55,7 +55,7 @@ async function main() {
       insert into embedding_cache (user_id, model, input_kind, text_hash, dimension, embedding)
       select distinct on (cf.user_id, encode(sha256(c.text::bytea), 'hex'))
              cf.user_id, ${spec.id}, 'document', encode(sha256(c.text::bytea), 'hex'),
-             ${spec.dimension}, c.embedding::real[]
+             ${spec.dimension}, c.embedding
       from ${sql(table)} c
       join document_embeddings de on de.id = c.document_embedding_id
       join configs cf on cf.id = de.config_id
