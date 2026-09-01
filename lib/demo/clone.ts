@@ -173,11 +173,19 @@ async function buildMap(
 //     override vector per query (~1.1 MB) — measured on the master, 2026-08-22.
 //     Without them every question is one ~12 KB ANN. Leaving this out is worth
 //     ~40x, and it is also what gives a visitor an untuned corpus to autotune.
-//   embedding_cache   107 MB live, and it exists to avoid paying to RE-embed.
-//     Guests cannot re-embed, so it would be pure storage for zero saving. ONE
-//     thing did read it — the full-corpus replay behind Appraise → Models — and
-//     the answer was to carry that measurement's RESULT rather than its inputs:
-//     17 rows against 107 MB. See step 5c.
+//   embedding_cache, ALL BUT A NAMED SCOPE — step 5k. The old entry here said
+//     "guests cannot re-embed, so it would be pure storage for zero saving",
+//     and that was measurably false: a guest's ⚙ Auto tune installs delegate
+//     overrides, retrieval then takes the fusion path, and foreignCompetitorSims
+//     needs the COMPETITOR's similarity for every chunk in the paid pool — in
+//     that model's vector space. Over a whole re-score the pools converge on the
+//     corpus, so two guests bought 744 vectors each on the operator's key and
+//     waited ~3 minutes for them. The scope 5k copies is pinned to the tuning
+//     shelf's own models, which is why it is ~3.6 MB and not 107.
+//     ONE OTHER THING reads this table — the full-corpus replay behind Appraise
+//     → Models — and that one still carries its measurement's RESULT rather than
+//     its inputs: 17 rows against 107 MB (step 5c). 5k's scope must not widen
+//     into it.
 //   replay_metrics IS cloned now — step 5c — and, like the shadow log below, it
 //     spent this demo's whole life in neither list. The plan's own bullet for the
 //     phase that fixed it named the wrong table (eval_model_trials, which the
@@ -245,6 +253,8 @@ export type CloneSummary = {
   bankedLlmRankings: number; // questions whose llm_rerank order "Add LLM nDCG rankings" replays
   bankedTuning: number; // board chunks whose autotune winner ⚙ Auto tune installs (step 5j)
   ledgerRows: number; // savings rows priced the payoff readout's money (step 5h)
+  cachedVectors: number; // delegate-space embeddings the re-score would re-buy (step 5k)
+  cachedVectorsWanted: number; // what a complete copy would have been — see step 5k
 };
 
 // THE PUBLISH OPTIONS — used by scripts/demo-snapshot.ts, never by a guest.
@@ -396,6 +406,13 @@ export async function cloneSeedWorkspace(
       // the copy below does not resolve, which is the quietest possible version
       // of that failure.
       await tx`delete from demo_replay where user_id = ${guestId}`;
+      // embedding_cache (step 5k) hangs off user_profiles alone for the same
+      // reason again — its key is CONTENT, not identity, which is the whole
+      // point of a cache that survives a re-ingest — so no cascade reaches it.
+      // Deleting here is what lets 5k be a plain insert: the last build's
+      // vectors are for passages this one may not contain, and a republish that
+      // left them would keep paying storage for text nothing can ask about.
+      await tx`delete from embedding_cache where user_id = ${guestId}`;
       await tx`delete from semantic_cache where user_id = ${guestId}`;
       await tx`delete from semantic_cache_thresholds where user_id = ${guestId}`;
       await tx`delete from documents where user_id = ${guestId}`;
@@ -1676,6 +1693,114 @@ export async function cloneSeedWorkspace(
        limit 1
     `;
 
+    // --- 5k. the delegate-space vectors, or the finale costs an hour ---------
+    //
+    // docs/demo-rescore-replay-plan.md. 5j hands a guest the master's autotune
+    // winners; several of them are `delegate → <another embedding model>`. With
+    // one installed, retrieval leaves the base ANN for the FUSION path, and
+    // foreignCompetitorSims (lib/rag/retriever.ts) needs the competitor's
+    // similarity for every chunk in the paid pool — in that model's space. Over
+    // a whole re-score the union of the pools converges on the corpus, so the
+    // guest embeds the ~218 chunks it never sees on a card, once per delegate
+    // model, at ~4s each. Measured 2026-09-01: 744 vectors, ~3 minutes, bought on
+    // the operator's Voyage key. A second press on the same workspace took 37s,
+    // for exactly one reason — the cache was warm. This step is arriving warm.
+    //
+    // WHY THIS COSTS NO EGRESS, which is what the plan's first draft got wrong
+    // and rejected the whole approach over. Supabase bills bytes leaving Postgres
+    // for the app server; this is `insert into … select … from …` like every
+    // other step here, so the wire carries the statement in and `INSERT 0 744`
+    // back. It costs STORAGE (~3.6 MB a guest, see lib/demo/config.ts) and no
+    // bandwidth, days after docs/demo-egress-plan.md cut a walk from 49.1 MB to
+    // 16.4 MB — a figure this does not touch.
+    //
+    // EXACT, not an approximation. Measured on the live database: of the 248
+    // hashes a guest computed under voyage-code-2, 248 already existed on the
+    // master under an identical (model, input_kind, text_hash). text_hash is
+    // content-addressed and the guest's corpus text IS the master's — reconfigure,
+    // ingest, override and tryModel are all blocked, so a guest cannot make a
+    // chunk the master lacks. Same key, byte for byte.
+    //
+    // THE SIMPLEST REPLAY-ADJACENT STEP IN THIS FILE, and the next reader will
+    // arrive expecting otherwise: there is no _map_chunk join and no id remap,
+    // because embedding_cache NAMES nothing. Its key is content. That is also why
+    // there is no `omit` — the table has no `id`, and copyRows reads its column
+    // list from information_schema, so a column added later travels by
+    // construction.
+    //
+    // SCOPED THREE WAYS, and the scope is the entire design:
+    //
+    //   1. MODELS — exactly the ones the tuning shelf names, read out of the
+    //      SOURCE's own banked payload, minus the config's own base model
+    //      (isBaseSpace short-circuits the foreign lane, and base vectors live in
+    //      the chunks table step 3 already copies). Self-limiting in the right
+    //      way: no shelf ⇒ no models ⇒ no copy, the same gate readTuning() imposes
+    //      on the replayed search itself. Pinned to the SHELF rather than to
+    //      "models this config has vectors for" so it can never widen into the
+    //      eleven-model sweep behind Appraise → Models.
+    //   2. DOCUMENT hashes — `_hash_scope`, which step 4e already built over the
+    //      cloned chunks. This is the single reason this step is short.
+    //   3. QUERY hashes — the wordings that TRAVELLED, read off the destination
+    //      rather than re-deriving step 4/4e's cap and dedupe. Read by
+    //      embedQueryCached in the fusion lane and by the dirty screen's
+    //      foreign-space branch (lib/rag/evalStore.ts), so dropping this half
+    //      would leave the screen paying per question.
+    await tx.unsafe(
+      `create temp table _qhash_scope (text_hash text primary key) on commit drop`,
+    );
+    // The labeled board, plus the bank "Add cached" hands out — a question a
+    // guest adds is a question the next re-score screens.
+    await tx.unsafe(
+      `insert into _qhash_scope (text_hash)
+       select distinct encode(sha256(convert_to(q.question, 'UTF8')), 'hex')
+         from eval_questions q join documents d on d.id = q.document_id
+        where d.user_id = $1
+       on conflict do nothing`,
+      [guestId] as never[],
+    );
+    await tx.unsafe(
+      `insert into _qhash_scope (text_hash)
+       select distinct encode(sha256(convert_to(s.question, 'UTF8')), 'hex')
+         from question_cache s
+        where s.user_id = $1
+       on conflict do nothing`,
+      [guestId] as never[],
+    );
+    await tx.unsafe(
+      `create temp table _cache_model (model text primary key) on commit drop`,
+    );
+    await tx.unsafe(
+      `insert into _cache_model (model)
+       select distinct e ->> 'model'
+         from demo_replay r, jsonb_array_elements(r.payload -> 'entries') e
+        where r.user_id = $1 and r.kind = 'tuning'
+          and e ->> 'model' is not null
+          and e ->> 'model' not in (select base_model from configs where user_id = $2)
+       on conflict do nothing`,
+      [seedId, guestId] as never[],
+    );
+    // What a COMPLETE copy would have been, so a short one is legible. The master
+    // is warm for every banked model today; one that was not would copy fewer
+    // rows and the guest would pay for the rest — today's behaviour, no
+    // regression, but silent. scripts/demo-snapshot warns on the gap.
+    const [{ count: cachedVectorsWanted }] = await tx.unsafe<{ count: number }[]>(
+      `select ((select count(*) from _cache_model)
+             * ((select count(*) from _hash_scope) + (select count(*) from _qhash_scope)))::int
+              as count`,
+      [] as never[],
+    );
+    const cachedVectors = await copyRows(tx, {
+      table: "embedding_cache",
+      joins: `join _cache_model cm on cm.model = s.model
+              left join _hash_scope h on h.text_hash = s.text_hash
+              left join _qhash_scope q on q.text_hash = s.text_hash`,
+      where: `s.user_id = $1
+              and ( (s.input_kind = 'document' and h.text_hash is not null)
+                 or (s.input_kind = 'query'    and q.text_hash is not null) )`,
+      overrides: { user_id: "$2" },
+      params: ids,
+    });
+
     // --- 5h. the savings ledger, so the payoff readout has money -------------
     //
     // Phase 6 of docs/demo-cache-replay-plan.md. `PayoffReadout` renders a hit
@@ -1814,6 +1939,8 @@ export async function cloneSeedWorkspace(
       bankedIdeals: rankingRows.count > 0 ? (bankedRankings?.ideals ?? 0) : 0,
       bankedLlmRankings: rankingRows.count > 0 ? (bankedRankings?.llm ?? 0) : 0,
       bankedTuning: tuningRows.count > 0 ? (bankedTuning?.chunks ?? 0) : 0,
+      cachedVectors,
+      cachedVectorsWanted,
       ledgerRows,
     };
   }) as Promise<CloneSummary>;

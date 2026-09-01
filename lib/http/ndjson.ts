@@ -44,9 +44,18 @@
 // AND SO IS THE KEY-USAGE BUFFER (lib/auth/keyUsageStore.ts), with a sharper
 // failure than either: the handler's buffer drains when the handler returns, which
 // here is immediately, so an inherited one is already spent and every row the
-// producer records lands in an array that will never be drained again. It gets a
-// fresh buffer rather than an exit, because ingest and eval are the heaviest
-// provider callers in the app and they are exactly what the coalescing is for.
+// producer records lands in an array that will never be drained again.
+//
+// It needs BOTH calls, and for a while it had only the second. withKeyUsageBuffer
+// is reentrant by design — a nested scope appends rather than draining its share
+// early — so on its own it saw the restored handler buffer, took the reentrant
+// branch, and installed nothing. Every provider call every streamed route made
+// went unrecorded, silently, because a buffer nobody drains cannot report a
+// failure. That is a spend control, not a counter: it is what the demo's
+// per-guest embedding budget is measured from, and a guest bought 744 embeddings
+// on the operator's key against a budget reading zero. runOutsideKeyUsageBuffer
+// exits the dead one so the fresh install below actually happens, and like the
+// other two it must live INSIDE the bind.
 //
 // The consequence to keep in mind: an ingest holds one pooled connection for the
 // entire ingest, not for each query in it.
@@ -67,7 +76,7 @@
 // another consumer.
 import { AsyncResource } from "node:async_hooks";
 
-import { withKeyUsageBuffer } from "@/lib/auth/keyUsageStore";
+import { runOutsideKeyUsageBuffer, withKeyUsageBuffer } from "@/lib/auth/keyUsageStore";
 import { activeUser, withUser } from "@/lib/auth/userScope";
 import { registerRun, isCancelled, unregisterRun } from "@/lib/http/cancelRegistry";
 import { runOutsideUserTransaction } from "@/lib/db";
@@ -95,11 +104,13 @@ export function ndjsonStream<E>(
           // restores the handler's buffer too, and that one drained the moment the
           // handler returned its Response — minutes before an ingest makes its
           // first embedding call — so every row the producer recorded would be
-          // pushed into an array nobody will ever read again. Installing a new one
-          // inside the producer's own scope gives its calls somewhere real to go,
-          // and one insert instead of one per batch. Innermost, so it drains into
-          // the producer's live transaction rather than the committed handler one.
-          withKeyUsageBuffer(() => run(send, () => isCancelled(runId))),
+          // pushed into an array nobody will ever read again. The exit is what
+          // makes the install fresh rather than reentrant; see the ordering note.
+          // Innermost, so it drains into the producer's live transaction rather
+          // than the committed handler one.
+          runOutsideKeyUsageBuffer(() =>
+            withKeyUsageBuffer(() => run(send, () => isCancelled(runId))),
+          ),
         ),
       ),
     ),

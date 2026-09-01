@@ -111,6 +111,17 @@ export type KeyUsageEvent = KeyUsageMeta &
 // answer's 3–5 calls become one statement instead of five.
 const buffer = new AsyncLocalStorage<KeyUsageEvent[]>();
 
+// Run `fn` with NO buffer installed, so a withKeyUsageBuffer() inside it opens a
+// fresh one instead of appending to the caller's. Exists for lib/http/ndjson.ts,
+// alongside runOutsideUserTransaction and runOutsideDetachedQueue and for the same
+// reason: AsyncResource.bind restores the handler's buffer, and the reentrancy
+// guard below then hands the producer that already-drained array. Every row it
+// records lands somewhere nobody will ever read — silently, because a buffer that
+// is never drained cannot fail. See the ordering note in that file.
+export function runOutsideKeyUsageBuffer<T>(fn: () => Promise<T>): Promise<T> {
+  return buffer.exit(fn);
+}
+
 // Collect this scope's rows and write them as ONE statement when it ends.
 //
 // `drain` decides WHERE that write happens, and the two callers need different
@@ -190,10 +201,20 @@ async function recordKeyUsage(
       ok,
       errorCode,
     };
-  } catch {
+  } catch (err) {
     // No user scope. Nothing here can be attributed, and the table's user_id is
     // NOT NULL, so there is no half-row worth writing. Reachable only from a
     // script, where the ledger is not the point.
+    //
+    // SAID OUT LOUD, because this is a spend control and a spend control that
+    // fails quietly is the defect. A bare `catch { return; }` here is how the
+    // demo's per-guest embedding budget came to be measured off a ledger that
+    // recorded nothing for guests: 744 embeddings bought on the operator's key
+    // with `assertDemoEmbedBudget` reading zero. The drop is still best-effort —
+    // telemetry must not fail the call — but it is no longer invisible.
+    console.warn(
+      `[keyusage] dropped a ${meta.provider}/${meta.kind} call: ${(err as Error).message}`,
+    );
     return;
   }
 

@@ -1076,6 +1076,35 @@ async function main() {
   const picks = await selectBankable(snapCfg.id, cfg.base_model, board);
   const bank = await seedPublishedBank(snapshot, snapCfg.llm_model, picks);
 
+  // WHAT A GUEST WILL ACTUALLY NEED, measured after the bank exists — which is
+  // why this is here and not inside the clone. Step 5k's own census is taken
+  // mid-transaction, when the snapshot still holds all 472 of the build's own
+  // questions; seedPublishedBank then empties them and leaves 60. Reporting the
+  // clone's raw `cachedVectorsWanted` therefore warned about ~120 wordings no
+  // guest will ever hold — a warning that fires on every publish is one nobody
+  // reads, so the number on the line is this one.
+  const [vectors] = await privilegedSql<{ have: number; want: number }[]>`
+    with texts as (
+      select 'document' as input_kind, encode(sha256(convert_to(x.text, 'UTF8')), 'hex') as text_hash
+        from ${privilegedSql(chunksTable(cfg.base_model, modelDimension(cfg.base_model)))} x
+       where x.config_id = ${snapCfg.id}
+      union
+      select 'query', encode(sha256(convert_to(x.question, 'UTF8')), 'hex')
+        from question_cache x where x.user_id = ${snapshot}
+    ),
+    models as (
+      select distinct e ->> 'model' as model
+        from demo_replay r, jsonb_array_elements(r.payload -> 'entries') e
+       where r.user_id = ${snapshot} and r.kind = 'tuning'
+         and e ->> 'model' is not null and e ->> 'model' <> ${cfg.base_model}
+    )
+    select count(e.text_hash)::int as have, count(*)::int as want
+      from models m cross join texts t
+      left join embedding_cache e
+        on e.user_id = ${snapshot} and e.model = m.model
+       and e.input_kind = t.input_kind and e.text_hash = t.text_hash
+  `;
+
   console.log("published:");
   console.log(
     `  ${summary.configs} config, ${summary.documents} documents, ${summary.chunks} chunks, ` +
@@ -1091,7 +1120,8 @@ async function main() {
       `${summary.boardChunks === 0 ? "NO board scope" : `a board scoped to ${summary.boardChunks} chunks`}, ` +
       `${summary.bankedIdeals} banked ideals, ${summary.bankedLlmRankings} banked LLM re-rankings, ` +
       `${summary.bankedTuning === 0 ? "NO banked tuning" : `banked tuning for ${summary.bankedTuning} chunks`}, ` +
-      `${summary.ledgerRows === 0 ? "NO savings ledger" : `${summary.ledgerRows} savings row`}\n`,
+      `${summary.ledgerRows === 0 ? "NO savings ledger" : `${summary.ledgerRows} savings row`}, ` +
+      `${summary.cachedVectors} delegate-space vectors (${vectors.have}/${vectors.want} a guest needs)\n`,
   );
   // The payoff readout's money is the whole point of §4's bottom line, and its
   // absence is silent by design: readCacheEconomics turns a zero-event ledger
@@ -1144,6 +1174,22 @@ async function main() {
       "⚠ no banked tuning reached the snapshot, so ⚙ Auto tune is BLOCKED for a guest and\n" +
         "  the walk ends at step 5. Either the master has never autotuned a board chunk, or\n" +
         "  the ids did not survive the clone's remap — check step 5j.\n",
+    );
+  }
+  // A SHORT VECTOR COPY (step 5k), which is the quietest failure on this line
+  // because it costs nothing at publish time and everything at the finale: the
+  // build is valid, the walk works, and every guest who presses ⚙ Auto tune buys
+  // the missing vectors themselves at ~4s each on the operator's key. It happens
+  // when the MASTER's own cache is cold for a banked delegate model — the copy
+  // can only carry what is there — so the fix is to warm the master, not to
+  // re-run the publish.
+  if (vectors.want > 0 && vectors.have < vectors.want) {
+    const missing = vectors.want - vectors.have;
+    console.log(
+      `⚠ ${missing} of ${vectors.want} delegate-space vectors a guest needs were missing from the\n` +
+        "  master's embedding_cache, so a guest's re-score will re-buy them one at a time.\n" +
+        "  Ask a few questions on the published config with the banked overrides installed,\n" +
+        "  then re-publish — check step 5k.\n",
     );
   }
   // Louder than the count above, because a build with no matrix is the one
