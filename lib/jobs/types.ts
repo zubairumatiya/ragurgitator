@@ -83,7 +83,11 @@ export type BackgroundJob = {
   kind: JobKind;
   status: JobStatus;
   scope: unknown;   // the launch request, frozen at create time
-  cursor: unknown;  // opaque here; owned by the step for this kind
+  // Optional because only the lease claim selects it (lib/jobs/store.ts):
+  // every other reader gets JOB_COLUMNS_LIGHT and this is absent. The
+  // optionality is the point — a new reader that needs a cursor fails to
+  // compile rather than silently reading undefined.
+  cursor?: unknown;  // opaque here; owned by the step for this kind
   result: unknown;  // headline numbers for the email and the panel
   totalUnits: number;
   doneUnits: number;

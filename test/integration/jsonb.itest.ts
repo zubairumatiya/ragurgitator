@@ -16,7 +16,7 @@ import { after, before, describe, it } from "node:test";
 
 import { withUser } from "../../lib/auth/userScope";
 import { fragment, privilegedSql, sql } from "../../lib/db";
-import { createJob, getJob } from "../../lib/jobs/store";
+import { claimJob, createJob, getJob } from "../../lib/jobs/store";
 import { adminClient, createUser, ensureAppRole, truncateAll } from "../support/harness";
 
 type Sql = ReturnType<typeof adminClient>;
@@ -124,8 +124,11 @@ describe("toJsonb round-trips", () => {
     assert.equal(row.isNull, true);
     assert.equal(row.typ, null);
 
-    // And it survives the read back as a JS null, which is what run() defaults on.
-    const read = await withUser(alice, async () => getJob(job.id));
-    assert.equal(read?.cursor, null);
+    // And it survives the read back as a JS null, which is what run() defaults
+    // on. Read through the CLAIM, not getJob: since the JOB_COLUMNS split the
+    // claim is the only reader that selects `cursor` at all, so it is the only
+    // one that can tell a stored null from an absent column.
+    const claimed = await withUser(alice, async () => claimJob(job.id, 60));
+    assert.equal(claimed?.job.cursor, null);
   });
 });
