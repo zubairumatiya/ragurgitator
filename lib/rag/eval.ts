@@ -23,7 +23,6 @@ import {
 import {
   listTrialModelOptions,
   modelSpec,
-  sameVectorSpace,
   unavailableReason,
   type TrialModelOption,
 } from "@/lib/rag/embeddingModels";
@@ -31,7 +30,6 @@ import { availableProviders } from "@/lib/rag/providerAvailability";
 import {
   clearRetrievalChanges,
   listOverrides,
-  overrideEmbeddings,
   overrideSims,
   retrievalStateFingerprint,
   setChunkOverride,
@@ -50,7 +48,6 @@ import {
 } from "@/lib/rag/questionCache";
 import { splitText, tokenizeWithOffsets } from "@/lib/rag/chunker";
 import {
-  cachedQueryVectors,
   cosine,
   embedDocsCached,
   embedQueryCached,
@@ -66,7 +63,6 @@ import {
   retrieveWithCutoffs,
   type SimsFor,
 } from "@/lib/rag/retriever";
-import { chunkEmbeddings } from "@/lib/rag/vectorStore";
 import {
   allLabeledQuestions,
   chunksNeedingQuestionsByDifficulty,
@@ -81,6 +77,7 @@ import {
   getModelTrialChunk,
   getModelTrialQuestions,
   getQuestionToScore,
+  screenSims,
   getSummary,
   insertModelTrial,
   insertQuestionWithLabel,
@@ -944,9 +941,45 @@ export type AffectedScreen = {
   total: number;
 };
 
+// How the screen gets its two sims per (question, changed chunk) pair. Injected
+// so scripts/screen-equiv.ts can replay the whole screen through the OLD
+// JS-cosine path and assert the verdicts match (§3, §1.4); production always
+// takes the default, which computes them in Postgres.
+export type ScreenSimsFor = (
+  changed: ChangedChunk[],
+  questions: QuestionToScore[],
+) => Promise<(q: QuestionToScore) => ChangedChunkSims[]>;
+
+// The default: one round trip per model plus one for the base lane, each
+// returning a pair of doubles per (question, chunk) instead of a pair of
+// 1,024-float vectors (docs/demo-egress-plan.md §1.4). Absent pair = null sim =
+// dirty, which is exactly what a cache miss meant on the JS path.
+export const sqlScreenSims: ScreenSimsFor = async (changed, questions) => {
+  const cfg = activeConfig();
+  const sims = await screenSims(
+    changed,
+    questions.map((q) => q.questionId),
+    cfg.embeddingModel,
+  );
+  return (q: QuestionToScore) => {
+    const byChunk = sims.get(q.questionId);
+    return changed.map((x) => {
+      const s = byChunk?.get(x.chunkId);
+      return {
+        ...x,
+        baseSim: s?.baseSim ?? null,
+        // Irrelevant when the override was cleared, and never read then — kept
+        // null rather than carrying a sim for a model that no longer applies.
+        bestPieceSim: x.finalModel === null ? null : (s?.bestPieceSim ?? null),
+      };
+    });
+  };
+};
+
 export async function screenAffectedQuestions(
   changed: ChangedChunk[],
   startState: string,
+  simsSource: ScreenSimsFor = sqlScreenSims,
 ): Promise<AffectedScreen> {
   const cfg = activeConfig();
   const criteria = await getActiveCriteria();
@@ -955,66 +988,11 @@ export async function screenAffectedQuestions(
 
   const questions = await allLabeledQuestions();
   const latest = await latestResultsForScreening(finalState);
-  const qids = questions.map((q) => q.questionId);
 
-  // Everything the screens compare is prefetched, batched, and CACHE-ONLY — a miss
-  // marks the question dirty rather than paying a provider call (the re-score would
-  // have to embed it anyway). Base-model query vectors live in
-  // eval_question_embeddings (keyed by question id); override-model ones live in
-  // embedding_cache (keyed by text), hence the two lookups.
-  const baseQVecs = await getCachedQueryEmbeddings(qids, cfg.embeddingModel);
-  const models = [...new Set(changed.flatMap((c) => (c.finalModel ? [c.finalModel] : [])))];
-  const modelQVecs = new Map<string, Map<string, number[]>>(); // model → question TEXT → vec
-  for (const m of models) {
-    // Same-space models fold into the base lane (retriever.fuseWithOverrides),
-    // so their pieces are scored against the BASE query vector — no model-space
-    // query vectors are needed (or fetched) for them.
-    if (!sameVectorSpace(m, cfg.embeddingModel)) {
-      modelQVecs.set(m, await cachedQueryVectors(questions.map((q) => q.question), m));
-    }
-  }
-  const piecesByChunk = new Map<string, number[][]>();
-  for (const m of models) {
-    // Only the CHANGED chunks' pieces. This screen wants raw vectors (it cosines
-    // them against a question vector here in JS), so it cannot use the retriever's
-    // SQL-side sims — but it was reading every piece under the model to keep a
-    // handful, which is the same egress defect one level up
-    // (docs/fusion-egress-plan.md §1.1, "the fourth consumer").
-    const wanted = changed.filter((c) => c.finalModel === m).map((c) => c.chunkId);
-    const pieces = await overrideEmbeddings(m, wanted);
-    for (const chunkId of wanted) {
-      piecesByChunk.set(
-        chunkId,
-        pieces.filter((p) => p.chunkId === chunkId).map((p) => p.embedding),
-      );
-    }
-  }
-  const chunkBaseVecs = await chunkEmbeddings(changed.map((c) => c.chunkId));
-
-  // Per question: compute the two sims each changed chunk needs (null when a
-  // vector isn't in any cache — the screen treats that as dirty) and let the
-  // pure screen (dirtyScreen.ts) decide.
-  const simsFor = (q: QuestionToScore): ChangedChunkSims[] => {
-    const qBase = baseQVecs.get(q.questionId) ?? null;
-    return changed.map((x) => {
-      const xBase = chunkBaseVecs.get(x.chunkId) ?? null;
-      const baseSim = qBase && xBase ? cosine(qBase, xBase) : null;
-      let bestPieceSim: number | null = null;
-      if (x.finalModel !== null) {
-        // Match the retriever's query vector: same-space folds use the base
-        // query vector, foreign spaces use the model-embedded one.
-        const qv =
-          sameVectorSpace(x.finalModel, cfg.embeddingModel)
-            ? qBase
-            : (modelQVecs.get(x.finalModel)?.get(q.question) ?? null);
-        const pieces = piecesByChunk.get(x.chunkId);
-        if (qv && pieces && pieces.length > 0) {
-          bestPieceSim = pieces.reduce((best, p) => Math.max(best, cosine(qv, p)), -Infinity);
-        }
-      }
-      return { ...x, baseSim, bestPieceSim };
-    });
-  };
+  // Per question: the two sims each changed chunk needs (null when neither cache
+  // can supply one — the screen treats that as dirty), then the pure screen
+  // (dirtyScreen.ts) decides.
+  const simsFor = await simsSource(changed, questions);
 
   const dirty: QuestionToScore[] = [];
   const cleanLabelIds: string[] = [];

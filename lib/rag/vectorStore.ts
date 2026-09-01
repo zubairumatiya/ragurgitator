@@ -429,7 +429,7 @@ export async function poolDocSims(
 
 // Base-space embeddings for a set of chunk ids in the active config — for
 // similarity screens that need a chunk's own stored vector rather than an ANN
-// (eval.rescoreAffectedQuestions). pgvector's text form '[1,2,3]' is valid
+// (efficacyGate; the dirty screen's cosines moved into SQL, §1.4). pgvector's text form '[1,2,3]' is valid
 // JSON, so read ::text and parse.
 export async function chunkEmbeddings(ids: string[]): Promise<Map<string, number[]>> {
   if (ids.length === 0) return new Map();

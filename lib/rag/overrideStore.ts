@@ -413,11 +413,13 @@ export async function getChunkOverridePieces(
 // the best piece per source chunk (hit = any piece in top-k).
 //
 // ⚠ THIS SHIPS VECTORS. A 1024-dim real[] renders to ~11 kB of text on the wire,
-// so a whole config's pieces is a few hundred kB per call. The RETRIEVER no longer
-// calls this — it asks Postgres for the collapsed sims instead (overrideSims,
-// below, docs/fusion-egress-plan.md §1.1). The one surviving caller needs the raw
-// vectors for a screen, not a ranking, and MUST pass `chunkIds` so it downloads
-// the handful it will actually use rather than the table.
+// so a whole config's pieces is a few hundred kB per call. NOTHING IN THE APP
+// CALLS THIS ANY MORE: the retriever asks Postgres for the collapsed sims
+// (overrideSims, below, docs/fusion-egress-plan.md §1.1) and the dirty screen
+// asks it for per-pair sims (evalStore.screenSims, demo-egress-plan §1.4). The
+// surviving callers are the two equivalence scripts, which keep a copy of the
+// JS path precisely so they can compare it against the SQL one. A caller that
+// does want raw vectors MUST pass `chunkIds` and download the handful it uses.
 export async function overrideEmbeddings(
   model: string,
   chunkIds?: string[],

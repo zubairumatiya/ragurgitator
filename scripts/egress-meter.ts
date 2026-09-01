@@ -70,6 +70,8 @@ const FALLBACK_WIDTHS = {
   //   preview  — uuid(36) + file name + position + left(text, 200).
   poolSimRow: 140,
   previewRow: 260,
+  //   screenSim — two uuids (36 each) plus a double rendered as text (~20).
+  screenSimRow: 92,
 };
 
 type WidthKey = keyof typeof FALLBACK_WIDTHS;
@@ -211,6 +213,36 @@ const PATTERNS: Pattern[] = [
     headline: true,
   },
   {
+    // Phase 4's replacements for question_vectors, override_vectors and the
+    // screen leg's share of doc_vectors (§1.4): two doubles per (question,
+    // changed chunk) pair instead of two 1,024-float vectors. Two keys, not the
+    // one D6 asked for, because the screen asks two different questions —
+    // §4 D15. Both are anchored on the column ALIASES, since pg_stat_statements
+    // parameterises the `1` in `1 - (...)` and every other literal.
+    key: "screen_base_sims",
+    label: "screen base sims  (screenSims: question x changed chunk, in SQL)",
+    width: "screenSimRow",
+    ilike: [
+      "select qe.eval_question_id as question_id,%",
+      "%as chunk_id,%",
+      "%from eval_question_embeddings qe%",
+    ],
+    // LOAD-BEARING: the SAME-SPACE piece statement also selects
+    // `qe.eval_question_id as question_id` from `eval_question_embeddings qe`
+    // (its query vector is the base one), so without this it lands in both keys
+    // and the base lane reads ~2x its real rows. `max(` is the aggregate only
+    // the piece form has. Measured: 22,656 rows became 11,800.
+    unlike: ["%max(%"],
+    headline: false,
+  },
+  {
+    key: "screen_piece_sims",
+    label: "screen piece sims  (screenSims: best piece per pair, in SQL)",
+    width: "screenSimRow",
+    ilike: ["%as question_id,%", "%as chunk_id, max(%", "%config_chunk_overrides o%"],
+    headline: false,
+  },
+  {
     // Item I. 274 piece rows per fingerprint, 8,668 fingerprints.
     key: "fingerprint_pieces",
     label: "fingerprint pieces  (retrievalStateFingerprint: every piece)",
@@ -335,6 +367,7 @@ async function measureWidths(): Promise<Record<WidthKey, number>> {
     fpRow: fp?.w ?? FALLBACK_WIDTHS.fpRow,
     poolSimRow: FALLBACK_WIDTHS.poolSimRow,
     previewRow: FALLBACK_WIDTHS.previewRow,
+    screenSimRow: FALLBACK_WIDTHS.screenSimRow,
   };
 }
 

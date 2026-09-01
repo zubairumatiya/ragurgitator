@@ -29,6 +29,7 @@
     "demo:warm": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/demo-warm-answers.ts",
     "egress": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/egress-meter.ts",
     "cache:equiv": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/cache-probe-equiv.ts",
+    "screen:equiv": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/screen-equiv.ts",
     "fusion:equiv": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/fusion-equiv.ts",
     "fusion:replay": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/fusion-replay.ts",
     "migrate": "node --import tsx scripts/migrate.ts",

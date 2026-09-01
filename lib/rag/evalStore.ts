@@ -17,6 +17,7 @@ import {
   type DemoBlockedSentences,
 } from "@/lib/demo/policy";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";
+import { sameVectorSpace } from "@/lib/rag/embeddingModels";
 import { cacheKey, DigestMemo } from "@/lib/rag/digestMemo";
 import { reciprocalRank, ndcg } from "@/lib/rag/evalMetrics";
 import { reduceRates } from "@/lib/rag/evalRates";
@@ -957,6 +958,128 @@ export async function putCachedQueryEmbedding(
     on conflict (eval_question_id, model)
       do update set embedding = excluded.embedding, created_at = now()
   `;
+}
+
+// --- The dirty screen's sims, computed in Postgres (demo-egress-plan §1.4) ----
+//
+// The post-autotune screen (eval.screenAffectedQuestions) needs two cosines per
+// (question, changed chunk) pair and nothing else. It used to fetch the vectors
+// for them — every labelled question's 1,024-float query vector, every changed
+// chunk's base vector, every override piece under the run's models — and cosine
+// them in JS: ~10 MB a screen, for a few thousand doubles.
+//
+// The arithmetic moves to where the vectors already live. Same shape as
+// overrideStore.overrideSims and vectorStore.poolDocSims, and the same ~1e-7
+// agreement with the JS cosine (§3), so the screen's verdict is what is asserted
+// equal, not the sim (scripts/screen-equiv.ts).
+//
+// CACHE-ONLY SEMANTICS ARE THE POINT. The JS path never embedded: a vector that
+// was not already cached made the pair's sim null, and null means dirty
+// (dirtyScreen.ts). Every join below is an INNER join for exactly that reason —
+// a pair with no row simply does not come back, the caller reads null, and the
+// screen fails toward a re-score. The one direction that would be a bug is
+// inventing a sim for a pair the JS path could not compute.
+export type ScreenSim = { baseSim: number | null; bestPieceSim: number | null };
+
+// questionId → chunkId → sims. Absent = null = dirty.
+export type ScreenSims = Map<string, Map<string, ScreenSim>>;
+
+function putSim(
+  out: ScreenSims,
+  questionId: string,
+  chunkId: string,
+  patch: Partial<ScreenSim>,
+): void {
+  let byChunk = out.get(questionId);
+  if (!byChunk) {
+    byChunk = new Map();
+    out.set(questionId, byChunk);
+  }
+  const cur = byChunk.get(chunkId) ?? { baseSim: null, bestPieceSim: null };
+  byChunk.set(chunkId, { ...cur, ...patch });
+}
+
+export async function screenSims(
+  changed: { chunkId: string; finalModel: string | null }[],
+  questionIds: string[],
+  baseModel: string,
+): Promise<ScreenSims> {
+  const out: ScreenSims = new Map();
+  if (changed.length === 0 || questionIds.length === 0) return out;
+  const cfg = activeConfig();
+  const table = await activeChunksTable();
+  const chunkIds = changed.map((c) => c.chunkId);
+
+  // baseSim: the question's BASE query vector against the changed chunk's own
+  // stored vector. eval_question_embeddings is real[], the chunks table is
+  // pgvector; both sides get ::vector, which for a real[] is the exact same
+  // float4s and not a re-encoding (overrideStore.overrideSims documents this).
+  // `model = baseModel` is what guarantees the two sides have equal dimensions.
+  if (table) {
+    const rows = await sql<{ question_id: string; chunk_id: string; sim: string }[]>`
+      select qe.eval_question_id as question_id,
+             c.id as chunk_id,
+             1 - (qe.embedding::vector <=> c.embedding) as sim
+      from eval_question_embeddings qe
+      join ${sql(table)} c
+        on c.config_id = ${cfg.id}
+       and c.id = any(${chunkIds}::uuid[])
+      where qe.model = ${baseModel}
+        and qe.eval_question_id = any(${questionIds}::uuid[])
+    `;
+    for (const r of rows) putSim(out, r.question_id, r.chunk_id, { baseSim: Number(r.sim) });
+  }
+
+  // bestPieceSim: max over the chunk's pieces under its FINAL model, against the
+  // query vector in that model's space. Two shapes, because the query vector
+  // lives in two different places:
+  //
+  //   same vector space as the base — the retriever folds these into the base
+  //     lane and scores them with the BASE query vector, so the left side is
+  //     eval_question_embeddings again (eval.ts's `sameVectorSpace` branch);
+  //   foreign space — the vector is in embedding_cache under that model, keyed
+  //     by sha256 of the question TEXT, so the join is by hash (§1.4). That is
+  //     the one thing the database cannot key by question id.
+  const models = [...new Set(changed.flatMap((c) => (c.finalModel ? [c.finalModel] : [])))];
+  for (const model of models) {
+    const wanted = changed.filter((c) => c.finalModel === model).map((c) => c.chunkId);
+    const rows = sameVectorSpace(model, baseModel)
+      ? await sql<{ question_id: string; chunk_id: string; sim: string }[]>`
+          select qe.eval_question_id as question_id,
+                 o.source_chunk_id as chunk_id,
+                 max(1 - (o.embedding::vector <=> qe.embedding::vector)) as sim
+          from eval_question_embeddings qe
+          join config_chunk_overrides o
+            on o.config_id = ${cfg.id}
+           and o.model = ${model}
+           and o.source_chunk_id = any(${wanted}::uuid[])
+          where qe.model = ${baseModel}
+            and qe.eval_question_id = any(${questionIds}::uuid[])
+          group by qe.eval_question_id, o.source_chunk_id
+        `
+      : await sql<{ question_id: string; chunk_id: string; sim: string }[]>`
+          select q.id as question_id,
+                 o.source_chunk_id as chunk_id,
+                 max(1 - (o.embedding::vector <=> ec.embedding::vector)) as sim
+          from eval_questions q
+          join embedding_cache ec
+            on ec.user_id = ${activeUserId()}
+           and ec.model = ${model}
+           and ec.input_kind = 'query'
+           and ec.text_hash = encode(sha256(convert_to(q.question, 'UTF8')), 'hex')
+          join config_chunk_overrides o
+            on o.config_id = ${cfg.id}
+           and o.model = ${model}
+           and o.source_chunk_id = any(${wanted}::uuid[])
+          where q.id = any(${questionIds}::uuid[])
+          group by q.id, o.source_chunk_id
+        `;
+    for (const r of rows) {
+      putSim(out, r.question_id, r.chunk_id, { bestPieceSim: Number(r.sim) });
+    }
+  }
+
+  return out;
 }
 
 // One chunk in the "why did it miss?" view: a retrieved result with its text and

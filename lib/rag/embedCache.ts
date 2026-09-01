@@ -384,9 +384,10 @@ export async function diskDocVectorsByHash(
 
 // Cache-only lookup for QUERY strings — the query-kind counterpart of
 // cachedDocVectors: vectors for whichever of `texts` are already banked under
-// `model`, never calling the provider. Backs the post-autotune dirty screen
-// (eval.rescoreAffectedQuestions), where a miss just means "can't prove clean,
-// re-score" — the re-score embeds (and banks) it anyway.
+// `model`, never calling the provider. It backed the post-autotune dirty screen
+// until that screen's cosines moved into SQL (evalStore.screenSims,
+// docs/demo-egress-plan.md §1.4); the pair-bank floor (floorPopulations) reads it
+// now, on the same terms — a miss costs a fallback, never a provider call.
 export async function cachedQueryVectors(
   texts: string[],
   model: string,
