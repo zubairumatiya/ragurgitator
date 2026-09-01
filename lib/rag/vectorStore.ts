@@ -375,6 +375,90 @@ export async function queryExcludingIds(
   }));
 }
 
+// One pooled candidate's competitor sim under a FOREIGN override model, computed
+// in Postgres (docs/demo-egress-plan.md §1.2).
+//
+//   msim      the candidate's cosine against the override model's query vector,
+//             read out of embedding_cache — or null when this user has never
+//             banked that text under that model.
+//   textHash  sha256 of the chunk text, the cache's content address. On the wire
+//             because a null msim still has to be offerable to the optional DISK
+//             layer, which answers by hash and is consulted BEFORE the database
+//             (embedCache.readPersisted) — without it, turning EMBED_DISK_CACHE on
+//             would start costing embeds.
+//   textLen   character count, so a cache hit can still be PRICED as an avoided
+//             embed without shipping the text it would have embedded (pricing
+//             .estimateTokensFromChars exists for exactly this).
+export type PoolDocSim = {
+  id: string;
+  textHash: string;
+  textLen: number;
+  msim: number | null;
+};
+
+// Competitor sims for an ALREADY-CHOSEN pool of chunk ids, under `model`.
+//
+// Keyed by id rather than re-running the ANN: the pool these sims describe must
+// be the SAME multiset the base lane produced, or the fusion candidate set moves
+// and the merged ranks move with it. Two ANN searches with identical arguments
+// would almost certainly agree, but "almost certainly" is not the standard a
+// no-FUSION_VERSION-bump change is held to (§4 D2), and this form also skips a
+// second HNSW descent per override model per query.
+//
+// Replaces ~12 kB of vector per candidate (cachedDocVectors) with ~140 B of row.
+// The cosine is pgvector's, against a float4 rendering of the query vector — the
+// same arithmetic overrideStore.overrideSims already does, and measured against
+// the JS path at ~1e-7 (scripts/fusion-equiv.ts).
+export async function poolDocSims(
+  ids: string[],
+  model: string,
+  modelVector: number[],
+): Promise<Map<string, PoolDocSim>> {
+  if (ids.length === 0) return new Map();
+  const cfg = activeConfig();
+  const userId = activeUserId();
+  const modelVec = vectorLiteral(modelVector);
+
+  // The projection's shape is load-bearing for scripts/egress-meter.ts's
+  // `pool_sims` pattern, which anchors on `select p.id,` and the `text_hash` /
+  // `msim` aliases — pg_stat_statements parameterises every literal, so the
+  // aliases are the only stable thing to match on.
+  const rows = await sql<
+    { id: string; text_hash: string; text_len: number; msim: string | null }[]
+  >`
+    select
+      p.id,
+      p.text_hash as text_hash,
+      p.text_len as text_len,
+      1 - (ec.embedding::vector <=> ${modelVec}::vector) as msim
+    from (
+      select id,
+             encode(sha256(text::bytea), 'hex') as text_hash,
+             char_length(text) as text_len
+      from ${sql(cfg.chunksTable)}
+      where config_id = ${cfg.id}
+        and id = any(${ids}::uuid[])
+    ) p
+    left join embedding_cache ec
+      on ec.user_id = ${userId}
+     and ec.model = ${model}
+     and ec.input_kind = 'document'
+     and ec.text_hash = p.text_hash
+  `;
+
+  return new Map(
+    rows.map((r) => [
+      r.id,
+      {
+        id: r.id,
+        textHash: r.text_hash,
+        textLen: Number(r.text_len),
+        msim: r.msim === null ? null : Number(r.msim),
+      },
+    ]),
+  );
+}
+
 // Base-space embeddings for a set of chunk ids in the active config — for
 // similarity screens that need a chunk's own stored vector rather than an ANN
 // (eval.rescoreAffectedQuestions). pgvector's text form '[1,2,3]' is valid

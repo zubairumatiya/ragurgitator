@@ -24,10 +24,11 @@
 // chunk would occupy — trial and live retrieval share this code and cannot drift.
 import { activeConfig } from "@/lib/rag/activeConfig";
 import {
-  cachedDocVectors,
   cosine,
+  diskDocVectorsByHash,
   embedDocsCached,
   embedQueryCached,
+  meterEmbedHitsByChars,
   meterEmbeds,
 } from "@/lib/rag/embedCache";
 import { embedQuery } from "@/lib/rag/embeddings";
@@ -37,7 +38,13 @@ import {
   overrideSims,
   type ChunkOverride,
 } from "@/lib/rag/overrideStore";
-import { query, queryExcluding, queryExcludingIds, resolveChunks } from "@/lib/rag/vectorStore";
+import {
+  poolDocSims,
+  query,
+  queryExcluding,
+  queryExcludingIds,
+  resolveChunks,
+} from "@/lib/rag/vectorStore";
 import type { RetrievedChunk } from "@/types/rag";
 
 // Base candidates pulled for fusion when overrides exist (vs the final top-k).
@@ -197,6 +204,88 @@ export async function retrieve(question: string): Promise<RetrievedChunk[]> {
   return retrieveForQuery(trimmed, vector);
 }
 
+// The FOREIGN lane's competition: this query's base candidates, scored in the
+// override model's space (docs/demo-egress-plan.md §1.2).
+//
+// This used to download a vector per candidate — the paid pool through
+// embedDocsCached, the free deeper tier through cachedDocVectors — and cosine
+// them in JS, ~12 kB of float per candidate for one number. Postgres does the
+// cosine now (vectorStore.poolDocSims) and returns the number.
+//
+// WHAT MUST NOT CHANGE, and does not: the multiset of sims. `competitorSims` is
+// only ever sorted for a cutoff and counted for a fractional rank, so order is
+// free, but membership is not — it decides merged ranks, and a change there is a
+// FUSION_VERSION bump (§4 D2). So the two tiers keep their existing rules:
+//
+//   inside paidN   every candidate contributes. A cache miss is BOUGHT, exactly
+//                  as embedDocsCached bought it, after resolving its text by id.
+//   below paidN    only already-banked candidates contribute; a miss is dropped,
+//                  exactly as cachedDocVectors returning no entry dropped it.
+//
+// Precedence stays disk → the join → pay. The join is the database, so the disk
+// layer has to be offered the misses explicitly, by hash — that is why poolDocSims
+// puts `text_hash` on the wire at all.
+async function foreignCompetitorSims(
+  ids: string[],
+  paidN: number,
+  model: string,
+  qv: number[],
+): Promise<number[]> {
+  const sims = await poolDocSims(ids, model, qv);
+
+  // Split the database's misses at the paid boundary before doing anything about
+  // them, so each tier's fallback is asked for its own rows and only those.
+  const buyIds: string[] = [];
+  const diskHashes: string[] = [];
+  ids.forEach((id, i) => {
+    const row = sims.get(id);
+    if (row === undefined || row.msim !== null) return;
+    if (i < paidN) buyIds.push(id);
+    else diskHashes.push(row.textHash);
+  });
+
+  const fromDisk = await diskDocVectorsByHash(model, diskHashes);
+  const bought = new Map<string, number[]>();
+  if (buyIds.length > 0) {
+    // The text comes back only for what has to be embedded — the whole point of
+    // the change is that the other ~95% of the pool never ships its text.
+    const texts = await resolveChunks(buyIds);
+    const wanted = buyIds.filter((id) => texts.has(id));
+    const vecs = await embedDocsCached(
+      wanted.map((id) => texts.get(id)!.text),
+      model,
+    );
+    wanted.forEach((id, i) => bought.set(id, vecs[i]));
+  }
+
+  // A join hit inside the paid pool is an avoided embed and has to stay on the
+  // savings ledger, where embedDocsCached used to book it. Priced from the
+  // character count rather than the text, and de-duplicated by hash because
+  // embedDocsCached metered UNIQUE texts.
+  const hitChars: number[] = [];
+  const metered = new Set<string>();
+  const out: number[] = [];
+
+  for (let i = 0; i < ids.length; i++) {
+    const row = sims.get(ids[i]);
+    if (row === undefined) continue;
+    const paid = i < paidN;
+    if (row.msim !== null) {
+      out.push(row.msim);
+      if (paid && !metered.has(row.textHash)) {
+        metered.add(row.textHash);
+        hitChars.push(row.textLen);
+      }
+      continue;
+    }
+    const vec = paid ? bought.get(ids[i]) : fromDisk.get(row.textHash);
+    if (vec) out.push(cosine(qv, vec));
+  }
+
+  await meterEmbedHitsByChars(model, hitChars);
+  return out;
+}
+
 // Rank-interleave fusion against an explicit override state. Returns the FULL
 // merged list plus whatever metadata the merge happened to have in hand —
 // EMPTY unless a foreign-space lane forced the pool's text to be fetched
@@ -314,15 +403,12 @@ export async function fuseWithOverrides(
     if (isBaseSpace) {
       competitorSims = baseChunks.map((rc) => rc.score);
     } else {
-      const paidTexts = baseChunks.slice(0, paidN).map((rc) => rc.chunk.chunk.text);
-      const paidVecs = await embedDocsCached(paidTexts, model);
-      competitorSims = paidVecs.map((v) => cosine(qv, v));
-      const deeperTexts = baseChunks.slice(paidN).map((rc) => rc.chunk.chunk.text);
-      const freeVecs = await cachedDocVectors(deeperTexts, model);
-      for (const t of deeperTexts) {
-        const vec = freeVecs.get(t);
-        if (vec) competitorSims.push(cosine(qv, vec));
-      }
+      competitorSims = await foreignCompetitorSims(
+        baseChunks.map((rc) => rc.chunk.chunk.id),
+        paidN,
+        model,
+        qv,
+      );
     }
 
     // Screen cutoff for this space: the k-th strongest competitor sim (k = the

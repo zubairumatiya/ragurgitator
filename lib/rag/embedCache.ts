@@ -33,7 +33,12 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { isolated, sql } from "@/lib/db";
 import { detached } from "@/lib/detached";
 import { embedQueries, embedQuery, embedTexts } from "@/lib/rag/embeddings";
-import { costEmbed, estimateTokens, estimateTokensAll } from "@/lib/rag/pricing";
+import {
+  costEmbed,
+  estimateTokens,
+  estimateTokensAll,
+  estimateTokensFromChars,
+} from "@/lib/rag/pricing";
 import { recordSaving, recordSpend } from "@/lib/rag/savingsStore";
 
 const uniq = (xs: string[]): string[] => [...new Set(xs)];
@@ -73,6 +78,35 @@ export async function meterEmbeds(
       recordSpend("embed", embedCost(model, misses), estimateTokensAll(misses)),
     );
   }
+}
+
+// The same avoided-embed saving as meterEmbeds' hit half, for a caller that
+// holds CHARACTER COUNTS rather than the texts — the fusion pool's competitor
+// sims are computed in Postgres now (vectorStore.poolDocSims), so the hit is
+// real but the text was deliberately never downloaded to price it.
+//
+// Not folded into meterEmbeds: that function's contract is "these exact strings
+// hit, these exact strings missed", and a char-count caller can never report a
+// miss (a miss there is bought on the ordinary path and metered there).
+//
+// The estimate drifts from the text-based one only for astral characters, where
+// Postgres' char_length counts one and JS's .length counts two. Same tradeoff
+// the re-ingest skip already accepted (pricing.estimateTokensFromChars).
+export async function meterEmbedHitsByChars(
+  model: string,
+  charCounts: number[],
+): Promise<void> {
+  if (charCounts.length === 0) return;
+  let usd = 0;
+  let tokens = 0;
+  for (const chars of charCounts) {
+    const t = estimateTokensFromChars(chars);
+    tokens += t;
+    usd += costEmbed(model, t);
+  }
+  await detached(() =>
+    recordSaving("embed_cache", usd, tokens, { events: charCounts.length }),
+  );
 }
 
 // Cosine similarity. Voyage vectors are already unit-length (so this reduces to
@@ -326,6 +360,26 @@ export async function cachedDocVectors(
   // embed_cache without bound. The paid paths (embedDocsCached /
   // embedQueryCached) are where a real avoided embed is counted.
   return out;
+}
+
+// Disk-layer-only lookup, BY HASH — the one piece of readPersisted a caller can
+// still use once it has stopped carrying text. Returns hash → vector for whatever
+// the optional on-disk layer already holds, and an empty map when EMBED_DISK_CACHE
+// is unset (the default), which makes it a no-op rather than a second code path.
+//
+// Exists because the fusion pool's free-competitor lookup moved into SQL
+// (vectorStore.poolDocSims, docs/demo-egress-plan.md §1.2). That join asks the
+// DATABASE, so without this the precedence would silently become database-only and
+// turning the disk cache on would stop answering candidates it used to answer.
+// Order is preserved as disk → the join → pay.
+export async function diskDocVectorsByHash(
+  model: string,
+  hashes: string[],
+): Promise<Map<string, number[]>> {
+  if (hashes.length === 0) return new Map();
+  const diskCache = disk();
+  if (!diskCache) return new Map();
+  return (await diskCache).readDisk(activeUserId(), model, "document", hashes);
 }
 
 // Cache-only lookup for QUERY strings — the query-kind counterpart of
