@@ -297,48 +297,16 @@ export async function query(
 }
 
 // Like query(), but excludes a set of chunk ids from the active config's base
-// ANN — the chunks that have been overridden to a different model (Phase 5).
-// Those are ranked separately in their override model's space and rank-fused with
-// this list (see retriever.retrieveForQuery). An empty exclude list behaves like
-// query(). Pulls `limit` candidates (callers pass a generous N for fusion).
-export async function queryExcluding(
-  vector: number[],
-  limit: number,
-  excludeIds: string[],
-): Promise<RetrievedChunk[]> {
-  const cfg = activeConfig();
-  const queryVec = vectorLiteral(vector);
-
-  const rows = await sql.begin(async (tx) => {
-    await tx.unsafe(`set local hnsw.ef_search = ${EF_SEARCH}`);
-    return tx<
-      { id: string; document_id: string; position: number; text: string; score: number }[]
-    >`
-      select
-        id, document_id, position, text,
-        1 - (embedding <=> ${queryVec}::vector) as score
-      from ${tx(cfg.chunksTable)}
-      where config_id = ${cfg.id}
-        and not (id = any(${excludeIds}::uuid[]))
-      order by embedding <=> ${queryVec}::vector
-      limit ${limit}
-    `;
-  });
-
-  return rows.map((r) => ({
-    score: Number(r.score),
-    chunk: {
-      embedding: [],
-      chunk: { id: r.id, documentId: r.document_id, text: r.text, position: r.position },
-    },
-  }));
-}
-
-// queryExcluding without the `text` column — the deep fusion pool
-// (docs/fusion-egress-plan.md §1.2). The merge only ever reads `score` and `id`
-// off these rows; text is needed for the topK that SURVIVE, and those are
-// resolved by id through resolveChunks. Pulling text on all deepN rows shipped
-// ~480 kB a query to compute a rank.
+// ANN — the chunks that have been overridden to a different model — and returns
+// (id, score) ALONE. Those excluded chunks are ranked separately in their
+// override model's space and rank-fused with this list (retriever.fuseWithOverrides).
+// Callers pass a generous N for the fusion pool; an empty exclude list behaves
+// like query() minus the text.
+//
+// This is the ONLY deep-pool read since docs/demo-egress-plan.md §1.3. The merge
+// only ever reads `score` and `id` off these rows; text is needed for the topK
+// that SURVIVE, and those are resolved by id through resolveChunks. The
+// text-carrying twin this replaced shipped ~480 kB a query to compute a rank.
 //
 // Returns the same RetrievedChunk shape so the caller (and its ANN cache) needs
 // no second type — but `text`/`documentId`/`position` are EMPTY, not merely

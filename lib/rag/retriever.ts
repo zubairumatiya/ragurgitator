@@ -41,7 +41,6 @@ import {
 import {
   poolDocSims,
   query,
-  queryExcluding,
   queryExcludingIds,
   resolveChunks,
 } from "@/lib/rag/vectorStore";
@@ -287,10 +286,11 @@ async function foreignCompetitorSims(
 }
 
 // Rank-interleave fusion against an explicit override state. Returns the FULL
-// merged list plus whatever metadata the merge happened to have in hand —
-// EMPTY unless a foreign-space lane forced the pool's text to be fetched
-// (§1.2). Callers slice the merged list and resolve the ids they keep. Live retrieval passes the stored overrides, the trial dry-run a
-// hypothetical set.
+// merged list plus a `meta` map that is now ALWAYS EMPTY — no lane reads the
+// pool's text any more (§1.3), so callers slice the merged list and resolve the
+// ids they keep. Kept in the signature because retrieveForQuery fills it from
+// resolveChunks and reads it back. Live retrieval passes the stored overrides,
+// the trial dry-run a hypothetical set.
 //
 // ⚠ If you change the SEMANTICS of this merge (rank formula, candidate set, what
 // `sim`/score means), bump FUSION_VERSION in overrideStore.ts — that's what flags
@@ -330,41 +330,26 @@ export async function fuseWithOverrides(
   // already-cached deeper candidates can compete for free (see header).
   const paidN = effectiveFusionPool(k, pool);
   const deepN = Math.max(paidN * FUSION_DEEP_FACTOR, FUSION_DEEP_FLOOR);
-  // Does anything in this merge actually READ the pool's text? Only a
-  // FOREIGN-space override model does: it re-embeds the paid pool and looks the
-  // deeper candidates up in cachedDocVectors BY TEXT, so the text is that
-  // cache's key and all deepN rows are required (§1.2 — resolving only paidN
-  // there would drop the free deeper candidates, i.e. change the candidate set
-  // and cost a FUSION_VERSION bump). Every other path wants (id, score) alone,
-  // and pays ~480 kB a query for text it discards.
-  const needsPoolText = models.some((m) => !sameVectorSpace(m, cfg.embeddingModel));
+  // NOTHING in this merge reads the pool's text any more (docs/demo-egress-plan.md
+  // §1.3). The foreign lane used to re-embed the paid pool and look the deeper
+  // candidates up in cachedDocVectors BY TEXT, which forced text onto all deepN
+  // rows; phase 2 moved that lookup into Postgres (poolDocSims joins on a hash the
+  // database computes), so every lane now wants (id, score) alone and the light
+  // ANN is the only read.
+  //
   // Keyed on everything the ANN result depends on: the query, the excluded set
-  // (sorted so ordering can't produce a false miss), the depth, and WHICH of the
-  // two reads produced it — a text-free entry must never be served to a call that
-  // needs text (a trial can inject a foreign-space model the stored overrides
-  // don't have, so this can vary within one annCache's life).
+  // (sorted so ordering can't produce a false miss), and the depth. The T/L
+  // discriminator that used to be here is gone with the second read it chose
+  // between.
   const annKey = annCache
-    ? `${text}\0${deepN}\0${needsPoolText ? "T" : "L"}\0${[...overriddenIds].sort().join(",")}`
+    ? `${text}\0${deepN}\0${[...overriddenIds].sort().join(",")}`
     : null;
   const cachedAnn = annKey !== null ? annCache!.get(annKey) : undefined;
-  const baseChunks =
-    cachedAnn ??
-    (needsPoolText
-      ? await queryExcluding(baseVector, deepN, overriddenIds)
-      : await queryExcludingIds(baseVector, deepN, overriddenIds));
+  const baseChunks = cachedAnn ?? (await queryExcludingIds(baseVector, deepN, overriddenIds));
   if (annKey !== null && cachedAnn === undefined) annCache!.set(annKey, baseChunks);
-  // Seed `meta` only when the rows actually carry it. On the light path the map
-  // starts EMPTY and retrieveForQuery's existing resolveChunks fallback fills the
-  // topK that survive — the same path override winners have always taken.
-  if (needsPoolText) {
-    baseChunks.forEach((rc) =>
-      meta.set(rc.chunk.chunk.id, {
-        documentId: rc.chunk.chunk.documentId,
-        position: rc.chunk.chunk.position,
-        text: rc.chunk.chunk.text,
-      }),
-    );
-  }
+  // `meta` therefore starts EMPTY, always: retrieveForQuery's resolveChunks
+  // fallback fills the topK that survive — the same path override winners have
+  // always taken.
   lists.push(
     baseChunks.map((rc, i) => ({ id: rc.chunk.chunk.id, rank: i + 1, sim: rc.score })),
   );

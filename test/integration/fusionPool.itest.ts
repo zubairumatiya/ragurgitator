@@ -234,7 +234,7 @@ describe("the deep fusion pool", () => {
       }
     });
 
-    it("keeps its deepN text, so the free deeper candidates still compete", async () => {
+    it("drops its deepN text and the free deeper candidates still compete", async () => {
       const k = 2;
       const { meta, cutoffs } = await inScope(async () =>
         fuseWithOverrides(
@@ -248,9 +248,10 @@ describe("the deep fusion pool", () => {
         ),
       );
 
-      // The pool kept its text on this branch — cachedDocVectors is keyed by it.
-      assert.equal(meta.size, 5, "every non-overridden base chunk, with metadata");
-      assert.equal(meta.get(chunkIds[4])!.text, TEXT(4));
+      // The foreign lane used to force text onto every pooled row, because
+      // cachedDocVectors was keyed by it. poolDocSims hashes in the database
+      // instead (§1.2), so this branch is as light as the fold branch (§1.3).
+      assert.equal(meta.size, 0, "no lane reads pool text any more");
 
       // competitorSims = paid [0.3, 0.2] + free [0.9, 0.1] (chunk 3 uncached).
       // The k-th strongest of those four is 0.3. Were the deeper rows dropped it
