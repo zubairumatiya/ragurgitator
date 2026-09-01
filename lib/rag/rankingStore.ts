@@ -21,6 +21,13 @@ export type StoredRanking = {
   createdAt: number;
 };
 
+// How much chunk text a display read pulls. Matches the picker preview length at
+// evalStore.ts:1690, and every consumer trims it further before rendering, so the
+// truncation is invisible on screen and worth ~10x on the wire.
+export const PREVIEW_TEXT_CHARS = 200;
+
+type ChunkTextRow = { id: string; file_name: string; position: number | null; text: string };
+
 export type PoolCandidate = {
   chunkId: string;
   fileName: string;
@@ -114,6 +121,9 @@ export async function poolNearest(
         similarity: number;
       }[]
     >`
+      -- Whole text on purpose: ranking.ts embeds this pool under every model to
+      -- build the aggregate, so left(c.text, n) here would change the embeddings
+      -- and therefore the ideal ranking. Same rule as evalStore.getChunksByIds.
       select c.id, d.file_name, c.position, c.text,
              1 - (c.embedding <=> ${qlit}::vector) as similarity
       from ${tx(table)} c
@@ -132,24 +142,37 @@ export async function poolNearest(
   }));
 }
 
-// Full text + labels for a set of chunk ids under the active config, in the
-// requested order. Used to render a ranking's items (pool may be stale).
+// Text + labels for a set of chunk ids under the active config, in the requested
+// order. Used to render a ranking's items (pool may be stale).
+//
+// Text comes back truncated to PREVIEW_TEXT_CHARS by default, because every
+// display caller trims it harder than that anyway. `fullText` is the opt-out for
+// the one caller that feeds the text to a model rather than a screen — see
+// ranking.ts's LLM ranking — where truncating would change the ranking itself.
 export async function getRankingChunks(
   ids: string[],
+  opts: { fullText?: boolean } = {},
 ): Promise<Map<string, { fileName: string; position: number | null; text: string }>> {
   if (ids.length === 0) return new Map();
   const table = await activeChunksTable();
   if (!table) return new Map();
-  const rows = await sql<
-    { id: string; file_name: string; position: number | null; text: string }[]
-  >`
-    select c.id, d.file_name, c.position, c.text
-    from ${sql(table)} c
-    join documents d on d.id = c.document_id
-    join document_embeddings de on de.id = c.document_embedding_id
-    where c.id = any(${ids}::uuid[])
-      and de.config_id = ${activeConfig().id}
-  `;
+  const rows = opts.fullText
+    ? await sql<ChunkTextRow[]>`
+        select c.id, d.file_name, c.position, c.text
+        from ${sql(table)} c
+        join documents d on d.id = c.document_id
+        join document_embeddings de on de.id = c.document_embedding_id
+        where c.id = any(${ids}::uuid[])
+          and de.config_id = ${activeConfig().id}
+      `
+    : await sql<ChunkTextRow[]>`
+        select c.id, d.file_name, c.position, left(c.text, ${PREVIEW_TEXT_CHARS}) as text
+        from ${sql(table)} c
+        join documents d on d.id = c.document_id
+        join document_embeddings de on de.id = c.document_embedding_id
+        where c.id = any(${ids}::uuid[])
+          and de.config_id = ${activeConfig().id}
+      `;
   return new Map(
     rows.map((r) => [r.id, { fileName: r.file_name, position: r.position, text: r.text }]),
   );

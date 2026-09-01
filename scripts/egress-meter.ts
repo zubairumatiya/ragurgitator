@@ -262,15 +262,18 @@ const PATTERNS: Pattern[] = [
   },
   {
     // Items G and H, the picker's two readers (getRankingChunks and
-    // poolNearest). Phase 5 narrows both to left(c.text, 200).
+    // poolNearest). Phase 5 narrowed getRankingChunks; poolNearest still reads
+    // whole text because ranking.ts embeds that pool (see its SQL comment), and
+    // getRankingChunks keeps an explicit fullText opt-out for the LLM prompt.
     key: "ranking_text",
-    label: "picker text  (getRankingChunks/poolNearest: whole text)",
+    label: "picker text  (poolNearest + fullText opt-out: whole text)",
     width: "chunkText",
     ilike: ["select c.id, d.file_name, c.position, c.text%"],
     headline: true,
   },
   {
-    // Phase 5's replacement, tracked beside what it replaces (§2).
+    // Phase 5's replacement, tracked beside what it replaces (§2). This is the
+    // default getRankingChunks read — everything that renders a ranking.
     key: "ranking_preview",
     label: "picker text  (narrowed: left(c.text, 200))",
     width: "previewRow",
