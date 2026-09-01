@@ -3,7 +3,6 @@
 // other stores. An override is an alternate vector for a chunk that still lives
 // in the config's base chunks_<model>_<dim> table — see retriever.ts for how the
 // base ANN and the override sets are rank-fused at query time.
-import { createHash } from "node:crypto";
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 
@@ -53,41 +52,43 @@ export const FUSION_VERSION = 4;
 // determines them (and they're cached), so the semantic rows suffice.
 export async function retrievalStateFingerprint(): Promise<string> {
   const cfg = activeConfig();
+  // The canonical string's PREFIX is app state, not row state: the fusion
+  // version is a constant here and the live fusion pool (0027) shapes every
+  // fused rank, so it's part of the state — changing it (while overrides exist)
+  // stales scored results, and changing it back revalidates them. Auto (null)
+  // contributes NOTHING so fingerprints from before the pool existed stay valid
+  // — auto IS the historical behavior.
+  const prefix =
+    `fusion-v${FUSION_VERSION}\n` + (cfg.fusionPool === null ? "" : `pool-${cfg.fusionPool}\n`);
   try {
-    const rows = await sql<
-      {
-        source_chunk_id: string;
-        model: string;
-        kind: string;
-        piece_index: number;
-        token_start: number | null;
-        token_end: number | null;
-        text_hash: string | null;
-      }[]
-    >`
-      select source_chunk_id, model, kind, piece_index, token_start, token_end,
-             md5(text) as text_hash
+    // Postgres builds the canonical string and hashes it, so the app reads 64
+    // hex characters instead of every override piece row — the digest used to
+    // cost a full download of the pieces table 8,668 times over
+    // (docs/demo-egress-plan.md §1.5). Byte-for-byte the same string the JS
+    // form built: `|` between fields, E'\n' between rows, md5 for the text,
+    // coalesce for the nullable columns, ordered by the same two columns in
+    // their own types. `scripts/fingerprint-equiv.ts` holds the JS reference
+    // and asserts the two agree — run it before touching anything here, since a
+    // one-byte drift stales every scored result in the database.
+    const [row] = await sql<{ digest: string | null }[]>`
+      select encode(
+               sha256(convert_to(
+                 ${prefix} || string_agg(
+                   source_chunk_id::text || '|' || model || '|' || kind || '|'
+                     || piece_index::text || '|' || coalesce(token_start::text, '') || '|'
+                     || coalesce(token_end::text, '') || '|' || coalesce(md5(text), ''),
+                   E'\n' order by source_chunk_id, piece_index
+                 ),
+                 'utf8'
+               )),
+               'hex'
+             ) as digest
       from config_chunk_overrides
       where config_id = ${cfg.id}
-      order by source_chunk_id, piece_index
     `;
-    if (rows.length === 0) return "baseline";
-    // The live fusion pool (0027) shapes every fused rank, so it's part of the
-    // state — changing it (while overrides exist) stales scored results, and
-    // changing it back revalidates them. Auto (null) contributes NOTHING so
-    // fingerprints from before the pool existed stay valid — auto IS the
-    // historical behavior.
-    const canonical =
-      `fusion-v${FUSION_VERSION}\n` +
-      (cfg.fusionPool === null ? "" : `pool-${cfg.fusionPool}\n`) +
-      rows
-        .map(
-          (r) =>
-            `${r.source_chunk_id}|${r.model}|${r.kind}|${r.piece_index}|` +
-            `${r.token_start ?? ""}|${r.token_end ?? ""}|${r.text_hash ?? ""}`,
-        )
-        .join("\n");
-    return createHash("sha256").update(canonical).digest("hex");
+    // No pieces => string_agg is null => the digest is null: the baseline
+    // (base-ANN-only) path, no fusion and so no version.
+    return row?.digest ?? "baseline";
   } catch (err) {
     // Overrides table missing (0013 unapplied) -> plain baseline retrieval.
     if ((err as { code?: string }).code === "42P01") return "baseline";

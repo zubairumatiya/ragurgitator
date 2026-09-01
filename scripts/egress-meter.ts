@@ -72,6 +72,8 @@ const FALLBACK_WIDTHS = {
   previewRow: 260,
   //   screenSim — two uuids (36 each) plus a double rendered as text (~20).
   screenSimRow: 92,
+  //   fpDigest  — one row, 64 hex characters, whatever the pieces table holds.
+  fpDigest: 64,
 };
 
 type WidthKey = keyof typeof FALLBACK_WIDTHS;
@@ -251,6 +253,19 @@ const PATTERNS: Pattern[] = [
     headline: true,
   },
   {
+    // Phase 6's replacement for it (§1.5): Postgres builds the canonical string
+    // and hashes it, so the whole digest is one 64-character row. Tracked beside
+    // the statement it replaces for the same reason override_sims is — a phase is
+    // graded on bytes MOVED, not on an old counter going quiet.
+    key: "fingerprint_digest",
+    label: "fingerprint digest  (retrievalStateFingerprint: one hash, in SQL)",
+    width: "fpDigest",
+    // The `|` separators and the prefix are all NORMALISED to parameters, so the
+    // pattern spells out only the function calls that survive normalisation.
+    ilike: ["select encode(%", "%sha256(convert_to(%", "%string_agg(%", "%from config_chunk_overrides%"],
+    headline: true,
+  },
+  {
     // Item G, and DELIBERATELY not narrowed by phase 5: getChunksByIds feeds an
     // embed pool, so truncating it would change what gets embedded. Tracked so
     // that a later lap narrowing it by mistake is visible rather than silent.
@@ -371,6 +386,7 @@ async function measureWidths(): Promise<Record<WidthKey, number>> {
     poolSimRow: FALLBACK_WIDTHS.poolSimRow,
     previewRow: FALLBACK_WIDTHS.previewRow,
     screenSimRow: FALLBACK_WIDTHS.screenSimRow,
+    fpDigest: FALLBACK_WIDTHS.fpDigest,
   };
 }
 
