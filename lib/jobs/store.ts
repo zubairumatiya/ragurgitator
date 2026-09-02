@@ -35,7 +35,7 @@ type JobRow = {
   kind: string;
   status: string;
   scope: unknown;
-  cursor: unknown;
+  cursor?: unknown;
   result: unknown;
   total_units: number;
   done_units: number;
@@ -54,12 +54,19 @@ type JobRow = {
   finished_at: Date | null;
 };
 
-const JOB_COLUMNS = fragment`
-  id, config_id, config_label, kind, status, scope, cursor, result,
+// `cursor` is 96% of a job row's ~6 kB (autotune's carries a frozen retrieval
+// state), and only the lease claim resumes from it. Every other reader — the
+// panel, the poller, the janitor, the already-running guard — takes the light
+// list, and `BackgroundJob.cursor` is optional so the compiler names any reader
+// that needs the wide one.
+const JOB_COLUMNS_LIGHT = fragment`
+  id, config_id, config_label, kind, status, scope, result,
   total_units, done_units, failed_units, last_unit_error, last_message,
   must_finish, lease_expires_at, attempts, error,
   acknowledged, email_sent, created_at, updated_at, started_at, finished_at
 `;
+
+const JOB_COLUMNS = fragment`${JOB_COLUMNS_LIGHT}, cursor`;
 
 const ADVANCEABLE = fragment`('queued', 'running', 'cancelling')`;
 const TERMINAL = fragment`('cancelled', 'succeeded', 'failed')`;
@@ -117,7 +124,7 @@ export async function createJob(args: NewJob): Promise<BackgroundJob> {
     values
       (${activeUserId()}, ${args.kind}, ${args.configId}, ${args.configLabel},
        ${toJsonb(args.scope)}, ${toJsonb(args.cursor ?? null)}, ${args.totalUnits}, 'queued')
-    returning ${JOB_COLUMNS}
+    returning ${JOB_COLUMNS_LIGHT}
   `;
   return toJob(rows[0]);
 }
@@ -125,7 +132,7 @@ export async function createJob(args: NewJob): Promise<BackgroundJob> {
 export async function getJob(id: string): Promise<BackgroundJob | null> {
   if (!isUuid(id)) return null;
   const rows = await sql<JobRow[]>`
-    select ${JOB_COLUMNS} from background_jobs
+    select ${JOB_COLUMNS_LIGHT} from background_jobs
     where id = ${id} and user_id = ${activeUserId()}
     limit 1
   `;
@@ -135,7 +142,7 @@ export async function getJob(id: string): Promise<BackgroundJob | null> {
 // Newest-first for the panel. Terminal rows stay as history.
 export async function listJobs(limit = 50): Promise<BackgroundJob[]> {
   const rows = await sql<JobRow[]>`
-    select ${JOB_COLUMNS} from background_jobs
+    select ${JOB_COLUMNS_LIGHT} from background_jobs
     where user_id = ${activeUserId()}
     order by created_at desc
     limit ${limit}
@@ -147,7 +154,7 @@ export async function listJobs(limit = 50): Promise<BackgroundJob[]> {
 // lease? Answered oldest-first so a backlog drains in launch order.
 export async function listStalledJobs(): Promise<BackgroundJob[]> {
   const rows = await sql<JobRow[]>`
-    select ${JOB_COLUMNS} from background_jobs
+    select ${JOB_COLUMNS_LIGHT} from background_jobs
     where user_id = ${activeUserId()}
       and status in ${ADVANCEABLE}
       and (lease_expires_at is null or lease_expires_at < now())
@@ -165,13 +172,13 @@ export async function activeJobsForConfig(
   if (!isUuid(configId)) return [];
   const rows = kinds && kinds.length > 0
     ? await sql<JobRow[]>`
-        select ${JOB_COLUMNS} from background_jobs
+        select ${JOB_COLUMNS_LIGHT} from background_jobs
         where config_id = ${configId} and user_id = ${activeUserId()}
           and status in ${ADVANCEABLE} and kind in ${sql(kinds)}
         order by created_at desc
       `
     : await sql<JobRow[]>`
-        select ${JOB_COLUMNS} from background_jobs
+        select ${JOB_COLUMNS_LIGHT} from background_jobs
         where config_id = ${configId} and user_id = ${activeUserId()}
           and status in ${ADVANCEABLE}
         order by created_at desc
@@ -301,7 +308,7 @@ export async function finishJob(
   const rows = await sql<JobRow[]>`
     update background_jobs set ${sql(row)}
     where id = ${id} and user_id = ${activeUserId()} and lease_token = ${leaseToken}
-    returning ${JOB_COLUMNS}
+    returning ${JOB_COLUMNS_LIGHT}
   `;
   return rows.length > 0 ? toJob(rows[0]) : null;
 }
@@ -325,7 +332,7 @@ export async function requestCancel(id: string): Promise<BackgroundJob | null> {
            updated_at = now()
      where id = ${id} and user_id = ${activeUserId()}
        and status in ('queued', 'running')
-    returning ${JOB_COLUMNS}
+    returning ${JOB_COLUMNS_LIGHT}
   `;
   return rows.length > 0 ? toJob(rows[0]) : getJob(id);
 }
@@ -368,7 +375,7 @@ export async function failJob(id: string, message: string): Promise<BackgroundJo
            lease_token = null, lease_expires_at = null,
            finished_at = now(), updated_at = now()
      where id = ${id} and user_id = ${activeUserId()} and status in ${ADVANCEABLE}
-    returning ${JOB_COLUMNS}
+    returning ${JOB_COLUMNS_LIGHT}
   `;
   return rows.length > 0 ? toJob(rows[0]) : null;
 }
@@ -387,7 +394,7 @@ export async function acknowledgeJob(id: string): Promise<BackgroundJob | null> 
   const rows = await sql<JobRow[]>`
     update background_jobs set acknowledged = true, updated_at = now()
     where id = ${id} and user_id = ${activeUserId()}
-    returning ${JOB_COLUMNS}
+    returning ${JOB_COLUMNS_LIGHT}
   `;
   return rows.length > 0 ? toJob(rows[0]) : null;
 }

@@ -62,7 +62,7 @@ async function seedEmbedding(text: string, vector: number[]) {
   await admin`
     insert into embedding_cache (user_id, model, input_kind, text_hash, dimension, embedding)
     values (${alice.id}, ${KEY_MODEL}, 'query', ${sha256(text)}, ${vector.length},
-            ${`{${vector.join(",")}}`})
+            ${`{${vector.join(",")}}`}::real[])
     on conflict do nothing`;
 }
 
@@ -304,7 +304,7 @@ describe("semanticCacheLookup over seeded similarities", () => {
       values (${bob.id}, ${bobCorpus.id}, ${KEY_MODEL}, 500, 50, 5, 'test-llm') returning id`;
     await admin`
       insert into embedding_cache (user_id, model, input_kind, text_hash, dimension, embedding)
-      values (${bob.id}, ${KEY_MODEL}, 'query', ${sha256("bobs")}, 4, ${"{1,0,0,0}"})`;
+      values (${bob.id}, ${KEY_MODEL}, 'query', ${sha256("bobs")}, 4, ${"{1,0,0,0}"}::real[])`;
     await withUser(bob, async () => {
       const cfg = await resolveConfig(bobCfg.id);
       await withConfig(cfg!, () =>

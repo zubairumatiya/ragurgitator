@@ -4,7 +4,7 @@
 //
 // docs/fusion-egress-plan.md §3: neither fix in that plan changes WHAT is
 // computed, so the only real risk is that one changes it anyway, by a float.
-// `max(1 - (embedding::vector <=> qv::vector))` in Postgres and "cosine every
+// `max(1 - (embedding <=> qv::vector))` in Postgres and "cosine every
 // piece in JS, keep the max" sum the same float4 values in different orders, and
 // the precedent (scripts/cache-probe-equiv.ts) measured that disagreement once
 // already: ~1e-7, because the server runs extra_float_digits = 0 and a `real`

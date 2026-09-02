@@ -47,21 +47,36 @@ function intEnv(name: string, fallback: number): number {
 
 export const demo = {
   // How long a guest workspace lives. Two hours is long enough that nobody is
-  // hurried through the demo and short enough that ~40 concurrent guests is a
-  // ceiling nothing realistic reaches (the plan's storage arithmetic).
+  // hurried through the demo and short enough that the storage ceiling below is
+  // one nothing realistic reaches.
   get ttlMinutes() {
     return intEnv("DEMO_TTL_MINUTES", 120);
   },
 
-  // THE STORAGE CAP, in guests. ~8.3 MB each against ~340 MB of headroom on the
-  // free tier is ~40; this sits below that so the wall is a friendly panel
-  // rather than a write failure somewhere deep in the clone.
+  // THE STORAGE CAP, in guests. RE-MEASURED 2026-09-01, and the arithmetic it
+  // replaced ("~8.3 MB each … is ~40") had been wrong for two reasons at once.
+  //
+  // Measured 2026-09-01 on a guest walked end to end — board filled, scored,
+  // graded, autotuned — as raw column bytes: embedding_cache 4.29 MB (step 5k's
+  // 888 vectors: 3 delegate models over 236 passages and 60 banked wordings),
+  // semantic_cache 3.22, chunks 1.37, demo_replay 0.58, the installed overrides
+  // 0.35, documents 0.27, the rest under 0.11. That is 10.0 MB raw, or ~14.8 MB
+  // on disk once indexes and page overhead are counted at the same ratio the old
+  // figure implied. Against ~340 MB of free-tier headroom that is ~23, so the
+  // default is 20 and the margin holds.
+  //
+  // The first 3.68 MB of that is clone step 5k, and it is NOT new spend: a guest
+  // who pressed ⚙ Auto tune already wrote those exact rows themselves, three
+  // minutes and a real Voyage bill later. What 5k adds is the same storage for
+  // guests who never press. The old figure was already understating the ones who
+  // did — a stale storage comment is how a cap becomes a write failure deep in
+  // the clone.
   //
   // It binds later than the CONNECTION ceiling does — lib/db.ts pins one pooled
   // connection per scope against the database's 60 — so in practice concurrency
   // fails first, and gracefully, by queueing.
   get maxLiveGuests() {
-    return intEnv("DEMO_MAX_GUESTS", 25);
+    return intEnv("DEMO_MAX_GUESTS", 20);
   },
 
   // Per-address provisioning limit, over the window below. This is what stops

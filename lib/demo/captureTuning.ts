@@ -160,8 +160,8 @@ export async function packTuning(
   if (board.length === 0) return { version: 1, entries: [] };
 
   const overrides = await privilegedSql<OverrideRow[]>`
-    select o.source_chunk_id, o.model, o.kind, o.text, o.dimension, o.embedding,
-           o.token_start, o.token_end
+    select o.source_chunk_id, o.model, o.kind, o.text, o.dimension,
+           o.embedding::real[] as embedding, o.token_start, o.token_end
       from config_chunk_overrides o
      where o.config_id = ${configId}
        and o.source_chunk_id = any(${board}::uuid[])

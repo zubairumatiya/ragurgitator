@@ -61,7 +61,7 @@ async function seedOwnedRows(userId: string) {
   const embedding = `{${Array.from({ length: 1024 }, () => 0).join(",")}}`;
   await sql`
     insert into embedding_cache (model, input_kind, text_hash, dimension, embedding, user_id)
-    values ('voyage-4-lite', 'document', ${`t-${userId}`}, 1024, ${embedding}, ${userId})`;
+    values ('voyage-4-lite', 'document', ${`t-${userId}`}, 1024, ${embedding}::real[], ${userId})`;
   return { corpus: corpus.id, config: config.id, document: document.id };
 }
 

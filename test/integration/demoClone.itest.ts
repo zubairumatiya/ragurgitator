@@ -29,8 +29,14 @@ import { withUser } from "../../lib/auth/userScope";
 import { config } from "../../lib/config";
 import { fragment, privilegedSql } from "../../lib/db";
 import { cloneSeedWorkspace } from "../../lib/demo/clone";
-import { forgetMatrix, readMatrix, writeMatrix } from "../../lib/demo/replay";
-import { packMatrix, pairIdentity, type ReplayPair } from "../../lib/demo/replayCore";
+import { forgetMatrix, readMatrix, writeMatrix, writeTuning } from "../../lib/demo/replay";
+import {
+  packEmbedding,
+  packMatrix,
+  pairIdentity,
+  type ReplayPair,
+  type ReplayTuning,
+} from "../../lib/demo/replayCore";
 import {
   PAIR_BANK_CAP,
   PAIR_BLANK_CAP,
@@ -60,7 +66,8 @@ const sha256 = (t: string) => createHash("sha256").update(t, "utf8").digest("hex
 
 // TWO VECTOR WIDTHS, and the split is forced by the schema rather than chosen.
 //
-// semantic_cache.query_vector and embedding_cache.embedding are untyped real[],
+// semantic_cache.query_vector is untyped real[] (embedding_cache.embedding became
+// pgvector in 0084),
 // so the cache path can use four readable dimensions exactly as
 // semanticCache.itest.ts does — and no provider is ever called, because
 // embedQueryCached finds the seeded row first.
@@ -92,7 +99,7 @@ async function seedEmbedding(userId: string, text: string) {
   await admin`
     insert into embedding_cache (user_id, model, input_kind, text_hash, dimension, embedding)
     values (${userId}, ${KEY_MODEL}, 'query', ${sha256(text)}, ${V.length},
-            ${`{${V.join(",")}}`})
+            ${`{${V.join(",")}}`}::real[])
     on conflict do nothing`;
 }
 
@@ -1816,5 +1823,131 @@ describe("cloneSeedWorkspace replay matrix", () => {
     await bankMatrix(seed.id);
     await cloneSeedWorkspace(seed.id, guest.id);
     assert.equal((await banked(seed.id)).length, 1);
+  });
+});
+
+// --- step 5k: the delegate-space vectors ------------------------------------
+//
+// docs/demo-rescore-replay-plan.md. The one copy in this file whose absence is
+// invisible: without it a guest's ⚙ Auto tune still works, still re-scores, and
+// still reports real numbers — it just buys 744 embeddings on the operator's key
+// and takes three minutes instead of thirty-seven seconds. Nothing errors, so
+// only a test that asserts on the COPIED SET can hold the scope in place.
+//
+// The scope is the whole design, so each assertion below is one way of widening
+// or narrowing it wrongly.
+describe("cloneSeedWorkspace delegate vectors", () => {
+  // Not KEY_MODEL: the config's own base model is excluded on purpose — the
+  // fusion lane short-circuits for it, and its vectors live in the chunks table
+  // step 3 already copies.
+  const DELEGATE = "voyage-code-2";
+
+  async function cacheRow(userId: string, model: string, kind: string, text: string) {
+    await admin`
+      insert into embedding_cache (user_id, model, input_kind, text_hash, dimension, embedding)
+      values (${userId}, ${model}, ${kind}, ${sha256(text)}, ${V.length}, ${`{${V.join(",")}}`}::real[])
+      on conflict do nothing`;
+  }
+
+  // A shelf whose one winner delegates to DELEGATE — the only thing that makes
+  // the copy happen at all.
+  async function bankTuning(model: string) {
+    const tuning: ReplayTuning = {
+      version: 1,
+      entries: [
+        {
+          chunk: (
+            await admin<{ id: string }[]>`select id from ${admin(CHUNKS)} order by position limit 1`
+          )[0].id,
+          model,
+          kind: "model",
+          detail: `delegate → ${model}`,
+          pieces: [
+            { text: null, dimension: 2, embedding: packEmbedding([0.5, -0.25]), tokenStart: null, tokenEnd: null },
+          ],
+          trials: [],
+        },
+      ],
+    };
+    await withUser(seed, () => writeTuning(seed.id, tuning));
+  }
+
+  async function copied(): Promise<{ model: string; kind: string; hash: string }[]> {
+    const rows = await admin<{ model: string; input_kind: string; text_hash: string }[]>`
+      select model, input_kind, text_hash from embedding_cache
+       where user_id = ${guest.id} order by input_kind, model`;
+    return rows.map((r) => ({ model: r.model, kind: r.input_kind, hash: r.text_hash }));
+  }
+
+  it("copies both input_kinds under the shelf's model, and nothing else", async () => {
+    await bankTuning(DELEGATE);
+    // The two that must travel: a cloned chunk's text, and a question wording
+    // the guest ends up holding.
+    await cacheRow(seed.id, DELEGATE, "document", "chunk zero");
+    await cacheRow(seed.id, DELEGATE, "query", "what?");
+    // Right model, wrong text: a passage this build does not carry. `_hash_scope`
+    // is what keeps the master's other corpora out.
+    await cacheRow(seed.id, DELEGATE, "document", "a passage from another corpus");
+    // Right text, wrong model: the eleven-model sweep behind Appraise → Models
+    // lives in this table too, and 5k must never widen into it.
+    await cacheRow(seed.id, "voyage-finance-2", "document", "chunk zero");
+    // The config's own base model, excluded by name.
+    await cacheRow(seed.id, KEY_MODEL, "document", "chunk zero");
+
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+
+    assert.deepEqual(await copied(), [
+      { model: DELEGATE, kind: "document", hash: sha256("chunk zero") },
+      { model: DELEGATE, kind: "query", hash: sha256("what?") },
+    ]);
+    assert.equal(summary.cachedVectors, 2);
+  });
+
+  it("copies nothing when the build banked no tuning", async () => {
+    await cacheRow(seed.id, DELEGATE, "document", "chunk zero");
+    await cacheRow(seed.id, DELEGATE, "query", "what?");
+
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+
+    // No shelf ⇒ no models ⇒ no copy, the same gate readTuning() imposes on the
+    // replayed search itself. A build that cannot install an override cannot take
+    // the fusion path, so these vectors would be storage for nothing.
+    assert.deepEqual(await copied(), []);
+    assert.equal(summary.cachedVectors, 0);
+    assert.equal(summary.cachedVectorsWanted, 0);
+  });
+
+  it("reports a short copy, so a cold master is legible at publish time", async () => {
+    await bankTuning(DELEGATE);
+    // The document half only. The master's cache being cold for a banked model is
+    // not an error — the guest just pays for the rest, which is today's behaviour
+    // — but scripts/demo-snapshot has to be able to SAY so.
+    await cacheRow(seed.id, DELEGATE, "document", "chunk zero");
+
+    const summary = await cloneSeedWorkspace(seed.id, guest.id);
+
+    assert.equal(summary.cachedVectors, 1);
+    assert.ok(
+      summary.cachedVectorsWanted > summary.cachedVectors,
+      "a short copy has to be visible against what a complete one would have been",
+    );
+  });
+
+  it("does not stack the last build's vectors on a republish", async () => {
+    await bankTuning(DELEGATE);
+    await cacheRow(seed.id, DELEGATE, "document", "chunk zero");
+    await cloneSeedWorkspace(seed.id, guest.id, { replaceDestination: true });
+    // A row from a build this destination no longer holds. embedding_cache hangs
+    // off user_profiles alone, so no cascade in step 0's delete list reaches it —
+    // and its content-addressed key means a stale row is not even a conflict, just
+    // storage nothing can ask about.
+    await cacheRow(guest.id, DELEGATE, "document", "a passage from the last build");
+
+    const summary = await cloneSeedWorkspace(seed.id, guest.id, { replaceDestination: true });
+
+    assert.deepEqual(await copied(), [
+      { model: DELEGATE, kind: "document", hash: sha256("chunk zero") },
+    ]);
+    assert.equal(summary.cachedVectors, 1);
   });
 });

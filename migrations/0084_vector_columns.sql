@@ -1,0 +1,66 @@
+-- ============================================================================
+-- 0084_vector_columns.sql
+--
+-- Phase 1 of docs/fusion-latency-plan.md: the two vector columns the fusion path
+-- reads stop being `real[]` and become pgvector `vector`.
+--
+-- WHAT THIS IS ABOUT — a cast, executed per row, per call, per question.
+-- `embedding_cache.embedding` and `config_chunk_overrides.embedding` have been
+-- float4 arrays since 0020/0025, so every similarity read had to write
+-- `embedding::vector` to reach the `<=>` operator. That cast is not free and it
+-- is not cached: Postgres re-parses the array into a vector datum on every scan
+-- of every row. Measured on the live database, 2026-09-01:
+--
+--   poolDocSims' shape over 515 cached document vectors
+--     rows read, embedding untouched                      1.5 ms
+--     rows read + detoasted (array_length only)           83  ms
+--     rows read + `embedding::vector <=> qv` (shipped)    348 ms
+--     same rows already stored as `vector`                3.7 ms
+--
+--   overrideSims over 232 override pieces
+--     `embedding::vector <=> qv` (shipped)                162 ms
+--
+-- So ~265 ms of that 348 ms was the cast alone. The demo's autotune finale runs
+-- poolDocSims once per question per delegate model — 60 x 3 — which is ~62 s of
+-- pure casting on a run that makes zero provider calls, and the same arithmetic
+-- is paid by every question a tuned config answers in production.
+--
+-- THE CAST IS EXACT IN BOTH DIRECTIONS, which is why this is a type change and
+-- not a data migration. pgvector stores float4, the same as `real[]`, so
+-- `embedding::vector` loses nothing and `embedding::real[]` recovers the array
+-- byte-for-byte. overrideStore's own comment has said this since the SQL-side
+-- sims landed ("the cast is exact — pgvector stores float4 too — not a
+-- re-encoding"); this migration is that sentence applied to the storage instead
+-- of to every read.
+--
+-- UNTYPED ON PURPOSE — `vector`, not `vector(1024)`. Both tables hold vectors
+-- from many models at once: 384, 1024, 1536 and 3072 wide. pgvector allows a
+-- column with no dimension modifier and records the width per value, which is
+-- exactly the shape these tables already had. It costs the ability to build an
+-- HNSW/IVFFlat index, which neither table has ever had and neither wants: both
+-- are read through their btree primary keys and then scanned exactly, and
+-- `overrideSims`' header calls that out as load-bearing (nothing here became
+-- ANN). `<=>` still requires equal dimensions on both sides, and the `model =`
+-- filter every caller carries is still what guarantees it.
+--
+-- STORAGE IS NEUTRAL. A 1024-dim value is 4096 bytes of float4 either way; the
+-- array header (~24 bytes) is replaced by the vector header (8). The rewrite
+-- below therefore does not change what these tables cost — it changes what
+-- reading them costs.
+--
+-- LOCKS. Both statements are full table rewrites under ACCESS EXCLUSIVE:
+-- embedding_cache is ~20k rows / 136 MB, config_chunk_overrides ~389 rows /
+-- 3 MB. Seconds, not minutes, but not online — apply it when nobody is mid-run.
+--
+-- NOT IN SCOPE, deliberately: `eval_question_embeddings.embedding` and
+-- `semantic_cache.query_vector` carry the identical defect (the semantic-cache
+-- probe casts 1,443 rows twice per lookup). They are on a different path from
+-- the one measured here and get their own migration once measured, rather than
+-- riding along on this one's evidence.
+-- ============================================================================
+
+alter table embedding_cache
+  alter column embedding type vector using embedding::vector;
+
+alter table config_chunk_overrides
+  alter column embedding type vector using embedding::vector;

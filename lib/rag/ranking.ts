@@ -372,7 +372,9 @@ export async function buildLlmRanking(
     return resolve(cached);
   }
 
-  const chunks = await getRankingChunks(poolIds);
+  // Whole text: these chunks go into the LLM prompt, not onto a screen, so a
+  // preview-length read would change what the ranker is asked to judge.
+  const chunks = await getRankingChunks(poolIds, { fullText: true });
 
   const numbered = poolIds.map((id, i) => {
     const c = chunks.get(id);

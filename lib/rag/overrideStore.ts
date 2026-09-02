@@ -3,7 +3,6 @@
 // other stores. An override is an alternate vector for a chunk that still lives
 // in the config's base chunks_<model>_<dim> table — see retriever.ts for how the
 // base ANN and the override sets are rank-fused at query time.
-import { createHash } from "node:crypto";
 import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 
@@ -53,41 +52,43 @@ export const FUSION_VERSION = 4;
 // determines them (and they're cached), so the semantic rows suffice.
 export async function retrievalStateFingerprint(): Promise<string> {
   const cfg = activeConfig();
+  // The canonical string's PREFIX is app state, not row state: the fusion
+  // version is a constant here and the live fusion pool (0027) shapes every
+  // fused rank, so it's part of the state — changing it (while overrides exist)
+  // stales scored results, and changing it back revalidates them. Auto (null)
+  // contributes NOTHING so fingerprints from before the pool existed stay valid
+  // — auto IS the historical behavior.
+  const prefix =
+    `fusion-v${FUSION_VERSION}\n` + (cfg.fusionPool === null ? "" : `pool-${cfg.fusionPool}\n`);
   try {
-    const rows = await sql<
-      {
-        source_chunk_id: string;
-        model: string;
-        kind: string;
-        piece_index: number;
-        token_start: number | null;
-        token_end: number | null;
-        text_hash: string | null;
-      }[]
-    >`
-      select source_chunk_id, model, kind, piece_index, token_start, token_end,
-             md5(text) as text_hash
+    // Postgres builds the canonical string and hashes it, so the app reads 64
+    // hex characters instead of every override piece row — the digest used to
+    // cost a full download of the pieces table 8,668 times over
+    // (docs/demo-egress-plan.md §1.5). Byte-for-byte the same string the JS
+    // form built: `|` between fields, E'\n' between rows, md5 for the text,
+    // coalesce for the nullable columns, ordered by the same two columns in
+    // their own types. `scripts/fingerprint-equiv.ts` holds the JS reference
+    // and asserts the two agree — run it before touching anything here, since a
+    // one-byte drift stales every scored result in the database.
+    const [row] = await sql<{ digest: string | null }[]>`
+      select encode(
+               sha256(convert_to(
+                 ${prefix} || string_agg(
+                   source_chunk_id::text || '|' || model || '|' || kind || '|'
+                     || piece_index::text || '|' || coalesce(token_start::text, '') || '|'
+                     || coalesce(token_end::text, '') || '|' || coalesce(md5(text), ''),
+                   E'\n' order by source_chunk_id, piece_index
+                 ),
+                 'utf8'
+               )),
+               'hex'
+             ) as digest
       from config_chunk_overrides
       where config_id = ${cfg.id}
-      order by source_chunk_id, piece_index
     `;
-    if (rows.length === 0) return "baseline";
-    // The live fusion pool (0027) shapes every fused rank, so it's part of the
-    // state — changing it (while overrides exist) stales scored results, and
-    // changing it back revalidates them. Auto (null) contributes NOTHING so
-    // fingerprints from before the pool existed stay valid — auto IS the
-    // historical behavior.
-    const canonical =
-      `fusion-v${FUSION_VERSION}\n` +
-      (cfg.fusionPool === null ? "" : `pool-${cfg.fusionPool}\n`) +
-      rows
-        .map(
-          (r) =>
-            `${r.source_chunk_id}|${r.model}|${r.kind}|${r.piece_index}|` +
-            `${r.token_start ?? ""}|${r.token_end ?? ""}|${r.text_hash ?? ""}`,
-        )
-        .join("\n");
-    return createHash("sha256").update(canonical).digest("hex");
+    // No pieces => string_agg is null => the digest is null: the baseline
+    // (base-ANN-only) path, no fusion and so no version.
+    return row?.digest ?? "baseline";
   } catch (err) {
     // Overrides table missing (0013 unapplied) -> plain baseline retrieval.
     if ((err as { code?: string }).code === "42P01") return "baseline";
@@ -384,7 +385,8 @@ export async function getChunkOverridePieces(
         token_end: number | null;
       }[]
     >`
-      select model, kind, text, dimension, embedding, token_start, token_end
+      select model, kind, text, dimension, embedding::real[] as embedding,
+             token_start, token_end
       from config_chunk_overrides
       where config_id = ${cfg.id} and source_chunk_id = ${sourceChunkId}
       order by piece_index
@@ -413,11 +415,13 @@ export async function getChunkOverridePieces(
 // the best piece per source chunk (hit = any piece in top-k).
 //
 // ⚠ THIS SHIPS VECTORS. A 1024-dim real[] renders to ~11 kB of text on the wire,
-// so a whole config's pieces is a few hundred kB per call. The RETRIEVER no longer
-// calls this — it asks Postgres for the collapsed sims instead (overrideSims,
-// below, docs/fusion-egress-plan.md §1.1). The one surviving caller needs the raw
-// vectors for a screen, not a ranking, and MUST pass `chunkIds` so it downloads
-// the handful it will actually use rather than the table.
+// so a whole config's pieces is a few hundred kB per call. NOTHING IN THE APP
+// CALLS THIS ANY MORE: the retriever asks Postgres for the collapsed sims
+// (overrideSims, below, docs/fusion-egress-plan.md §1.1) and the dirty screen
+// asks it for per-pair sims (evalStore.screenSims, demo-egress-plan §1.4). The
+// surviving callers are the two equivalence scripts, which keep a copy of the
+// JS path precisely so they can compare it against the SQL one. A caller that
+// does want raw vectors MUST pass `chunkIds` and download the handful it uses.
 export async function overrideEmbeddings(
   model: string,
   chunkIds?: string[],
@@ -427,7 +431,7 @@ export async function overrideEmbeddings(
   const only =
     chunkIds === undefined ? sql`` : sql`and source_chunk_id = any(${chunkIds}::uuid[])`;
   const rows = await sql<{ source_chunk_id: string; embedding: number[] }[]>`
-    select source_chunk_id, embedding
+    select source_chunk_id, embedding::real[] as embedding
     from config_chunk_overrides
     where config_id = ${cfg.id} and model = ${model} ${only}
   `;
@@ -440,8 +444,11 @@ export async function overrideEmbeddings(
 // where the vectors already live — ~300 kB per query per model becomes ~1 kB.
 //
 // Three things this depends on, none of them incidental:
-//   • `embedding` is real[] (_float4), NOT pgvector, so BOTH sides need ::vector.
-//     The cast is exact — pgvector stores float4 too — not a re-encoding.
+//   • `embedding` IS pgvector since 0084 (it was real[], and both sides used to
+//     need a ::vector cast — 162 ms per call over 232 pieces, re-parsed on every
+//     scan). The query vector still arrives as a JS array, hence its own cast.
+//     Reads that want the raw floats back ask for ::real[]; that direction is
+//     exact, because pgvector stores float4 too.
 //   • The table carries btree indexes only (no HNSW), so `<=>` scans exactly the
 //     rows the JS loop scanned. Nothing here became ANN.
 //   • `<=>` requires equal dimensions, and `model = $2` is what guarantees that:
@@ -452,6 +459,33 @@ export async function overrideEmbeddings(
 // chunk's stored override with a hypothetical one, so its stored pieces must not
 // compete. It used to be a JS `.filter` after the download; in the where clause it
 // is free. scripts/fusion-equiv.ts replays both forms and asserts they agree.
+// overrideSims for a WHOLE BATCH of queries under one model. One statement for
+// what was one per question — see vectorStore.queryExcludingIdsBatch for why
+// that is the number that matters on a pinned connection.
+//
+// No `excludeChunkId`: the exclusion is the trial dry-run's, and a trial scores
+// ONE question against many rungs, which is the opposite shape. Batching is for
+// the eval scorer, where no chunk is excluded.
+export async function overrideSimsBatch(
+  model: string,
+  queryVectors: number[][],
+): Promise<Map<string, number>[]> {
+  if (queryVectors.length === 0) return [];
+  const cfg = activeConfig();
+  const literals = queryVectors.map((v) => `[${v.join(",")}]`);
+  const rows = await sql<{ i: string; source_chunk_id: string; sim: number }[]>`
+    select q.i, o.source_chunk_id,
+           max(1 - (o.embedding <=> q.v)) as sim
+    from unnest(${literals}::text[]::vector[]) with ordinality as q(v, i)
+    cross join config_chunk_overrides o
+    where o.config_id = ${cfg.id} and o.model = ${model}
+    group by q.i, o.source_chunk_id
+  `;
+  const out: Map<string, number>[] = queryVectors.map(() => new Map());
+  for (const r of rows) out[Number(r.i) - 1].set(r.source_chunk_id, Number(r.sim));
+  return out;
+}
+
 export async function overrideSims(
   model: string,
   queryVector: number[],
@@ -463,7 +497,7 @@ export async function overrideSims(
     : sql``;
   const rows = await sql<{ source_chunk_id: string; sim: number }[]>`
     select source_chunk_id,
-           max(1 - (embedding::vector <=> ${queryVector}::real[]::vector)) as sim
+           max(1 - (embedding <=> ${queryVector}::real[]::vector)) as sim
     from config_chunk_overrides
     where config_id = ${cfg.id} and model = ${model} ${exclude}
     group by source_chunk_id
