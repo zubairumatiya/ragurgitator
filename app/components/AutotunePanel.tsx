@@ -116,11 +116,16 @@ export function AutotunePanel({
   busy,
   onBusyChange,
   onDone,
+  onScored,
 }: {
   summary: EvalSummary;
   busy: boolean;
   onBusyChange: (b: boolean) => void;
   onDone: () => void;
+  // The run's final re-score has landed. Separate from onDone because it fires
+  // with the dialog still open: the metric tiles sit behind it and would
+  // otherwise hold the pre-run numbers until the panel was closed.
+  onScored: () => void;
 }) {
   // The two things the demo changes about this panel, and both come off the
   // summary rather than off an isGuest() branch — like every other consumer of
@@ -312,6 +317,10 @@ export function AutotunePanel({
               break;
             case "autotune-done":
               setDone(event);
+              // Scores changed on the server as the re-score ran; pull the
+              // summary in place so the tiles behind this dialog agree with the
+              // result it is about to show.
+              onScored();
               break;
             case "error":
               setError(event.message);

@@ -1248,6 +1248,7 @@ export function EvalDashboard() {
             busy={busy}
             onBusyChange={setBusy}
             onDone={reload}
+            onScored={refreshSummary}
           />
         )}
         {!progress && notice && (
