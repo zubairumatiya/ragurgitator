@@ -422,27 +422,53 @@ async function snapshot(label: string, widths?: Record<WidthKey, number>): Promi
 const kb = (bytes: number) => `${(bytes / 1024).toFixed(0)} kB`;
 const mb = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
-function print(rows: { p: Pattern; calls: number; rows: number; bytes: number }[], title: string): void {
+// A line whose pattern has no baseline entry is neither a delta nor zero — it is
+// UNKNOWN, and null is what says so. See tabulate.
+type Row = { p: Pattern; calls: number | null; rows: number | null; bytes: number | null };
+
+const NO_BASELINE = "\u2014 (no baseline)";
+
+function print(rows: Row[], title: string): void {
   console.log(`\n${title}`);
+  // Named up front, not buried in the table: a reader who skips the rows still
+  // has to learn that the total below is missing some of them.
+  const blind = rows.filter((r) => r.rows === null).length;
+  if (blind > 0) {
+    console.log(`  ${blind} of ${rows.length} patterns have NO BASELINE — shown as "${NO_BASELINE}" and left out`);
+    console.log(`  of the total. Re-baseline to measure them: npm run egress -- start "<label>"`);
+  }
   console.log("  " + "statement".padEnd(52) + "calls".padStart(9) + "rows".padStart(11) + "bytes".padStart(12));
   for (const r of rows) {
-    console.log(
-      "  " +
-        r.p.label.padEnd(52) +
-        String(r.calls).padStart(9) +
-        String(r.rows).padStart(11) +
-        (r.bytes >= 1024 * 1024 ? mb(r.bytes) : kb(r.bytes)).padStart(12),
-    );
+    // 32 = the three numeric columns' widths (9 + 11 + 12), so the placeholder
+    // occupies exactly the space the numbers would have.
+    const cells =
+      r.rows === null || r.calls === null || r.bytes === null
+        ? NO_BASELINE.padStart(32)
+        : String(r.calls).padStart(9) +
+          String(r.rows).padStart(11) +
+          (r.bytes >= 1024 * 1024 ? mb(r.bytes) : kb(r.bytes)).padStart(12);
+    console.log("  " + r.p.label.padEnd(52) + cells);
   }
-  const total = rows.reduce((a, r) => a + r.bytes, 0);
-  console.log("  " + "TOTAL estimated egress".padEnd(52) + "".padStart(20) + mb(total).padStart(12));
+  const total = rows.reduce((a, r) => a + (r.bytes ?? 0), 0);
+  const caveat = blind > 0 ? `  (${blind} pattern${blind === 1 ? "" : "s"} not counted)` : "";
+  console.log("  " + "TOTAL estimated egress".padEnd(52) + "".padStart(20) + mb(total).padStart(12) + caveat);
 }
 
-function tabulate(after: Snapshot, before?: Snapshot) {
+function tabulate(after: Snapshot, before?: Snapshot): Row[] {
   const widths = before?.widths ?? after.widths;
   return PATTERNS.map((p) => {
     const a = after.readings.find((r) => r.key === p.key)!;
     const b = before?.readings.find((r) => r.key === p.key);
+    // A baseline taken by an EARLIER build has no READING for a pattern added
+    // since, and `- 0` reports that pattern's whole cumulative count since
+    // stats_reset as if it were this window's delta. That is what printed a
+    // ~432 MB window as 2,848.8 MB and cost two wrong diagnoses before anyone
+    // read this line — so an absent baseline is null, never a number.
+    //
+    // NB `before === undefined` is the CUMULATIVE view (show, and start's
+    // opening table), where every line legitimately IS its own full count.
+    // Only a PARTIAL baseline can lie, so only that case returns null.
+    if (before !== undefined && b === undefined) return { p, calls: null, rows: null, bytes: null };
     const rows = a.rows - (b?.rows ?? 0);
     // A baseline taken by an EARLIER build has no width for a pattern added
     // since. Fall back rather than multiplying by undefined and printing NaN —
@@ -632,13 +658,13 @@ function runLeg(owner: Owner, leg: Leg, n: number): Promise<void> {
 // Sum a set of leg deltas into one table, so `walk all` ends on the figure the
 // plan's phase 7 actually reports. Bytes are recomputed from the summed rows
 // rather than added, so one width change cannot be applied twice.
-function combine(
-  legs: { p: Pattern; calls: number; rows: number; bytes: number }[][],
-  widths: Record<WidthKey, number>,
-) {
+function combine(legs: Row[][], widths: Record<WidthKey, number>) {
   return PATTERNS.map((p, i) => {
-    const calls = legs.reduce((a, l) => a + l[i].calls, 0);
-    const rows = legs.reduce((a, l) => a + l[i].rows, 0);
+    // `?? 0` cannot fire here: a walk's legs are tabulated against a baseline
+    // this same run took, so every pattern has a reading. It is the type's
+    // null case, not a real one.
+    const calls = legs.reduce((a, l) => a + (l[i].calls ?? 0), 0);
+    const rows = legs.reduce((a, l) => a + (l[i].rows ?? 0), 0);
     return { p, calls, rows, bytes: rows * (widths[p.width] ?? FALLBACK_WIDTHS[p.width]) };
   });
 }
@@ -670,7 +696,7 @@ async function main(): Promise<void> {
     // pg_stat_statements evicts least-used entries when it hits pg_stat_statements.max.
     // A negative delta means the baseline's entry was evicted mid-walk, so the
     // delta is not a measurement of anything and must not be reported as one.
-    if (rows.some((r) => r.rows < 0 || r.calls < 0)) {
+    if (rows.some((r) => (r.rows ?? 0) < 0 || (r.calls ?? 0) < 0)) {
       console.log("WARNING: a counter went backwards — an entry was evicted or stats were reset.");
       console.log("         Re-take the baseline and re-run the walk; this delta is not usable.");
     }
@@ -681,8 +707,8 @@ async function main(): Promise<void> {
     const head = rows.filter((r) => r.p.headline);
     console.log(
       "\n  headline: " +
-        head.map((r) => `${r.p.key}=${r.rows} rows`).join(", ") +
-        `, total ${mb(rows.reduce((a, r) => a + r.bytes, 0))}`,
+        head.map((r) => `${r.p.key}=${r.rows ?? "no baseline"}`).join(", ") +
+        `, total ${mb(rows.reduce((a, r) => a + (r.bytes ?? 0), 0))}`,
     );
   } else if (cmd === "walk") {
     // `walk [leg] [n]`. The leg argument is optional and positional, so a bare
@@ -711,7 +737,7 @@ async function main(): Promise<void> {
       "  widths: " +
         (Object.keys(widths) as WidthKey[]).map((k) => `${k} ${widths[k]} B`).join(", "),
     );
-    const tables: { p: Pattern; calls: number; rows: number; bytes: number }[][] = [];
+    const tables: Row[][] = [];
 
     for (const leg of legs) {
       const label = `${leg} leg, n=${n}`;
@@ -719,7 +745,7 @@ async function main(): Promise<void> {
       await runLeg(owner, leg, n);
       const after = await snapshot(label, widths);
       const rows = tabulate(after, before);
-      if (rows.some((r) => r.rows < 0 || r.calls < 0)) {
+      if (rows.some((r) => (r.rows ?? 0) < 0 || (r.calls ?? 0) < 0)) {
         console.log("WARNING: a counter went backwards — an entry was evicted or stats were reset.");
         console.log("         Re-take the reading; this delta is not usable.");
       }
