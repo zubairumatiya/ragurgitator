@@ -13,7 +13,7 @@ import "server-only";
 import { cache } from "react";
 
 import { activeUserId } from "@/lib/auth/userScope";
-import { privilegedSql, sql } from "@/lib/db";
+import { privilegedSql, scopeMemo, sql } from "@/lib/db";
 
 export type GuestStatus = {
   isGuest: boolean;
@@ -27,13 +27,18 @@ const NOT_A_GUEST: GuestStatus = { isGuest: false, expiresAt: null };
 
 // Reads the CALLER'S OWN profile row through the ordinary RLS-scoped handle, so
 // this cannot be turned into a question about anybody else even by accident.
-export const guestStatus = cache(async (): Promise<GuestStatus> => {
-  const [row] = await sql<{ is_guest: boolean; expires_at: Date | null }[]>`
-    select is_guest, expires_at from user_profiles where id = ${activeUserId()}
-  `;
-  if (!row?.is_guest) return NOT_A_GUEST;
-  return { isGuest: true, expiresAt: row.expires_at?.toISOString() ?? null };
-});
+//
+// Once per scope (scopeMemo): a demo ⚙ press asked this 66 times on one
+// connection, and nothing in a scope can change whether its caller is a guest.
+export const guestStatus = cache(async (): Promise<GuestStatus> =>
+  scopeMemo(`guest:${activeUserId()}`, async () => {
+    const [row] = await sql<{ is_guest: boolean; expires_at: Date | null }[]>`
+        select is_guest, expires_at from user_profiles where id = ${activeUserId()}
+      `;
+    if (!row?.is_guest) return NOT_A_GUEST;
+    return { isGuest: true, expiresAt: row.expires_at?.toISOString() ?? null };
+  }),
+);
 
 // Sugar for the many call sites that only need the boolean.
 export async function isGuest(): Promise<boolean> {

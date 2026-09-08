@@ -38,6 +38,20 @@
 //                                          board question, bought once and banked
 //                                          — the build is valid without them, that
 //                                          step just greys out)
+//   … --tuning easy=<id>,medium=<id>,easy+medium=<id>
+//                                          bank ⚙ Auto tune's winners from the
+//                                          tuning SIBLINGS (docs/demo-voyage-
+//                                          tuning-plan.md, scripts/demo-tuning-
+//                                          configs), one bank per difficulty set,
+//                                          instead of from the publish config's
+//                                          own overrides. Without it the publish
+//                                          config's overrides are banked under
+//                                          the legacy key, as before. With it,
+//                                          the full-set bank is ALSO written
+//                                          under the legacy key for a deployed
+//                                          build that predates the set keys;
+//                                          --no-legacy-bank stops that once the
+//                                          set-key reader is live.
 //
 // Env: DEMO_MASTER_USER_ID (the account you work in), DEMO_SNAPSHOT_USER_ID (the
 // published one), DEMO_SNAPSHOT_EMAIL (only for --create; must be a real address,
@@ -65,14 +79,23 @@ import { resolveConfig, withConfig } from "../lib/rag/activeConfig";
 import { ndcg } from "../lib/rag/evalMetrics";
 import { captureReplayMatrix } from "../lib/demo/captureMatrix";
 import { packTuning, tuningCensus } from "../lib/demo/captureTuning";
-import { writeBoard, writeIdeals, writeLlmRankings, writeMatrix, writeTuning } from "../lib/demo/replay";
+import {
+  pruneTuning,
+  writeBoard,
+  writeIdeals,
+  writeLlmRankings,
+  writeMatrix,
+  writeTuning,
+} from "../lib/demo/replay";
 import {
   BOARD_KEY,
   DEMO_MATRIX_MAX_BYTES,
   DEMO_RANKINGS_MAX_BYTES,
   DEMO_TUNING_MAX_BYTES,
   rankingsBytes,
+  TUNING_KEY,
   tuningBytes,
+  tuningKey,
   type ReplayBoard,
 } from "../lib/demo/replayCore";
 import { buildLlmRanking } from "../lib/rag/ranking";
@@ -99,6 +122,45 @@ const valueOf = (flag: string) => {
 function die(message: string): never {
   console.error(`\n✗ ${message}\n`);
   process.exit(1);
+}
+
+// THE TUNING SIBLINGS, if this publish banks from them: `--tuning
+// easy=<id>,medium=<id>,easy+medium=<id>` → one (bank key, source config) per
+// set. Each source must be the master's, on the publish config's base model
+// (the id remap in lib/demo/captureTuning joins one chunk table), and carry at
+// least one override — a sibling that has not been tuned yet is a bank of
+// nothing, which a guest would read as "no variation helped" on every chunk.
+type TuningSource = { set: string[]; key: string; configId: string };
+
+async function parseTuningSources(
+  master: string,
+  baseModel: string,
+): Promise<TuningSource[] | null> {
+  const raw = valueOf("--tuning");
+  if (!raw) return null;
+  const sources: TuningSource[] = [];
+  for (const part of raw.split(",")) {
+    const [setSpec, id] = part.split("=");
+    if (!setSpec || !id) die(`--tuning: cannot read "${part}" (want <set>=<configId>)`);
+    const set = setSpec.split("+").filter(Boolean);
+    const key = tuningKey(set);
+    if (sources.some((s) => s.key === key)) die(`--tuning: "${setSpec}" is given twice`);
+    const [cfg] = await privilegedSql<
+      { user_id: string; base_model: string; name: string | null; overrides: number }[]
+    >`
+      select c.user_id, c.base_model, c.name,
+             (select count(*) from config_chunk_overrides o where o.config_id = c.id)::int as overrides
+        from configs c where c.id = ${id}
+    `;
+    if (!cfg) die(`--tuning: no config ${id}`);
+    if (cfg.user_id !== master) die(`--tuning: config ${id} is not the master's`);
+    if (cfg.base_model !== baseModel) {
+      die(`--tuning: "${cfg.name}" is on ${cfg.base_model}, not the publish config's ${baseModel}`);
+    }
+    if (cfg.overrides === 0) die(`--tuning: "${cfg.name}" (${id}) carries no overrides — tune it first`);
+    sources.push({ set, key, configId: id });
+  }
+  return sources;
 }
 
 // Which chunk table a config's vectors live in, or null for a base model that
@@ -630,7 +692,16 @@ async function main() {
   const boardChunks = [...new Set(tunable.map((t) => t.chunk))];
   const ideals = await idealCensus(configId, boardChunks);
   const llmRanks = await llmRankingCensus(configId, boardChunks);
+  const tuningSources = await parseTuningSources(master, cfg.base_model);
   const tuning = await tuningCensus(configId, boardChunks, cfg.base_model);
+  const tuningBySet = tuningSources
+    ? await Promise.all(
+        tuningSources.map(async (t) => ({
+          ...t,
+          census: await tuningCensus(configId, boardChunks, cfg.base_model, t.configId),
+        })),
+      )
+    : null;
 
   console.log(`\nmaster    ${master}`);
   console.log(`snapshot  ${snapshot}  (${profile.email})\n`);
@@ -754,13 +825,29 @@ async function main() {
   // never overrode is one its own search found nothing for, and the replayed run
   // reports it unresolved exactly as a real one would. What matters is the
   // number reaching ZERO, which is a build whose last step refuses.
-  console.log(
-    `  autotune winners: ${tuning.overridden - tuning.foreign}/${tuning.boardChunks} board chunks ` +
-      `carry a bankable one (${tuning.overrideRows} override rows, ${tuning.trials} saved trial(s))` +
-      (tuning.foreign > 0
-        ? `, ${tuning.foreign} dropped — won under a provider the demo has no key for`
-        : ""),
-  );
+  //
+  // FROM THE SIBLINGS when --tuning names them (docs/demo-voyage-tuning-plan.md):
+  // one line per set, and `foreign` must read 0 on each — a sibling searches
+  // the demo's own provider only, so a foreign winner there is a sibling whose
+  // model scope was edited.
+  if (tuningBySet) {
+    for (const t of tuningBySet) {
+      console.log(
+        `  autotune winners [${t.key}]: ${t.census.overridden - t.census.foreign}/${t.census.boardChunks} ` +
+          `board chunks carry a bankable one (${t.census.overrideRows} override rows, ` +
+          `${t.census.trials} saved trial(s))` +
+          (t.census.foreign > 0 ? `  ⚠ ${t.census.foreign} FOREIGN — the sibling's model scope is not the demo's provider` : ""),
+      );
+    }
+  } else {
+    console.log(
+      `  autotune winners: ${tuning.overridden - tuning.foreign}/${tuning.boardChunks} board chunks ` +
+        `carry a bankable one (${tuning.overrideRows} override rows, ${tuning.trials} saved trial(s))` +
+        (tuning.foreign > 0
+          ? `, ${tuning.foreign} dropped — won under a provider the demo has no key for`
+          : ""),
+    );
+  }
 
   // Before the dry-run exit, so an operator sees the refusal without having to
   // type --yes to earn it.
@@ -1018,19 +1105,46 @@ async function main() {
   // months ago, and what travels is the winner it confirmed. Board-scoped and
   // never wider (§6): the other ~200 override rows name chunks no visitor can
   // reach.
-  const bankedTuning = await packTuning(configId, boardChunks, cfg.base_model);
-  await writeTuning(master, bankedTuning, privilegedSql);
-  const tuningSize = tuningBytes(bankedTuning);
-  console.log(
-    `banked the autotune winner for ${bankedTuning.entries.length} board chunk(s) at ` +
-      `${(tuningSize / 1024).toFixed(0)} KB\n`,
-  );
-  if (tuningSize > DEMO_TUNING_MAX_BYTES) {
-    console.log(
-      `⚠ the banked tuning is ${(tuningSize / 1024).toFixed(0)} KB, over the ` +
-        `${(DEMO_TUNING_MAX_BYTES / 1024).toFixed(0)} KB this is meant to stay under.\n`,
-    );
+  //
+  // ONE BANK PER DIFFICULTY SET when --tuning names the siblings
+  // (docs/demo-voyage-tuning-plan.md §3.3), each packed from its sibling into
+  // the publish config's id space; otherwise the publish config's own overrides
+  // under the legacy key, as before. Either way the banks this publish did not
+  // write are pruned, so a build cannot carry a stale key beside the live ones.
+  //
+  // THE LEGACY KEY IS KEPT STOCKED while a deployed build still reads only it:
+  // production serves guests from this same database, and its readTuning knows
+  // one key. The bank it gets is the widest set's — the full board's questions
+  // are what its unconfirmed install is least wrong against. --no-legacy-bank
+  // drops it once the set-key reader has shipped.
+  const banks: { key: string; source: string }[] = tuningSources
+    ? tuningSources.map((t) => ({ key: t.key, source: t.configId }))
+    : [{ key: TUNING_KEY, source: configId }];
+  if (tuningSources && !has("--no-legacy-bank")) {
+    const widest = [...tuningSources].sort((x, y) => y.set.length - x.set.length)[0];
+    banks.push({ key: TUNING_KEY, source: widest.configId });
   }
+  for (const bank of banks) {
+    const bankedTuning = await packTuning(configId, boardChunks, cfg.base_model, bank.source);
+    await writeTuning(master, bankedTuning, privilegedSql, bank.key);
+    const tuningSize = tuningBytes(bankedTuning);
+    console.log(
+      `banked the autotune winner for ${bankedTuning.entries.length} board chunk(s) at ` +
+        `${(tuningSize / 1024).toFixed(0)} KB under "${bank.key}"`,
+    );
+    if (tuningSize > DEMO_TUNING_MAX_BYTES) {
+      console.log(
+        `⚠ the banked tuning is ${(tuningSize / 1024).toFixed(0)} KB, over the ` +
+          `${(DEMO_TUNING_MAX_BYTES / 1024).toFixed(0)} KB this is meant to stay under.`,
+      );
+    }
+  }
+  await pruneTuning(
+    master,
+    banks.map((b) => b.key),
+    privilegedSql,
+  );
+  console.log();
 
   const summary = await cloneSeedWorkspace(master, snapshot, {
     onlyConfigId: configId,
@@ -1119,9 +1233,10 @@ async function main() {
       `${summary.matrixPairs === 0 ? "NO replay matrix" : `a replay matrix over ${summary.matrixPairs} pairs`}, ` +
       `${summary.boardChunks === 0 ? "NO board scope" : `a board scoped to ${summary.boardChunks} chunks`}, ` +
       `${summary.bankedIdeals} banked ideals, ${summary.bankedLlmRankings} banked LLM re-rankings, ` +
-      `${summary.bankedTuning === 0 ? "NO banked tuning" : `banked tuning for ${summary.bankedTuning} chunks`}, ` +
+      `${summary.bankedTuning === 0 ? "NO banked tuning" : `${summary.bankedTuning} banked tuning entries over ${banks.length} bank(s)`}, ` +
       `${summary.ledgerRows === 0 ? "NO savings ledger" : `${summary.ledgerRows} savings row`}, ` +
-      `${summary.cachedVectors} delegate-space vectors (${vectors.have}/${vectors.want} a guest needs)\n`,
+      `${summary.cachedVectors} delegate-space vectors (${vectors.have}/${vectors.want} a guest needs), ` +
+      `${summary.bankedRetrievalStates === 0 ? "NO retrieval bank" : `a retrieval bank over ${summary.bankedRetrievalStates} state(s) / ${summary.bankedRetrievalQuestions} lists${summary.bankedRetrievalHoles > 0 ? ` (${summary.bankedRetrievalHoles} holes)` : ""}`}\n`,
   );
   // The payoff readout's money is the whole point of §4's bottom line, and its
   // absence is silent by design: readCacheEconomics turns a zero-event ledger
@@ -1174,6 +1289,20 @@ async function main() {
       "⚠ no banked tuning reached the snapshot, so ⚙ Auto tune is BLOCKED for a guest and\n" +
         "  the walk ends at step 5. Either the master has never autotuned a board chunk, or\n" +
         "  the ids did not survive the clone's remap — check step 5j.\n",
+    );
+  }
+  // THE RETRIEVAL BANK (docs/demo-retrieval-bank-plan.md) is NOT written by the
+  // publish: it is recorded by walking guests of the finished snapshot against a
+  // dev server, so on the master → snapshot hop this count is always zero and
+  // this line always fires. That is the reminder, not a defect — a snapshot
+  // without it serves every guest at today's speed (Score pending ~28 s, ⚙ ~100 s)
+  // and every number is still right.
+  if (summary.bankedRetrievalStates === 0) {
+    console.log(
+      "\u2139 no retrieval bank on the snapshot yet. Guests compute every retrieval until you run\n" +
+        "  the walk against a dev server started with DEMO_RETRIEVAL_RECORD:\n" +
+        "    DEMO_RETRIEVAL_RECORD=$PWD/data/demo-walk/retrieval.ndjson npm run dev\n" +
+        "    npm run demo:walk -- --yes\n",
     );
   }
   // A SHORT VECTOR COPY (step 5k), which is the quietest failure on this line

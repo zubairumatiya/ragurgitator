@@ -4,7 +4,7 @@
 // neighbor queries. Vectors live in one table per (embedding-model, dim) so
 // different models stay in their own geometric spaces; see migrations/.
 import { activeUserId } from "@/lib/auth/userScope";
-import { sql } from "@/lib/db";
+import { scopeForget, scopePeek, scopeSet, sql, withEfSearch } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { modelSpec } from "@/lib/rag/embeddingModels";
 import type { RetrievedChunk } from "@/types/rag";
@@ -127,6 +127,13 @@ export async function deleteEmbeddingRunFor(
       where config_id = ${cfg.id} and document_id = ${documentId}
       returning id
     `;
+    // Both memoised reads this touched (cut 2): the config may have no chunks
+    // now, and its override fingerprint moved.
+    scopeForget("chunksTable:");
+    scopeForget("fingerprint:");
+    scopeForget("changedAt:");
+    scopeForget("chunkLabel:");
+    scopeForget("chunkMeta:");
     return rows.length > 0;
   });
 }
@@ -218,6 +225,7 @@ export async function insertEmbeddingRunWithChunks(args: {
          ${chunkSize}, ${chunkOverlap}, ${args.chunks.length})
       returning id
     `;
+    scopeForget("chunksTable:");
 
     if (args.chunks.length === 0) return [];
 
@@ -258,17 +266,18 @@ export async function query(
   // Config-filtered ANN: only this config's chunks compete. Raise ef_search
   // inside the txn so the filter doesn't starve the top-k once multiple configs
   // share the table (§5.3). EF_SEARCH is a trusted constant, hence unsafe().
-  const rows = await sql.begin(async (tx) => {
-    await tx.unsafe(`set local hnsw.ef_search = ${EF_SEARCH}`);
-    return tx<
-      {
-        id: string;
-        document_id: string;
-        position: number;
-        text: string;
-        score: number;
-      }[]
-    >`
+  const rows = await withEfSearch(
+    EF_SEARCH,
+    (tx) =>
+      tx<
+        {
+          id: string;
+          document_id: string;
+          position: number;
+          text: string;
+          score: number;
+        }[]
+      >`
       select
         id,
         document_id,
@@ -279,8 +288,8 @@ export async function query(
       where config_id = ${cfg.id}
       order by embedding <=> ${queryVec}::vector
       limit ${topK}
-    `;
-  });
+    `,
+  );
 
   return rows.map((r) => ({
     score: Number(r.score),
@@ -320,9 +329,10 @@ export async function queryExcludingIds(
   const cfg = activeConfig();
   const queryVec = vectorLiteral(vector);
 
-  const rows = await sql.begin(async (tx) => {
-    await tx.unsafe(`set local hnsw.ef_search = ${EF_SEARCH}`);
-    return tx<{ id: string; score: number }[]>`
+  const rows = await withEfSearch(
+    EF_SEARCH,
+    (tx) =>
+      tx<{ id: string; score: number }[]>`
       select
         id,
         1 - (embedding <=> ${queryVec}::vector) as score
@@ -331,8 +341,8 @@ export async function queryExcludingIds(
         and not (id = any(${excludeIds}::uuid[]))
       order by embedding <=> ${queryVec}::vector
       limit ${limit}
-    `;
-  });
+    `,
+  );
 
   return rows.map((r) => ({
     score: Number(r.score),
@@ -355,18 +365,19 @@ export async function queryBatch(
   const cfg = activeConfig();
   const literals = vectors.map(vectorLiteral);
 
-  const rows = await sql.begin(async (tx) => {
-    await tx.unsafe(`set local hnsw.ef_search = ${EF_SEARCH}`);
-    return tx<
-      {
-        i: string;
-        id: string;
-        document_id: string;
-        position: number;
-        text: string;
-        score: number;
-      }[]
-    >`
+  const rows = await withEfSearch(
+    EF_SEARCH,
+    (tx) =>
+      tx<
+        {
+          i: string;
+          id: string;
+          document_id: string;
+          position: number;
+          text: string;
+          score: number;
+        }[]
+      >`
       select q.i, c.id, c.document_id, c.position, c.text,
              1 - (c.embedding <=> q.v) as score
       from unnest(${literals}::text[]::vector[]) with ordinality as q(v, i)
@@ -377,8 +388,8 @@ export async function queryBatch(
         order by embedding <=> q.v
         limit ${topK}
       ) c
-    `;
-  });
+    `,
+  );
 
   const out: RetrievedChunk[][] = vectors.map(() => []);
   for (const r of rows) {
@@ -429,9 +440,10 @@ export async function queryExcludingIdsBatch(
   // pgvector type, and the array I/O cast is exact (pgvector parses '[x,y,z]').
   const literals = vectors.map(vectorLiteral);
 
-  const rows = await sql.begin(async (tx) => {
-    await tx.unsafe(`set local hnsw.ef_search = ${EF_SEARCH}`);
-    return tx<{ i: string; id: string; score: number }[]>`
+  const rows = await withEfSearch(
+    EF_SEARCH,
+    (tx) =>
+      tx<{ i: string; id: string; score: number }[]>`
       select q.i, c.id, 1 - (c.embedding <=> q.v) as score
       from unnest(${literals}::text[]::vector[]) with ordinality as q(v, i)
       cross join lateral (
@@ -442,8 +454,8 @@ export async function queryExcludingIdsBatch(
         order by embedding <=> q.v
         limit ${limit}
       ) c
-    `;
-  });
+    `,
+  );
 
   // `with ordinality` numbers from 1 and the lateral preserves each query's own
   // ordering within its group, so appending in row order rebuilds each list
@@ -452,7 +464,10 @@ export async function queryExcludingIdsBatch(
   for (const r of rows) {
     out[Number(r.i) - 1].push({
       score: Number(r.score),
-      chunk: { embedding: [], chunk: { id: r.id, documentId: "", text: "", position: 0 } },
+      chunk: {
+        embedding: [],
+        chunk: { id: r.id, documentId: "", text: "", position: 0 },
+      },
     });
   }
   return out;
@@ -498,6 +513,13 @@ export type PoolDocSim = {
 // datum on every scan — 348 ms over 515 rows, of which ~265 ms was the cast,
 // paid once per question per delegate model. The same rows stored as `vector`
 // cosine in 3.7 ms. Putting the cast back would silently restore a ~90x cost.
+// `with p as materialized` IN ALL THREE POOL READERS (cut 5,
+// docs/autotune-press-latency-plan.md §9): inlined, the planner put the
+// derived table's `encode(sha256(text))` into the join filter and recomputed
+// it per (pool row × cache row) — 44,000 hashes for a 60-chunk pool under two
+// models, 261 ms; materialized, 60 hashes and 15 ms, the same rows. The
+// mis-estimate that leads it there (rows=1 for `id = any($ids)` under the RLS
+// subplan) is not one an index fixes.
 export async function poolDocSims(
   ids: string[],
   model: string,
@@ -515,19 +537,20 @@ export async function poolDocSims(
   const rows = await sql<
     { id: string; text_hash: string; text_len: number; msim: string | null }[]
   >`
-    select
-      p.id,
-      p.text_hash as text_hash,
-      p.text_len as text_len,
-      1 - (ec.embedding <=> ${modelVec}::vector) as msim
-    from (
+    with p as materialized (
       select id,
              encode(sha256(text::bytea), 'hex') as text_hash,
              char_length(text) as text_len
       from ${sql(cfg.chunksTable)}
       where config_id = ${cfg.id}
         and id = any(${ids}::uuid[])
-    ) p
+    )
+    select
+      p.id,
+      p.text_hash as text_hash,
+      p.text_len as text_len,
+      1 - (ec.embedding <=> ${modelVec}::vector) as msim
+    from p
     left join embedding_cache ec
       on ec.user_id = ${userId}
      and ec.model = ${model}
@@ -563,19 +586,104 @@ export async function poolDocSims(
 // |pool| x |queries| — on a corpus whose pools overlap (they always do; they are
 // the same ANN over the same chunks) that is the same order of egress the
 // per-question calls already paid, and never more than the corpus x the batch.
+// poolDocSimsBatch for SEVERAL models in one statement (cut 4,
+// docs/autotune-press-latency-plan.md §9). The pool rows are read once and
+// joined to the cache per (model, text_hash); `ec.model = q.model` keeps each
+// `<=>` on equal dimensions, as the single-model join did.
+export async function poolDocSimsMulti(
+  ids: string[],
+  byModel: { model: string; vectors: number[][] }[],
+): Promise<Map<string, Map<string, PoolDocSim>[]>> {
+  const out = new Map<string, Map<string, PoolDocSim>[]>();
+  const models: string[] = [];
+  const literals: string[] = [];
+  const slot: { model: string; i: number }[] = [];
+  for (const m of byModel) {
+    out.set(
+      m.model,
+      m.vectors.map(() => new Map()),
+    );
+    m.vectors.forEach((v, i) => {
+      models.push(m.model);
+      literals.push(vectorLiteral(v));
+      slot.push({ model: m.model, i });
+    });
+  }
+  if (ids.length === 0 || literals.length === 0) return out;
+  const cfg = activeConfig();
+  const userId = activeUserId();
+  const rows = await sql<
+    {
+      i: string;
+      id: string;
+      text_hash: string;
+      text_len: number;
+      msim: string | null;
+    }[]
+  >`
+    with p as materialized (
+      select id,
+             encode(sha256(text::bytea), 'hex') as text_hash,
+             char_length(text) as text_len
+      from ${sql(cfg.chunksTable)}
+      where config_id = ${cfg.id}
+        and id = any(${ids}::uuid[])
+    )
+    select
+      q.i,
+      p.id,
+      p.text_hash as text_hash,
+      p.text_len as text_len,
+      1 - (ec.embedding <=> q.v) as msim
+    from unnest(${models}::text[], ${literals}::text[]::vector[])
+         with ordinality as q(model, v, i)
+    cross join p
+    left join embedding_cache ec
+      on ec.user_id = ${userId}
+     and ec.model = q.model
+     and ec.input_kind = 'document'
+     and ec.text_hash = p.text_hash
+  `;
+  for (const r of rows) {
+    const s = slot[Number(r.i) - 1];
+    out.get(s.model)![s.i].set(r.id, {
+      id: r.id,
+      textHash: r.text_hash,
+      textLen: Number(r.text_len),
+      msim: r.msim === null ? null : Number(r.msim),
+    });
+  }
+  return out;
+}
+
 export async function poolDocSimsBatch(
   ids: string[],
   model: string,
   modelVectors: number[][],
 ): Promise<Map<string, PoolDocSim>[]> {
-  if (ids.length === 0 || modelVectors.length === 0) return modelVectors.map(() => new Map());
+  if (ids.length === 0 || modelVectors.length === 0)
+    return modelVectors.map(() => new Map());
   const cfg = activeConfig();
   const userId = activeUserId();
   const literals = modelVectors.map(vectorLiteral);
 
   const rows = await sql<
-    { i: string; id: string; text_hash: string; text_len: number; msim: string | null }[]
+    {
+      i: string;
+      id: string;
+      text_hash: string;
+      text_len: number;
+      msim: string | null;
+    }[]
   >`
+    with p as materialized (
+      select id,
+             encode(sha256(text::bytea), 'hex') as text_hash,
+             char_length(text) as text_len
+      from ${sql(cfg.chunksTable)}
+      where config_id = ${cfg.id}
+        and id = any(${ids}::uuid[])
+    )
     select
       q.i,
       p.id,
@@ -583,14 +691,7 @@ export async function poolDocSimsBatch(
       p.text_len as text_len,
       1 - (ec.embedding <=> q.v) as msim
     from unnest(${literals}::text[]::vector[]) with ordinality as q(v, i)
-    cross join (
-      select id,
-             encode(sha256(text::bytea), 'hex') as text_hash,
-             char_length(text) as text_len
-      from ${sql(cfg.chunksTable)}
-      where config_id = ${cfg.id}
-        and id = any(${ids}::uuid[])
-    ) p
+    cross join p
     left join embedding_cache ec
       on ec.user_id = ${userId}
      and ec.model = ${model}
@@ -614,7 +715,9 @@ export async function poolDocSimsBatch(
 // similarity screens that need a chunk's own stored vector rather than an ANN
 // (efficacyGate; the dirty screen's cosines moved into SQL, §1.4). pgvector's text form '[1,2,3]' is valid
 // JSON, so read ::text and parse.
-export async function chunkEmbeddings(ids: string[]): Promise<Map<string, number[]>> {
+export async function chunkEmbeddings(
+  ids: string[],
+): Promise<Map<string, number[]>> {
   if (ids.length === 0) return new Map();
   const cfg = activeConfig();
   const rows = await sql<{ id: string; vec: string }[]>`
@@ -629,22 +732,45 @@ export async function chunkEmbeddings(ids: string[]): Promise<Map<string, number
 // Resolve a set of chunk ids (in the active config's base table) to their text +
 // position + document. Used to flesh out override chunks that won the merge but weren't
 // in the base ANN result (they were excluded from it).
+//
+// Hits remembered per scope (cut 6, docs/autotune-press-latency-plan.md §9): a
+// chunk's text and position do not change under a running scope, and a
+// confirm resolves the same result chunks before and after its install.
+// deleteEmbeddingRunFor forgets them.
 export async function resolveChunks(
   ids: string[],
-): Promise<Map<string, { documentId: string; position: number; text: string }>> {
+): Promise<
+  Map<string, { documentId: string; position: number; text: string }>
+> {
   if (ids.length === 0) return new Map();
   const cfg = activeConfig();
+  type Meta = { documentId: string; position: number; text: string };
+  const out = new Map<string, Meta>();
+  const missing: string[] = [];
+  for (const id of ids) {
+    const hit = scopePeek<Meta>(`chunkMeta:${cfg.id}:${id}`);
+    if (hit) out.set(id, await hit);
+    else missing.push(id);
+  }
+  if (missing.length === 0) return out;
   const rows = await sql<
     { id: string; document_id: string; position: number; text: string }[]
   >`
     select id, document_id, position, text
     from ${sql(cfg.chunksTable)}
     where config_id = ${cfg.id}
-      and id = any(${ids}::uuid[])
+      and id = any(${missing}::uuid[])
   `;
-  return new Map(
-    rows.map((r) => [r.id, { documentId: r.document_id, position: r.position, text: r.text }]),
-  );
+  for (const r of rows) {
+    const meta = {
+      documentId: r.document_id,
+      position: r.position,
+      text: r.text,
+    };
+    out.set(r.id, meta);
+    scopeSet(`chunkMeta:${cfg.id}:${r.id}`, meta);
+  }
+  return out;
 }
 
 // One row in the user's LIBRARY: a previously-uploaded document (with stored
@@ -685,7 +811,9 @@ export async function listLibraryDocuments(): Promise<LibraryDocument[]> {
 // Owner-scoped, not config-scoped: the semantic cache replays stored sources
 // whose chunks may predate the current config's embedding run, and a name is
 // not worth suppressing over that.
-export async function documentFileNames(ids: string[]): Promise<Record<string, string>> {
+export async function documentFileNames(
+  ids: string[],
+): Promise<Record<string, string>> {
   const unique = [...new Set(ids)];
   if (unique.length === 0) return {};
   const rows = await sql<{ id: string; file_name: string }[]>`

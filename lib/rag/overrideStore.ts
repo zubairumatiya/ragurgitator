@@ -3,11 +3,15 @@
 // other stores. An override is an alternate vector for a chunk that still lives
 // in the config's base chunks_<model>_<dim> table — see retriever.ts for how the
 // base ANN and the override sets are rank-fused at query time.
-import { sql } from "@/lib/db";
+import { scopeForget, scopeMemo, sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 
 export type OverrideKind = "model" | "size" | "size+model";
-export type ChunkOverride = { sourceChunkId: string; model: string; kind: OverrideKind };
+export type ChunkOverride = {
+  sourceChunkId: string;
+  model: string;
+  kind: OverrideKind;
+};
 export type OverrideEmbedding = { chunkId: string; embedding: number[] };
 
 // One piece of a chunk override (migration 0015). For a model-only override
@@ -50,8 +54,91 @@ export const FUSION_VERSION = 4;
 // change (e.g. delegate back to baseline) makes the old results valid again
 // without a re-score. Embeddings aren't hashed: (model, kind, text/span)
 // determines them (and they're cached), so the semantic rows suffice.
+//
+// Once per scope (scopeMemo): every writer of config_chunk_overrides or
+// retrieval_changed_at below calls forgetRetrievalState(), and so does
+// vectorStore.deleteEmbeddingRunFor. A ⚙ press read this 95 times.
 export async function retrievalStateFingerprint(): Promise<string> {
   const cfg = activeConfig();
+  return scopeMemo(`fingerprint:${cfg.id}`, () => computeFingerprint(cfg));
+}
+
+export function forgetRetrievalState(): void {
+  scopeForget("fingerprint:");
+  scopeForget("changedAt:");
+  scopeForget("portableKey:");
+}
+
+// THE PORTABLE RETRIEVAL KEY — docs/demo-retrieval-bank-plan.md §3.1.
+//
+// The fingerprint above names an override state IN THIS WORKSPACE: its rows
+// carry `source_chunk_id`, and chunk ids are minted fresh per clone
+// (lib/demo/clone.ts `_map_chunk`), so the same override set digests
+// differently in every guest and can never key a bank shared across them. This
+// is the SAME canonical string — same prefix, same fields, same separators —
+// with each row's chunk id replaced by the md5 of the chunk's TEXT, which the
+// clone copies byte for byte. Two workspaces holding the same override set over
+// the same corpus produce the same key; scripts/portable-key-equiv.ts asserts
+// that on live and test/integration/demoRetrievalBank.itest.ts asserts it across
+// a real clone.
+//
+// NOT A REPLACEMENT FOR THE FINGERPRINT. eval_results.retrieval_state keeps
+// stamping the real one — staleness is a question about this workspace. The
+// portable key is only ever a lookup key into the demo's retrieval bank
+// (lib/demo/replay.readRetrievalBank), and is read for a real account too,
+// where it costs one memoed statement per scope and keys nothing.
+//
+// ORDER IS THE WHOLE KEY. The fingerprint orders by (source_chunk_id,
+// piece_index); this orders by (text md5, piece_index) and then by the rest of
+// the row, so two chunks that happen to share text cannot make the string
+// depend on which row the planner emitted first. 'baseline' with no rows, as
+// the fingerprint is, and for the same reason: a no-override retrieval is one
+// state everywhere, and the demo's baseline leg is keyed by exactly this word.
+//
+// Once per scope under the fingerprint's forget: every writer that invalidates
+// the fingerprint invalidates this, so a press with 19 installs pays for it
+// once per install rather than once per read.
+export async function portableRetrievalKey(): Promise<string> {
+  const cfg = activeConfig();
+  return scopeMemo(`portableKey:${cfg.id}`, () => computePortableKey(cfg));
+}
+
+async function computePortableKey(
+  cfg: ReturnType<typeof activeConfig>,
+): Promise<string> {
+  const prefix =
+    `fusion-v${FUSION_VERSION}\n` +
+    (cfg.fusionPool === null ? "" : `pool-${cfg.fusionPool}\n`);
+  try {
+    const [row] = await sql<{ digest: string | null }[]>`
+      select encode(
+               sha256(convert_to(
+                 ${prefix} || string_agg(
+                   md5(c.text) || '|' || o.model || '|' || o.kind || '|'
+                     || o.piece_index::text || '|' || coalesce(o.token_start::text, '') || '|'
+                     || coalesce(o.token_end::text, '') || '|' || coalesce(md5(o.text), ''),
+                   E'\n' order by md5(c.text), o.piece_index, o.model, o.kind,
+                                  coalesce(o.token_start::text, ''), coalesce(o.token_end::text, ''),
+                                  coalesce(md5(o.text), '')
+                 ),
+                 'utf8'
+               )),
+               'hex'
+             ) as digest
+      from config_chunk_overrides o
+      join ${sql(cfg.chunksTable)} c on c.id = o.source_chunk_id
+      where o.config_id = ${cfg.id}
+    `;
+    return row?.digest ?? "baseline";
+  } catch (err) {
+    if ((err as { code?: string }).code === "42P01") return "baseline";
+    throw err;
+  }
+}
+
+async function computeFingerprint(
+  cfg: ReturnType<typeof activeConfig>,
+): Promise<string> {
   // The canonical string's PREFIX is app state, not row state: the fusion
   // version is a constant here and the live fusion pool (0027) shapes every
   // fused rank, so it's part of the state — changing it (while overrides exist)
@@ -59,7 +146,8 @@ export async function retrievalStateFingerprint(): Promise<string> {
   // contributes NOTHING so fingerprints from before the pool existed stay valid
   // — auto IS the historical behavior.
   const prefix =
-    `fusion-v${FUSION_VERSION}\n` + (cfg.fusionPool === null ? "" : `pool-${cfg.fusionPool}\n`);
+    `fusion-v${FUSION_VERSION}\n` +
+    (cfg.fusionPool === null ? "" : `pool-${cfg.fusionPool}\n`);
   try {
     // Postgres builds the canonical string and hashes it, so the app reads 64
     // hex characters instead of every override piece row — the digest used to
@@ -98,7 +186,16 @@ export async function retrievalStateFingerprint(): Promise<string> {
 
 // "resume.pdf · chunk #3" for change-log descriptions — falls back to a short
 // id when the chunk can't be resolved (matches the dashboard's `chunk #n`).
-async function chunkLabel(sourceChunkId: string): Promise<string> {
+// Once per scope per chunk (cut 3): a file name and a position do not move
+// under a running scope, and the confirm asks for this label on every install
+// and every revert of the same chunk.
+function chunkLabel(sourceChunkId: string): Promise<string> {
+  return scopeMemo(`chunkLabel:${sourceChunkId}`, () =>
+    readChunkLabel(sourceChunkId),
+  );
+}
+
+async function readChunkLabel(sourceChunkId: string): Promise<string> {
   try {
     const cfg = activeConfig();
     const [row] = await sql<{ position: number | null; file_name: string }[]>`
@@ -117,7 +214,9 @@ async function chunkLabel(sourceChunkId: string): Promise<string> {
 }
 
 // The chunk's override BEFORE a mutation, phrased for the "(was …)" suffix.
-function wasLabel(prev: { model: string; kind: OverrideKind } | undefined): string {
+function wasLabel(
+  prev: { model: string; kind: OverrideKind } | undefined,
+): string {
   if (!prev) return "was baseline";
   if (prev.kind === "model") return `was ${prev.model}`;
   if (prev.kind === "size") return "was re-split";
@@ -173,8 +272,12 @@ export async function noteFusionPoolChange(
   await sql`
     update configs set retrieval_changed_at = now() where id = ${activeConfig().id}
   `;
+  forgetRetrievalState();
   const label = (v: number | null) => (v === null ? "auto" : String(v));
-  await logRetrievalChange(null, `fusion pool → ${label(next)} (was ${label(prev)})`);
+  await logRetrievalChange(
+    null,
+    `fusion pool → ${label(next)} (was ${label(prev)})`,
+  );
 }
 
 // Drop the config's change log — called once a full re-score has made every
@@ -206,7 +309,9 @@ export async function setChunkOverridePieces(
   const cfg = activeConfig();
   const [label, prev] = await Promise.all([
     chunkLabel(sourceChunkId),
-    listOverrides().then((all) => all.find((o) => o.sourceChunkId === sourceChunkId)),
+    listOverrides().then((all) =>
+      all.find((o) => o.sourceChunkId === sourceChunkId),
+    ),
   ]);
   await sql.begin(async (tx) => {
     await tx`
@@ -242,7 +347,9 @@ export async function setChunkOverridePieces(
       update configs set retrieval_changed_at = now() where id = ${cfg.id}
     `;
   });
-  const fallback = kind === "model" ? `delegate → ${model}` : `re-split under ${model}`;
+  forgetRetrievalState();
+  const fallback =
+    kind === "model" ? `delegate → ${model}` : `re-split under ${model}`;
   await logRetrievalChange(
     sourceChunkId,
     `${label}: ${detail ?? fallback} (${wasLabel(prev)})`,
@@ -266,7 +373,9 @@ export async function setChunkOverride(
 // Remove a chunk's override under the active config. Returns false when none.
 // Clearing changes retrieval just like setting does, so it also stamps
 // retrieval_changed_at — but only when a row was actually deleted.
-export async function clearChunkOverride(sourceChunkId: string): Promise<boolean> {
+export async function clearChunkOverride(
+  sourceChunkId: string,
+): Promise<boolean> {
   const cfg = activeConfig();
   const rows = await sql<{ model: string; kind: OverrideKind }[]>`
     delete from config_chunk_overrides
@@ -275,6 +384,7 @@ export async function clearChunkOverride(sourceChunkId: string): Promise<boolean
   `;
   if (rows.length > 0) {
     await sql`update configs set retrieval_changed_at = now() where id = ${cfg.id}`;
+    forgetRetrievalState();
     await logRetrievalChange(
       sourceChunkId,
       `${await chunkLabel(sourceChunkId)}: override cleared → baseline (${wasLabel(rows[0])})`,
@@ -290,15 +400,17 @@ export async function clearChunkOverride(sourceChunkId: string): Promise<boolean
 // tolerance below.
 export async function getRetrievalChangedAt(): Promise<Date | null> {
   const cfg = activeConfig();
-  try {
-    const [row] = await sql<{ retrieval_changed_at: Date | null }[]>`
-      select retrieval_changed_at from configs where id = ${cfg.id}
-    `;
-    return row?.retrieval_changed_at ?? null;
-  } catch (err) {
-    if ((err as { code?: string }).code === "42703") return null;
-    throw err;
-  }
+  return scopeMemo(`changedAt:${cfg.id}`, async () => {
+    try {
+      const [row] = await sql<{ retrieval_changed_at: Date | null }[]>`
+        select retrieval_changed_at from configs where id = ${cfg.id}
+      `;
+      return row?.retrieval_changed_at ?? null;
+    } catch (err) {
+      if ((err as { code?: string }).code === "42703") return null;
+      throw err;
+    }
+  });
 }
 
 // PER-CHUNK override fingerprints — retrievalStateFingerprint's question asked
@@ -344,11 +456,22 @@ export async function overrideFingerprints(): Promise<Map<string, string>> {
 // not existing yet (migration 0013 unapplied): Postgres "undefined_table"
 // (42P01) → no overrides, i.e. the app behaves exactly as pre-Phase-5 until 0013
 // lands. Any other error propagates.
+//
+// Once per scope, under the fingerprint's key prefix so the same writers forget
+// it (cut 3): every scoring call and every install read it — 49 times a press.
 export async function listOverrides(): Promise<ChunkOverride[]> {
   const cfg = activeConfig();
+  return scopeMemo(`fingerprint:list:${cfg.id}`, () => readOverrides(cfg));
+}
+
+async function readOverrides(
+  cfg: ReturnType<typeof activeConfig>,
+): Promise<ChunkOverride[]> {
   try {
     // DISTINCT: a chunk now has several piece rows, but one model + kind.
-    const rows = await sql<{ source_chunk_id: string; model: string; kind: string }[]>`
+    const rows = await sql<
+      { source_chunk_id: string; model: string; kind: string }[]
+    >`
       select distinct source_chunk_id, model, kind
       from config_chunk_overrides
       where config_id = ${cfg.id}
@@ -369,9 +492,11 @@ export async function listOverrides(): Promise<ChunkOverride[]> {
 // by autotune before it persists a candidate, so a failed confirm can RESTORE
 // the prior override exactly (via setChunkOverridePieces) instead of clearing
 // the chunk to baseline and losing an earlier run's working override.
-export async function getChunkOverridePieces(
-  sourceChunkId: string,
-): Promise<{ model: string; kind: OverrideKind; pieces: OverridePiece[] } | null> {
+export async function getChunkOverridePieces(sourceChunkId: string): Promise<{
+  model: string;
+  kind: OverrideKind;
+  pieces: OverridePiece[];
+} | null> {
   const cfg = activeConfig();
   try {
     const rows = await sql<
@@ -429,13 +554,18 @@ export async function overrideEmbeddings(
   const cfg = activeConfig();
   if (chunkIds !== undefined && chunkIds.length === 0) return [];
   const only =
-    chunkIds === undefined ? sql`` : sql`and source_chunk_id = any(${chunkIds}::uuid[])`;
+    chunkIds === undefined
+      ? sql``
+      : sql`and source_chunk_id = any(${chunkIds}::uuid[])`;
   const rows = await sql<{ source_chunk_id: string; embedding: number[] }[]>`
     select source_chunk_id, embedding::real[] as embedding
     from config_chunk_overrides
     where config_id = ${cfg.id} and model = ${model} ${only}
   `;
-  return rows.map((r) => ({ chunkId: r.source_chunk_id, embedding: r.embedding }));
+  return rows.map((r) => ({
+    chunkId: r.source_chunk_id,
+    embedding: r.embedding,
+  }));
 }
 
 // The same candidate set, collapsed to the one number the merge actually consumes:
@@ -482,7 +612,50 @@ export async function overrideSimsBatch(
     group by q.i, o.source_chunk_id
   `;
   const out: Map<string, number>[] = queryVectors.map(() => new Map());
-  for (const r of rows) out[Number(r.i) - 1].set(r.source_chunk_id, Number(r.sim));
+  for (const r of rows)
+    out[Number(r.i) - 1].set(r.source_chunk_id, Number(r.sim));
+  return out;
+}
+
+// overrideSimsBatch for SEVERAL models in one statement (cut 4,
+// docs/autotune-press-latency-plan.md §9): the prefetch used to issue one per
+// delegate model — 2.5 per one-question call on a pinned connection. Each query
+// vector travels with its model, and `o.model = q.model` is what keeps `<=>` on
+// equal dimensions, exactly as the single-model `model = $2` filter did; the
+// rows per model are the same rows, grouped the same way.
+export async function overrideSimsMulti(
+  byModel: { model: string; vectors: number[][] }[],
+): Promise<Map<string, Map<string, number>[]>> {
+  const out = new Map<string, Map<string, number>[]>();
+  const models: string[] = [];
+  const literals: string[] = [];
+  const slot: { model: string; i: number }[] = [];
+  for (const m of byModel) {
+    out.set(
+      m.model,
+      m.vectors.map(() => new Map()),
+    );
+    m.vectors.forEach((v, i) => {
+      models.push(m.model);
+      literals.push(`[${v.join(",")}]`);
+      slot.push({ model: m.model, i });
+    });
+  }
+  if (literals.length === 0) return out;
+  const cfg = activeConfig();
+  const rows = await sql<{ i: string; source_chunk_id: string; sim: number }[]>`
+    select q.i, o.source_chunk_id,
+           max(1 - (o.embedding <=> q.v)) as sim
+    from unnest(${models}::text[], ${literals}::text[]::vector[])
+         with ordinality as q(model, v, i)
+    join config_chunk_overrides o
+      on o.config_id = ${cfg.id} and o.model = q.model
+    group by q.i, o.source_chunk_id
+  `;
+  for (const r of rows) {
+    const s = slot[Number(r.i) - 1];
+    out.get(s.model)![s.i].set(r.source_chunk_id, Number(r.sim));
+  }
   return out;
 }
 

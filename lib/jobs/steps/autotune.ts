@@ -88,7 +88,11 @@ import { randomUUID } from "node:crypto";
 import { NEVER_STOP } from "@/lib/http/cancelRegistry";
 import { assertDemoAllows } from "@/lib/demo/policy";
 import { readTuning } from "@/lib/demo/replay";
-import { unpackEmbedding, type ReplayTuning, type ReplayTuningEntry } from "@/lib/demo/replayCore";
+import {
+  unpackEmbedding,
+  type ReplayTuning,
+  type ReplayTuningEntry,
+} from "@/lib/demo/replayCore";
 import {
   drainStuck,
   nextChunks,
@@ -96,10 +100,12 @@ import {
   type PlanEntry,
   type QuestionState,
 } from "@/lib/jobs/steps/autotuneSlice";
+import { closeFrame, openFrame, stage } from "@/lib/autotuneTiming";
 import type { JobProgress, JobStep, StopSignal } from "@/lib/jobs/types";
 import {
   barsReached,
   chunkTargetsNow,
+  confirmOverride,
   drainSnapshot,
   failingMetrics,
   prepareAutotune,
@@ -126,11 +132,11 @@ import {
 } from "@/lib/rag/eval";
 import type { EvalCriteria } from "@/lib/rag/evalSettingsStore";
 import {
+  deleteModelTrialsForChunk,
   getModelTrialChunk,
   getQuestionToScore,
   getSummary,
   insertModelTrial,
-  listModelTrials,
   type EvalSummary,
   type QuestionDetail,
   type QuestionToScore,
@@ -161,7 +167,9 @@ const RESCORE_BATCH = 20;
 // continues from where it stopped, no cursor required. 20 minutes is well under
 // the 66 that failed and comfortably over an ordinary sweep. Env-tunable, like the
 // slice budget it is the sibling of.
-export const STREAM_BUDGET_MS = Number(process.env.AUTOTUNE_BUDGET_MS ?? 1_200_000);
+export const STREAM_BUDGET_MS = Number(
+  process.env.AUTOTUNE_BUDGET_MS ?? 1_200_000,
+);
 
 // The frozen "before" side of one targeted question's outcome rows. Captured when
 // the run first saw the question and never recomputed — see the header.
@@ -270,18 +278,31 @@ export type AutotuneResult = {
 type Emit = (progress: JobProgress<AutotuneEvent>) => void;
 
 const pairValue = (q: QuestionDetail, metric: AutotuneMetric): number =>
-  metric === "recall" ? (q.hit ? 1 : 0) : metric === "mrr" ? (q.rr ?? 0) : (q.ndcg ?? 0);
+  metric === "recall"
+    ? q.hit
+      ? 1
+      : 0
+    : metric === "mrr"
+      ? (q.rr ?? 0)
+      : (q.ndcg ?? 0);
 
-const beforeValue = (b: FrozenBaseline, metric: AutotuneMetric): number | null =>
+const beforeValue = (
+  b: FrozenBaseline,
+  metric: AutotuneMetric,
+): number | null =>
   metric === "recall" ? (b.hit ? 1 : 0) : metric === "mrr" ? b.rr : b.ndcg;
 
 // The chunks whose override differs from the run's start — the dirty-set
 // re-score's input, and the one thing in this file that is DERIVED rather than
 // remembered. Covers all three ways a chunk can differ: gained an override,
 // changed to a different one, or (a revert past the run's start) lost it.
-async function changedChunks(startOverrides: Record<string, string>): Promise<ChangedChunk[]> {
+async function changedChunks(
+  startOverrides: Record<string, string>,
+): Promise<ChangedChunk[]> {
   const live = await overrideFingerprints();
-  const models = new Map((await listOverrides()).map((o) => [o.sourceChunkId, o.model]));
+  const models = new Map(
+    (await listOverrides()).map((o) => [o.sourceChunkId, o.model]),
+  );
   const ids = new Set([...Object.keys(startOverrides), ...live.keys()]);
   const changed: ChangedChunk[] = [];
   for (const id of ids) {
@@ -310,7 +331,10 @@ export const autotuneStep: JobStep<
     // failing question is what the plan will be once `settle` has run, and it is
     // exactly `plan.length` when nothing is stale — so the estimate is only an
     // estimate in the case that has one.
-    return { totalUnits: cursor.plan?.length ?? (await estimateChunks()), cursor };
+    return {
+      totalUnits: cursor.plan?.length ?? (await estimateChunks()),
+      cursor,
+    };
   },
 
   async run(_scope, cursor, emit, shouldStop) {
@@ -318,9 +342,10 @@ export const autotuneStep: JobStep<
     // freezes its run-start state here instead — later than launch, but still
     // before the first chunk is touched, which is the property that matters.
     const c = cursor ?? (await freshCursor());
-    if (c.phase === "settle") return runSettle(c, emit, shouldStop);
+    if (c.phase === "settle")
+      return stage("phase:settle", () => runSettle(c, emit, shouldStop));
     if (c.phase === "search") {
-      const planned = await ensurePlanned(c);
+      const planned = await stage("phase:search:plan", () => ensurePlanned(c));
       // THE ONE GATE THIS STEP HAS, and it reads as one expression on purpose:
       // "gate unless the demo has a published answer", exactly as bulk-ndcg and
       // bulk-llm-ndcg do since phase 5. readTuning is null for every real
@@ -329,21 +354,39 @@ export const autotuneStep: JobStep<
       // shelf replays the master's winners; a guest whose build was published
       // WITHOUT them is refused rather than falling through to a real search on
       // the operator's key, which is `sweep`'s lesson (lib/demo/policy).
-      const tuning = await readTuning();
+      //
+      // WHICH BANK is the board's difficulties' question (docs/demo-voyage-
+      // tuning-plan.md §3.4), asked through a thunk readTuning only calls for
+      // a guest — a real account's run stays byte-for-byte what it was.
+      //
+      // The summary the pick reads is handed to the replay's prepare (cut 6,
+      // docs/autotune-press-latency-plan.md §9): nothing writes between the two
+      // in a slice, and a summary is ~15 statements.
+      const pick: { summary: EvalSummary | null } = { summary: null };
+      const tuning = await readTuning(async () => {
+        pick.summary = await stage("phase:search:pick-bank", () =>
+          getSummary(),
+        );
+        return boardDifficulties(pick.summary);
+      });
       if (tuning === null) await assertDemoAllows("autotune");
-      return tuning === null
-        ? runSearch(planned, emit, shouldStop)
-        : runReplay(planned, tuning, emit, shouldStop);
+      return stage(tuning === null ? "phase:search" : "phase:replay", () =>
+        tuning === null
+          ? runSearch(planned, emit, shouldStop)
+          : runReplay(planned, tuning, emit, shouldStop, pick.summary),
+      );
     }
-    if (c.phase === "rescore") return runRescore(c, emit, shouldStop);
-    if (c.phase === "outcomes") return runOutcomes(c, emit);
-    return runSnapshots(c, emit, shouldStop);
+    if (c.phase === "rescore")
+      return stage("phase:rescore", () => runRescore(c, emit, shouldStop));
+    if (c.phase === "outcomes")
+      return stage("phase:outcomes", () => runOutcomes(c, emit));
+    return stage("phase:snapshots", () => runSnapshots(c, emit, shouldStop));
   },
 
   // Only the headline numbers — every durable effect already happened in a phase,
   // so this is safe to skip and safe to repeat.
   async finalize(_scope, cursor) {
-    const summary = await getSummary();
+    const summary = await stage("finalize:summary", () => getSummary());
     const { resolved, improved } = tally(cursor.baselines, summary);
     const targeted = Object.keys(cursor.baselines).length;
     return {
@@ -437,12 +480,20 @@ async function freezePlan(c: AutotuneCursor): Promise<AutotuneCursor> {
 // reads the same in the database as "this run predates the recording", and it
 // has to: both are cases where there is no measurement, and inventing a zero for
 // either would be the assertion 0074 exists to avoid.
-function freezeHoldout(summary: EvalSummary, criteria: EvalCriteria): HoldoutFreeze | null {
+function freezeHoldout(
+  summary: EvalSummary,
+  criteria: EvalCriteria,
+): HoldoutFreeze | null {
   const held = summary.questions.filter((q) => q.heldOut);
   if (held.length === 0) return null;
   const rows: Record<string, FrozenHoldout> = {};
   for (const q of held) {
-    rows[q.questionId] = { hit: q.hit, rank: q.foundRank, rr: q.rr, ndcg: q.ndcg };
+    rows[q.questionId] = {
+      hit: q.hit,
+      rank: q.foundRank,
+      rr: q.rr,
+      ndcg: q.ndcg,
+    };
   }
   const dials = criteria.autotune.holdout;
   return {
@@ -461,7 +512,8 @@ function freezeHoldout(summary: EvalSummary, criteria: EvalCriteria): HoldoutFre
 // doing the freeze now — the corpus has already been settled, so this reads the
 // same thing freezePlan would have.
 async function ensurePlanned(c: AutotuneCursor): Promise<PlannedCursor> {
-  const planned = c.plan === null || c.plan === undefined ? await freezePlan(c) : c;
+  const planned =
+    c.plan === null || c.plan === undefined ? await freezePlan(c) : c;
   return planned as PlannedCursor;
 }
 
@@ -473,7 +525,8 @@ async function estimateChunks(): Promise<number> {
   const criteria = summary.criteria as EvalCriteria;
   const chunks = new Set<string>();
   for (const q of summary.questions) {
-    if (q.stale || failingMetrics(q, criteria).length > 0) chunks.add(q.sourceChunkId);
+    if (q.stale || failingMetrics(q, criteria).length > 0)
+      chunks.add(q.sourceChunkId);
   }
   return chunks.size;
 }
@@ -496,9 +549,14 @@ function tally(
   let improved = 0;
   for (const [questionId, b] of Object.entries(baselines)) {
     const q = after.get(questionId);
-    const stillFailing = q ? failingMetrics(q, summary.criteria as EvalCriteria) : b.metrics;
+    const stillFailing = q
+      ? failingMetrics(q, summary.criteria as EvalCriteria)
+      : b.metrics;
     if (stillFailing.length === 0) resolved += 1;
-    else if (q && b.metrics.some((m) => pairValue(q, m) > (beforeValue(b, m) ?? 0) + 1e-9)) {
+    else if (
+      q &&
+      b.metrics.some((m) => pairValue(q, m) > (beforeValue(b, m) ?? 0) + 1e-9)
+    ) {
       improved += 1;
     }
   }
@@ -529,8 +587,14 @@ function tally(
 // worth keeping: this makes the PLAN and its ordering honest, while the per-chunk
 // re-score makes each individual skip decision honest even for staleness this
 // phase did not anticipate.
-async function runSettle(c: AutotuneCursor, emit: Emit, shouldStop: () => boolean) {
-  const stale = await staleQuestions(c.startState);
+async function runSettle(
+  c: AutotuneCursor,
+  emit: Emit,
+  shouldStop: () => boolean,
+) {
+  const stale = await stage("settle:stale-read", () =>
+    staleQuestions(c.startState),
+  );
 
   // The same guard runRescore carries, against the same hazard: a question that
   // cannot come back clean would re-score forever, and on the streamed path
@@ -545,7 +609,9 @@ async function runSettle(c: AutotuneCursor, emit: Emit, shouldStop: () => boolea
     const message =
       `Could not re-score ${stale.length} stale question(s), so there is no ` +
       `trustworthy corpus to tune against. Re-score all questions, then try again.`;
-    console.warn(`[rag:autotune] settle made no progress at ${stale.length} stale; giving up`);
+    console.warn(
+      `[rag:autotune] settle made no progress at ${stale.length} stale; giving up`,
+    );
     emit({ doneUnits: 0, event: { type: "error", message } });
     return { cursor: c, done: true, doneUnits: 0 };
   }
@@ -553,8 +619,12 @@ async function runSettle(c: AutotuneCursor, emit: Emit, shouldStop: () => boolea
   if (stale.length === 0) {
     // Settled: drop the change log and freeze the snapshot, then freeze the plan
     // against a corpus that can now answer "is this question failing".
-    await settleStale();
-    return { cursor: await freezePlan(c), done: false, doneUnits: 0 };
+    await stage("settle:settle-stale", () => settleStale());
+    return {
+      cursor: await stage("settle:freeze-plan", () => freezePlan(c)),
+      done: false,
+      doneUnits: 0,
+    };
   }
 
   emit({ doneUnits: 0, event: { type: "rescore-start", total: stale.length } });
@@ -562,18 +632,24 @@ async function runSettle(c: AutotuneCursor, emit: Emit, shouldStop: () => boolea
   while (i < stale.length && !shouldStop()) {
     const batch = stale.slice(i, i + RESCORE_BATCH);
     const offset = i;
-    await scoreQuestions(
-      batch,
-      (event) => {
-        if (event.type === "score-result") {
-          emit({
-            doneUnits: 0,
-            message: `Settling ${offset + event.done} of ${stale.length} stale questions`,
-            event: { type: "rescore-progress", done: offset + event.done, total: stale.length },
-          });
-        }
-      },
-      NEVER_STOP,
+    await stage("settle:batch", () =>
+      scoreQuestions(
+        batch,
+        (event) => {
+          if (event.type === "score-result") {
+            emit({
+              doneUnits: 0,
+              message: `Settling ${offset + event.done} of ${stale.length} stale questions`,
+              event: {
+                type: "rescore-progress",
+                done: offset + event.done,
+                total: stale.length,
+              },
+            });
+          }
+        },
+        NEVER_STOP,
+      ),
     );
     i += batch.length;
   }
@@ -592,7 +668,10 @@ async function runSearch(c: PlannedCursor, emit: Emit, shouldStop: StopSignal) {
   const failed = new Set(c.failed);
   const prepared = await prepareAutotune();
   if (!prepared.ok) {
-    emit({ doneUnits: covered.size, event: { type: "error", message: prepared.error } });
+    emit({
+      doneUnits: covered.size,
+      event: { type: "error", message: prepared.error },
+    });
     // Before the first chunk this is just "there is nothing to target" — no
     // overrides changed, so the tail would write an empty history row against an
     // unchanged corpus. After it, the criteria were edited mid-run: the searching
@@ -600,7 +679,11 @@ async function runSearch(c: PlannedCursor, emit: Emit, shouldStop: StopSignal) {
     // ending used to leave stopReason null, which read as a completed sweep.
     if (covered.size === 0) return { cursor: c, done: true, doneUnits: 0 };
     return {
-      cursor: { ...c, phase: "rescore" as const, stopReason: "aborted" as const },
+      cursor: {
+        ...c,
+        phase: "rescore" as const,
+        stopReason: "aborted" as const,
+      },
       done: false,
       doneUnits: covered.size,
       mustFinish: true,
@@ -626,7 +709,9 @@ async function runSearch(c: PlannedCursor, emit: Emit, shouldStop: StopSignal) {
   // Live values for the frozen plan's questions, indexed once. `targets` is the
   // fresh-and-below-bar set, so presence in it IS the failing test, and it also
   // carries the current before-values searchChunk ranks candidates against.
-  const targetsByQuestion = new Map(prepared.targets.map((t) => [t.questionId, t]));
+  const targetsByQuestion = new Map(
+    prepared.targets.map((t) => [t.questionId, t]),
+  );
   const planned = new Set(c.plan.map((e) => e.chunkId));
 
   // Newly seen targets get a frozen baseline too: a question can start failing
@@ -724,10 +809,14 @@ async function runSearch(c: PlannedCursor, emit: Emit, shouldStop: StopSignal) {
       // concurrently so assembling the batch is one round trip, then a single
       // scoreQuestions call pays the per-call fixed costs once.
       const toScore = (
-        await Promise.all(decision.questionIds.map((id) => getQuestionToScore(id)))
+        await Promise.all(
+          decision.questionIds.map((id) => getQuestionToScore(id)),
+        )
       ).filter((q): q is QuestionToScore => q !== null);
-      if (toScore.length > 0) await scoreQuestions(toScore, () => {}, NEVER_STOP);
-      chunkTargets = (await chunkTargetsNow(chunkId, decision.questionIds)).targets;
+      if (toScore.length > 0)
+        await scoreQuestions(toScore, () => {}, NEVER_STOP);
+      chunkTargets = (await chunkTargetsNow(chunkId, decision.questionIds))
+        .targets;
     }
 
     // Covered either way: the run is finished with this chunk, and a chunk a
@@ -760,7 +849,8 @@ async function runSearch(c: PlannedCursor, emit: Emit, shouldStop: StopSignal) {
       // failed unit so a job that finishes with holes says so (0066), and counted
       // on the cursor so the history row can say the same for a streamed run,
       // which has no job row to carry it.
-      const message = err instanceof Error ? err.message : "Chunk search failed.";
+      const message =
+        err instanceof Error ? err.message : "Chunk search failed.";
       emit({
         doneUnits: covered.size,
         failure: message,
@@ -807,10 +897,28 @@ function liveQuestionState(
   for (const q of summary.questions) {
     live.set(
       q.questionId,
-      q.stale ? "stale" : targetsByQuestion.has(q.questionId) ? "failing" : "passing",
+      q.stale
+        ? "stale"
+        : targetsByQuestion.has(q.questionId)
+          ? "failing"
+          : "passing",
     );
   }
   return live;
+}
+
+// The difficulties present among this workspace's questions, which for a guest
+// is the board (getSummary is board-scoped there). What readTuning picks a bank
+// by: a guest who added the easy questions only gets the bank confirmed against
+// easy questions only.
+function boardDifficulties(summary: EvalSummary): string[] {
+  return [
+    ...new Set(
+      summary.questions
+        .map((q) => q.difficulty)
+        .filter((d): d is string => d !== null),
+    ),
+  ];
 }
 
 // --- phase 1, replayed: the demo installs a search it did not run ------------
@@ -834,20 +942,45 @@ function liveQuestionState(
 // A PLANNED CHUNK WITH NOTHING BANKED IS UNRESOLVED, not skipped. The master's
 // own search found nothing for it either, so reporting it as anything else would
 // be a demo in which every chunk improves, which is a demo nobody believes.
+//
+// AND AN INSTALL IS CONFIRMED, NOT TRUSTED — docs/demo-voyage-tuning-plan.md
+// §3.5. The bank's winner was confirmed on the sibling it came from, against
+// that set's questions, in that sibling's override environment; this workspace
+// holds some subset of those questions under whatever overrides earlier chunks
+// installed. So each install goes through confirmOverride, the same
+// re-score-and-compare the real search keeps its own candidates by: the chunk's
+// questions are re-scored fresh before (chunk A's install moved the
+// fingerprint, so chunk B's rows are stale and would read as passing), the
+// override is written, they are re-scored again, and it stays only if the
+// failing set shrank with no new failure — or, under keep-best, rose. Otherwise
+// the chunk's prior override comes back (a second press can have one) or it is
+// cleared, and the chunk is reported unresolved with the reason. Trials land
+// only on a keep.
 async function runReplay(
   c: PlannedCursor,
   tuning: ReplayTuning,
   emit: Emit,
   shouldStop: StopSignal,
+  // The bank pick's summary, read moments ago in this same slice (cut 6).
+  picked: EvalSummary | null = null,
 ) {
   const covered = new Set(c.covered);
-  const prepared = await prepareAutotune();
+  const prepared = await stage("replay:prepare", () =>
+    prepareAutotune(picked ?? undefined),
+  );
   if (!prepared.ok) {
     // runSearch's ending, for its reasons exactly — see the comment there.
-    emit({ doneUnits: covered.size, event: { type: "error", message: prepared.error } });
+    emit({
+      doneUnits: covered.size,
+      event: { type: "error", message: prepared.error },
+    });
     if (covered.size === 0) return { cursor: c, done: true, doneUnits: 0 };
     return {
-      cursor: { ...c, phase: "rescore" as const, stopReason: "aborted" as const },
+      cursor: {
+        ...c,
+        phase: "rescore" as const,
+        stopReason: "aborted" as const,
+      },
       done: false,
       doneUnits: covered.size,
       mustFinish: true,
@@ -855,7 +988,9 @@ async function runReplay(
   }
   const { prep, summary } = prepared;
   const chunksTotal = c.plan.length;
-  const targetsByQuestion = new Map(prepared.targets.map((t) => [t.questionId, t]));
+  const targetsByQuestion = new Map(
+    prepared.targets.map((t) => [t.questionId, t]),
+  );
   const planned = new Set(c.plan.map((e) => e.chunkId));
 
   if (covered.size === 0) {
@@ -895,7 +1030,9 @@ async function runReplay(
   // so a stored id names a row in no destination — and this is the other end of
   // that: the board's rows were minted from the bank carrying the master's exact
   // wording, so an equality join on it is exact.
-  const questionIds = new Map(summary.questions.map((q) => [q.question, q.questionId]));
+  const questionIds = new Map(
+    summary.questions.map((q) => [q.question, q.questionId]),
+  );
 
   const banked = new Map(tuning.entries.map((e) => [e.chunk, e]));
   for (const entry of c.plan) {
@@ -906,7 +1043,11 @@ async function runReplay(
     if (shouldStop()) {
       const why = shouldStop.reason?.() ?? "deadline";
       if (why === "deadline") {
-        return { cursor: { ...c, covered: [...covered] }, done: false, doneUnits: covered.size };
+        return {
+          cursor: { ...c, covered: [...covered] },
+          done: false,
+          doneUnits: covered.size,
+        };
       }
       if (why === "budget") {
         emit({
@@ -923,6 +1064,9 @@ async function runReplay(
       break;
     }
     covered.add(chunkId);
+    openFrame(
+      `chunk ${covered.size}/${chunksTotal} ${chunkId.slice(0, 8)} qs=${entry.questionIds.length}`,
+    );
 
     const chunkTargets = entry.questionIds
       .map((id) => targetsByQuestion.get(id))
@@ -948,33 +1092,70 @@ async function runReplay(
         event: {
           type: "chunk-unresolved",
           chunkId,
-          reason: "the published search found no variation that helped this chunk",
+          reason:
+            "the published search found no variation that helped this chunk",
         },
       });
+      closeFrame("no-bank");
       continue;
     }
 
+    let confirmed: Awaited<ReturnType<typeof confirmOverride>>;
     try {
-      await installBanked(shelved, questionIds);
+      confirmed = await confirmOverride(
+        chunkId,
+        async () => {
+          await installOverride(shelved);
+          return null;
+        },
+        prep.keepBest ? "improve" : "clear",
+      );
+      if (confirmed.status === "kept") {
+        await stage("trials", () => installTrials(shelved, questionIds));
+      }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Installing the published override failed.";
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Installing the published override failed.";
       emit({
         doneUnits: covered.size,
         failure: message,
         event: { type: "chunk-unresolved", chunkId, reason: message },
       });
+      closeFrame("failed");
       continue;
     }
-    emit({
-      doneUnits: covered.size,
-      event: {
-        type: "chunk-published",
-        chunkId,
-        detail: shelved.detail,
-        pieces: shelved.pieces.length,
-        trials: shelved.trials.length,
-      },
-    });
+    if (confirmed.status !== "kept") {
+      emit({
+        doneUnits: covered.size,
+        event: {
+          type: "chunk-unresolved",
+          chunkId,
+          reason:
+            confirmed.status === "reverted"
+              ? "the published winner did not move this workspace's question"
+              : confirmed.status === "skipped"
+                ? "this chunk already passes under the overrides installed so far"
+                : confirmed.detail,
+        },
+      });
+      closeFrame(confirmed.status);
+      continue;
+    }
+    await stage("emit", async () =>
+      emit({
+        doneUnits: covered.size,
+        event: {
+          type: "chunk-published",
+          chunkId,
+          detail: shelved.detail,
+          pieces: shelved.pieces.length,
+          trials: shelved.trials.length,
+        },
+      }),
+    );
+    closeFrame("kept");
   }
 
   return {
@@ -995,13 +1176,10 @@ async function runReplay(
 // history row reports nothing changed, and the visitor watches a run that did
 // nothing.
 //
-// The trials are the chunk card's "Models tried" list, and they are inserted
-// ONLY when the chunk has none: a second press of the button would otherwise
-// stack another copy of the same frozen aggregate under it.
-async function installBanked(
-  entry: ReplayTuningEntry,
-  questionIds: ReadonlyMap<string, string>,
-): Promise<void> {
+// SPLIT FROM THE TRIALS (docs/demo-voyage-tuning-plan.md §3.5): this is the
+// `install` confirmOverride wraps, and the trials below land only once the
+// confirm has kept it.
+async function installOverride(entry: ReplayTuningEntry): Promise<void> {
   await setChunkOverridePieces(
     entry.chunk,
     entry.model,
@@ -1015,11 +1193,20 @@ async function installBanked(
     })),
     entry.detail,
   );
+}
 
-  if (entry.trials.length === 0) return;
+// The trials are the chunk card's "Models tried" list, and THEY FOLLOW THE
+// WINNER (§3.6): a keep replaces whatever the chunk held, so a second press that
+// swaps the one-difficulty bank's winner for the full set's does not leave the
+// first bank's list under the second bank's override. A revert never reaches
+// here, so the list under a restored override is the one it was kept with.
+async function installTrials(
+  entry: ReplayTuningEntry,
+  questionIds: ReadonlyMap<string, string>,
+): Promise<void> {
   const chunk = await getModelTrialChunk(entry.chunk);
   if (!chunk) return; // not in this config's corpus: nothing to hang a trial on
-  if ((await listModelTrials(entry.chunk)).length > 0) return;
+  await deleteModelTrialsForChunk(entry.chunk);
   for (const t of entry.trials) {
     // RE-KEYED TO THIS WORKSPACE'S QUESTIONS, and cut down to them. A banked
     // outcome whose wording is not on the visitor's board names a question that
@@ -1054,9 +1241,17 @@ async function installBanked(
 
 // --- phase 2: the dirty-set re-score ----------------------------------------
 
-async function runRescore(c: AutotuneCursor, emit: Emit, shouldStop: () => boolean) {
-  const changed = await changedChunks(c.startOverrides);
-  const screen = await screenAffectedQuestions(changed, c.startState);
+async function runRescore(
+  c: AutotuneCursor,
+  emit: Emit,
+  shouldStop: () => boolean,
+) {
+  const screen = await stage("rescore:screen", async () =>
+    screenAffectedQuestions(
+      await changedChunks(c.startOverrides),
+      c.startState,
+    ),
+  );
 
   // The phase drains its own work, so "am I finished" is "is anything still
   // dirty" — with one guard. A question that cannot come back clean (its score
@@ -1075,13 +1270,19 @@ async function runRescore(c: AutotuneCursor, emit: Emit, shouldStop: () => boole
   if (screen.dirty.length === 0 || stuck) {
     // Nothing left dirty: stamp the proven-clean rows, drop the change log and
     // freeze the snapshot. Idempotent, so a slice that dies here simply redoes it.
-    await settleAffectedRescore(screen, c.startState);
+    await stage("rescore:settle", () =>
+      settleAffectedRescore(screen, c.startState),
+    );
     return {
       // Settling a set that would not shrink stamps rows clean under a state some
       // question never actually reached. The warning above says so to the log; the
       // history row has to say it too, or a run that gave up on its tail is
       // indistinguishable from one that came clean.
-      cursor: { ...c, phase: "outcomes" as const, tailStatus: stuck ? ("stuck" as const) : null },
+      cursor: {
+        ...c,
+        phase: "outcomes" as const,
+        tailStatus: stuck ? ("stuck" as const) : null,
+      },
       done: false,
       doneUnits: c.covered.length,
       mustFinish: true,
@@ -1090,33 +1291,43 @@ async function runRescore(c: AutotuneCursor, emit: Emit, shouldStop: () => boole
 
   // No cursor of its own: a question scored under the final state drops out of the
   // next screen, so the phase eliminates its own work exactly like the search does.
-  emit({ doneUnits: c.covered.length, event: { type: "rescore-start", total: screen.dirty.length } });
+  emit({
+    doneUnits: c.covered.length,
+    event: { type: "rescore-start", total: screen.dirty.length },
+  });
   let i = 0;
   while (i < screen.dirty.length && !shouldStop()) {
     const batch = screen.dirty.slice(i, i + RESCORE_BATCH);
     const offset = i;
-    await scoreQuestions(
-      batch,
-      (event) => {
-        if (event.type === "score-result") {
-          emit({
-            doneUnits: c.covered.length,
-            message: `Re-scoring ${offset + event.done} of ${screen.dirty.length} affected questions`,
-            event: {
-              type: "rescore-progress",
-              done: offset + event.done,
-              total: screen.dirty.length,
-            },
-          });
-        }
-      },
-      NEVER_STOP,
+    await stage("rescore:batch", () =>
+      scoreQuestions(
+        batch,
+        (event) => {
+          if (event.type === "score-result") {
+            emit({
+              doneUnits: c.covered.length,
+              message: `Re-scoring ${offset + event.done} of ${screen.dirty.length} affected questions`,
+              event: {
+                type: "rescore-progress",
+                done: offset + event.done,
+                total: screen.dirty.length,
+              },
+            });
+          }
+        },
+        NEVER_STOP,
+      ),
     );
     i += batch.length;
   }
 
   const lastDirty = passSize(i, screen.dirty.length, c.lastDirty);
-  return { cursor: { ...c, lastDirty }, done: false, doneUnits: c.covered.length, mustFinish: true };
+  return {
+    cursor: { ...c, lastDirty },
+    done: false,
+    doneUnits: c.covered.length,
+    mustFinish: true,
+  };
 }
 
 // --- phase 3: the history row -----------------------------------------------
@@ -1128,8 +1339,12 @@ async function runOutcomes(c: AutotuneCursor, emit: Emit) {
 
   // Which chunks THIS run changed, and what they ended up with — both read back
   // from the override rows rather than from anything the run remembered doing.
-  const changed = new Set((await changedChunks(c.startOverrides)).map((x) => x.chunkId));
-  const endOverrides = new Map((await listOverrides()).map((o) => [o.sourceChunkId, o]));
+  const changed = new Set(
+    (await changedChunks(c.startOverrides)).map((x) => x.chunkId),
+  );
+  const endOverrides = new Map(
+    (await listOverrides()).map((o) => [o.sourceChunkId, o]),
+  );
   // The one attributed field the rows cannot answer: an override row stores its
   // pieces, not the target token size the candidate was chosen at. The kept
   // candidates are on the cursor (they are queued for their trial snapshots), so
@@ -1139,7 +1354,9 @@ async function runOutcomes(c: AutotuneCursor, emit: Emit) {
   const outcomes: AutotuneOutcome[] = [];
   for (const [questionId, b] of Object.entries(c.baselines)) {
     const after = afterByQ.get(questionId);
-    const ov = changed.has(b.chunkId) ? (endOverrides.get(b.chunkId) ?? null) : null;
+    const ov = changed.has(b.chunkId)
+      ? (endOverrides.get(b.chunkId) ?? null)
+      : null;
     for (const m of b.metrics) {
       outcomes.push({
         questionId,
@@ -1169,7 +1386,10 @@ async function runOutcomes(c: AutotuneCursor, emit: Emit) {
   // back around. If that ever changes, this feature reports zero deltas rather
   // than failing, which is the worst way for it to break: whoever touches those
   // queries needs to know this reads them.
-  const holdout = c.holdoutFreeze === null ? null : holdoutCapture(c.holdoutFreeze, summary, afterByQ);
+  const holdout =
+    c.holdoutFreeze === null
+      ? null
+      : holdoutCapture(c.holdoutFreeze, summary, afterByQ);
   await insertAutotuneRun(
     c.runId,
     {
@@ -1220,24 +1440,26 @@ function holdoutCapture(
   afterByQ: Map<string, QuestionDetail>,
 ): NonNullable<Parameters<typeof insertAutotuneRun>[1]["holdout"]> {
   const members = new Set(Object.keys(freeze.rows));
-  const rows: HoldoutQuestionOutcome[] = Object.entries(freeze.rows).map(([questionId, b]) => {
-    // A question that has vanished from the summary (deleted mid-run, or its
-    // label moved off this config) keeps its before-values and gets null afters.
-    // Dropping the row instead would change the split key the aggregates were
-    // computed under, and quietly make this run incomparable to its siblings.
-    const a = afterByQ.get(questionId) ?? null;
-    return {
-      questionId,
-      beforeHit: b.hit,
-      beforeRank: b.rank,
-      beforeRr: b.rr,
-      beforeNdcg: b.ndcg,
-      afterHit: a?.hit ?? null,
-      afterRank: a?.foundRank ?? null,
-      afterRr: a?.rr ?? null,
-      afterNdcg: a?.ndcg ?? null,
-    };
-  });
+  const rows: HoldoutQuestionOutcome[] = Object.entries(freeze.rows).map(
+    ([questionId, b]) => {
+      // A question that has vanished from the summary (deleted mid-run, or its
+      // label moved off this config) keeps its before-values and gets null afters.
+      // Dropping the row instead would change the split key the aggregates were
+      // computed under, and quietly make this run incomparable to its siblings.
+      const a = afterByQ.get(questionId) ?? null;
+      return {
+        questionId,
+        beforeHit: b.hit,
+        beforeRank: b.rank,
+        beforeRr: b.rr,
+        beforeNdcg: b.ndcg,
+        afterHit: a?.hit ?? null,
+        afterRank: a?.foundRank ?? null,
+        afterRr: a?.rr ?? null,
+        afterNdcg: a?.ndcg ?? null,
+      };
+    },
+  );
   return {
     dials: freeze.dials,
     splitKey: holdoutSplitKey([...members]),
@@ -1248,7 +1470,15 @@ function holdoutCapture(
 }
 
 const afterValue = (q: QuestionDetail, m: AutotuneMetric): number | null =>
-  m === "recall" ? (q.hit === null ? null : q.hit ? 1 : 0) : m === "mrr" ? q.rr : q.ndcg;
+  m === "recall"
+    ? q.hit === null
+      ? null
+      : q.hit
+        ? 1
+        : 0
+    : m === "mrr"
+      ? q.rr
+      : q.ndcg;
 
 // --- phase 4: the deferred trial snapshots ----------------------------------
 
@@ -1257,12 +1487,19 @@ const afterValue = (q: QuestionDetail, m: AutotuneMetric): number | null =>
 // 41% of confirm, and nothing inside a run reads eval_model_trials back. Last, so
 // the run's RESULT never waits on bookkeeping, and sliced like everything else so
 // a long list cannot overrun the deadline in one go.
-async function runSnapshots(c: AutotuneCursor, emit: Emit, shouldStop: () => boolean) {
+async function runSnapshots(
+  c: AutotuneCursor,
+  emit: Emit,
+  shouldStop: () => boolean,
+) {
   const left = [...c.snapshots];
   while (left.length > 0 && !shouldStop()) {
-    await drainSnapshot(left[0]);
+    await stage("snapshot", () => drainSnapshot(left[0]));
     left.shift();
-    emit({ doneUnits: c.covered.length, message: `Saving trials (${left.length} left)` });
+    emit({
+      doneUnits: c.covered.length,
+      message: `Saving trials (${left.length} left)`,
+    });
   }
   return {
     cursor: { ...c, snapshots: left },

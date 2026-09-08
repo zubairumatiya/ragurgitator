@@ -255,6 +255,9 @@ export type CloneSummary = {
   ledgerRows: number; // savings rows priced the payoff readout's money (step 5h)
   cachedVectors: number; // delegate-space embeddings the re-score would re-buy (step 5k)
   cachedVectorsWanted: number; // what a complete copy would have been — see step 5k
+  bankedRetrievalStates: number; // override states with banked ranked lists (step 5l)
+  bankedRetrievalQuestions: number; // question lists across those states
+  bankedRetrievalHoles: number; // list elements the remap could not place — each one a miss
 };
 
 // THE PUBLISH OPTIONS — used by scripts/demo-snapshot.ts, never by a guest.
@@ -1686,11 +1689,15 @@ export async function cloneSeedWorkspace(
     // Counted out of the payload for bankedMatrix's reason, and here the count
     // is the difference between a finale and a refusal: an empty shelf is what
     // the step's own gate reads to decide whether to replay or to refuse.
+    //
+    // SUMMED OVER EVERY BANK, not read off one: since docs/demo-voyage-tuning-plan.md
+    // the shelf holds one row per difficulty set, and a `limit 1` here would
+    // report whichever bank sorted first and zero for a build whose only bank
+    // sorted second.
     const [bankedTuning] = await tx<{ chunks: number }[]>`
-      select coalesce(jsonb_array_length(r.payload -> 'entries'), 0)::int as chunks
+      select coalesce(sum(jsonb_array_length(r.payload -> 'entries')), 0)::int as chunks
         from demo_replay r
        where r.user_id = ${guestId} and r.kind = 'tuning'
-       limit 1
     `;
 
     // --- 5k. the delegate-space vectors, or the finale costs an hour ---------
@@ -1800,6 +1807,86 @@ export async function cloneSeedWorkspace(
       overrides: { user_id: "$2" },
       params: ids,
     });
+
+    // --- 5l. the banked retrieval, rewritten from text hashes to ids ---------
+    //
+    // docs/demo-retrieval-bank-plan.md §3.2. `retrieval` (0085) is, per portable
+    // override state, the ranked list the publish's walk retrieved for every
+    // question it scored there. A guest's re-score reads the list instead of
+    // retrieving, which is where Score pending's 28 s and the press's 98 s go.
+    //
+    // TWO FORMS, ONE STATEMENT EACH. The walk records ids as sha256(chunk text)
+    // (`form: 'hash'`) because it runs in throwaway guests whose ids mean
+    // nothing, and the seed holds that form. The hop that lands the bank in a
+    // guest rewrites each hash to the destination's chunk id through
+    // `_hash_chunk` below — the `_hash_scope` shape step 4e builds, carrying
+    // `new_id` — and stamps `form: 'id'`. A bank already in id form (a second
+    // hop, if there is ever one) remaps id → id through `_map_chunk`, the 5i
+    // shape. Both are scalar lookups (CASE picks the table by form, so a hash is
+    // never cast to a uuid) that leave an unmappable element's place as null:
+    // these are RANKINGS, position is rank, and the reader treats any null as a
+    // miss for that question (lib/demo/replayCore.bankedRetrieval).
+    //
+    // A TEXT THAT NAMES TWO CHUNKS MAPS TO NEITHER. Two chunks with identical
+    // text (two configs over one corpus, or a repeated passage) are one hash,
+    // and picking either would rank the wrong row under a real-looking hit —
+    // exactly the wrong number this bank's key exists to rule out. So the
+    // ambiguous hash gets null, the question misses, and it computes.
+    await tx.unsafe(
+      `create temp table _hash_chunk (text_hash text primary key, new_id uuid) on commit drop`,
+    );
+    for (const table of tables) {
+      await tx.unsafe(
+        `insert into _hash_chunk (text_hash, new_id)
+         select h, case when count(*) = 1 then (array_agg(new_id))[1] else null end
+           from (select encode(sha256(convert_to(c."text", 'UTF8')), 'hex') as h, m.new_id
+                   from "${table}" c join _map_chunk m on m.old_id = c.id) s
+          group by h
+         on conflict (text_hash) do update set new_id = null`,
+      );
+    }
+    const retrievalRows = await tx.unsafe(
+      `insert into demo_replay (user_id, kind, key, payload)
+       select $1, r.kind, r.key,
+              jsonb_set(
+                jsonb_set(r.payload, '{form}', '"id"'::jsonb),
+                '{questions}',
+                coalesce((
+                  select jsonb_object_agg(q.key, jsonb_set(q.value, '{ids}', coalesce((
+                           select jsonb_agg(
+                                    case when r.payload ->> 'form' = 'hash'
+                                         then (select hc.new_id::text from _hash_chunk hc
+                                                where hc.text_hash = u.old)
+                                         else (select mch.new_id::text from _map_chunk mch
+                                                where mch.old_id = u.old::uuid)
+                                    end
+                                    order by u.ord)
+                             from jsonb_array_elements_text(q.value -> 'ids')
+                                  with ordinality u(old, ord)),
+                           '[]'::jsonb)))
+                    from jsonb_each(r.payload -> 'questions') q),
+                  '{}'::jsonb))
+         from demo_replay r
+        where r.user_id = $2 and r.kind = 'retrieval'`,
+      [guestId, seedId] as never[],
+    );
+    // Counted out of the payloads for bankedMatrix's reason: states and the
+    // questions banked under them. A state whose every list lost an element to
+    // the remap inserts a perfectly good row and misses on every question, so
+    // the second number is the one that says whether a guest's re-score will be
+    // fast, and scripts/demo-snapshot reports the hole count beside it.
+    const [bankedRetrieval] = await tx<{ states: number; questions: number; holes: number }[]>`
+      select count(*)::int as states,
+             coalesce(sum((select count(*) from jsonb_object_keys(r.payload -> 'questions'))), 0)::int
+               as questions,
+             coalesce(sum((
+               select count(*)
+                 from jsonb_each(r.payload -> 'questions') q,
+                      jsonb_array_elements(q.value -> 'ids') e
+                where e.value = 'null'::jsonb)), 0)::int as holes
+        from demo_replay r
+       where r.user_id = ${guestId} and r.kind = 'retrieval'
+    `;
 
     // --- 5h. the savings ledger, so the payoff readout has money -------------
     //
@@ -1942,6 +2029,9 @@ export async function cloneSeedWorkspace(
       cachedVectors,
       cachedVectorsWanted,
       ledgerRows,
+      bankedRetrievalStates: retrievalRows.count > 0 ? (bankedRetrieval?.states ?? 0) : 0,
+      bankedRetrievalQuestions: retrievalRows.count > 0 ? (bankedRetrieval?.questions ?? 0) : 0,
+      bankedRetrievalHoles: retrievalRows.count > 0 ? (bankedRetrieval?.holes ?? 0) : 0,
     };
   }) as Promise<CloneSummary>;
 }

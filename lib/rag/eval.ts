@@ -13,6 +13,7 @@
 //   - Retrieval searches the whole model+dim chunks table (all docs/configs that
 //     share it).
 import type { StreamErrorEvent } from "@/lib/http/missingKey";
+import { stage } from "@/lib/autotuneTiming";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import {
   addDifficulty,
@@ -31,6 +32,7 @@ import {
   clearRetrievalChanges,
   listOverrides,
   overrideSims,
+  portableRetrievalKey,
   retrievalStateFingerprint,
   setChunkOverride,
   setChunkOverridePieces,
@@ -55,13 +57,20 @@ import {
 } from "@/lib/rag/embedCache";
 import { NEVER_STOP, type ShouldStop } from "@/lib/http/cancelRegistry";
 import { embedQuery } from "@/lib/rag/embeddings";
-import { screenStoredResult, type ChangedChunkSims } from "@/lib/rag/dirtyScreen";
+import { readRetrievalBank } from "@/lib/demo/replay";
+import { bankedRetrieval } from "@/lib/demo/replayCore";
+import { recordRetrieval } from "@/lib/rag/retrievalRecord";
+import {
+  screenStoredResult,
+  type ChangedChunkSims,
+} from "@/lib/rag/dirtyScreen";
 import { stitchChunks } from "@/lib/rag/reconstruct";
 import {
   buildRetrievalContext,
   prefetchRetrieval,
   fuseWithOverrides,
   retrieveWithCutoffs,
+  type ScreenCutoffs,
   type SimsFor,
 } from "@/lib/rag/retriever";
 import {
@@ -333,13 +342,18 @@ export function questionRequestParams(
 // JSON on a clean stop, but a truncation (max_tokens) or refusal can still yield
 // unparseable text: skip that chunk (it stays under target, retried next pass).
 export function parseQuestions(
-  message: { content: Array<{ type: string; text?: string }>; stop_reason?: string | null },
+  message: {
+    content: Array<{ type: string; text?: string }>;
+    stop_reason?: string | null;
+  },
   count: number,
 ): GeneratedQuestion[] {
   const textBlock = message.content.find((b) => b.type === "text");
   if (!textBlock || typeof textBlock.text !== "string") return [];
   try {
-    const parsed = JSON.parse(textBlock.text) as { questions?: GeneratedQuestion[] };
+    const parsed = JSON.parse(textBlock.text) as {
+      questions?: GeneratedQuestion[];
+    };
     return (parsed.questions ?? []).slice(0, count);
   } catch {
     console.warn(
@@ -356,7 +370,11 @@ async function authorQuestions(
   text: string,
   count: number,
   difficulty?: Difficulty,
-): Promise<{ questions: GeneratedQuestion[]; inputTokens: number; outputTokens: number }> {
+): Promise<{
+  questions: GeneratedQuestion[];
+  inputTokens: number;
+  outputTokens: number;
+}> {
   const response = await meteredMessage(
     "question_gen",
     questionRequestParams(text, count, difficulty, activeConfig().llmModel),
@@ -472,7 +490,8 @@ export async function generateMissingQuestions(
     // SERVING is a deliberate act ("Add cached questions" in Bulk actions), and
     // it needs data to hit against.
     const bankKey = `${hashes[gi]} ${gap.difficulty}`;
-    const startSlot = (banked0.get(bankKey) ?? 0) + (bankedHere.get(bankKey) ?? 0);
+    const startSlot =
+      (banked0.get(bankKey) ?? 0) + (bankedHere.get(bankKey) ?? 0);
     await bankQuestions({
       textHash: hashes[gi],
       difficulty: gap.difficulty,
@@ -554,7 +573,9 @@ export async function generateQuestionForChunk(
 // pool has 10 connections. Measured: no effect — rescore 44.5s → 45.4s, confirm
 // 82.3s → 81.4s. Reverted. Whatever bounds a batch here, it is not pool width;
 // don't re-raise it without finding out what actually is.
-const SCORE_CONCURRENCY = 4;
+// The env override exists for ONE experiment (docs/autotune-press-latency-plan.md
+// phase 1: force 1 and see whether the wall moves); nothing sets it in production.
+const SCORE_CONCURRENCY = Number(process.env.SCORE_CONCURRENCY ?? 4);
 
 export async function scoreQuestions(
   questions: QuestionToScore[],
@@ -567,25 +588,35 @@ export async function scoreQuestions(
 
   const cfg = activeConfig();
   // Retrieve a superset deep enough for every enabled metric, then judge recall at
-  // recall_k. These four reads are the batch's fixed setup and have no data
-  // dependency on each other — one round trip instead of four, measured at ~129ms
-  // each. "Once per batch" is only cheap when the batch is big: autotune scores one
+  // recall_k. These reads are the batch's fixed setup and have no data dependency
+  // on each other — one round trip instead of several, measured at ~129ms each.
+  // "Once per batch" is only cheap when the batch is big: autotune scores one
   // question per call, so it re-pays all of it per question.
   //
   // Every result is stamped with the override state it's scored under (0022) — the
   // state can't change mid-run, so one fingerprint covers the batch. The same
   // promise is handed to buildRetrievalContext as its piece-cache key, so the
   // fingerprint is still fetched in parallel here rather than ahead of it.
+  //
+  // The PORTABLE key (docs/demo-retrieval-bank-plan.md §3.1) rides along: it is
+  // the same state named without this workspace's chunk ids, and it is what the
+  // demo's retrieval bank is keyed by. For a real account it is one memoed
+  // statement and keys nothing.
   const statePromise = retrievalStateFingerprint();
-  const [criteria, cached, retrievalState, ctx] = await Promise.all([
-      getActiveCriteria(),
-      getCachedQueryEmbeddings(
-        questions.map((q) => q.questionId),
-        cfg.embeddingModel,
-      ),
-    statePromise,
-    buildRetrievalContext(statePromise),
-  ]);
+  const [criteria, cached, retrievalState, ctx, portableKey] = await stage(
+    "score:setup",
+    () =>
+      Promise.all([
+        getActiveCriteria(),
+        getCachedQueryEmbeddings(
+          questions.map((q) => q.questionId),
+          cfg.embeddingModel,
+        ),
+        statePromise,
+        buildRetrievalContext(statePromise),
+        portableRetrievalKey(),
+      ]),
+  );
   const depth = retrievalDepth(criteria, cfg.topK);
   const recallK = effectiveK(criteria.recall, cfg.topK);
 
@@ -600,10 +631,54 @@ export async function scoreQuestions(
   // It costs one extra vector query and ZERO dollars: `{ ...ctx, overrides: [] }`
   // takes retrieveWithCutoffs' single-ANN fast path against the same cached query
   // vector — no fusion pool, no re-embedding, no provider call.
-  const baselineCtx = ctx.overrides.length > 0 ? { ...ctx, overrides: [] } : null;
+  const baselineCtx =
+    ctx.overrides.length > 0 ? { ...ctx, overrides: [] } : null;
   const haveBaseline = baselineCtx
-    ? await labelsWithBaseline(questions.map((q) => q.labelId))
+    ? await stage("score:baseline-labels", () =>
+        labelsWithBaseline(questions.map((q) => q.labelId)),
+      )
     : new Set<string>();
+  const needsBaseline = (q: QuestionToScore) =>
+    baselineCtx !== null && !haveBaseline.has(q.labelId);
+
+  // THE DEMO'S RETRIEVAL BANK (docs/demo-retrieval-bank-plan.md §3.3). Every
+  // retrieval the demo pays for comes through here — Score pending, the
+  // confirm's before/after re-scores, the finale's dirty set — so this is the one
+  // intercept. readRetrievalBank is null for a real account (the rule every
+  // lib/demo/replay reader follows), and null for a guest whose build never
+  // walked this state; either way `bankedRetrieval` answers null per question
+  // and the question takes the computed path below, byte-for-byte the current
+  // code. A hit builds the same ResultInsert the computed path would from the
+  // banked list; the itest holds that equality field for field.
+  //
+  // Decided BEFORE the prefetch, so the prefetch is issued only for the misses —
+  // a fully banked batch skips score:prefetch altogether — and the baseline leg
+  // looks its list up under the 'baseline' key, which is a portable key already
+  // (no rows, no ids).
+  const [bank, baseBank] = await stage("score:bank", () =>
+    Promise.all([
+      readRetrievalBank(portableKey),
+      baselineCtx && questions.some(needsBaseline)
+        ? readRetrievalBank("baseline")
+        : Promise.resolve(null),
+    ]),
+  );
+  const bankedLive = questions.map((q) => bankedRetrieval(bank, q.question, depth));
+  const bankedBase = questions.map((q) =>
+    needsBaseline(q) ? bankedRetrieval(baseBank, q.question, depth) : null,
+  );
+  const liveMiss = (i: number) => bankedLive[i] === null;
+  const baseMiss = (i: number) => needsBaseline(questions[i]) && bankedBase[i] === null;
+  if (bank !== null || baseBank !== null) {
+    const hits = bankedLive.filter((b) => b !== null).length;
+    const baseWanted = questions.filter(needsBaseline).length;
+    const baseHits = bankedBase.filter((b) => b !== null).length;
+    console.log(
+      `[rag:demo] retrieval bank ${portableKey.slice(0, 8)}: ${hits} hit · ` +
+        `${questions.length - hits} miss · depth ${depth}` +
+        (baseWanted > 0 ? ` · baseline ${baseHits} hit · ${baseWanted - baseHits} miss` : ""),
+    );
+  }
 
   // ONE SET OF READS FOR THE WHOLE BATCH, before any worker starts. Every store
   // call in this scope shares one pinned connection (lib/db.ts), so the four
@@ -611,27 +686,39 @@ export async function scoreQuestions(
   // Prefetching turns ~12 statements per question into a handful for the batch;
   // it changes no answer, and a question it could not cover (no cached vector,
   // or a failed statement) still takes the ordinary per-question path.
-  // docs/fusion-latency-plan.md §3.
-  await prefetchRetrieval(
-    ctx,
-    questions
-      .filter((q) => cached.has(q.questionId))
-      .map((q) => ({ text: q.question, vector: cached.get(q.questionId)! })),
-    depth,
-    // The baseline leg reads the no-override path at the same depth — prefetch it
-    // only when this batch is actually going to measure one.
-    baselineCtx && questions.some((q) => !haveBaseline.has(q.labelId)) ? depth : undefined,
-  );
+  // docs/fusion-latency-plan.md §3. Only the MISSES are prefetched: a banked
+  // question retrieves nothing, so it has nothing to prefetch.
+  const misses = questions
+    .map((q, i) => ({ q, i }))
+    .filter(({ i }) => liveMiss(i) || baseMiss(i));
+  if (misses.length > 0) {
+    await stage("score:prefetch", () =>
+      prefetchRetrieval(
+        ctx,
+        misses
+          .filter(({ q, i }) => liveMiss(i) && cached.has(q.questionId))
+          .map(({ q }) => ({ text: q.question, vector: cached.get(q.questionId)! })),
+        depth,
+        // The baseline leg reads the no-override path at the same depth — prefetch it
+        // only when this batch is actually going to measure one it has no bank for.
+        misses.some(({ i }) => baseMiss(i)) ? depth : undefined,
+      ),
+    );
+  }
 
   const results: ResultInsert[] = new Array<ResultInsert>(questions.length);
-  const baselineResults: ResultInsert[] = new Array<ResultInsert>(questions.length);
+  const baselineResults: ResultInsert[] = new Array<ResultInsert>(
+    questions.length,
+  );
   let done = 0;
   let nextIndex = 0;
   // Cost accounting for the query-vector cache (eval_question_embeddings). It's
   // a PAID path — the no-cache counterfactual re-embeds every question on every
   // re-score — so hits are avoided embeds and misses are real spend, priced the
   // same way embedCache prices its own. Tallied across the batch and metered
-  // once below (one upsert, not one per question).
+  // once below (one upsert, not one per question). A question both of whose
+  // legs were banked never asks for its vector, and is counted on neither side:
+  // nothing was spent and nothing was avoided.
   const qHits: string[] = [];
   const qMisses: string[] = [];
   const worker = async () => {
@@ -641,19 +728,37 @@ export async function scoreQuestions(
       // are inserted below with the rest.
       if (shouldStop()) break;
       const q = questions[i];
-      let vector = cached.get(q.questionId);
-      if (vector) {
-        qHits.push(q.question);
+      // The query vector, on demand and at most once: only a leg that actually
+      // retrieves needs it, so a fully banked question makes no embed and no
+      // cache read beyond the batch's own.
+      let vector: number[] | undefined;
+      const vectorFor = async (): Promise<number[]> => {
+        if (vector) return vector;
+        vector = cached.get(q.questionId);
+        if (vector) {
+          qHits.push(q.question);
+        } else {
+          vector = await embedQuery(q.question);
+          qMisses.push(q.question);
+          await putCachedQueryEmbedding(q.questionId, cfg.embeddingModel, vector);
+        }
+        return vector;
+      };
+      const banked = bankedLive[i];
+      let ids: string[];
+      let scores: number[];
+      let cutoffs: ScreenCutoffs;
+      if (banked) {
+        ({ ids, scores, cutoffs } = banked);
       } else {
-        vector = await embedQuery(q.question);
-        qMisses.push(q.question);
-        await putCachedQueryEmbedding(q.questionId, cfg.embeddingModel, vector);
+        // Pass the question text too: override configs embed it under the override
+        // models for the rank-interleave fusion; non-override configs ignore it (base vector only).
+        const live = await retrieveWithCutoffs(q.question, await vectorFor(), depth, ctx);
+        ids = live.retrieved.map((r) => r.chunk.chunk.id);
+        scores = live.retrieved.map((r) => r.score);
+        cutoffs = live.cutoffs;
+        recordRetrieval({ key: portableKey, question: q.question, depth, retrieved: live.retrieved, cutoffs });
       }
-      // Pass the question text too: override configs embed it under the override
-      // models for the rank-interleave fusion; non-override configs ignore it (base vector only).
-      const { retrieved, cutoffs } = await retrieveWithCutoffs(q.question, vector!, depth, ctx);
-      const ids = retrieved.map((r) => r.chunk.chunk.id);
-      const scores = retrieved.map((r) => r.score);
       const rank = ids.indexOf(q.sourceChunkId);
       const foundRank = rank === -1 ? null : rank + 1;
       // Hit = the ground truth landed within recall_k of the retrieved superset.
@@ -669,9 +774,20 @@ export async function scoreQuestions(
         retrievalState,
         screenCutoffs: cutoffs,
       };
-      if (baselineCtx && !haveBaseline.has(q.labelId)) {
-        const base = await retrieveWithCutoffs(q.question, vector!, depth, baselineCtx);
-        const baseIds = base.retrieved.map((r) => r.chunk.chunk.id);
+      if (baselineCtx && needsBaseline(q)) {
+        let baseIds: string[];
+        let baseScores: number[];
+        let baseCutoffs: ScreenCutoffs;
+        const bankedBaseline = bankedBase[i];
+        if (bankedBaseline) {
+          ({ ids: baseIds, scores: baseScores, cutoffs: baseCutoffs } = bankedBaseline);
+        } else {
+          const base = await retrieveWithCutoffs(q.question, await vectorFor(), depth, baselineCtx);
+          baseIds = base.retrieved.map((r) => r.chunk.chunk.id);
+          baseScores = base.retrieved.map((r) => r.score);
+          baseCutoffs = base.cutoffs;
+          recordRetrieval({ key: "baseline", question: q.question, depth, retrieved: base.retrieved, cutoffs: baseCutoffs });
+        }
         const baseIdx = baseIds.indexOf(q.sourceChunkId);
         const baseRank = baseIdx === -1 ? null : baseIdx + 1;
         baselineResults[i] = {
@@ -681,11 +797,11 @@ export async function scoreQuestions(
           hit: baseRank !== null && baseRank <= recallK,
           foundRank: baseRank,
           retrievedIds: baseIds,
-          retrievedScores: base.retrieved.map((r) => r.score),
+          retrievedScores: baseScores,
           // The honest fingerprint for an override-free retrieval — and what
           // makes these rows readable alongside the free historical ones.
           retrievalState: "baseline",
-          screenCutoffs: base.cutoffs,
+          screenCutoffs: baseCutoffs,
           isBaseline: true,
         };
       }
@@ -700,10 +816,17 @@ export async function scoreQuestions(
       });
     }
   };
-  await Promise.all(
-    Array.from({ length: Math.min(SCORE_CONCURRENCY, questions.length) }, worker),
+  await stage("score:retrieve", () =>
+    Promise.all(
+      Array.from(
+        { length: Math.min(SCORE_CONCURRENCY, questions.length) },
+        worker,
+      ),
+    ),
   );
-  await meterEmbeds(cfg.embeddingModel, qHits, qMisses);
+  await stage("score:meter", () =>
+    meterEmbeds(cfg.embeddingModel, qHits, qMisses),
+  );
 
   // A cancelled run leaves holes in the pre-sized array (the slots no worker
   // claimed), so insert what actually scored and report that count — not
@@ -711,10 +834,12 @@ export async function scoreQuestions(
   const landed = results.filter((r): r is ResultInsert => r !== undefined);
   // One insert for both legs: the baseline rows are the same shape and a
   // cancelled run leaves the same holes in their array.
-  await insertResults([
-    ...landed,
-    ...baselineResults.filter((r): r is ResultInsert => r !== undefined),
-  ]);
+  await stage("score:insert", () =>
+    insertResults([
+      ...landed,
+      ...baselineResults.filter((r): r is ResultInsert => r !== undefined),
+    ]),
+  );
   // The count is LIVE results only — baseline rows are shadow measurements, and
   // reporting them would claim scoring work the user didn't ask for.
   return landed.length;
@@ -751,7 +876,9 @@ export async function scoreUnscoredQuestions(
 ): Promise<number> {
   const pending = await questionsNeedingScoring();
   if (pending.length === 0) return 0;
-  console.log(`[rag:eval] scoring ${pending.length} question(s) @ k=${activeConfig().topK}`);
+  console.log(
+    `[rag:eval] scoring ${pending.length} question(s) @ k=${activeConfig().topK}`,
+  );
   return scoreQuestions(pending, emit, shouldStop);
 }
 
@@ -1055,7 +1182,11 @@ export async function settleAffectedRescore(
 ): Promise<{ recall: number | null; mrr: number | null; ndcg: number | null }> {
   // Proven-clean rows carry results a real re-retrieval would reproduce —
   // only their fingerprint stamp changes.
-  await restampLatestResults(screen.cleanLabelIds, startState, screen.finalState);
+  await restampLatestResults(
+    screen.cleanLabelIds,
+    startState,
+    screen.finalState,
+  );
   // Every label is now fresh under finalState (re-scored, re-stamped, or
   // already fresh), so the change log can drop like after a full re-score.
   await clearRetrievalChanges();
@@ -1099,7 +1230,9 @@ export async function settleAffectedRescore(
 // real re-retrieval would have moved. The stale stamps win over the change log
 // whenever they disagree, so the cheap path is not available here — and the cost
 // of re-scoring is exactly the work the abandoned run did not finish.
-export async function staleQuestions(state: string): Promise<QuestionToScore[]> {
+export async function staleQuestions(
+  state: string,
+): Promise<QuestionToScore[]> {
   const questions = await allLabeledQuestions();
   const latest = await latestResultsForScreening(state);
   const stale = questions.filter((q) => {
@@ -1195,7 +1328,10 @@ async function rankExperiment(
   );
   // Cached: repeat experiments at the same size (and any later autotune rung or
   // promoted override over these pieces) reuse the vectors for free.
-  const subVectors = await embedDocsCached(subTexts, activeConfig().embeddingModel);
+  const subVectors = await embedDocsCached(
+    subTexts,
+    activeConfig().embeddingModel,
+  );
 
   const k = activeConfig().topK;
   const ranked = await rankWithSubstitutedChunk({
@@ -1233,7 +1369,14 @@ async function rankExperiment(
   const bestSubRank =
     subChunks.length > 0 ? Math.min(...subChunks.map((s) => s.rank)) : null;
 
-  return { subChunkCount: subTexts.length, k, hit, bestSubRank, topK, subChunks };
+  return {
+    subChunkCount: subTexts.length,
+    k,
+    hit,
+    bestSubRank,
+    topK,
+    subChunks,
+  };
 }
 
 // Uniform sub-divide: split the labeled chunk at a trial (size, overlap) and
@@ -1271,7 +1414,12 @@ export type ChunkWindow = {
   text: string; // stitched window text
   tokenCount: number;
   offsets: number[]; // length tokenCount+1; char index of each token boundary
-  chunks: { position: number; tokenStart: number; tokenEnd: number; frozen: boolean }[];
+  chunks: {
+    position: number;
+    tokenStart: number;
+    tokenEnd: number;
+    frozen: boolean;
+  }[];
   exclusive: { tokenStart: number; tokenEnd: number }; // test chunk's exclusive zone
   testDefault: { tokenStart: number; tokenEnd: number }; // the test chunk's own span
 };
@@ -1358,7 +1506,12 @@ export type ModelTrialContext = {
   models: TrialModelOption[];
   baselineModel: string;
   k: number;
-  chunk: { chunkId: string; fileName: string; position: number | null; text: string };
+  chunk: {
+    chunkId: string;
+    fileName: string;
+    position: number | null;
+    text: string;
+  };
   questions: {
     questionId: string;
     question: string;
@@ -1423,7 +1576,9 @@ export async function getModelTrialContext(
   const questions = await getModelTrialQuestions(chunkId);
   // Auto pool = the distractors the chunk's questions already surfaced (the chunk
   // itself is always added at run time, so drop it here to avoid a duplicate).
-  const autoIds = uniq(questions.flatMap((q) => q.retrievedIds)).filter((id) => id !== chunkId);
+  const autoIds = uniq(questions.flatMap((q) => q.retrievedIds)).filter(
+    (id) => id !== chunkId,
+  );
 
   const [autoPool, restCorpus, savedTrials, overrides] = await Promise.all([
     getChunksByIds(autoIds),
@@ -1433,7 +1588,10 @@ export async function getModelTrialContext(
   ]);
 
   return {
-    models: listTrialModelOptions(await availableProviders(), activeConfig().embeddingModel),
+    models: listTrialModelOptions(
+      await availableProviders(),
+      activeConfig().embeddingModel,
+    ),
     baselineModel: activeConfig().embeddingModel,
     k: activeConfig().topK,
     chunk: {
@@ -1451,7 +1609,8 @@ export async function getModelTrialContext(
     autoPool,
     restCorpus,
     savedTrials,
-    currentOverride: overrides.find((o) => o.sourceChunkId === chunkId)?.model ?? null,
+    currentOverride:
+      overrides.find((o) => o.sourceChunkId === chunkId)?.model ?? null,
   };
 }
 
@@ -1505,7 +1664,10 @@ export async function setChunkSizeOverride(
 
   // Cached (see setChunkModelOverride) — the search rung that found this size
   // already embedded the identical pieces.
-  const vectors = await embedDocsCached(subTexts, activeConfig().embeddingModel);
+  const vectors = await embedDocsCached(
+    subTexts,
+    activeConfig().embeddingModel,
+  );
   const pieces = vectors.map((v, i) => ({
     text: subTexts[i],
     dimension: v.length,
@@ -1579,7 +1741,10 @@ export async function runModelTrial(
   variation: TrialVariation,
   poolChunkIds: string[],
   save: boolean,
-): Promise<{ result: ModelTrialResult; savedTrial: SavedModelTrial | null } | null> {
+): Promise<{
+  result: ModelTrialResult;
+  savedTrial: SavedModelTrial | null;
+} | null> {
   const baselineModel = activeConfig().embeddingModel;
   const model = variation.kind === "size" ? baselineModel : variation.model;
   if (variation.kind !== "size") {
@@ -1594,7 +1759,9 @@ export async function runModelTrial(
       throw new Error(`Unknown model "${model}".`);
     }
     if (!(await availableProviders()).has(spec.provider)) {
-      throw new Error(`Cannot try "${model}" — ${unavailableReason(spec.provider)}.`);
+      throw new Error(
+        `Cannot try "${model}" — ${unavailableReason(spec.provider)}.`,
+      );
     }
   }
 
@@ -1614,8 +1781,15 @@ export async function runModelTrial(
     } else if (variation.size !== undefined) {
       const size = variation.size;
       const overlap = variation.overlap ?? 0;
-      if (!Number.isInteger(size) || size < 1 || overlap < 0 || overlap >= size) {
-        throw new Error("Invalid size/overlap (need size ≥ 1 and 0 ≤ overlap < size).");
+      if (
+        !Number.isInteger(size) ||
+        size < 1 ||
+        overlap < 0 ||
+        overlap >= size
+      ) {
+        throw new Error(
+          "Invalid size/overlap (need size ≥ 1 and 0 ≤ overlap < size).",
+        );
       }
       pieceTexts = await splitText(chunk.text, size, overlap);
       if (pieceTexts.length === 0) {
@@ -1624,7 +1798,9 @@ export async function runModelTrial(
       chunkSize = size;
       chunkOverlap = overlap;
     } else {
-      throw new Error("A size variation needs `size` (+ optional overlap) or `sections`.");
+      throw new Error(
+        "A size variation needs `size` (+ optional overlap) or `sections`.",
+      );
     }
   }
   const pieceCount = variation.kind === "model" ? null : pieceTexts.length;
@@ -1637,9 +1813,14 @@ export async function runModelTrial(
 
   const [pieceVectors, otherVectors] = await Promise.all([
     embedDocsCached(pieceTexts, model),
-    embedDocsCached(otherChunks.map((c) => c.text), model),
+    embedDocsCached(
+      otherChunks.map((c) => c.text),
+      model,
+    ),
   ]);
-  const otherVecById = new Map(otherChunks.map((c, i) => [c.chunkId, otherVectors[i]]));
+  const otherVecById = new Map(
+    otherChunks.map((c, i) => [c.chunkId, otherVectors[i]]),
+  );
 
   // Fused dry-run state: the config's overrides with THIS chunk's entry replaced
   // by the trial variation — what promotion would actually persist. Pieces for
@@ -1661,7 +1842,11 @@ export async function runModelTrial(
       // cosined here and folded in by max (DECISION 3).
       p = overrideSims(m, qv, chunkId).then((stored) =>
         m === model
-          ? withCandidateSims(stored, chunkId, pieceVectors.map((v) => cosine(qv, v)))
+          ? withCandidateSims(
+              stored,
+              chunkId,
+              pieceVectors.map((v) => cosine(qv, v)),
+            )
           : stored,
       );
       simCache.set(key, p);
@@ -1728,7 +1913,9 @@ export async function runModelTrial(
   }
 
   const hitCount = questionsOut.filter((o) => o.newHit).length;
-  const storedHitCount = questionsOut.filter((o) => o.storedHit === true).length;
+  const storedHitCount = questionsOut.filter(
+    (o) => o.storedHit === true,
+  ).length;
   const result: ModelTrialResult = {
     model,
     baselineModel,

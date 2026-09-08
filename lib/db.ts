@@ -29,6 +29,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import postgres from "postgres";
 
+import { AUTOTUNE_TIMING, countStatement } from "./autotuneTiming";
 import { sslFor } from "./dbSsl";
 
 // Seconds a free connection may sit in the pool before it is closed. Short
@@ -75,6 +76,9 @@ const appPool =
   postgres(appUrl, {
     prepare: false,
     ssl: sslFor(appUrl),
+    // Phase-1 instrument (docs/autotune-press-latency-plan.md §2): a statement
+    // count per stage. Off the flag this is postgres.js's own default.
+    debug: AUTOTUNE_TIMING ? (_c, query) => countStatement(query) : false,
     // SIZED FOR SERVERLESS, where this number is per INSTANCE and Vercel runs
     // several at once. The shared ceiling is the database's 60 connections (~44
     // free), and because a scope pins one connection for its whole life, that
@@ -136,7 +140,16 @@ if (process.env.NODE_ENV !== "production") {
   globalThis.__ragSqlApp = appPool;
 }
 
-type UserTransaction = { userId: string; tx: Sql };
+// One scope = one transaction = one memo. `memo` holds reads that cannot change
+// underneath the scope (or whose writers call scopeForget), `atEnd` holds work
+// deferred to just before commit — see scopeMemo / scopeAtEnd below. Both are
+// shared, by reference, with the savepoint scopes isolated() opens.
+type UserTransaction = {
+  userId: string;
+  tx: Sql;
+  memo: Map<string, Promise<unknown>>;
+  atEnd: Map<string, () => Promise<void>>;
+};
 
 const txStore = new AsyncLocalStorage<UserTransaction>();
 
@@ -147,7 +160,10 @@ const txStore = new AsyncLocalStorage<UserTransaction>();
 // than opening a second one on a second connection. That matters because
 // withPageUser has 11 call sites and a page's layout, page and leaves each enter
 // the scope independently.
-export function withUserTransaction<T>(userId: string, fn: () => Promise<T>): Promise<T> {
+export function withUserTransaction<T>(
+  userId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
   const open = txStore.getStore();
   if (open) {
     // Two different users inside one async chain means a scope leaked across a
@@ -174,9 +190,103 @@ export function withUserTransaction<T>(userId: string, fn: () => Promise<T>): Pr
       // `command` off a postgres Result, and awaiting any promises the caller meant to
       // keep. A scope returns arbitrary application data, so it must not be an array
       // when postgres.js looks at it.
-      return { value: await txStore.run({ userId, tx: tx as unknown as Sql }, fn) };
+      const scope: UserTransaction = {
+        userId,
+        tx: tx as unknown as Sql,
+        memo: new Map(),
+        atEnd: new Map(),
+      };
+      return {
+        value: await txStore.run(scope, async () => {
+          const value = await fn();
+          await runAtEnd(scope);
+          return value;
+        }),
+      };
     })
     .then((boxed) => (boxed as { value: T }).value);
+}
+
+// The deferred work, inside the transaction so it commits with what it
+// describes. A hook may register another; the loop drains until none is left.
+async function runAtEnd(scope: UserTransaction): Promise<void> {
+  while (scope.atEnd.size > 0) {
+    const [key, fn] = scope.atEnd.entries().next().value as [
+      string,
+      () => Promise<void>,
+    ];
+    scope.atEnd.delete(key);
+    await fn();
+  }
+}
+
+// PER-SCOPE MEMO (docs/autotune-press-latency-plan.md §9, cut 2). A press is
+// one pinned connection issuing ~1,700 serial statements at ~65 ms each, and
+// the census found a third of them re-reading rows that cannot have changed
+// since the last read in the same transaction: the criteria row 130 times, the
+// caller's guest flag 66 times, "does this config have chunks" 60 times, the
+// override fingerprint 95 times. Reads like that ask once per scope here.
+//
+// The contract: a memoised read is only ever wrong if this scope WROTE the row
+// after reading it, so every writer of a memoised row calls scopeForget with the
+// key's prefix. A savepoint that rolls back clears the whole memo (isolated()
+// below), since a read made inside it may have seen the rolled-back write.
+// Outside a scope these are pass-throughs.
+export function inScope(): boolean {
+  return txStore.getStore() !== undefined;
+}
+
+export function scopeMemo<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const open = txStore.getStore();
+  if (!open) return fn();
+  const hit = open.memo.get(key);
+  if (hit) return hit as Promise<T>;
+  const p = fn();
+  open.memo.set(key, p);
+  p.catch(() => open.memo.delete(key));
+  return p;
+}
+
+// For a caller that memoises MANY keys from one read (a batch of cached query
+// vectors): peek at what the scope already holds, read the rest in one
+// statement, and set each hit. Both are no-ops outside a scope.
+export function scopePeek<T>(key: string): Promise<T> | undefined {
+  return txStore.getStore()?.memo.get(key) as Promise<T> | undefined;
+}
+
+export function scopeSet<T>(key: string, value: T): void {
+  txStore.getStore()?.memo.set(key, Promise.resolve(value));
+}
+
+export function scopeForget(prefix: string): void {
+  const open = txStore.getStore();
+  if (!open) return;
+  for (const k of [...open.memo.keys()]) {
+    if (k.startsWith(prefix)) open.memo.delete(k);
+  }
+}
+
+// Defer `fn` to just before this scope commits — once per key, so a caller that
+// buffers can register its flush on every call and get one. Outside a scope
+// there is nothing to wait for, so it runs now.
+export function scopeAtEnd(
+  key: string,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const open = txStore.getStore();
+  if (!open) return fn();
+  if (!open.atEnd.has(key)) open.atEnd.set(key, fn);
+  return Promise.resolve();
+}
+
+// Run a deferred hook now rather than at the end — for a reader that must see
+// what the scope has buffered under `key`. No-op when nothing is registered.
+export async function scopeRunNow(key: string): Promise<void> {
+  const open = txStore.getStore();
+  const fn = open?.atEnd.get(key);
+  if (!open || !fn) return;
+  open.atEnd.delete(key);
+  await fn();
 }
 
 // Run `fn` with NO transaction in scope, so a withUser() inside it opens a fresh
@@ -219,10 +329,55 @@ export function isolated<T>(fn: () => Promise<T>): Promise<T> {
     .savepoint(async (sp) => ({
       // Re-enter the scope with the SAVEPOINT's handle, not the outer one —
       // otherwise `fn`'s queries go to the enclosing transaction and the
-      // savepoint isolates nothing.
-      value: await txStore.run({ userId: open.userId, tx: sp }, fn),
+      // savepoint isolates nothing. The memo and the end hooks are the outer
+      // scope's own, shared by reference.
+      value: await txStore.run({ ...open, tx: sp }, fn),
     }))
-    .then((boxed) => (boxed as { value: T }).value);
+    .then(
+      (boxed) => (boxed as { value: T }).value,
+      (err: unknown) => {
+        // Rolled back: anything read inside may reflect a write that no longer
+        // exists, and a `set local` made inside is undone. Forget it all.
+        open.memo.clear();
+        throw err;
+      },
+    );
+}
+
+// Run an HNSW read with `hnsw.ef_search` raised to `ef` — ONE `set local` per
+// transaction, not one savepoint + one `set local` per read.
+//
+// What the five ANN reads did before (docs/autotune-press-latency-plan.md §9,
+// cut 1): `sql.begin(tx => { set local …; select … })`. Inside a scope `begin`
+// is a savepoint (see the Proxy below), postgres.js never releases a savepoint
+// on success, and `set local` is TRANSACTION-scoped — so after the first read
+// the GUC was already raised for the rest of the scope, and every later read
+// paid two round trips (savepoint, set local) to set what was set. A demo ⚙
+// press made ~200 such reads on one pinned connection at ~65 ms each.
+//
+// Remembered in the scope's memo, so it is shared with the savepoint scopes
+// isolated() opens (a prefetch runs inside one) and forgotten when a savepoint
+// rolls back — which is exactly when Postgres undoes a `set local` made inside
+// it. The first draft keyed this on the connection HANDLE, and a savepoint's
+// handle is a new object, so every prefetch set the GUC again: measured, zero
+// statements saved.
+//
+// Same answers by construction: the query runs under the same GUC value it ran
+// under before; only the statements that re-established it are gone.
+const EF_KEY = "ef_search";
+export async function withEfSearch<T>(
+  ef: number,
+  fn: (tx: Sql) => Promise<T>,
+): Promise<T> {
+  if (!Number.isSafeInteger(ef) || ef <= 0) {
+    throw new Error(`withEfSearch: invalid ef_search ${ef}.`);
+  }
+  const open = scopedStore();
+  if ((await open.memo.get(EF_KEY)) !== ef) {
+    await open.tx.unsafe(`set local hnsw.ef_search = ${ef}`);
+    open.memo.set(EF_KEY, Promise.resolve(ef));
+  }
+  return fn(open.tx);
 }
 
 // For building a static SQL FRAGMENT at module scope — a shared column list, a
@@ -258,7 +413,7 @@ export function toJsonb(value: unknown) {
   return appPool.json(value as Parameters<typeof appPool.json>[0]);
 }
 
-function scopedTx(): Sql {
+function scopedStore(): UserTransaction {
   const open = txStore.getStore();
   if (!open) {
     throw new Error(
@@ -267,8 +422,9 @@ function scopedTx(): Sql {
         "genuinely cross-tenant, use privilegedSql and say why.",
     );
   }
-  return open.tx;
+  return open;
 }
+const scopedTx = (): Sql => scopedStore().tx;
 
 // Value helpers that build a fragment rather than talk to a connection, so they
 // are safe to reach for outside a scope.

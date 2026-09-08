@@ -10,7 +10,14 @@
 // ship ahead of the migration and never breaks a hot path. Recording errors are
 // swallowed — telemetry must not fail an answer.
 import { activeUserId } from "@/lib/auth/userScope";
-import { isolated, sql } from "@/lib/db";
+import {
+  inScope,
+  isolated,
+  scopeAtEnd,
+  scopeMemo,
+  scopeRunNow,
+  sql,
+} from "@/lib/db";
 import { activeConfigOrNull } from "@/lib/rag/activeConfig";
 import {
   LEVERS,
@@ -37,6 +44,69 @@ function scopeConfigId(): string | null {
 // Add to a lever's signed running total. `saved` may be negative (cascade
 // escalation). configId defaults to the active scope; batch apply passes the
 // job's config explicitly since it can run outside a request scope.
+// BUFFERED PER SCOPE (docs/autotune-press-latency-plan.md §9, cut 2). Inside a
+// request scope the increments below are summed in the scope's memo and written
+// as ONE upsert per (config, lever) just before the transaction commits. The
+// totals are sums, so the row ends up identical; what changes is that a demo ⚙
+// press no longer issues ~190 savepoint + upsert pairs — 22% of its statements
+// — one per cache-hit batch on a pinned connection. detached() was meant to
+// take these off the request, but a streaming route has no after-response
+// hook, so there they ran inline.
+//
+// A reader in the same scope that must see the buffered rows calls
+// flushBufferedTotals() first (getCostsReport does). Outside a scope the write
+// is immediate, as before.
+type Tally = {
+  configId: string;
+  key: string;
+  events: number;
+  tokens: number;
+  usd: number;
+};
+const BUFFER = "savings:buffer";
+const FLUSH = "savings:flush";
+
+async function buffered(): Promise<Map<string, Tally>> {
+  return scopeMemo(BUFFER, async () => new Map<string, Tally>());
+}
+
+async function tally(
+  kind: "saving" | "spend",
+  configId: string,
+  key: string,
+  events: number,
+  tokens: number,
+  usd: number,
+): Promise<void> {
+  const buf = await buffered();
+  const id = `${kind}|${configId}|${key}`;
+  const t = buf.get(id) ?? { configId, key, events: 0, tokens: 0, usd: 0 };
+  t.events += events;
+  t.tokens += tokens;
+  t.usd += usd;
+  buf.set(id, t);
+  await scopeAtEnd(FLUSH, async () => {
+    for (const [id, t] of [...buf.entries()]) {
+      buf.delete(id);
+      if (id.startsWith("saving|")) {
+        await writeSaving(
+          t.configId,
+          t.key as LeverId,
+          t.events,
+          t.tokens,
+          t.usd,
+        );
+      } else {
+        await writeSpend(t.configId, t.key as Surface, t.usd, t.tokens);
+      }
+    }
+  });
+}
+
+export async function flushBufferedTotals(): Promise<void> {
+  await scopeRunNow(FLUSH);
+}
+
 export async function recordSaving(
   lever: LeverId,
   saved: number,
@@ -46,6 +116,20 @@ export async function recordSaving(
   const configId = opts.configId ?? scopeConfigId();
   if (!configId) return;
   const events = opts.events ?? 1;
+  if (inScope()) {
+    await tally("saving", configId, lever, events, tokensSaved, saved);
+    return;
+  }
+  await writeSaving(configId, lever, events, tokensSaved, saved);
+}
+
+async function writeSaving(
+  configId: string,
+  lever: LeverId,
+  events: number,
+  tokensSaved: number,
+  saved: number,
+): Promise<void> {
   try {
     await isolated(
       () => sql`
@@ -60,7 +144,9 @@ export async function recordSaving(
     );
   } catch (err) {
     if (isMissingTable(err)) return;
-    console.warn(`[rag:savings] record ${lever} failed: ${(err as Error).message}`);
+    console.warn(
+      `[rag:savings] record ${lever} failed: ${(err as Error).message}`,
+    );
   }
 }
 
@@ -73,6 +159,19 @@ export async function recordSpend(
 ): Promise<void> {
   const configId = opts.configId ?? scopeConfigId();
   if (!configId) return;
+  if (inScope()) {
+    await tally("spend", configId, surface, 1, tokens, spent);
+    return;
+  }
+  await writeSpend(configId, surface, spent, tokens);
+}
+
+async function writeSpend(
+  configId: string,
+  surface: Surface,
+  spent: number,
+  tokens: number,
+): Promise<void> {
   try {
     await isolated(
       () => sql`
@@ -86,7 +185,9 @@ export async function recordSpend(
     );
   } catch (err) {
     if (isMissingTable(err)) return;
-    console.warn(`[rag:savings] spend ${surface} failed: ${(err as Error).message}`);
+    console.warn(
+      `[rag:savings] spend ${surface} failed: ${(err as Error).message}`,
+    );
   }
 }
 
@@ -132,7 +233,10 @@ const EMPTY: CostsReport = {
 // `configId` omitted/null keeps the account-wide sum across every config.
 // Unknown lever/surface rows (hand-edited, or a lever retired from the
 // registry) are skipped rather than shown label-less. Missing tables → EMPTY.
-export async function getCostsReport(configId?: string | null): Promise<CostsReport> {
+export async function getCostsReport(
+  configId?: string | null,
+): Promise<CostsReport> {
+  await flushBufferedTotals();
   // One fragment reused by both queries. Both tables carry a NOT NULL config_id,
   // so restricting to the caller's configs is exact — and it is what keeps the
   // "all configs" view (configId null) from summing other accounts' spend into

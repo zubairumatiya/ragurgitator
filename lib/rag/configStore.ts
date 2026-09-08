@@ -16,7 +16,7 @@
 // therefore behaves exactly like a deleted one: reads return null, mutations match
 // 0 rows, and the routes turn both into the same 404.
 import { activeUserId } from "@/lib/auth/userScope";
-import { sql } from "@/lib/db";
+import { scopeForget, sql } from "@/lib/db";
 import { config } from "@/lib/config";
 import { isUuid } from "@/lib/rag/activeConfig";
 import {
@@ -37,9 +37,9 @@ export type ConfigSummary = {
   chunkOverlap: number;
   topK: number;
   llmModel: string;
-  corpusId: string | null;   // null = detached (corpus deleted, or created without one)
+  corpusId: string | null; // null = detached (corpus deleted, or created without one)
   corpusName: string | null;
-  corpusSync: boolean;       // auto-sync membership with the corpus (0017)
+  corpusSync: boolean; // auto-sync membership with the corpus (0017)
   isOpen: boolean;
   tabOrder: number;
   createdAt: number;
@@ -67,7 +67,11 @@ type ConfigJoinRow = {
 // Exported because `label` is DERIVED, not a column: anything joining configs
 // for display (the /cache listing) has to apply the same `name ?? default`
 // fallback, and a second copy of the rule would drift.
-export function defaultLabel(baseModel: string, chunkSize: number, chunkOverlap: number): string {
+export function defaultLabel(
+  baseModel: string,
+  chunkSize: number,
+  chunkOverlap: number,
+): string {
   return `${baseModel} · ${chunkSize}/${chunkOverlap}`;
 }
 
@@ -75,7 +79,9 @@ function toSummary(row: ConfigJoinRow): ConfigSummary {
   return {
     id: row.id,
     name: row.name,
-    label: row.name ?? defaultLabel(row.base_model, row.chunk_size, row.chunk_overlap),
+    label:
+      row.name ??
+      defaultLabel(row.base_model, row.chunk_size, row.chunk_overlap),
     baseModel: row.base_model,
     chunkSize: row.chunk_size,
     chunkOverlap: row.chunk_overlap,
@@ -172,7 +178,9 @@ export type NewConfigInput = {
 // Insert a config row, opened at the end of the tab bar. Low-level: the caller
 // supplies the (optional) corpus and settings. (createEmptyConfig and
 // duplicateConfig build on this for the two real entry points.)
-export async function createConfig(input: NewConfigInput): Promise<ConfigSummary> {
+export async function createConfig(
+  input: NewConfigInput,
+): Promise<ConfigSummary> {
   const tabOrder = await nextTabOrder();
   const rows = await sql<{ id: string }[]>`
     insert into configs
@@ -193,7 +201,9 @@ export async function createConfig(input: NewConfigInput): Promise<ConfigSummary
 // Starts with no documents — the user ingests into it. Since 0017 no throwaway
 // corpus is auto-created (those used to pile up as empty orphans); the user
 // attaches/saves a corpus from the create dialog when they want one.
-export async function createEmptyConfig(name?: string | null): Promise<ConfigSummary> {
+export async function createEmptyConfig(
+  name?: string | null,
+): Promise<ConfigSummary> {
   return createConfig({
     corpusId: null,
     name: name?.trim() || null,
@@ -350,7 +360,10 @@ export async function updateConfigSettings(
   return getConfig(id);
 }
 
-export async function renameConfig(id: string, name: string): Promise<ConfigSummary | null> {
+export async function renameConfig(
+  id: string,
+  name: string,
+): Promise<ConfigSummary | null> {
   const trimmed = name.trim();
   const rows = await sql`
     update configs
@@ -386,7 +399,10 @@ export async function reopenConfig(id: string): Promise<boolean> {
 // Move a tab to a new left-to-right position. The UI sends the absolute order it
 // wants for one config; neighbors keep their values (ties break by created_at in
 // listConfigs), which is enough for the simple "send to position" MVP.
-export async function setTabOrder(id: string, tabOrder: number): Promise<boolean> {
+export async function setTabOrder(
+  id: string,
+  tabOrder: number,
+): Promise<boolean> {
   const rows = await sql`
     update configs set tab_order = ${tabOrder}, updated_at = now()
     where id = ${id} and user_id = ${activeUserId()}
@@ -413,7 +429,9 @@ export async function deleteConfig(id: string): Promise<boolean> {
 // (corpus_id, document_id), so sharing the corpus means the copy inherits
 // membership automatically — nothing to copy. Eval/cluster/ranking data is NOT
 // copied: a duplicate starts with fresh eval history. Done in one transaction.
-export async function duplicateConfig(id: string): Promise<ConfigSummary | null> {
+export async function duplicateConfig(
+  id: string,
+): Promise<ConfigSummary | null> {
   const source = await getConfig(id);
   if (!source) return null;
 
@@ -447,6 +465,7 @@ export async function duplicateConfig(id: string): Promise<ConfigSummary | null>
       from document_embeddings
       where config_id = ${source.id}
     `;
+    scopeForget("chunksTable:");
 
     // Clone the chunk rows (incl. vectors), pointing each at the matching new run.
     await tx`
