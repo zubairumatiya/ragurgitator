@@ -386,7 +386,20 @@ export function isolated<T>(fn: () => Promise<T>): Promise<T> {
 //
 // Same answers by construction: the query runs under the same GUC value it ran
 // under before; only the statements that re-established it are gone.
+//
+// ITERATIVE SCAN, SET IN THE SAME BREATH (2026-09-09). The chunk tables are
+// shared by every config and every demo guest, and a guest is a clone of the
+// same vectors — so a plain HNSW scan fills its ef_search candidates with OTHER
+// configs' copies of the nearest chunks, and the `config_id` filter keeps
+// whichever copies the beam happened to touch. Measured on the retrieval-bank
+// gate (docs/demo-retrieval-bank-plan.md, Ph4): two of four guests' top-5 lacked
+// the chunk whose exact cosine was rank 1 by 0.017, at 4,476 rows / 21 configs.
+// `hnsw.iterative_scan` (pgvector ≥ 0.8) keeps walking until `limit` rows pass
+// the filter, bounded by hnsw.max_scan_tuples (20,000). strict_order, not
+// relaxed_order: the reads' `order by … limit` is what the callers consume, and
+// relaxed may hand rows back slightly out of distance order.
 const EF_KEY = "ef_search";
+export const HNSW_ITERATIVE_SCAN = "strict_order";
 export async function withEfSearch<T>(
   ef: number,
   fn: (tx: Sql) => Promise<T>,
@@ -396,7 +409,9 @@ export async function withEfSearch<T>(
   }
   const open = scopedStore();
   if ((await open.memo.get(EF_KEY)) !== ef) {
-    await open.tx.unsafe(`set local hnsw.ef_search = ${ef}`);
+    await open.tx.unsafe(
+      `set local hnsw.ef_search = ${ef}; set local hnsw.iterative_scan = ${HNSW_ITERATIVE_SCAN}`,
+    );
     open.memo.set(EF_KEY, Promise.resolve(ef));
   }
   return fn(open.tx);

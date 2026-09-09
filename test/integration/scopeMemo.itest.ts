@@ -203,6 +203,14 @@ describe("withEfSearch", () => {
     assert.deepEqual(v, ["100", "100", "120"]);
   });
 
+  it("turns on iterative scan alongside it, so a config filter cannot starve the top-k", async () => {
+    const v = await withUser(alice, async () => {
+      const r = await withEfSearch(100, (tx) => tx<{ v: string }[]>`select current_setting('hnsw.iterative_scan') as v`);
+      return r[0].v;
+    });
+    assert.equal(v, "strict_order");
+  });
+
   it("re-sets after a rolled-back savepoint undid it", async () => {
     const v = await withUser(alice, async () => {
       await assert.rejects(
