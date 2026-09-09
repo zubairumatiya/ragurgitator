@@ -2,7 +2,29 @@
 //
 // We connect through Supabase's transaction pooler, so prepared statements aren't
 // supported: `prepare: false` is required or the client throws "prepared statement
-// does not exist" once the pooler recycles its backend session.
+// does not exist" once the pooler recycles its backend session. (Re-tested
+// 2026-09-08 for docs/demo-retrieval-bank-plan.md phase 3: 66 of 80 transactions
+// across five connections failed that way. It is not a thing that got fixed.)
+//
+// `prepare: false` had a cost nobody had measured: postgres.js sent every
+// PARAMETERIZED statement as Parse+Describe, waited for the server's parameter
+// types, and only then sent Bind+Execute — two round trips, ~130 ms against this
+// database, where a bare `select 1` is one, ~65 ms. patches/postgres@3.4.9.patch
+// skips the describe when every parameter is a string, number, null, typed value
+// (Date, bytea, sql.json, sql.typed) or an array of those — the description only
+// ever chose a serializer, and those need none. A plain object bound without
+// sql.json still describes first, so nothing that worked stops working. One
+// visible change: a pre-stringified JSON string bound to `::jsonb` is no longer
+// double-encoded (test/integration/jsonb.itest.ts pins it). Halved the demo's
+// autotune press without touching a query.
+//
+// The same patch sets postgres.js's `max_pipeline` default to 0 (the option is
+// real but undeclared in its types, so it is set there rather than here). Ten
+// or more statements pipelined onto one connection
+// hang the pooler — no error, no answer, ever — and only statements that skip
+// the describe round trip pipeline, so before the patch the app's parameterized
+// statements never did and the hang was reachable only by a no-parameter batch
+// (scripts/egress-meter.ts's Promise.all found it within a minute of the patch).
 //
 //   sql             the store layer's handle. Connects as `rag_app`, which has
 //                   NOBYPASSRLS, so 0051's policies actually bite. Every query
@@ -397,18 +419,23 @@ export const fragment: Sql = appPool;
 
 // Bind `value` as a jsonb parameter.
 //
-// USE THIS, NEVER `${JSON.stringify(value)}::jsonb`. That pattern DOUBLE-ENCODES:
-// the `::jsonb` cast makes Postgres resolve the parameter's type to jsonb,
-// postgres.js then applies its own JSON.stringify to the string you already
-// stringified, and the column ends up holding a jsonb STRING SCALAR whose contents
-// are the JSON text.
+// USE THIS, NOT `${JSON.stringify(value)}::jsonb`. That pattern used to
+// DOUBLE-ENCODE: the `::jsonb` cast made Postgres resolve the parameter's type
+// to jsonb, postgres.js then applied its own JSON.stringify to the string you
+// had already stringified, and the column ended up holding a jsonb STRING SCALAR
+// whose contents were the JSON text.
 //
-// It fails silently in both directions. The insert succeeds. The read back returns
-// a JS string rather than the object the type annotation promises, so every field
-// access is `undefined` — surfacing later and elsewhere as an UNDEFINED_VALUE on a
-// downstream insert, or a `.map is not a function`, and never as an error at the
-// site that wrote the bad row. Two tables were already storing string scalars this
-// way before anyone noticed; see migration 0052.
+// It failed silently in both directions. The insert succeeded. The read back
+// returned a JS string rather than the object the type annotation promised, so
+// every field access was `undefined` — surfacing later and elsewhere as an
+// UNDEFINED_VALUE on a downstream insert, or a `.map is not a function`, and
+// never as an error at the site that wrote the bad row. Two tables were already
+// storing string scalars this way before anyone noticed; see migration 0052.
+//
+// Since patches/postgres@3.4.9.patch (see the header) the string goes out
+// untyped and Postgres parses it, so the pattern now happens to work. It stays
+// banned: it works because of a patch, and a bare object bound the same way
+// still takes the describe-first path the patch exists to avoid.
 export function toJsonb(value: unknown) {
   return appPool.json(value as Parameters<typeof appPool.json>[0]);
 }

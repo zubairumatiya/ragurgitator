@@ -132,11 +132,10 @@ import {
 } from "@/lib/rag/eval";
 import type { EvalCriteria } from "@/lib/rag/evalSettingsStore";
 import {
-  deleteModelTrialsForChunk,
-  getModelTrialChunk,
   getQuestionToScore,
   getSummary,
-  insertModelTrial,
+  replaceModelTrials,
+  type ModelTrialInsert,
   type EvalSummary,
   type QuestionDetail,
   type QuestionToScore,
@@ -146,6 +145,7 @@ import {
   overrideFingerprints,
   retrievalStateFingerprint,
   setChunkOverridePieces,
+  type ChunkOverrideState,
 } from "@/lib/rag/overrideStore";
 
 // Same size and the same reason as the re-score step's: big enough that
@@ -253,6 +253,18 @@ export type AutotuneCursor = {
   // different sets and a settle that would not shrink says nothing about the
   // tail's progress later.
   lastStale: number | null;
+  // The headline numbers finalize reports, tallied by the outcomes phase off
+  // the summary it reads anyway. Null until then; absent on a cursor persisted
+  // before the field existed. finalize reads the summary itself in both cases.
+  closing: ClosingNumbers | null;
+};
+
+type ClosingNumbers = {
+  resolved: number;
+  improved: number;
+  recall: number | null;
+  mrr: number | null;
+  ndcg: number | null;
 };
 
 // A cursor past `settle`, i.e. one whose plan is frozen. The search phase is
@@ -386,22 +398,39 @@ export const autotuneStep: JobStep<
   // Only the headline numbers — every durable effect already happened in a phase,
   // so this is safe to skip and safe to repeat.
   async finalize(_scope, cursor) {
-    const summary = await stage("finalize:summary", () => getSummary());
-    const { resolved, improved } = tally(cursor.baselines, summary);
+    // The closing numbers were tallied by the outcomes phase off the summary
+    // it already reads, and ride the cursor (phase 3 of
+    // docs/demo-retrieval-bank-plan.md): the snapshots phase between the two
+    // writes trials, not results, so a third summary read here (~15
+    // statements) could only repeat them. A cursor persisted before the field
+    // existed has none, and reads the summary as this always did.
+    const closing =
+      cursor.closing ??
+      (await stage("finalize:summary", async () => {
+        const summary = await getSummary();
+        const { resolved, improved } = tally(cursor.baselines, summary);
+        return {
+          resolved,
+          improved,
+          recall: summary.recall,
+          mrr: summary.mrr,
+          ndcg: summary.ndcg,
+        };
+      }));
     const targeted = Object.keys(cursor.baselines).length;
     return {
       targeted,
-      resolved,
-      unresolved: targeted - resolved,
-      improved,
+      resolved: closing.resolved,
+      unresolved: targeted - closing.resolved,
+      improved: closing.improved,
       pendingChoice: cursor.pendingChoice,
       attempts: cursor.attempts,
       chunksSearched: cursor.covered.length,
       chunksTotal: cursor.plan?.length ?? 0,
       stopReason: cursor.stopReason,
-      recall: summary.recall,
-      mrr: summary.mrr,
-      ndcg: summary.ndcg,
+      recall: closing.recall,
+      mrr: closing.mrr,
+      ndcg: closing.ndcg,
     };
   },
 };
@@ -435,6 +464,7 @@ async function freshCursor(): Promise<AutotuneCursor> {
     snapshots: [],
     lastDirty: null,
     lastStale: null,
+    closing: null,
   };
   return stale.length > 0 ? cursor : freezePlan(cursor);
 }
@@ -1104,11 +1134,9 @@ async function runReplay(
     try {
       confirmed = await confirmOverride(
         chunkId,
-        async () => {
-          await installOverride(shelved);
-          return null;
-        },
+        () => installOverride(shelved),
         prep.keepBest ? "improve" : "clear",
+        "install",
       );
       if (confirmed.status === "kept") {
         await stage("trials", () => installTrials(shelved, questionIds));
@@ -1179,8 +1207,10 @@ async function runReplay(
 // SPLIT FROM THE TRIALS (docs/demo-voyage-tuning-plan.md §3.5): this is the
 // `install` confirmOverride wraps, and the trials below land only once the
 // confirm has kept it.
-async function installOverride(entry: ReplayTuningEntry): Promise<void> {
-  await setChunkOverridePieces(
+async function installOverride(
+  entry: ReplayTuningEntry,
+): Promise<{ prior: ChunkOverrideState | null }> {
+  const prior = await setChunkOverridePieces(
     entry.chunk,
     entry.model,
     entry.kind,
@@ -1193,6 +1223,7 @@ async function installOverride(entry: ReplayTuningEntry): Promise<void> {
     })),
     entry.detail,
   );
+  return { prior };
 }
 
 // The trials are the chunk card's "Models tried" list, and THEY FOLLOW THE
@@ -1204,9 +1235,7 @@ async function installTrials(
   entry: ReplayTuningEntry,
   questionIds: ReadonlyMap<string, string>,
 ): Promise<void> {
-  const chunk = await getModelTrialChunk(entry.chunk);
-  if (!chunk) return; // not in this config's corpus: nothing to hang a trial on
-  await deleteModelTrialsForChunk(entry.chunk);
+  const trials: ModelTrialInsert[] = [];
   for (const t of entry.trials) {
     // RE-KEYED TO THIS WORKSPACE'S QUESTIONS, and cut down to them. A banked
     // outcome whose wording is not on the visitor's board names a question that
@@ -1220,9 +1249,7 @@ async function installTrials(
       })
       .filter((r) => r !== null);
     if (results.length === 0) continue;
-    await insertModelTrial({
-      sourceChunkId: entry.chunk,
-      documentEmbeddingId: chunk.documentEmbeddingId,
+    trials.push({
       baselineModel: t.baselineModel,
       trialModel: t.trialModel,
       kind: t.kind as "model" | "size" | "size+model",
@@ -1237,6 +1264,10 @@ async function installTrials(
       results,
     });
   }
+  // One statement for the lookup, the delete and every row (phase 3 of
+  // docs/demo-retrieval-bank-plan.md); a chunk outside this config's corpus
+  // matches nothing and nothing is written, as before.
+  await replaceModelTrials(entry.chunk, trials);
 }
 
 // --- phase 2: the dirty-set re-score ----------------------------------------
@@ -1333,8 +1364,11 @@ async function runRescore(
 // --- phase 3: the history row -----------------------------------------------
 
 async function runOutcomes(c: AutotuneCursor, emit: Emit) {
-  const prepared = await prepareAutotune();
+  // One summary, not two (phase 3 of docs/demo-retrieval-bank-plan.md):
+  // prepareAutotune reads the same closing summary this phase tallies, and
+  // nothing writes between the two, so it is handed the one read here.
   const summary = await getSummary();
+  const prepared = await prepareAutotune(summary);
   const { resolved, improved, after: afterByQ } = tally(c.baselines, summary);
 
   // Which chunks THIS run changed, and what they ended up with — both read back
@@ -1420,7 +1454,17 @@ async function runOutcomes(c: AutotuneCursor, emit: Emit) {
   );
   emit({ doneUnits: c.covered.length, message: "Recording results" });
   return {
-    cursor: { ...c, phase: "snapshots" as const },
+    cursor: {
+      ...c,
+      phase: "snapshots" as const,
+      closing: {
+        resolved,
+        improved,
+        recall: summary.recall,
+        mrr: summary.mrr,
+        ndcg: summary.ndcg,
+      },
+    },
     done: false,
     doneUnits: c.covered.length,
     mustFinish: true,

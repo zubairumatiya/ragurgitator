@@ -54,7 +54,6 @@ import {
 import { effectiveK, type EvalCriteria } from "@/lib/rag/evalSettingsStore";
 import {
   getChunkQuestions,
-  getQuestionToScore,
   type QuestionToScore,
   getChunksByIds,
   getModelTrialQuestions,
@@ -65,6 +64,7 @@ import {
 import {
   clearChunkOverride,
   getChunkOverridePieces,
+  type ChunkOverrideState,
   listOverrides,
   overrideSims,
   setChunkOverridePieces,
@@ -566,13 +566,24 @@ export async function applyAutotuneCandidate(
 // replay cannot drift on what "improved" means. The order of operations is the
 // original's, step for step, and every comment below is the reason for a step.
 //
-// `install` writes the override and returns null, or a failure detail; the
-// chunk's prior override (if any) is captured before it runs and restored on a
-// revert, so a failed confirm never clears an override an earlier run kept.
+// `install` writes the override and returns null, or a failure detail, or —
+// when it went through setChunkOverridePieces and has it for free — the prior
+// override it replaced. The prior (if any) is what a revert restores, so a
+// failed confirm never clears an override an earlier run kept; an install that
+// does not report it is read before the install runs, as it always was.
+export type InstallOutcome =
+  | string
+  | null
+  | { prior: ChunkOverrideState | null };
+
 export async function confirmOverride(
   chunkId: string,
-  install: () => Promise<string | null>,
+  install: () => Promise<InstallOutcome>,
   mode: ConfirmMode = "clear",
+  // Where the prior override comes from. "read": read before the install runs
+  // (the search's install reports only a status). "install": the install
+  // returns what it replaced, and nothing is read first.
+  priorFrom: "read" | "install" = "read",
 ): Promise<ApplyResult> {
   // L6 (docs/autotune-speedups-plan.md): chunk-scoped read, not the whole-config
   // getSummary(). This function only ever looked at THIS chunk's questions, but
@@ -598,13 +609,20 @@ export async function confirmOverride(
   //
   // The lookups run concurrently so the batch still costs one round trip to
   // assemble, then a single scoreQuestions call does the work.
+  //
+  // Phase 3 of docs/demo-retrieval-bank-plan.md took the lookups out: the chunk
+  // read above already holds every field a QuestionToScore needs, and it is
+  // seconds old in the same scope, so re-reading each question was one
+  // statement per question per re-score (30 of a banked press's 542) that
+  // could only ever return what `before` already said.
   const rescoreChunk = (label: string) =>
     stage(label, async () => {
-      const toScore = (
-        await stage("confirm:lookup", () =>
-          Promise.all(chunkQs.map((q) => getQuestionToScore(q.questionId))),
-        )
-      ).filter((q): q is QuestionToScore => q !== null);
+      const toScore: QuestionToScore[] = chunkQs.map((q) => ({
+        questionId: q.questionId,
+        question: q.question,
+        labelId: before.labels.get(q.questionId)!,
+        sourceChunkId: q.sourceChunkId,
+      }));
       if (toScore.length > 0) await scoreQuestions(toScore);
     });
 
@@ -642,16 +660,22 @@ export async function confirmOverride(
 
   const beforeSum = failingSum(chunkQs);
 
-  // Capture the chunk's CURRENT override (if any) before overwriting it —
-  // the install replaces it, so a failed confirm must put THIS back, not
-  // clear to baseline (which would destroy a working override kept by an
-  // earlier run just because a new candidate over-promised).
-  const prior = await stage("confirm:prior", () =>
-    getChunkOverridePieces(chunkId),
-  );
-
-  const failure = await stage("confirm:install", () => install());
-  if (failure !== null) return { status: "failed", detail: failure };
+  // The chunk's CURRENT override (if any) has to be in hand before the install
+  // overwrites it — a failed confirm must put THIS back, not clear to baseline
+  // (which would destroy a working override kept by an earlier run just
+  // because a new candidate over-promised). The replay's install returns it
+  // (the delete inside setChunkOverridePieces hands back what it removed, one
+  // statement per chunk fewer — phase 3 of docs/demo-retrieval-bank-plan.md);
+  // the search's install does not, and is preceded by the read.
+  const priorRead =
+    priorFrom === "read"
+      ? await stage("confirm:prior", () => getChunkOverridePieces(chunkId))
+      : null;
+  const installed = await stage("confirm:install", () => install());
+  if (typeof installed === "string") {
+    return { status: "failed", detail: installed };
+  }
+  const prior = installed === null ? priorRead : installed.prior;
 
   await rescoreChunk("confirm:after-rescore");
 

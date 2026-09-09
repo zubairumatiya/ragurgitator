@@ -2109,6 +2109,71 @@ export async function deleteModelTrialsForChunk(
   return rows.length;
 }
 
+// REPLACE A CHUNK'S TRIALS IN ONE STATEMENT (docs/demo-retrieval-bank-plan.md
+// phase 3) — what the replayed autotune did as getModelTrialChunk +
+// deleteModelTrialsForChunk + one insertModelTrial per trial, three round trips
+// per kept chunk. The chunk lookup, the delete and the multi-row insert are one
+// chain of CTEs: a chunk that is not in this config's corpus matches nothing,
+// so nothing is deleted and nothing is inserted, exactly as the three-call
+// form returned early; and an empty `trials` deletes and inserts nothing, as
+// it did. The VALUES rows are cast column by column because a parameter with
+// no context resolves to text there, and text does not assign to int or uuid.
+export type ModelTrialInsert = Omit<
+  Parameters<typeof insertModelTrial>[0],
+  "sourceChunkId" | "documentEmbeddingId"
+>;
+
+export async function replaceModelTrials(
+  chunkId: string,
+  trials: ModelTrialInsert[],
+): Promise<void> {
+  const table = await activeChunksTable();
+  if (!table) return;
+  const cfg = activeConfig();
+  const chunk = sql`
+    select c.document_embedding_id
+    from ${sql(table)} c
+    join document_embeddings de on de.id = c.document_embedding_id
+    where c.id = ${chunkId} and de.config_id = ${cfg.id}
+    limit 1`;
+  const gone = sql`
+    delete from eval_model_trials t
+    using document_embeddings de
+    where de.id = t.document_embedding_id
+      and de.config_id = ${cfg.id}
+      and t.source_chunk_id = ${chunkId}
+      and exists (select 1 from chunk)
+    returning t.id`;
+  if (trials.length === 0) {
+    await sql`with chunk as (${chunk}) ${gone}`;
+    return;
+  }
+  const rows = trials.map(
+    (t) => sql`(
+      ${t.baselineModel}::text, ${t.trialModel}::text, ${t.kind}::text,
+      ${t.chunkSize}::int, ${t.chunkOverlap}::int, ${t.pieceCount}::int,
+      ${t.k}::int, ${t.poolChunkIds}::uuid[],
+      ${t.questionCount}::int, ${t.hitCount}::int, ${t.storedHitCount}::int,
+      ${sql.json(t.results)}::jsonb
+    )`,
+  );
+  await sql`
+    with chunk as (${chunk}),
+    gone as (${gone})
+    insert into eval_model_trials
+      (source_chunk_id, document_embedding_id, baseline_model, trial_model, kind,
+       chunk_size, chunk_overlap, piece_count, k,
+       pool_chunk_ids, question_count, hit_count, stored_hit_count, results)
+    select ${chunkId}::uuid, chunk.document_embedding_id, v.*
+    from chunk,
+         (values ${rows.reduce((acc, r) => sql`${acc}, ${r}`)})
+           as v(baseline_model, trial_model, kind, chunk_size, chunk_overlap,
+                piece_count, k, pool_chunk_ids, question_count, hit_count,
+                stored_hit_count, results)
+    where (select count(*) from gone) >= 0
+  `;
+}
+
 export async function insertResults(rows: ResultInsert[]): Promise<void> {
   if (rows.length === 0) return;
   await writeResults(rows);
@@ -2562,6 +2627,13 @@ async function activeDocIngestTimes(): Promise<number[]> {
 type EvalDetailRow = {
   question_id: string;
   question: string;
+  // Only the chunk-scoped read selects these (getChunkQuestions): the confirm
+  // re-scores the questions it just read, a QuestionToScore needs the label id
+  // the summary shape never carried, and whether the label already has a
+  // baseline row is what labelsWithBaseline would otherwise ask next. Absent
+  // from the summary's rows.
+  label_id?: string;
+  has_baseline?: boolean;
   source: string;
   difficulty: string | null;
   document_id: string;
@@ -2928,9 +3000,14 @@ function reduceMetrics(questions: QuestionDetail[]) {
 // Shares mapQuestionDetails with getSummary, so `stale`, `hit`, `rr` and `ndcg`
 // are computed identically — the keep/revert comparison puts a `before` from this
 // function against an `after` from it.
-export async function getChunkQuestions(
-  chunkId: string,
-): Promise<{ questions: QuestionDetail[]; criteria: EvalCriteria }> {
+export async function getChunkQuestions(chunkId: string): Promise<{
+  questions: QuestionDetail[];
+  criteria: EvalCriteria;
+  // question id → label id, for the confirm's re-score (phase 3 of
+  // docs/demo-retrieval-bank-plan.md): it used to look every question up again
+  // one statement at a time to learn a value this read already had.
+  labels: Map<string, string>;
+}> {
   const cfg = activeConfig();
 
   // These four reads have no data dependency on each other, and run sequentially
@@ -2952,7 +3029,7 @@ export async function getChunkQuestions(
   const mrrK = effectiveK(criteria.mrr, cfg.topK);
   const ndcgK = effectiveK(criteria.ndcg, cfg.topK);
 
-  if (!table) return { questions: [], criteria };
+  if (!table) return { questions: [], criteria, labels: new Map() };
 
   // Same query as getSummary's detail select, with the chunk filter pushed into
   // active_labels so `latest` only scans this chunk's results.
@@ -2976,7 +3053,13 @@ export async function getChunkQuestions(
     )
     select
       q.id as question_id, q.question, q.source, q.difficulty, q.document_id,
-      q.updated_at, d.file_name, al.source_chunk_id,
+      q.updated_at, d.file_name, al.source_chunk_id, al.label_id,
+      exists (
+        select 1 from eval_results b
+        where b.eval_label_id = al.label_id
+          and b.baseline_key = ${baselineKey()}
+          and (b.is_baseline or b.retrieval_state = 'baseline')
+      ) as has_baseline,
       c.position as expected_position,
       lt.hit, lt.found_rank, lt.retrieved_ids, lt.retrieved_scores,
       lt.scored_at, lt.retrieval_state,
@@ -3002,7 +3085,16 @@ export async function getChunkQuestions(
     ndcgK,
     truthOrders,
   });
-  return { questions, criteria };
+  const labels = new Map(detail.map((r) => [r.question_id, r.label_id!]));
+  // What labelsWithBaseline would find for these labels, remembered the way it
+  // remembers its own hits (phase 3 of docs/demo-retrieval-bank-plan.md): the
+  // confirm re-scores exactly these questions next, and used to spend one
+  // statement per chunk learning this. Hits only — a miss may be written next.
+  const key = baselineKey();
+  for (const r of detail) {
+    if (r.has_baseline) scopeSet(`baseline:${key}:${r.label_id}`, true);
+  }
+  return { questions, criteria, labels };
 }
 
 export async function getSummary(): Promise<EvalSummary> {

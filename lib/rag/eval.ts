@@ -603,15 +603,11 @@ export async function scoreQuestions(
   // demo's retrieval bank is keyed by. For a real account it is one memoed
   // statement and keys nothing.
   const statePromise = retrievalStateFingerprint();
-  const [criteria, cached, retrievalState, ctx, portableKey] = await stage(
+  const [criteria, retrievalState, ctx, portableKey] = await stage(
     "score:setup",
     () =>
       Promise.all([
         getActiveCriteria(),
-        getCachedQueryEmbeddings(
-          questions.map((q) => q.questionId),
-          cfg.embeddingModel,
-        ),
         statePromise,
         buildRetrievalContext(statePromise),
         portableRetrievalKey(),
@@ -691,6 +687,20 @@ export async function scoreQuestions(
   const misses = questions
     .map((q, i) => ({ q, i }))
     .filter(({ i }) => liveMiss(i) || baseMiss(i));
+  // The cached query vectors, for the MISSES only (phase 3 of the retrieval
+  // bank plan): a banked question never retrieves, so it never asks for its
+  // vector, and reading the batch's vectors up front was one statement per
+  // scoring call that a fully banked call threw away. A real account has no
+  // bank, misses everything, and reads exactly what it read before.
+  const cached =
+    misses.length === 0
+      ? new Map<string, number[]>()
+      : await stage("score:qvec", () =>
+          getCachedQueryEmbeddings(
+            misses.map(({ q }) => q.questionId),
+            cfg.embeddingModel,
+          ),
+        );
   if (misses.length > 0) {
     await stage("score:prefetch", () =>
       prefetchRetrieval(
