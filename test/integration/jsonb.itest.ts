@@ -77,10 +77,16 @@ describe("toJsonb round-trips", () => {
     assert.equal(await typeOf("cursor", job.id), "object");
   });
 
-  it("makes the double-encoded form detectable as a string scalar", async () => {
+  it("no longer double-encodes a pre-stringified value bound to ::jsonb", async () => {
+    // This used to be the wrong pattern, and it is still not the one to write —
+    // use toJsonb. But what it does CHANGED with patches/postgres@3.4.9.patch:
+    // an untyped string parameter now goes out in the same buffer as the Parse,
+    // so postgres.js never learns the server resolved it to jsonb and never
+    // applies its own JSON.stringify on top. Postgres parses the text as JSON
+    // and the row holds an object. Pinned here so a postgres.js upgrade that
+    // drops the patch is caught by this test rather than by a string scalar
+    // appearing in a jsonb column somewhere else (migration 0052's history).
     const id = await withUser(alice, async () => {
-      // The wrong pattern, written out on purpose. This is what lib/db.ts's
-      // toJsonb comment is describing, and it inserts perfectly happily.
       const [row] = await sql<{ id: string }[]>`
         insert into background_jobs
           (user_id, kind, config_id, config_label, scope, total_units, status)
@@ -91,14 +97,11 @@ describe("toJsonb round-trips", () => {
       return row.id;
     });
 
-    // Not an error anywhere — just a different jsonb_typeof. That single word is
-    // the whole difference between a working row and a row that breaks later,
-    // somewhere else, in code that never touched this table.
-    assert.equal(await typeOf("scope", id), "string");
+    assert.equal(await typeOf("scope", id), "object");
 
     const [row] = await admin<{ scope: unknown }[]>`
       select scope from background_jobs where id = ${id}`;
-    assert.equal(typeof row.scope, "string", "the read comes back as JSON text, not an object");
+    assert.deepEqual(row.scope, SCOPE);
   });
 
   it("turns a null cursor into SQL NULL, not the jsonb 'null' literal", async () => {

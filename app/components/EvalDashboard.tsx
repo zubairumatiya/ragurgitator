@@ -1248,6 +1248,7 @@ export function EvalDashboard() {
             busy={busy}
             onBusyChange={setBusy}
             onDone={reload}
+            onScored={refreshSummary}
           />
         )}
         {!progress && notice && (
@@ -1750,16 +1751,38 @@ const ChunkGroupCard = memo(function ChunkGroupCard({
             </span>
           )}
         </span>
-        <span className="shrink-0 text-xs text-zinc-500">
-          {scored.length > 0
-            ? `${hits}/${scored.length} hit${scored.length === 1 ? "" : "s"}`
-            : "unscored"}
-          {avgSim !== null && (
-            <span className="text-zinc-400">
-              {" "}
-              · avg sim {avgSim.toFixed(3)}
+        <span className="flex shrink-0 items-center gap-1.5 text-xs text-zinc-500">
+          {/* DEMO ONLY, and only once a GENERATED question on the chunk has
+              scored a miss. Demo-ness is `summary.demoBoard` — derived from
+              data the publish wrote down, never from who is asking, like the
+              split above — because the caveat explains the PUBLISHED bank's
+              questions: two board chunks (world-war-i #10, world-war-ii #26)
+              carry questions whose answer sits in the neighbouring chunk, so
+              retrieval finds the right passage and the label still counts a
+              miss, and no model or re-split of THIS chunk can change that. A
+              real account's misses are its own to diagnose (the per-question
+              "why did it miss?" detail), and a hand-written question is not
+              this caveat either. */}
+          {summary.demoBoard !== null &&
+            scored.some((q) => q.hit === false && q.source !== "manual") && (
+            <span
+              title="These questions were generated synthetically from the chunk. One drawback: some come out inaccurate — e.g. asking about a fact that actually sits in a neighbouring chunk. Retrieval then finds the right passage, but the label still counts it a miss, and no model or chunk variation can fix that."
+              className="cursor-help rounded bg-amber-100 px-1.5 py-0.5 font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400"
+            >
+              Why miss?
             </span>
           )}
+          <span>
+            {scored.length > 0
+              ? `${hits}/${scored.length} hit${scored.length === 1 ? "" : "s"}`
+              : "unscored"}
+            {avgSim !== null && (
+              <span className="text-zinc-400">
+                {" "}
+                · avg sim {avgSim.toFixed(3)}
+              </span>
+            )}
+          </span>
         </span>
       </div>
 

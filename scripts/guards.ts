@@ -35,7 +35,8 @@ function fail(message: string) {
 function walk(dir: string, match: (path: string) => boolean): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir)) {
-    if (entry === "node_modules" || entry === ".next" || entry === ".git") continue;
+    if (entry === "node_modules" || entry === ".next" || entry === ".git")
+      continue;
     const full = join(dir, entry);
     if (statSync(full).isDirectory()) out.push(...walk(full, match));
     else if (match(full)) out.push(full);
@@ -64,8 +65,13 @@ const EXPOSE_ALLOWED: Record<string, string> = {
 
 function sweepExpose() {
   console.log("1. .expose() call sites\n");
-  const files = walk(join(ROOT, "lib"), (p) => p.endsWith(".ts") || p.endsWith(".tsx"));
-  files.push(...walk(join(ROOT, "app"), (p) => p.endsWith(".ts") || p.endsWith(".tsx")));
+  const files = walk(
+    join(ROOT, "lib"),
+    (p) => p.endsWith(".ts") || p.endsWith(".tsx"),
+  );
+  files.push(
+    ...walk(join(ROOT, "app"), (p) => p.endsWith(".ts") || p.endsWith(".tsx")),
+  );
 
   for (const file of files) {
     const path = rel(file);
@@ -82,12 +88,18 @@ function sweepExpose() {
 
       const why = EXPOSE_ALLOWED[path];
       if (!why) {
-        fail(`${path}:${i + 1} — .expose() outside the allowlist in scripts/guards.ts`);
+        fail(
+          `${path}:${i + 1} — .expose() outside the allowlist in scripts/guards.ts`,
+        );
         return;
       }
       // Allowed file, but still check the call is not being parked in a local.
-      if (/(?:const|let|var)\s+\w+\s*(?::[^=]+)?=\s*[\w.]*\.expose\(\)/.test(code)) {
-        fail(`${path}:${i + 1} — .expose() assigned to a variable; inline it at the call`);
+      if (
+        /(?:const|let|var)\s+\w+\s*(?::[^=]+)?=\s*[\w.]*\.expose\(\)/.test(code)
+      ) {
+        fail(
+          `${path}:${i + 1} — .expose() assigned to a variable; inline it at the call`,
+        );
       }
     });
   }
@@ -115,11 +127,15 @@ const SCOPE_EXEMPT: Record<string, string> = {
     "guest provisioning — deliberately cross-tenant (privilegedSql), and the one " +
     "scoped call it makes (sealing the Voyage key) opens the guest's own scope inside " +
     "provisionGuest rather than wrapping a handler that has no session to scope to",
-  "app/auth/actions.ts": "sign in / up / out and password reset — Supabase Auth only, no store call",
+  "app/auth/actions.ts":
+    "sign in / up / out and password reset — Supabase Auth only, no store call",
   "app/auth/callback/route.ts": "verifyOtp only, runs before a profile exists",
-  "app/auth/reset/page.tsx": "session + recovery-cookie check only, no store call",
-  "app/oauth/consent/page.tsx": "OAuth consent — Supabase Auth only, no store call",
-  "app/api/oauth/decision/route.ts": "OAuth approve / deny — Supabase Auth only, no store call",
+  "app/auth/reset/page.tsx":
+    "session + recovery-cookie check only, no store call",
+  "app/oauth/consent/page.tsx":
+    "OAuth consent — Supabase Auth only, no store call",
+  "app/api/oauth/decision/route.ts":
+    "OAuth approve / deny — Supabase Auth only, no store call",
 };
 
 // The MCP pair from lib/http/mcpScope.ts, listed for the same reason as their
@@ -138,7 +154,9 @@ const SCOPE_ENTRIES =
 const STORE_IMPORT = /@\/lib\/(rag|auth|batch|llm|jobs)/;
 
 function isEntryPoint(path: string) {
-  return /(?:^|\/)(?:route|actions)\.ts$|(?:^|\/)(?:page|layout)\.tsx$/.test(path);
+  return /(?:^|\/)(?:route|actions)\.ts$|(?:^|\/)(?:page|layout)\.tsx$/.test(
+    path,
+  );
 }
 
 function sweepScopes() {
@@ -159,7 +177,9 @@ function sweepScopes() {
     }
   }
 
-  console.log(`   ${checked} store-touching entry points, ${Object.keys(SCOPE_EXEMPT).length} exempt:`);
+  console.log(
+    `   ${checked} store-touching entry points, ${Object.keys(SCOPE_EXEMPT).length} exempt:`,
+  );
   for (const [path, why] of Object.entries(SCOPE_EXEMPT)) {
     console.log(`   ${path.padEnd(34)} ${why}`);
   }
@@ -174,7 +194,15 @@ function sweepScopes() {
 // PER METHOD, NOT PER FILE, and that distinction is the entire reason this exists.
 // The first sweep was file-level, passed, and left ten handlers open: each shared a
 // file with a gated sibling, so the filename matched.
-const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+const HTTP_METHODS = [
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "HEAD",
+  "OPTIONS",
+];
 // withMcpRequest (lib/http/mcpScope.ts) is the bearer-token boundary for
 // /api/mcp: it verifies the OAuth token, rejects anything that is not an MCP
 // token, and enforces the mcp_enabled kill switch. It belongs in this list for
@@ -187,17 +215,20 @@ const GATES =
   /withRequestUser|withRequestConfig|requireUserForApi|requireUser\(|withMcpRequest|withJobSecret/;
 
 const HANDLER_EXEMPT: Record<string, string> = {
-  "app/auth/callback/route.ts:GET": "the email confirmation link itself — no session yet, by definition",
+  "app/auth/callback/route.ts:GET":
+    "the email confirmation link itself — no session yet, by definition",
   // RFC 9728 discovery. A client fetches these to find out WHERE to get a
   // credential, so requiring one would be circular — the 401 challenge on
   // /api/mcp points at them by design. They serve two public URLs (this
   // server's identity and Supabase's issuer) and read nothing user-specific.
   "app/api/mcp-discovery/protected-resource/route.ts:GET":
     "unauthenticated OAuth discovery — RFC 9728, read before any credential exists",
-  "app/api/mcp-discovery/protected-resource/route.ts:OPTIONS": "CORS preflight for the above",
+  "app/api/mcp-discovery/protected-resource/route.ts:OPTIONS":
+    "CORS preflight for the above",
   "app/api/mcp-discovery/authorization-server/route.ts:GET":
     "unauthenticated OAuth discovery — RFC 8414 pass-through for pre-9728 clients",
-  "app/api/mcp-discovery/authorization-server/route.ts:OPTIONS": "CORS preflight for the above",
+  "app/api/mcp-discovery/authorization-server/route.ts:OPTIONS":
+    "CORS preflight for the above",
   // THE GUEST DEMO'S FRONT DOOR. Unauthenticated by definition — its whole
   // purpose is to serve someone who has no account — so no session gate can
   // apply. What stands in its place is a pair of caps checked before anything is
@@ -263,8 +294,13 @@ function sweepApiGates() {
 // heard of 0057, which omits the column entirely.
 function sweepBaselineReads() {
   console.log("\n4. eval_results reads exclude baseline rows\n");
-  const files = walk(join(ROOT, "lib"), (p) => p.endsWith(".ts") && !p.endsWith(".test.ts"));
-  files.push(...walk(join(ROOT, "app"), (p) => p.endsWith(".ts") || p.endsWith(".tsx")));
+  const files = walk(
+    join(ROOT, "lib"),
+    (p) => p.endsWith(".ts") && !p.endsWith(".test.ts"),
+  );
+  files.push(
+    ...walk(join(ROOT, "app"), (p) => p.endsWith(".ts") || p.endsWith(".tsx")),
+  );
 
   let reads = 0;
   for (const file of files) {
@@ -282,10 +318,14 @@ function sweepBaselineReads() {
       if (!/\bis_baseline\b/.test(stmt)) unguarded++;
     }
     if (unguarded === 0) continue;
-    fail(`${path} — ${unguarded} eval_results read(s) that never mention is_baseline`);
+    fail(
+      `${path} — ${unguarded} eval_results read(s) that never mention is_baseline`,
+    );
   }
 
-  console.log(`   ${reads} eval_results read(s) across ${files.length} files, all accounted for`);
+  console.log(
+    `   ${reads} eval_results read(s) across ${files.length} files, all accounted for`,
+  );
 }
 
 // 5. The transformers barrel
@@ -336,7 +376,9 @@ function sweepTransformersBarrel() {
       if (/\bimport\s*\(/.test(code) || /\brequire\s*\(/.test(code)) {
         const why = TRANSFORMERS_DYNAMIC_ALLOWED[path];
         if (!why) {
-          fail(`${path}:${i + 1} — dynamic import of ${TRANSFORMERS} outside the allowlist in scripts/guards.ts`);
+          fail(
+            `${path}:${i + 1} — dynamic import of ${TRANSFORMERS} outside the allowlist in scripts/guards.ts`,
+          );
         }
         return;
       }
@@ -350,7 +392,9 @@ function sweepTransformersBarrel() {
   }
 
   if (statics === 0) {
-    console.log(`   no value imports; ${Object.keys(TRANSFORMERS_DYNAMIC_ALLOWED).length} allowed dynamic import(s):`);
+    console.log(
+      `   no value imports; ${Object.keys(TRANSFORMERS_DYNAMIC_ALLOWED).length} allowed dynamic import(s):`,
+    );
     for (const [path, why] of Object.entries(TRANSFORMERS_DYNAMIC_ALLOWED)) {
       console.log(`   ${path.padEnd(32)} ${why}`);
     }
@@ -375,9 +419,12 @@ const DEMO_GATED: Record<string, string> = {
   "app/api/ingest/library/route.ts": "ingest from the document library",
   "app/api/corpora/[id]/documents/route.ts": "adding a document ingests it",
   "app/api/configs/[id]/populate/route.ts": "populates a config's chunks",
-  "app/api/configs/[id]/reconfigure/route.ts": "re-chunks, i.e. re-embeds the corpus",
-  "app/api/semantic-cache/key-model/route.ts": "re-embeds the question bank per model",
-  "app/api/semantic-cache/pairs/route.ts": "generates + embeds calibration pairs",
+  "app/api/configs/[id]/reconfigure/route.ts":
+    "re-chunks, i.e. re-embeds the corpus",
+  "app/api/semantic-cache/key-model/route.ts":
+    "re-embeds the question bank per model",
+  "app/api/semantic-cache/pairs/route.ts":
+    "generates + embeds calibration pairs",
   // spends an answer-model key the demo does not carry
   "app/api/eval/questions/generate/route.ts": "question generation",
   "app/api/eval/bulk-generate/route.ts": "bulk question generation",
@@ -387,14 +434,19 @@ const DEMO_GATED: Record<string, string> = {
   "app/api/clusters/[id]/label/route.ts": "LLM cluster labels",
   // ships VECTORS to the app server — cheap in dollars, ruinous in egress
   "app/api/clusters/run/route.ts": "clusterStore pulls every chunk embedding",
-  "app/api/eval/bulk-ndcg/route.ts": "aggregate ranking embeds a pool under every model",
-  "app/api/eval/chunks/[chunkId]/try-model/route.ts": "embeds a chunk under another model",
-  "app/api/eval/questions/[id]/ranking/route.ts": "aggregate ranking embeds a pool under every model",
-  "app/api/eval/chunks/[chunkId]/override/route.ts": "re-embeds a chunk, then rescores it",
+  "app/api/eval/bulk-ndcg/route.ts":
+    "aggregate ranking embeds a pool under every model",
+  "app/api/eval/chunks/[chunkId]/try-model/route.ts":
+    "embeds a chunk under another model",
+  "app/api/eval/questions/[id]/ranking/route.ts":
+    "aggregate ranking embeds a pool under every model",
+  "app/api/eval/chunks/[chunkId]/override/route.ts":
+    "re-embeds a chunk, then rescores it",
   // spends later, when the workspace no longer exists
   "app/api/batch/submit/route.ts": "provider batch submission",
   // guards the SCOPE the two ungated levers rely on — see sweepDemoScope
-  "app/api/eval/questions/[id]/ignore/route.ts": "un-ignoring thaws a frozen question",
+  "app/api/eval/questions/[id]/ignore/route.ts":
+    "un-ignoring thaws a frozen question",
   // the other door into one of the above
   "app/api/jobs/route.ts": "background launch of bulk_ndcg",
 };
@@ -495,7 +547,7 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
       // judge really returned. The gate above still stands unconditionally behind
       // it — replayJudgeQueue answers only a guest — so this needle is what keeps
       // the two lines in that order, which is the whole of the spend argument.
-      "const replayed = body.mode === \"llm\" ? await replayJudgeQueue(body) : null;",
+      'const replayed = body.mode === "llm" ? await replayJudgeQueue(body) : null;',
     ],
     why: "the carve-out is exactly the human verdict mode, plus a replay that spends nothing",
   },
@@ -563,12 +615,16 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
   //     routine cheap republish is exactly the build that reaches it.
   {
     file: "app/api/eval/bulk-ndcg/route.ts",
-    needles: ['if ((await readIdeals()) === null) await assertDemoAllows("rank");'],
+    needles: [
+      'if ((await readIdeals()) === null) await assertDemoAllows("rank");',
+    ],
     why: "the ideals carve-out: replay a published aggregate order, refuse without one",
   },
   {
     file: "app/api/eval/bulk-llm-ndcg/route.ts",
-    needles: ['if ((await readLlmRankings()) === null) await assertDemoAllows("llmRank");'],
+    needles: [
+      'if ((await readLlmRankings()) === null) await assertDemoAllows("llmRank");',
+    ],
     why: "the llm_rerank carve-out, on the ideals' terms exactly",
   },
   // The autotune's copy of the same shape, one layer in: the gate lives in the
@@ -580,10 +636,11 @@ const DEMO_SCOPED: { file: string; needles: string[]; why: string }[] = [
   {
     file: "lib/jobs/steps/autotune.ts",
     needles: [
-      "const tuning = await readTuning();",
+      "const tuning = await readTuning(async () => {",
+      "return boardDifficulties(pick.summary);",
       'if (tuning === null) await assertDemoAllows("autotune");',
       "? runSearch(planned, emit, shouldStop)",
-      ": runReplay(planned, tuning, emit, shouldStop)",
+      ": runReplay(planned, tuning, emit, shouldStop, pick.summary)",
     ],
     why: "the tuning carve-out, and that a stocked shelf takes runReplay rather than runSearch",
   },
@@ -626,10 +683,15 @@ function sweepDemoScope() {
   }
   // The two ungated routes, asserted from the other end: if one of them grows a
   // gate back, the scope stopped being trusted and this file should say why.
-  const expectedOpen = ["app/api/eval/rescore/route.ts", "app/api/eval/process/route.ts"];
+  const expectedOpen = [
+    "app/api/eval/rescore/route.ts",
+    "app/api/eval/process/route.ts",
+  ];
   for (const path of expectedOpen) {
     if (/assertDemoAllows\(/.test(read(join(ROOT, path)))) {
-      fail(`${path} — gated again, but still relied on as SCOPED in lib/demo/policy.ts`);
+      fail(
+        `${path} — gated again, but still relied on as SCOPED in lib/demo/policy.ts`,
+      );
     }
   }
   const readers = sweepDemoReaders();
@@ -661,15 +723,22 @@ function sweepDemoReaders(): number {
   const bodies = new Map<string, string>();
   decls.forEach((d, i) => {
     const start = d.index ?? 0;
-    const end = i + 1 < decls.length ? (decls[i + 1].index ?? source.length) : source.length;
+    const end =
+      i + 1 < decls.length
+        ? (decls[i + 1].index ?? source.length)
+        : source.length;
     bodies.set(d[1], source.slice(start, end));
   });
   const readers = [...bodies.keys()].filter((name) => /^read[A-Z]/.test(name));
   if (readers.length === 0) {
-    fail(`${file} — no read* functions found at all; the census below asserts nothing`);
+    fail(
+      `${file} — no read* functions found at all; the census below asserts nothing`,
+    );
     return 0;
   }
-  const covered = new Set(readers.filter((n) => bodies.get(n)!.includes(GUEST_CARVE_OUT)));
+  const covered = new Set(
+    readers.filter((n) => bodies.get(n)!.includes(GUEST_CARVE_OUT)),
+  );
   // One pass of delegation is enough today; loop anyway so a second layer of
   // indirection does not turn into a false failure that invites deleting this.
   for (let pass = 0; pass < readers.length; pass++) {
@@ -678,7 +747,8 @@ function sweepDemoReaders(): number {
       const body = bodies.get(name)!;
       for (const [other, otherBody] of bodies) {
         if (other === name || !body.includes(`${other}(`)) continue;
-        if (otherBody.includes(GUEST_CARVE_OUT) || covered.has(other)) covered.add(name);
+        if (otherBody.includes(GUEST_CARVE_OUT) || covered.has(other))
+          covered.add(name);
       }
     }
   }
@@ -705,7 +775,9 @@ function sweepDemoGates() {
       continue;
     }
     if (!/assertDemoAllows\(/.test(source)) {
-      fail(`${path} — spends or ships vectors (${why}) but never calls assertDemoAllows()`);
+      fail(
+        `${path} — spends or ships vectors (${why}) but never calls assertDemoAllows()`,
+      );
     }
   }
   console.log(`   ${Object.keys(DEMO_GATED).length} routes named, all gated`);
@@ -773,7 +845,8 @@ const REQUIRED_IN_PROBE_ROUTE: Record<string, string> = {
 // day something makes a pair eligible again this cap is the only thing standing
 // between one probe and forty.
 const FORBIDDEN_IN_PROBE_ROUTE: Record<string, string> = {
-  launchJob: "one probe by hand is the whole point — the bulk job stays blocked",
+  launchJob:
+    "one probe by hand is the whole point — the bulk job stays blocked",
   PROBE_CAP: "a cap means this route is running more than one probe",
 };
 
@@ -781,11 +854,13 @@ const FORBIDDEN_IN_PROBE_ROUTE: Record<string, string> = {
 // probe path: probe rows stock the queue, and a human or the metered judge fills
 // the verdict in.
 const FORBIDDEN_IN_PROBE_PATH: Record<string, string> = {
-  semanticCacheStore: "banks an answer — a probe must leave semantic_cache untouched",
+  semanticCacheStore:
+    "banks an answer — a probe must leave semantic_cache untouched",
   backfillKeyModel: "the other writer of semantic_cache — same rule as banking",
   setPairVerdict: "writes a pair verdict — probe rows land unjudged by design",
   judgeOne: "spends on the judge — the probe pass only stocks the queue for it",
-  judgeShadowEvents: "spends on the judge — the probe pass only stocks the queue for it",
+  judgeShadowEvents:
+    "spends on the judge — the probe pass only stocks the queue for it",
 };
 
 // These files explain at length what they do NOT do, and the prose must not trip
@@ -825,10 +900,14 @@ function sweepProbeReplay() {
   const decl = core.slice(core.indexOf("export const PROBE_LOOKUP"));
   const body = decl.slice(0, decl.indexOf("} as const"));
   if (!/serve:\s*false/.test(body)) {
-    fail("lib/rag/probeReplayCore.ts — PROBE_LOOKUP no longer passes serve: false");
+    fail(
+      "lib/rag/probeReplayCore.ts — PROBE_LOOKUP no longer passes serve: false",
+    );
   }
   if (!/origin:\s*"probe"/.test(body)) {
-    fail('lib/rag/probeReplayCore.ts — PROBE_LOOKUP no longer stamps origin: "probe"');
+    fail(
+      'lib/rag/probeReplayCore.ts — PROBE_LOOKUP no longer stamps origin: "probe"',
+    );
   }
 
   // 7c. Nothing anywhere in the probe path banks or judges.
@@ -855,7 +934,9 @@ function sweepProbeReplay() {
   // need a live database. (SHADOW_OPTIONAL_COLUMNS only ever DELETES keys from
   // this row, so a column absent here cannot reappear downstream.)
   const cache = codeOnly(read(join(ROOT, "lib/rag/semanticCache.ts")));
-  const shadowRow = cache.slice(cache.indexOf("const row: Record<string, unknown> = {"));
+  const shadowRow = cache.slice(
+    cache.indexOf("const row: Record<string, unknown> = {"),
+  );
   if (/\bverdict\b/.test(shadowRow.slice(0, shadowRow.indexOf("};")))) {
     fail(
       "lib/rag/semanticCache.ts — recordShadow's insert now carries a verdict; probe " +
@@ -877,7 +958,9 @@ function sweepProbeReplay() {
 
   // 7f. The single-probe route, checked from both ends — what it must do, and
   // what it must never grow into.
-  const route = codeOnly(read(join(ROOT, "app/api/semantic-cache/probe/route.ts")));
+  const route = codeOnly(
+    read(join(ROOT, "app/api/semantic-cache/probe/route.ts")),
+  );
   for (const [symbol, why] of Object.entries(REQUIRED_IN_PROBE_ROUTE)) {
     if (!route.includes(symbol)) {
       fail(`app/api/semantic-cache/probe/route.ts — lost ${symbol}: ${why}`);
@@ -885,7 +968,9 @@ function sweepProbeReplay() {
   }
   for (const [symbol, why] of Object.entries(FORBIDDEN_IN_PROBE_ROUTE)) {
     if (new RegExp(`\\b${symbol}\\b`).test(route)) {
-      fail(`app/api/semantic-cache/probe/route.ts — references ${symbol}: ${why}`);
+      fail(
+        `app/api/semantic-cache/probe/route.ts — references ${symbol}: ${why}`,
+      );
     }
   }
 
@@ -909,6 +994,142 @@ function sweepProbeReplay() {
   );
 }
 
+// 9. The autotune timing instrument
+//
+// docs/autotune-press-latency-plan.md §2: the phase-1 instrument is behind
+// AUTOTUNE_TIMING=1 "so the shipped path is byte-for-byte unchanged, which
+// scripts/guards.ts can hold". This is that hold. Three things, and the third is
+// the one that matters over time: the gate is the literal env check, every hook
+// is a passthrough when it is off, and the set of files that import it is closed
+// — an instrument that spreads becomes a feature nobody decided to ship. When
+// phase 4 has what it needs, delete lib/autotuneTiming.ts and this sweep together.
+const TIMING_MODULE = "lib/autotuneTiming.ts";
+const TIMING_ALLOWED: Record<string, string> = {
+  "lib/db.ts":
+    "the statement counter, on the app pool's postgres.js debug hook",
+  "lib/rag/eval.ts": "scoreQuestions' fixed-vs-marginal split (score:*)",
+  "lib/rag/retriever.ts": "prefetchRetrieval's reads (prefetch:*), phase 3's retrieval profile",
+  "lib/rag/autotune.ts": "confirmOverride's stages (confirm:*)",
+  "lib/jobs/steps/autotune.ts": "the phases, the per-chunk frame, the finale",
+  "lib/jobs/stream.ts": "plan / slice / finalize / record-timing",
+  "app/api/eval/autotune/route.ts": "the root stage, the RTT sample, the table",
+};
+const TIMING_IMPORT =
+  /from "(@\/lib\/autotuneTiming|\.\/autotuneTiming|(\.\.\/)+lib\/autotuneTiming)"/;
+
+function sweepAutotuneTiming() {
+  console.log("\n9. the autotune timing instrument is gated and contained\n");
+
+  const mod = read(join(ROOT, TIMING_MODULE));
+  if (
+    !mod.includes(
+      'export const AUTOTUNE_TIMING = process.env.AUTOTUNE_TIMING === "1";',
+    )
+  ) {
+    fail(
+      `${TIMING_MODULE} — the gate is no longer the literal AUTOTUNE_TIMING === "1" check`,
+    );
+  }
+  if (
+    !/export async function stage<T>\([\s\S]*?\): Promise<T> \{\s*if \(!AUTOTUNE_TIMING\) return fn\(\);/.test(
+      mod,
+    )
+  ) {
+    fail(
+      `${TIMING_MODULE} — stage() no longer opens with the passthrough \`if (!AUTOTUNE_TIMING) return fn();\``,
+    );
+  }
+  if (/^import /m.test(mod)) {
+    fail(
+      `${TIMING_MODULE} — imports something; lib/db.ts imports it, so it must stay import-free`,
+    );
+  }
+
+  const db = read(join(ROOT, "lib/db.ts"));
+  if (!db.includes("debug: AUTOTUNE_TIMING ? (_c, query) => countStatement(query) : false")) {
+    fail(
+      "lib/db.ts — the app pool's debug hook is not gated on AUTOTUNE_TIMING",
+    );
+  }
+  const evalSrc = read(join(ROOT, "lib/rag/eval.ts"));
+  if (!evalSrc.includes("Number(process.env.SCORE_CONCURRENCY ?? 4)")) {
+    fail(
+      "lib/rag/eval.ts — SCORE_CONCURRENCY must default to 4 with only an env override",
+    );
+  }
+
+  const files = [
+    ...walk(join(ROOT, "lib"), (f) => f.endsWith(".ts") || f.endsWith(".tsx")),
+    ...walk(join(ROOT, "app"), (f) => f.endsWith(".ts") || f.endsWith(".tsx")),
+    ...walk(join(ROOT, "scripts"), (f) => f.endsWith(".ts")),
+  ];
+  let importers = 0;
+  for (const file of files) {
+    if (rel(file) === TIMING_MODULE) continue;
+    if (!TIMING_IMPORT.test(read(file))) continue;
+    importers += 1;
+    if (!(rel(file) in TIMING_ALLOWED)) {
+      fail(
+        `${rel(file)} — imports ${TIMING_MODULE}; the instrument's importers are a closed list`,
+      );
+    }
+  }
+  console.log(
+    `   gated on AUTOTUNE_TIMING; ${importers} importer(s), all of ${Object.keys(TIMING_ALLOWED).length} allowlisted`,
+  );
+}
+
+// 10. The retrieval recorder
+//
+// docs/demo-retrieval-bank-plan.md §3.4: the publish's walk records every
+// computed retrieval to an NDJSON file so it can be banked, and the recorder
+// is a publish-time instrument on sweep 9's terms — gated on one env var,
+// a passthrough when it is off, and imported from a closed list. The one
+// importer is scoreQuestions, which is the single place every retrieval the
+// demo pays for goes through; a second importer is a second place the demo's
+// answers could be written down, and should be argued for here.
+const RECORD_MODULE = "lib/rag/retrievalRecord.ts";
+const RECORD_ALLOWED: Record<string, string> = {
+  "lib/rag/eval.ts": "scoreQuestions, per computed (never banked) result",
+};
+const RECORD_IMPORT =
+  /from "(@\/lib\/rag\/retrievalRecord|\.\/retrievalRecord|(\.\.\/)+lib\/rag\/retrievalRecord)"/;
+
+function sweepRetrievalRecorder() {
+  console.log("\n10. the retrieval recorder is gated and contained\n");
+  const mod = read(join(ROOT, RECORD_MODULE));
+  if (!mod.includes('export const RETRIEVAL_RECORD_FILE = process.env.DEMO_RETRIEVAL_RECORD ?? "";')) {
+    fail(`${RECORD_MODULE} — the gate is no longer the literal DEMO_RETRIEVAL_RECORD read`);
+  }
+  if (!/export function recordRetrieval\([\s\S]*?\): void \{\s*if \(!RETRIEVAL_RECORDING\) return;/.test(mod)) {
+    fail(`${RECORD_MODULE} — recordRetrieval() no longer opens with the passthrough \`if (!RETRIEVAL_RECORDING) return;\``);
+  }
+  const files = [
+    ...walk(join(ROOT, "lib"), (f) => f.endsWith(".ts") || f.endsWith(".tsx")),
+    ...walk(join(ROOT, "app"), (f) => f.endsWith(".ts") || f.endsWith(".tsx")),
+    ...walk(join(ROOT, "scripts"), (f) => f.endsWith(".ts")),
+  ];
+  let importers = 0;
+  for (const file of files) {
+    if (rel(file) === RECORD_MODULE) continue;
+    if (!RECORD_IMPORT.test(read(file))) continue;
+    importers += 1;
+    if (!(rel(file) in RECORD_ALLOWED)) {
+      fail(`${rel(file)} — imports ${RECORD_MODULE}; the recorder's importers are a closed list`);
+    }
+  }
+  // And the reader side: the bank is read in scoreQuestions through
+  // lib/demo/replay.readRetrievalBank, which sweep 6c holds to the guest
+  // carve-out by name — so a real account's re-score cannot be served a list.
+  const evalSrc = read(join(ROOT, "lib/rag/eval.ts"));
+  if (!evalSrc.includes("readRetrievalBank(portableKey)")) {
+    fail("lib/rag/eval.ts — scoreQuestions no longer reads the retrieval bank through readRetrievalBank, the guest-gated reader");
+  }
+  console.log(
+    `   gated on DEMO_RETRIEVAL_RECORD; ${importers} importer(s), all of ${Object.keys(RECORD_ALLOWED).length} allowlisted`,
+  );
+}
+
 sweepExpose();
 sweepScopes();
 sweepApiGates();
@@ -917,13 +1138,15 @@ sweepTransformersBarrel();
 sweepDemoGates();
 sweepDemoScope();
 sweepProbeReplay();
+sweepAutotuneTiming();
+sweepRetrievalRecorder();
 
 console.log(
   failures === 0
     ? "\nOK — keys stay wrapped, scopes are entered, every handler is gated, " +
-        "baseline rows stay out of live reads, no guest can spend outside the "
-        + "demo's frozen scope, the transformers barrel is unimported, and the "
-        + "probe path neither serves nor judges."
+        "baseline rows stay out of live reads, no guest can spend outside the " +
+        "demo's frozen scope, the transformers barrel is unimported, and the " +
+        "probe path neither serves nor judges."
     : `\nFAILED — ${failures} violation(s).`,
 );
 if (failures) process.exitCode = 1;

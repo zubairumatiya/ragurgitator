@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  postgres@3.4.9:
+    hash: efe99bf8c2f5e974048924677a4b13ca61e2e4cae4561b22bf82b2f410bcd4fb
+    path: patches/postgres@3.4.9.patch
+
 importers:
 
   .:
@@ -49,7 +54,7 @@ importers:
         version: 6.45.0(zod@4.4.3)
       postgres:
         specifier: ^3.4.9
-        version: 3.4.9
+        version: 3.4.9(patch_hash=efe99bf8c2f5e974048924677a4b13ca61e2e4cae4561b22bf82b2f410bcd4fb)
       react:
         specifier: 19.2.4
         version: 19.2.4
@@ -5253,7 +5258,7 @@ snapshots:
       picocolors: 1.1.1
       source-map-js: 1.2.1
 
-  postgres@3.4.9: {}
+  postgres@3.4.9(patch_hash=efe99bf8c2f5e974048924677a4b13ca61e2e4cae4561b22bf82b2f410bcd4fb): {}
 
   prelude-ls@1.2.1: {}
 

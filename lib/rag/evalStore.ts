@@ -6,10 +6,15 @@
 // eval_labels, so the same question can later be scored against other configs
 // without re-authoring.
 import { activeUserId } from "@/lib/auth/userScope";
-import { sql, toJsonb } from "@/lib/db";
+import { scopeMemo, scopePeek, scopeSet, sql, toJsonb } from "@/lib/db";
 import { FROZEN_REASON, PUBLISHED_RUN_NOTE } from "@/lib/demo/frozen";
 import { isGuest } from "@/lib/demo/guest";
-import { readBoard, readIdeals, readLlmRankings, readTuning } from "@/lib/demo/replay";
+import {
+  hasTuning,
+  readBoard,
+  readIdeals,
+  readLlmRankings,
+} from "@/lib/demo/replay";
 import {
   demoBlockedSentences,
   EVAL_DEMO_ACTIONS,
@@ -358,12 +363,16 @@ export function baselineKey(): string {
 
 // Resolve the chunks table for the active config. Returns null when nothing has
 // been ingested under this config yet (so callers can no-op cleanly).
+// Once per scope (scopeMemo; the document_embeddings writers in vectorStore and
+// configStore forget it): asked 60 times in one ⚙ press.
 async function activeChunksTable(): Promise<string | null> {
   const cfg = activeConfig();
-  const rows = await sql`
-    select 1 from document_embeddings where config_id = ${cfg.id} limit 1
-  `;
-  return rows.length > 0 ? cfg.chunksTable : null;
+  return scopeMemo(`chunksTable:${cfg.id}`, async () => {
+    const rows = await sql`
+      select 1 from document_embeddings where config_id = ${cfg.id} limit 1
+    `;
+    return rows.length > 0 ? cfg.chunksTable : null;
+  });
 }
 
 // Chunks (under the active config) that have fewer than `target` questions.
@@ -484,7 +493,10 @@ export async function listChunkPage(
 export async function resolveChunksForLabeling(
   chunkIds: string[],
 ): Promise<Map<string, { documentId: string; documentEmbeddingId: string }>> {
-  const resolved = new Map<string, { documentId: string; documentEmbeddingId: string }>();
+  const resolved = new Map<
+    string,
+    { documentId: string; documentEmbeddingId: string }
+  >();
   const ids = chunkIds.filter(isUuid);
   if (ids.length === 0) return resolved;
 
@@ -627,7 +639,9 @@ export async function chunksNeedingQuestionsByDifficulty(
   // Bulk-actions scope: one or more documents; null/empty = the whole corpus.
   const docScope = documentIds && documentIds.length > 0 ? documentIds : null;
   // Aligned with `difficulties`; a missing/short list means one each.
-  const wanted = difficulties.map((_, i) => Math.max(1, Math.trunc(targets?.[i] ?? 1)));
+  const wanted = difficulties.map((_, i) =>
+    Math.max(1, Math.trunc(targets?.[i] ?? 1)),
+  );
 
   const rows = await sql<
     {
@@ -752,9 +766,11 @@ export async function addManualQuestion(
 // synthetic question for it on demand. Returns null when the chunk isn't part of
 // the active config's corpus (stale id, wrong config). Mirrors the resolution in
 // addManualQuestion but also returns the chunk text for the generator.
-export async function getChunkForGeneration(
-  chunkId: string,
-): Promise<{ text: string; documentId: string; documentEmbeddingId: string } | null> {
+export async function getChunkForGeneration(chunkId: string): Promise<{
+  text: string;
+  documentId: string;
+  documentEmbeddingId: string;
+} | null> {
   const table = await activeChunksTable();
   if (!table) return null;
 
@@ -904,7 +920,12 @@ export async function getQuestionToScore(
   questionId: string,
 ): Promise<QuestionToScore | null> {
   const [row] = await sql<
-    { question_id: string; question: string; label_id: string; source_chunk_id: string }[]
+    {
+      question_id: string;
+      question: string;
+      label_id: string;
+      source_chunk_id: string;
+    }[]
   >`
     select q.id as question_id, q.question, l.id as label_id, l.source_chunk_id
     from eval_questions q
@@ -931,18 +952,35 @@ export async function getQuestionToScore(
 
 // Cached query vectors for these questions under `model`, as questionId -> vector.
 // Missing entries are simply absent from the map (caller embeds + caches those).
+//
+// HITS are remembered per scope (cut 3): a question's vector under a model is
+// written once and never changes, and the confirm re-scores the same question
+// twice per chunk. A miss is not remembered, so a vector cached later in the
+// same scope is found on the next read.
 export async function getCachedQueryEmbeddings(
   questionIds: string[],
   model: string,
 ): Promise<Map<string, number[]>> {
   if (questionIds.length === 0) return new Map();
+  const out = new Map<string, number[]>();
+  const missing: string[] = [];
+  for (const id of questionIds) {
+    const hit = scopePeek<number[]>(`qvec:${model}:${id}`);
+    if (hit) out.set(id, await hit);
+    else missing.push(id);
+  }
+  if (missing.length === 0) return out;
   const rows = await sql<{ eval_question_id: string; embedding: number[] }[]>`
     select eval_question_id, embedding
     from eval_question_embeddings
     where model = ${model}
-      and eval_question_id = any(${questionIds}::uuid[])
+      and eval_question_id = any(${missing}::uuid[])
   `;
-  return new Map(rows.map((r) => [r.eval_question_id, r.embedding]));
+  for (const r of rows) {
+    out.set(r.eval_question_id, r.embedding);
+    scopeSet(`qvec:${model}:${r.eval_question_id}`, r.embedding);
+  }
+  return out;
 }
 
 // Store one freshly computed query vector. Idempotent on (question, model): a
@@ -1016,7 +1054,9 @@ export async function screenSims(
   // float4s and not a re-encoding (overrideStore.overrideSims documents this).
   // `model = baseModel` is what guarantees the two sides have equal dimensions.
   if (table) {
-    const rows = await sql<{ question_id: string; chunk_id: string; sim: string }[]>`
+    const rows = await sql<
+      { question_id: string; chunk_id: string; sim: string }[]
+    >`
       select qe.eval_question_id as question_id,
              c.id as chunk_id,
              1 - (qe.embedding::vector <=> c.embedding) as sim
@@ -1027,7 +1067,8 @@ export async function screenSims(
       where qe.model = ${baseModel}
         and qe.eval_question_id = any(${questionIds}::uuid[])
     `;
-    for (const r of rows) putSim(out, r.question_id, r.chunk_id, { baseSim: Number(r.sim) });
+    for (const r of rows)
+      putSim(out, r.question_id, r.chunk_id, { baseSim: Number(r.sim) });
   }
 
   // bestPieceSim: max over the chunk's pieces under its FINAL model, against the
@@ -1040,9 +1081,13 @@ export async function screenSims(
   //   foreign space — the vector is in embedding_cache under that model, keyed
   //     by sha256 of the question TEXT, so the join is by hash (§1.4). That is
   //     the one thing the database cannot key by question id.
-  const models = [...new Set(changed.flatMap((c) => (c.finalModel ? [c.finalModel] : [])))];
+  const models = [
+    ...new Set(changed.flatMap((c) => (c.finalModel ? [c.finalModel] : []))),
+  ];
   for (const model of models) {
-    const wanted = changed.filter((c) => c.finalModel === model).map((c) => c.chunkId);
+    const wanted = changed
+      .filter((c) => c.finalModel === model)
+      .map((c) => c.chunkId);
     const rows = sameVectorSpace(model, baseModel)
       ? await sql<{ question_id: string; chunk_id: string; sim: string }[]>`
           select qe.eval_question_id as question_id,
@@ -1843,7 +1888,9 @@ export type AutotuneScopeDocument = {
 // Settings dropdown's "Chunks" autotune-scope picker lists (0025). Only labeled
 // chunks appear: a chunk without questions can never be an autotune target, so
 // listing it would only be noise.
-export async function listAutotuneScopeOptions(): Promise<AutotuneScopeDocument[]> {
+export async function listAutotuneScopeOptions(): Promise<
+  AutotuneScopeDocument[]
+> {
   const table = await activeChunksTable();
   if (!table) return [];
 
@@ -1956,7 +2003,13 @@ async function hydrateModelTrials(
   const byId = new Map(poolChunks.map((c) => [c.chunkId, c]));
   const resolvePool = (ids: string[]): PoolChunk[] =>
     ids.map(
-      (id) => byId.get(id) ?? { chunkId: id, fileName: "?", position: null, text: "" },
+      (id) =>
+        byId.get(id) ?? {
+          chunkId: id,
+          fileName: "?",
+          position: null,
+          text: "",
+        },
     );
 
   return rows.map((r) => ({
@@ -1978,7 +2031,9 @@ async function hydrateModelTrials(
   }));
 }
 
-export async function listModelTrials(chunkId: string): Promise<SavedModelTrial[]> {
+export async function listModelTrials(
+  chunkId: string,
+): Promise<SavedModelTrial[]> {
   const rows = await sql<ModelTrialRow[]>`
     select t.id, t.source_chunk_id, t.baseline_model, t.trial_model, t.kind,
            t.chunk_size, t.chunk_overlap, t.piece_count, t.k, t.pool_chunk_ids,
@@ -2036,8 +2091,102 @@ export async function deleteModelTrial(id: string): Promise<boolean> {
   return rows.length > 0;
 }
 
+// Every saved trial under one chunk, for the replayed autotune's second press:
+// a banked winner that REPLACES an earlier one takes its own "Models tried" list
+// with it (docs/demo-voyage-tuning-plan.md §3.6). Same join as deleteModelTrial,
+// for the same reason — it is the authorization check.
+export async function deleteModelTrialsForChunk(
+  chunkId: string,
+): Promise<number> {
+  const rows = await sql`
+    delete from eval_model_trials t
+    using document_embeddings de
+    where de.id = t.document_embedding_id
+      and de.config_id = ${activeConfig().id}
+      and t.source_chunk_id = ${chunkId}
+    returning t.id
+  `;
+  return rows.length;
+}
+
+// REPLACE A CHUNK'S TRIALS IN ONE STATEMENT (docs/demo-retrieval-bank-plan.md
+// phase 3) — what the replayed autotune did as getModelTrialChunk +
+// deleteModelTrialsForChunk + one insertModelTrial per trial, three round trips
+// per kept chunk. The chunk lookup, the delete and the multi-row insert are one
+// chain of CTEs: a chunk that is not in this config's corpus matches nothing,
+// so nothing is deleted and nothing is inserted, exactly as the three-call
+// form returned early; and an empty `trials` deletes and inserts nothing, as
+// it did. The VALUES rows are cast column by column because a parameter with
+// no context resolves to text there, and text does not assign to int or uuid.
+export type ModelTrialInsert = Omit<
+  Parameters<typeof insertModelTrial>[0],
+  "sourceChunkId" | "documentEmbeddingId"
+>;
+
+export async function replaceModelTrials(
+  chunkId: string,
+  trials: ModelTrialInsert[],
+): Promise<void> {
+  const table = await activeChunksTable();
+  if (!table) return;
+  const cfg = activeConfig();
+  const chunk = sql`
+    select c.document_embedding_id
+    from ${sql(table)} c
+    join document_embeddings de on de.id = c.document_embedding_id
+    where c.id = ${chunkId} and de.config_id = ${cfg.id}
+    limit 1`;
+  const gone = sql`
+    delete from eval_model_trials t
+    using document_embeddings de
+    where de.id = t.document_embedding_id
+      and de.config_id = ${cfg.id}
+      and t.source_chunk_id = ${chunkId}
+      and exists (select 1 from chunk)
+    returning t.id`;
+  if (trials.length === 0) {
+    await sql`with chunk as (${chunk}) ${gone}`;
+    return;
+  }
+  const rows = trials.map(
+    (t) => sql`(
+      ${t.baselineModel}::text, ${t.trialModel}::text, ${t.kind}::text,
+      ${t.chunkSize}::int, ${t.chunkOverlap}::int, ${t.pieceCount}::int,
+      ${t.k}::int, ${t.poolChunkIds}::uuid[],
+      ${t.questionCount}::int, ${t.hitCount}::int, ${t.storedHitCount}::int,
+      ${sql.json(t.results)}::jsonb
+    )`,
+  );
+  await sql`
+    with chunk as (${chunk}),
+    gone as (${gone})
+    insert into eval_model_trials
+      (source_chunk_id, document_embedding_id, baseline_model, trial_model, kind,
+       chunk_size, chunk_overlap, piece_count, k,
+       pool_chunk_ids, question_count, hit_count, stored_hit_count, results)
+    select ${chunkId}::uuid, chunk.document_embedding_id, v.*
+    from chunk,
+         (values ${rows.reduce((acc, r) => sql`${acc}, ${r}`)})
+           as v(baseline_model, trial_model, kind, chunk_size, chunk_overlap,
+                piece_count, k, pool_chunk_ids, question_count, hit_count,
+                stored_hit_count, results)
+    where (select count(*) from gone) >= 0
+  `;
+}
+
 export async function insertResults(rows: ResultInsert[]): Promise<void> {
   if (rows.length === 0) return;
+  await writeResults(rows);
+  // What labelsWithBaseline would now find (cut 6).
+  const key = baselineKey();
+  for (const r of rows) {
+    if ((r.isBaseline || r.retrievalState === "baseline") && r.labelId) {
+      scopeSet(`baseline:${key}:${r.labelId}`, true);
+    }
+  }
+}
+
+async function writeResults(rows: ResultInsert[]): Promise<void> {
   // Stamped on live and baseline rows alike (0057): the vector space a result
   // was measured in, so a later model or chunk-shape change can be told apart
   // from a same-space re-score.
@@ -2064,22 +2213,27 @@ export async function insertResults(rows: ResultInsert[]): Promise<void> {
     return;
   }
 
-  await sql.begin(async (tx) => {
-    for (const r of rows) {
-      await tx`
-        insert into eval_results
-          (eval_question_id, eval_label_id, k, hit, found_rank, retrieved_ids,
-           retrieved_scores, retrieval_state, screen_cutoffs, is_baseline,
-           baseline_key)
-        values
-          (${r.questionId}, ${r.labelId}, ${r.k}, ${r.hit}, ${r.foundRank},
-           ${r.retrievedIds}::uuid[], ${r.retrievedScores}::real[],
-           ${r.retrievalState},
-           ${r.screenCutoffs === null ? null : toJsonb(r.screenCutoffs)},
-           ${r.isBaseline ?? false}, ${key})
-      `;
-    }
-  });
+  // The batch: ONE multi-row insert, atomic on its own, so no transaction and
+  // no per-row round trip (cut 3, docs/autotune-press-latency-plan.md §9 — the
+  // finale's 29 rows were 29 statements plus a savepoint). Fragments rather
+  // than the values helper: the casts and the jsonb column need them.
+  const values = rows.map(
+    (r) => sql`(
+      ${r.questionId}, ${r.labelId}, ${r.k}, ${r.hit}, ${r.foundRank},
+      ${r.retrievedIds}::uuid[], ${r.retrievedScores}::real[],
+      ${r.retrievalState},
+      ${r.screenCutoffs === null ? null : toJsonb(r.screenCutoffs)},
+      ${r.isBaseline ?? false}, ${key}
+    )`,
+  );
+  const allRows = values.reduce((acc, row) => sql`${acc}, ${row}`);
+  await sql`
+    insert into eval_results
+      (eval_question_id, eval_label_id, k, hit, found_rank, retrieved_ids,
+       retrieved_scores, retrieval_state, screen_cutoffs, is_baseline,
+       baseline_key)
+    values ${allRows}
+  `;
 }
 
 // One question's latest stored result, reduced to what the post-autotune dirty
@@ -2162,16 +2316,35 @@ export async function latestResultsForScreening(
 // no overrides — the second is why an untuned config has a baseline for free.
 // Both must carry the CURRENT baseline_key: an older key measured a different
 // vector space.
-export async function labelsWithBaseline(labelIds: string[]): Promise<Set<string>> {
+//
+// A label that HAS a baseline is remembered per scope (cut 6,
+// docs/autotune-press-latency-plan.md §9); insertResults remembers the ones it
+// writes, so the confirm's second re-score of a question asks nothing. A miss
+// is not remembered, because this scope may write one next.
+export async function labelsWithBaseline(
+  labelIds: string[],
+): Promise<Set<string>> {
   if (labelIds.length === 0) return new Set();
+  const key = baselineKey();
+  const out = new Set<string>();
+  const missing: string[] = [];
+  for (const id of labelIds) {
+    if (scopePeek<true>(`baseline:${key}:${id}`)) out.add(id);
+    else missing.push(id);
+  }
+  if (missing.length === 0) return out;
   const rows = await sql<{ eval_label_id: string }[]>`
     select distinct eval_label_id
     from eval_results
-    where eval_label_id = any(${labelIds}::uuid[])
-      and baseline_key = ${baselineKey()}
+    where eval_label_id = any(${missing}::uuid[])
+      and baseline_key = ${key}
       and (is_baseline or retrieval_state = 'baseline')
   `;
-  return new Set(rows.map((r) => r.eval_label_id));
+  for (const r of rows) {
+    out.add(r.eval_label_id);
+    scopeSet(`baseline:${key}:${r.eval_label_id}`, true);
+  }
+  return out;
 }
 
 // Re-stamp each label's newest `fromState` result as scored-under `toState` —
@@ -2231,7 +2404,10 @@ export async function createRunSnapshot(args: {
 //
 // Returning the matched count rather than void lets the routes 404 on a
 // scoped-out id instead of reporting a success that changed nothing.
-export async function updateQuestion(id: string, text: string): Promise<boolean> {
+export async function updateQuestion(
+  id: string,
+  text: string,
+): Promise<boolean> {
   // The text changed, so every cached query vector for it (any model) is stale.
   // Drop them in the same transaction; they repopulate on the next score.
   return sql.begin(async (tx) => {
@@ -2301,7 +2477,9 @@ export async function deleteQuestion(
 // token spans can leave a gap (whole-chunk and uniform re-splits store NULL spans
 // = full coverage); for those we check the spans cover [0, tokenCount) without
 // holes. Both tables are tolerated missing so /eval keeps working pre-migration.
-async function listChunkOverrideInfo(table: string): Promise<ChunkOverrideInfo[]> {
+async function listChunkOverrideInfo(
+  table: string,
+): Promise<ChunkOverrideInfo[]> {
   const cfg = activeConfig();
   let pieces: {
     source_chunk_id: string;
@@ -2449,6 +2627,13 @@ async function activeDocIngestTimes(): Promise<number[]> {
 type EvalDetailRow = {
   question_id: string;
   question: string;
+  // Only the chunk-scoped read selects these (getChunkQuestions): the confirm
+  // re-scores the questions it just read, a QuestionToScore needs the label id
+  // the summary shape never carried, and whether the label already has a
+  // baseline row is what labelsWithBaseline would otherwise ask next. Absent
+  // from the summary's rows.
+  label_id?: string;
+  has_baseline?: boolean;
   source: string;
   difficulty: string | null;
   document_id: string;
@@ -2640,7 +2825,11 @@ function byDocumentOrder(a: FrozenDetailRow, b: FrozenDetailRow): number {
   // The tiebreak detailRows added — see its ORDER BY. Both are uuids, so a
   // code-point comparison here matches Postgres's uuid ordering; the collation
   // caveat that applies to file_name does not arise.
-  return a.question_id < b.question_id ? -1 : a.question_id > b.question_id ? 1 : 0;
+  return a.question_id < b.question_id
+    ? -1
+    : a.question_id > b.question_id
+      ? 1
+      : 0;
 }
 
 type DetailContext = {
@@ -2659,13 +2848,18 @@ type DetailContext = {
 function mapQuestionDetails(
   rows: EvalDetailRow[],
   ctx: DetailContext,
-): { questions: QuestionDetail[]; retrievalStale: number; editStaleIds: Set<string> } {
+): {
+  questions: QuestionDetail[];
+  retrievalStale: number;
+  editStaleIds: Set<string>;
+} {
   let retrievalStale = 0;
   const editStaleIds = new Set<string>();
   const questions: QuestionDetail[] = rows.map((r) => {
     // Edited after its last score -> the shown hit/miss is for the old text. Treat
     // as pending (it will be re-scored next run, see questionsNeedingScoring).
-    const editStale = r.scored_at !== null && r.updated_at.getTime() > r.scored_at.getTime();
+    const editStale =
+      r.scored_at !== null && r.updated_at.getTime() > r.scored_at.getTime();
     if (editStale) editStaleIds.add(r.question_id);
     // Retrieval-stale = scored under a DIFFERENT override state than today's
     // (0022 fingerprint), so a set-then-reverted change isn't stale. Legacy
@@ -2686,14 +2880,17 @@ function mapQuestionDetails(
     // Recompute the hit at the CURRENT recall_k from the stored found_rank (the
     // rank within the stored superset, A1) — so changing recall_k in Settings is
     // reflected without a re-score, as long as it's within the retrieved depth.
-    const hit = scored ? r.found_rank !== null && r.found_rank <= ctx.recallK : null;
+    const hit = scored
+      ? r.found_rank !== null && r.found_rank <= ctx.recallK
+      : null;
     // Same recompute-at-current-k treatment for MRR: 1/rank within mrr_k, 0 past it.
     const rr = scored ? reciprocalRank(r.found_rank, ctx.mrrK) : null;
     const countable = scored && !editStale;
     // Graded nDCG needs an ideal ranking AND a countable retrieval order;
     // otherwise it's ungraded (null) and the UI shows the grey placeholder.
     const ideal = ctx.truthOrders.get(r.question_id);
-    const qNdcg = countable && ideal ? ndcg(ideal, r.retrieved_ids ?? [], ctx.ndcgK) : null;
+    const qNdcg =
+      countable && ideal ? ndcg(ideal, r.retrieved_ids ?? [], ctx.ndcgK) : null;
     // The ground-truth chunk's cosine sim in the stored retrieval — found_rank is
     // 1-based into retrieved_scores. Null on a full miss or pre-0004 results.
     const storedSim =
@@ -2803,9 +3000,14 @@ function reduceMetrics(questions: QuestionDetail[]) {
 // Shares mapQuestionDetails with getSummary, so `stale`, `hit`, `rr` and `ndcg`
 // are computed identically — the keep/revert comparison puts a `before` from this
 // function against an `after` from it.
-export async function getChunkQuestions(
-  chunkId: string,
-): Promise<{ questions: QuestionDetail[]; criteria: EvalCriteria }> {
+export async function getChunkQuestions(chunkId: string): Promise<{
+  questions: QuestionDetail[];
+  criteria: EvalCriteria;
+  // question id → label id, for the confirm's re-score (phase 3 of
+  // docs/demo-retrieval-bank-plan.md): it used to look every question up again
+  // one statement at a time to learn a value this read already had.
+  labels: Map<string, string>;
+}> {
   const cfg = activeConfig();
 
   // These four reads have no data dependency on each other, and run sequentially
@@ -2815,17 +3017,19 @@ export async function getChunkQuestions(
   // Deliberately NOT hoisted to run scope: `criteria` and the table are constant
   // for a run, but the fingerprint is not — it changes as overrides land mid-run,
   // and a stale one silently mis-labels fresh results.
-  const [criteria, table, currentState, retrievalChangedAt] = await Promise.all([
-    getActiveCriteria(),
-    activeChunksTable(),
-    retrievalStateFingerprint(),
-    getRetrievalChangedAt(),
-  ]);
+  const [criteria, table, currentState, retrievalChangedAt] = await Promise.all(
+    [
+      getActiveCriteria(),
+      activeChunksTable(),
+      retrievalStateFingerprint(),
+      getRetrievalChangedAt(),
+    ],
+  );
   const recallK = effectiveK(criteria.recall, cfg.topK);
   const mrrK = effectiveK(criteria.mrr, cfg.topK);
   const ndcgK = effectiveK(criteria.ndcg, cfg.topK);
 
-  if (!table) return { questions: [], criteria };
+  if (!table) return { questions: [], criteria, labels: new Map() };
 
   // Same query as getSummary's detail select, with the chunk filter pushed into
   // active_labels so `latest` only scans this chunk's results.
@@ -2849,7 +3053,13 @@ export async function getChunkQuestions(
     )
     select
       q.id as question_id, q.question, q.source, q.difficulty, q.document_id,
-      q.updated_at, d.file_name, al.source_chunk_id,
+      q.updated_at, d.file_name, al.source_chunk_id, al.label_id,
+      exists (
+        select 1 from eval_results b
+        where b.eval_label_id = al.label_id
+          and b.baseline_key = ${baselineKey()}
+          and (b.is_baseline or b.retrieval_state = 'baseline')
+      ) as has_baseline,
       c.position as expected_position,
       lt.hit, lt.found_rank, lt.retrieved_ids, lt.retrieved_scores,
       lt.scored_at, lt.retrieval_state,
@@ -2875,7 +3085,16 @@ export async function getChunkQuestions(
     ndcgK,
     truthOrders,
   });
-  return { questions, criteria };
+  const labels = new Map(detail.map((r) => [r.question_id, r.label_id!]));
+  // What labelsWithBaseline would find for these labels, remembered the way it
+  // remembers its own hits (phase 3 of docs/demo-retrieval-bank-plan.md): the
+  // confirm re-scores exactly these questions next, and used to spend one
+  // statement per chunk learning this. Hits only — a miss may be written next.
+  const key = baselineKey();
+  for (const r of detail) {
+    if (r.has_baseline) scopeSet(`baseline:${key}:${r.label_id}`, true);
+  }
+  return { questions, criteria, labels };
 }
 
 export async function getSummary(): Promise<EvalSummary> {
@@ -2900,7 +3119,7 @@ export async function getSummary(): Promise<EvalSummary> {
   const [bankedIdeals, bankedLlm, bankedTuning] = await Promise.all([
     readIdeals(),
     readLlmRankings(),
-    readTuning(),
+    hasTuning(),
   ]);
   const demoBlocked = await demoBlockedSentences(
     EVAL_DEMO_ACTIONS.filter(
@@ -2912,7 +3131,7 @@ export async function getSummary(): Promise<EvalSummary> {
   );
   // Only when the search really will be replayed: a build without the shelf
   // refuses instead, and the sentence above is what that visitor reads.
-  const demoPublishedSearch = bankedTuning === null ? null : PUBLISHED_SEARCH_NOTE;
+  const demoPublishedSearch = bankedTuning ? PUBLISHED_SEARCH_NOTE : null;
   const recallK = effectiveK(criteria.recall, cfg.topK);
   const mrrK = effectiveK(criteria.mrr, cfg.topK);
   const ndcgK = effectiveK(criteria.ndcg, cfg.topK);
@@ -3097,17 +3316,26 @@ export async function getSummary(): Promise<EvalSummary> {
   // or cleared) were produced by a retrieval that no longer exists. They still
   // COUNT toward the rates (badged stale, refreshed next run) — only edit-stale
   // rows are excluded, since their score belongs to the question's OLD text.
-  const { questions, retrievalStale, editStaleIds } = mapQuestionDetails(detail, {
-    currentState,
-    retrievalChangedAt,
-    recallK,
-    mrrK,
-    ndcgK,
-    truthOrders,
-  });
+  const { questions, retrievalStale, editStaleIds } = mapQuestionDetails(
+    detail,
+    {
+      currentState,
+      retrievalChangedAt,
+      recallK,
+      mrrK,
+      ndcgK,
+      truthOrders,
+    },
+  );
 
-  const { scoredRows, hits, recall, mrr, ndcg: ndcgValue, ndcgCovered } =
-    reduceMetrics(questions);
+  const {
+    scoredRows,
+    hits,
+    recall,
+    mrr,
+    ndcg: ndcgValue,
+    ndcgCovered,
+  } = reduceMetrics(questions);
 
   // What the per-chunk tuning has bought. Only when overrides exist: without
   // them live IS baseline and the delta is zero by construction, so the one
@@ -3118,27 +3346,28 @@ export async function getSummary(): Promise<EvalSummary> {
     // currentState 'baseline' is the fingerprint these rows were genuinely
     // scored under, so none is mislabelled stale; retrievalChangedAt is not
     // consulted for them for the same reason.
-    const { questions: baseQuestions } = mapQuestionDetails(
-      baseRows,
-      {
-        currentState: "baseline",
-        retrievalChangedAt: null,
-        recallK,
-        mrrK,
-        ndcgK,
-        truthOrders,
-      },
-    );
+    const { questions: baseQuestions } = mapQuestionDetails(baseRows, {
+      currentState: "baseline",
+      retrievalChangedAt: null,
+      recallK,
+      mrrK,
+      ndcgK,
+      truthOrders,
+    });
     // BOTH SIDES OVER THE SAME QUESTIONS — the intersection of what counts
     // live and what counts on the baseline. A delta between differently sized
     // question sets is meaningless, and the UI reports this size.
     const baseCountable = new Set(
       reduceMetrics(baseQuestions).scoredRows.map((q) => q.questionId),
     );
-    const liveSubset = scoredRows.filter((q) => baseCountable.has(q.questionId));
+    const liveSubset = scoredRows.filter((q) =>
+      baseCountable.has(q.questionId),
+    );
     const subsetIds = new Set(liveSubset.map((q) => q.questionId));
     if (subsetIds.size > 0) {
-      const base = reduceMetrics(baseQuestions.filter((q) => subsetIds.has(q.questionId)));
+      const base = reduceMetrics(
+        baseQuestions.filter((q) => subsetIds.has(q.questionId)),
+      );
       const live = reduceMetrics(liveSubset);
       baseline = {
         questions: subsetIds.size,
@@ -3161,7 +3390,9 @@ export async function getSummary(): Promise<EvalSummary> {
   let ndcgStaleRescore = false;
   let ndcgStaleRebuild = false;
   const stuckTruths = new Map<string, string>(); // chunk -> kind label (deduped)
-  const gradedQuestions = questions.filter((q) => q.ndcg !== null && !q.ignored);
+  const gradedQuestions = questions.filter(
+    (q) => q.ndcg !== null && !q.ignored,
+  );
   if (gradedQuestions.length > 0) {
     const gradedIds = gradedQuestions.map((q) => q.questionId);
     const [truthBuiltAt, truthKinds, docTimes] = await Promise.all([
@@ -3174,7 +3405,8 @@ export async function getSummary(): Promise<EvalSummary> {
       let earliestInput = Infinity;
       for (const q of gradedQuestions) {
         const builtAt = truthBuiltAt.get(q.questionId) ?? null;
-        if (q.scoredAt !== null && newestDoc > q.scoredAt) ndcgStaleRescore = true;
+        if (q.scoredAt !== null && newestDoc > q.scoredAt)
+          ndcgStaleRescore = true;
         if (builtAt !== null && newestDoc > builtAt) {
           // Ideal predates a newer document. An aggregate ideal the bulk rebuild
           // refreshes; a manual/LLM truth it leaves alone, so name that chunk as
@@ -3195,7 +3427,10 @@ export async function getSummary(): Promise<EvalSummary> {
       ndcgStaleDocs = docTimes.filter((t) => t > earliestInput).length;
     }
   }
-  const ndcgStuckTruths = [...stuckTruths].map(([chunk, kind]) => ({ chunk, kind }));
+  const ndcgStuckTruths = [...stuckTruths].map(([chunk, kind]) => ({
+    chunk,
+    kind,
+  }));
 
   // Questions "Score pending" would score: never scored, or edited since.
   // Matches questionsNeedingScoring() — no extra query needed.
@@ -3217,7 +3452,12 @@ export async function getSummary(): Promise<EvalSummary> {
   for (const q of questions) {
     let d = byDoc.get(q.documentId);
     if (!d) {
-      d = { documentId: q.documentId, fileName: q.fileName, scored: 0, hits: 0 };
+      d = {
+        documentId: q.documentId,
+        fileName: q.fileName,
+        scored: 0,
+        hits: 0,
+      };
       byDoc.set(q.documentId, d);
     }
     // Same inclusion rule as the headline rates: retrieval-stale counts.
@@ -3279,7 +3519,10 @@ export async function getSummary(): Promise<EvalSummary> {
     // them all) — hide the history once nothing is actually stale.
     retrievalChanges:
       retrievalStale > 0
-        ? changeLog.map((c) => ({ description: c.description, at: c.at.getTime() }))
+        ? changeLog.map((c) => ({
+            description: c.description,
+            at: c.at.getTime(),
+          }))
         : [],
     chunkCount: chunkRows.length,
     chunks: chunkRows.map((r) => ({

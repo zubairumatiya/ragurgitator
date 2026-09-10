@@ -5,7 +5,7 @@
 // activeConfig()), like evalStore.ts / clusterStore.ts. A ranking is tied to the
 // question's active-config embedding run (document_embedding_id), so changing the
 // config makes a question's rankings stop matching and it reads ungraded again.
-import { sql } from "@/lib/db";
+import { scopeForget, scopePeek, scopeSet, sql, withEfSearch } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { retrievalStateFingerprint } from "@/lib/rag/overrideStore";
 import { EF_SEARCH, vectorLiteral } from "@/lib/rag/vectorStore";
@@ -26,7 +26,12 @@ export type StoredRanking = {
 // truncation is invisible on screen and worth ~10x on the wire.
 export const PREVIEW_TEXT_CHARS = 200;
 
-type ChunkTextRow = { id: string; file_name: string; position: number | null; text: string };
+type ChunkTextRow = {
+  id: string;
+  file_name: string;
+  position: number | null;
+  text: string;
+};
 
 export type PoolCandidate = {
   chunkId: string;
@@ -110,17 +115,18 @@ export async function poolNearest(
     throw new Error(`poolNearest: invalid ef_search ${ef} for limit ${limit}.`);
   }
 
-  const rows = await sql.begin(async (tx) => {
-    await tx.unsafe(`set local hnsw.ef_search = ${ef}`);
-    return tx<
-      {
-        id: string;
-        file_name: string;
-        position: number | null;
-        text: string;
-        similarity: number;
-      }[]
-    >`
+  const rows = await withEfSearch(
+    ef,
+    (tx) =>
+      tx<
+        {
+          id: string;
+          file_name: string;
+          position: number | null;
+          text: string;
+          similarity: number;
+        }[]
+      >`
       -- Whole text on purpose: ranking.ts embeds this pool under every model to
       -- build the aggregate, so left(c.text, n) here would change the embeddings
       -- and therefore the ideal ranking. Same rule as evalStore.getChunksByIds.
@@ -131,8 +137,8 @@ export async function poolNearest(
       where c.config_id = ${activeConfig().id}
       order by c.embedding <=> ${qlit}::vector
       limit ${limit}
-    `;
-  });
+    `,
+  );
   return rows.map((r) => ({
     chunkId: r.id,
     fileName: r.file_name,
@@ -152,7 +158,9 @@ export async function poolNearest(
 export async function getRankingChunks(
   ids: string[],
   opts: { fullText?: boolean } = {},
-): Promise<Map<string, { fileName: string; position: number | null; text: string }>> {
+): Promise<
+  Map<string, { fileName: string; position: number | null; text: string }>
+> {
   if (ids.length === 0) return new Map();
   const table = await activeChunksTable();
   if (!table) return new Map();
@@ -174,7 +182,10 @@ export async function getRankingChunks(
           and de.config_id = ${activeConfig().id}
       `;
   return new Map(
-    rows.map((r) => [r.id, { fileName: r.file_name, position: r.position, text: r.text }]),
+    rows.map((r) => [
+      r.id,
+      { fileName: r.file_name, position: r.position, text: r.text },
+    ]),
   );
 }
 
@@ -205,7 +216,9 @@ export async function getRetrievedOrder(questionId: string): Promise<string[]> {
 }
 
 // Every stored ranking for a question under the active config, newest first.
-export async function listRankings(questionId: string): Promise<StoredRanking[]> {
+export async function listRankings(
+  questionId: string,
+): Promise<StoredRanking[]> {
   const rows = await sql<
     {
       id: string;
@@ -300,6 +313,7 @@ export async function upsertRanking(args: {
                     created_at = now()
     returning id
   `;
+  scopeForget("truth:");
   return row.id;
 }
 
@@ -324,6 +338,7 @@ export async function setTruth(
         and document_embedding_id = ${documentEmbeddingId}
       returning id
     `;
+    scopeForget("truth:");
     return rows.length > 0;
   });
 }
@@ -331,19 +346,42 @@ export async function setTruth(
 // Ideal (ground-truth) order for each of the given questions under the active
 // config, as questionId -> chunkIds. Questions without a truth ranking are
 // simply absent. Backs the graded nDCG in evalStore.getSummary.
+//
+// Once per scope per question (cut 6, docs/autotune-press-latency-plan.md
+// §9), ABSENCE included — a question with no truth is remembered as null. The
+// three writers above forget the lot. A ⚙ press asked this three times per
+// chunk.
 export async function getTruthOrder(
   questionIds: string[],
 ): Promise<Map<string, string[]>> {
   if (questionIds.length === 0) return new Map();
+  const cfg = activeConfig();
+  const out = new Map<string, string[]>();
+  const missing: string[] = [];
+  for (const id of questionIds) {
+    const hit = scopePeek<string[] | null>(`truth:${cfg.id}:${id}`);
+    if (hit === undefined) missing.push(id);
+    else {
+      const v = await hit;
+      if (v !== null) out.set(id, v);
+    }
+  }
+  if (missing.length === 0) return out;
   const rows = await sql<{ eval_question_id: string; chunk_ids: string[] }[]>`
     select r.eval_question_id, r.chunk_ids
     from eval_rankings r
     join document_embeddings de on de.id = r.document_embedding_id
     where r.is_truth
-      and r.eval_question_id = any(${questionIds}::uuid[])
-      and de.config_id = ${activeConfig().id}
+      and r.eval_question_id = any(${missing}::uuid[])
+      and de.config_id = ${cfg.id}
   `;
-  return new Map(rows.map((r) => [r.eval_question_id, r.chunk_ids]));
+  const found = new Map(rows.map((r) => [r.eval_question_id, r.chunk_ids]));
+  for (const id of missing) {
+    const v = found.get(id) ?? null;
+    if (v !== null) out.set(id, v);
+    scopeSet(`truth:${cfg.id}:${id}`, v);
+  }
+  return out;
 }
 
 // The KIND of each question's official (is_truth) ranking, active-config scoped.
@@ -376,5 +414,6 @@ export async function deleteRanking(id: string): Promise<boolean> {
       and r.id = ${id}
     returning r.id
   `;
+  scopeForget("truth:");
   return rows.length > 0;
 }

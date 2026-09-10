@@ -4,7 +4,7 @@
 // retrieval is hot and doesn't need them, while only the eval flows and the Settings
 // UI do. `k` is stored nullable: null means "fall back to the config's top_k".
 import { activeUserId } from "@/lib/auth/userScope";
-import { fragment, sql } from "@/lib/db";
+import { fragment, scopeForget, scopeMemo, sql } from "@/lib/db";
 import { activeConfig, isUuid } from "@/lib/rag/activeConfig";
 import type { Difficulty } from "@/lib/rag/eval";
 import type { HoldoutSettings } from "@/lib/rag/holdout";
@@ -101,7 +101,11 @@ const DIFFICULTIES: readonly Difficulty[] = ["easy", "medium", "hard"];
 
 function toCriteria(row: CriteriaRow): EvalCriteria {
   return {
-    recall: { enabled: row.recall_enabled, k: row.recall_k, minRate: row.recall_min_rate },
+    recall: {
+      enabled: row.recall_enabled,
+      k: row.recall_k,
+      minRate: row.recall_min_rate,
+    },
     mrr: { enabled: row.mrr_enabled, k: row.mrr_k, minRate: row.mrr_min_rate },
     ndcg: {
       enabled: row.ndcg_enabled,
@@ -117,7 +121,8 @@ function toCriteria(row: CriteriaRow): EvalCriteria {
       // auto_best is the default (0071), so an unrecognised value falls that way
       // rather than into the mode that cannot run in the background.
       apply: row.autotune_apply === "choose" ? "choose" : "auto_best",
-      search: row.autotune_search === "exhaustive" ? "exhaustive" : "first_success",
+      search:
+        row.autotune_search === "exhaustive" ? "exhaustive" : "first_success",
       stopEarly: row.autotune_stop_early,
       keepBest: row.autotune_keep_best,
       chunkScope: row.autotune_chunk_scope,
@@ -148,14 +153,20 @@ const COLUMNS = fragment`
 `;
 
 // Criteria for a specific config; null when the id is malformed / missing.
-export async function getCriteria(configId: string): Promise<EvalCriteria | null> {
+// Once per scope (scopeMemo; updateCriteria forgets it): the eval engine reads
+// this row per scoring call and per chunk read — 130 times in one ⚙ press.
+export async function getCriteria(
+  configId: string,
+): Promise<EvalCriteria | null> {
   if (!isUuid(configId)) return null;
-  const rows = await sql<CriteriaRow[]>`
-    select ${COLUMNS} from configs
-    where id = ${configId} and user_id = ${activeUserId()}
-    limit 1
-  `;
-  return rows.length > 0 ? toCriteria(rows[0]) : null;
+  return scopeMemo(`criteria:${configId}`, async () => {
+    const rows = await sql<CriteriaRow[]>`
+      select ${COLUMNS} from configs
+      where id = ${configId} and user_id = ${activeUserId()}
+      limit 1
+    `;
+    return rows.length > 0 ? toCriteria(rows[0]) : null;
+  });
 }
 
 // Criteria for the active config (eval engine). Throws if the row vanished.
@@ -237,14 +248,20 @@ export async function updateCriteria(
   // A live-pool change reshapes fusion ranks for every query — stamp + log it
   // so the stale badge can explain (no-op while the config has no overrides).
   if (next.retrieval.fusionPool !== cur.retrieval.fusionPool) {
-    await noteFusionPoolChange(cur.retrieval.fusionPool, next.retrieval.fusionPool);
+    await noteFusionPoolChange(
+      cur.retrieval.fusionPool,
+      next.retrieval.fusionPool,
+    );
   }
+  scopeForget("criteria:");
   return next;
 }
 
 // Add one difficulty to the active config's mix (idempotent) — backs the
 // "Bulk actions → Add question → {easy|medium|hard}" corpus-wide generate.
-export async function addDifficulty(difficulty: Difficulty): Promise<EvalCriteria | null> {
+export async function addDifficulty(
+  difficulty: Difficulty,
+): Promise<EvalCriteria | null> {
   const cur = await getActiveCriteria();
   if (cur.difficulties.includes(difficulty)) return cur;
   return updateCriteria(activeConfig().id, {

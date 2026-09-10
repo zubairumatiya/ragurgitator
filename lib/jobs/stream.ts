@@ -37,9 +37,16 @@
 // another slice is coming" — so no step needs a new concept, and none of them
 // writes a stop reason for it.
 import { activeUser, withUser } from "@/lib/auth/userScope";
+import { stage } from "@/lib/autotuneTiming";
 import { runOutsideUserTransaction } from "@/lib/db";
 import { recordTiming } from "@/lib/jobs/timing";
-import type { JobKind, JobStep, JobProgress, StopReason, StopSignal } from "@/lib/jobs/types";
+import type {
+  JobKind,
+  JobStep,
+  JobProgress,
+  StopReason,
+  StopSignal,
+} from "@/lib/jobs/types";
 
 // How long one streamed slice may run before handing back to commit. Measured per
 // slice, not per run — an expired run-wide deadline would make every step.run()
@@ -80,7 +87,9 @@ export async function runStepStreamed<S, C, R, E>(
   const inOwnTransaction = <T>(fn: () => Promise<T>): Promise<T> =>
     runOutsideUserTransaction(() => withUser(user, fn));
 
-  const { cursor: start } = await inOwnTransaction(() => step.plan(scope));
+  const { cursor: start } = await stage("plan", () =>
+    inOwnTransaction(() => step.plan(scope)),
+  );
   let cursor = start;
   let doneUnits = 0;
   let done = false;
@@ -102,18 +111,24 @@ export async function runStepStreamed<S, C, R, E>(
         // which is the step contract's word for "hand back, I will call you again"
         // — and the reason no step writes a stop reason for one.
         reason: (): StopReason | null =>
-          shouldStop() ? (shouldStop.reason?.() ?? "cancel") : yielding() ? "deadline" : null,
+          shouldStop()
+            ? (shouldStop.reason?.() ?? "cancel")
+            : yielding()
+              ? "deadline"
+              : null,
       },
     );
 
-    const slice = await inOwnTransaction(() =>
-      step.run(
-        scope,
-        cursor,
-        (progress: JobProgress<E>) => {
-          if (progress.event !== undefined) emit(progress.event);
-        },
-        sliceStop,
+    const slice = await stage("slice", () =>
+      inOwnTransaction(() =>
+        step.run(
+          scope,
+          cursor,
+          (progress: JobProgress<E>) => {
+            if (progress.event !== undefined) emit(progress.event);
+          },
+          sliceStop,
+        ),
       ),
     );
     cursor = slice.cursor;
@@ -134,7 +149,11 @@ export async function runStepStreamed<S, C, R, E>(
   // has, a cancelled run reaches the end of its tail and its numbers are real.
   const finalize = step.finalize;
   const result =
-    !done || !finalize ? null : await inOwnTransaction(() => finalize(scope, cursor));
+    !done || !finalize
+      ? null
+      : await stage("finalize", () =>
+          inOwnTransaction(() => finalize(scope, cursor)),
+        );
   // The streamed path is where the estimates come from in practice: it is the
   // button people press before they have ever run a background job, and its
   // timings are what decide whether the offer is made at all.
@@ -144,6 +163,8 @@ export async function runStepStreamed<S, C, R, E>(
   // the entire run, and an idle transaction is exactly what a server-side
   // idle_in_transaction timeout reaps. Leaving the last write on it would turn a
   // long, fully committed run into an error at the finish line.
-  await inOwnTransaction(() => recordTiming(kind, doneUnits, Date.now() - t0));
+  await stage("record-timing", () =>
+    inOwnTransaction(() => recordTiming(kind, doneUnits, Date.now() - t0)),
+  );
   return { doneUnits, cancelled, result };
 }

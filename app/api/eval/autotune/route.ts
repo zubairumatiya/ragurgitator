@@ -10,6 +10,13 @@
 // also runs as a background job (POST /api/jobs), sliced across invocations — one
 // implementation, two drivers, so a 66-minute sweep is no longer one transaction
 // (docs/autotune-slicing-plan.md).
+import {
+  reportTimings,
+  resetTimings,
+  sampleRtt,
+  stage,
+} from "@/lib/autotuneTiming";
+import { sql } from "@/lib/db";
 import { streamError } from "@/lib/http/missingKeyServer";
 import { ndjsonStream } from "@/lib/http/ndjson";
 import { withRequestConfig } from "@/lib/http/configScope";
@@ -35,12 +42,25 @@ export async function POST(request: Request) {
       // the bound has to come from somewhere — see STREAM_BUDGET_MS. The reason is
       // what lets the step tell it apart from a cancel and report it honestly.
       const overBudget = () => performance.now() - t0 > STREAM_BUDGET_MS;
-      const stop: StopSignal = Object.assign(() => shouldStop() || overBudget(), {
-        reason: (): StopReason | null =>
-          shouldStop() ? "cancel" : overBudget() ? "budget" : null,
-      });
+      const stop: StopSignal = Object.assign(
+        () => shouldStop() || overBudget(),
+        {
+          reason: (): StopReason | null =>
+            shouldStop() ? "cancel" : overBudget() ? "budget" : null,
+        },
+      );
       try {
-        const run = await runStepStreamed("autotune", autotuneStep, {}, send, stop);
+        // Phase-1 instrument (docs/autotune-press-latency-plan.md): the RTT
+        // sample runs on this producer's own pinned connection, before the
+        // press so it is not in the table; every function here is a no-op
+        // without AUTOTUNE_TIMING=1.
+        resetTimings();
+        await sampleRtt(() => sql`select 1`);
+        const pressStart = performance.now();
+        const run = await stage("press", () =>
+          runStepStreamed("autotune", autotuneStep, {}, send, stop),
+        );
+        reportTimings(performance.now() - pressStart);
         // Cancelling autotune stops the SEARCH, not the accounting — the step
         // declares mustFinish once it leaves that phase — so a cancelled run still
         // reaches the end and its numbers are real. The fallback covers the one

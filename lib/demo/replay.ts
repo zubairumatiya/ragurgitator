@@ -44,8 +44,11 @@ import {
   type ReplayMatrix,
   type ReplayProgress,
   type ReplayRankings,
+  type ReplayRetrieval,
   type ReplayShadowVerdict,
   type ReplayTuning,
+  chooseTuningKey,
+  RETRIEVAL_KIND,
   TUNING_KEY,
 } from "@/lib/demo/replayCore";
 
@@ -120,9 +123,57 @@ export async function writeLlmRankings(userId: string, rankings: ReplayRankings,
 // overrides for the board, with the model trials that go with them. Written on
 // the MASTER before the clone, on writeIdeals' terms — every entry names a chunk,
 // and clone step 5j is what rewrites those ids into a destination's space.
-export async function writeTuning(userId: string, tuning: ReplayTuning, db: Writer = sql): Promise<void> {
-  await put(db, userId, "tuning", TUNING_KEY, tuning);
+//
+// `key` names the bank (docs/demo-voyage-tuning-plan.md §3.2): one row per
+// difficulty set the guest can hold, or TUNING_KEY for a build that banks the
+// publish config's own overrides the pre-plan way.
+export async function writeTuning(
+  userId: string,
+  tuning: ReplayTuning,
+  db: Writer = sql,
+  key: string = TUNING_KEY,
+): Promise<void> {
+  await put(db, userId, "tuning", key, tuning);
   forgetTuning(userId);
+}
+
+// Drop every tuning bank this publish did not write. `put` replaces by key, so
+// without this a publish that moved from the legacy key to the set keys — or
+// from three sets to two — would leave the old rows on the master for the clone
+// to carry into every guest (~500 kB each) where nothing would ever read them.
+export async function pruneTuning(userId: string, keep: string[], db: Writer = sql): Promise<void> {
+  await db`
+    delete from demo_replay
+     where user_id = ${userId} and kind = 'tuning' and key <> all(${keep}::text[])
+  `;
+  forgetTuning(userId);
+}
+
+// The retrieval the demo's re-scores replay (docs/demo-retrieval-bank-plan.md):
+// one row per portable retrieval key, holding the ranked lists the publish's
+// walk computed under that override state. Written on the SEED by the publish
+// walk, AFTER the clone that built the seed, in text-hash form — the walk runs
+// against throwaway guests of the seed, and a hash names nothing, so where it
+// was recorded does not matter. Clone step 5l rewrites the hashes into a guest's
+// ids on the hop that lands them there.
+export async function writeRetrieval(
+  userId: string,
+  key: string,
+  bank: ReplayRetrieval,
+  db: Writer = sql,
+): Promise<void> {
+  await put(db, userId, RETRIEVAL_KIND, key, bank);
+  forgetRetrieval(userId);
+}
+
+// Drop every retrieval bank this walk did not write, on pruneTuning's terms: a
+// re-walk that reaches fewer states must not leave the last walk's under them.
+export async function pruneRetrieval(userId: string, keep: string[], db: Writer = sql): Promise<void> {
+  await db`
+    delete from demo_replay
+     where user_id = ${userId} and kind = ${RETRIEVAL_KIND} and key <> all(${keep}::text[])
+  `;
+  forgetRetrieval(userId);
 }
 
 // The guest's progress, written at clone time so their first page load has a
@@ -153,6 +204,7 @@ export async function clearReplay(userId: string, db: Writer = sql): Promise<voi
   forgetBoard(userId);
   forgetRankings(userId);
   forgetTuning(userId);
+  forgetRetrieval(userId);
 }
 
 // --- the read, and the memo in front of it ----------------------------------
@@ -304,29 +356,117 @@ export async function readShadowVerdicts(): Promise<Map<string, ReplayShadowVerd
 // cases is the ordinary path: a real search for a real account, and the demo
 // gate's refusal for a guest.
 //
+// WHICH BANK: `difficulties` is a thunk for the difficulties on the guest's
+// board, and it is a thunk rather than a value so a real account's run pays
+// nothing for it — the guest check comes first and the thunk is never called
+// past a null. chooseTuningKey (lib/demo/replayCore) turns those difficulties
+// and the keys the shelf holds into one bank; the keys are read first (a
+// handful of short strings) so only the chosen payload is loaded.
+//
 // A MEMO OF ITS OWN rather than a share of the rankings', because this is the
 // heaviest payload in the store (~425 kB of vectors) and the rarest read — once
 // per press of one button, against the rankings' every-lap. Holding one is still
 // worth it: the step reads it once per SLICE, and a sliced background autotune
-// re-enters this function every time it resumes.
+// re-enters this function every time it resumes. KEYED BY (user, bank): a
+// second press under the full-set key must not be served the one-difficulty
+// bank out of memory.
 const tuningMemo = new Map<string, ReplayTuning>();
 
+const tuningMemoKey = (userId: string, key: string) => `${userId}\n${key}`;
+
 export function forgetTuning(userId?: string): void {
-  if (userId === undefined) tuningMemo.clear();
-  else tuningMemo.delete(userId);
+  if (userId === undefined) {
+    tuningMemo.clear();
+    return;
+  }
+  for (const k of [...tuningMemo.keys()]) {
+    if (k.startsWith(`${userId}\n`)) tuningMemo.delete(k);
+  }
 }
 
-export async function readTuning(): Promise<ReplayTuning | null> {
+export async function readTuning(
+  difficulties: () => Promise<readonly string[]> = async () => [],
+): Promise<ReplayTuning | null> {
   if (!(await isGuest())) return null;
   const userId = activeUserId();
-  const memoed = tuningMemo.get(userId);
+  const keys = await withoutStore(sql<{ key: string }[]>`
+    select key from demo_replay where user_id = ${userId} and kind = 'tuning'
+  `.then((rows) => rows.map((r) => r.key)));
+  if (!keys || keys.length === 0) return null;
+  const present = await difficulties();
+  const key = chooseTuningKey(present, keys);
+  if (key === null) return null;
+  console.log(
+    `[rag:demo] tuning bank "${key}" for a board of {${[...new Set(present)].sort().join(", ")}}` +
+      ` (shelf: ${keys.sort().join(", ")})`,
+  );
+  const memoed = tuningMemo.get(tuningMemoKey(userId, key));
   if (memoed) return memoed;
   const row = await withoutStore(sql<{ payload: ReplayTuning }[]>`
     select payload from demo_replay
-     where user_id = ${userId} and kind = 'tuning' and key = ${TUNING_KEY}
+     where user_id = ${userId} and kind = 'tuning' and key = ${key}
   `.then((rows) => rows[0] ?? null));
   if (!row) return null;
   if (tuningMemo.size >= MEMO_MAX) tuningMemo.delete(tuningMemo.keys().next().value as string);
-  tuningMemo.set(userId, row.payload);
+  tuningMemo.set(tuningMemoKey(userId, key), row.payload);
+  return row.payload;
+}
+
+// "IS THE SHELF STOCKED" — the read getSummary makes on every Eval lap to decide
+// whether ⚙ Auto tune renders blocked. Any tuning row at all, whatever its key:
+// which bank a press would get is the step's question (readTuning), and a
+// summary that loaded ~425 kB of vectors per lap to answer a yes/no would be
+// exactly the egress this store exists to avoid. Same null-for-a-real-account
+// rule as every reader above, so the gate it feeds still fails closed.
+export async function hasTuning(): Promise<boolean> {
+  if (!(await isGuest())) return false;
+  const userId = activeUserId();
+  const rows = await withoutStore(sql<{ one: number }[]>`
+    select 1 as one from demo_replay where user_id = ${userId} and kind = 'tuning' limit 1
+  `);
+  return (rows?.length ?? 0) > 0;
+}
+
+// THE BANKED RETRIEVAL for one portable key, or null for a real account AND for
+// a guest whose build banked nothing under that key — the same deliberate null
+// every reader above returns, because the caller's job in both cases is the
+// ordinary path: a real retrieval. That is also what makes this reader safe to
+// call unconditionally from scoreQuestions, which is the one place every
+// retrieval the demo pays for goes through (docs/demo-retrieval-bank-plan.md
+// §3.3): a real account's re-score pays one memoed isGuest read and nothing
+// else, and is otherwise byte-for-byte what it was.
+//
+// MEMOED BY (user, key), on the tuning memo's terms — a press reads the same
+// key ~40 times across its confirms, and the bank has no writer in any request
+// path. The `key` argument is what stops a memo hit under the wrong state: a
+// press installs an override, the portable key changes, and the next read is a
+// different entry. A miss is still not cached (the clone stocks a guest's shelf
+// in this process), and a MISSING key is a legitimate, frequent miss: every
+// off-path state a guest reaches has none, and computes.
+const retrievalMemo = new Map<string, ReplayRetrieval>();
+
+export function forgetRetrieval(userId?: string): void {
+  if (userId === undefined) {
+    retrievalMemo.clear();
+    return;
+  }
+  for (const k of [...retrievalMemo.keys()]) {
+    if (k.startsWith(`${userId}\n`)) retrievalMemo.delete(k);
+  }
+}
+
+export async function readRetrievalBank(key: string): Promise<ReplayRetrieval | null> {
+  if (!(await isGuest())) return null;
+  const userId = activeUserId();
+  const memoKey = `${userId}\n${key}`;
+  const memoed = retrievalMemo.get(memoKey);
+  if (memoed) return memoed;
+  const row = await withoutStore(sql<{ payload: ReplayRetrieval }[]>`
+    select payload from demo_replay
+     where user_id = ${userId} and kind = ${RETRIEVAL_KIND} and key = ${key}
+  `.then((rows) => rows[0] ?? null));
+  if (!row) return null;
+  if (retrievalMemo.size >= MEMO_MAX) retrievalMemo.delete(retrievalMemo.keys().next().value as string);
+  retrievalMemo.set(memoKey, row.payload);
   return row.payload;
 }

@@ -123,7 +123,13 @@ export async function insertAutotuneRun(
   const h = header.holdout;
   // Outside the transaction on purpose: it is a read over OTHER runs' rows, and
   // the answer cannot change by anything happening inside this one.
-  const contaminated = h === null ? null : await holdoutContaminated(runId, h.rows.map((r) => r.questionId));
+  const contaminated =
+    h === null
+      ? null
+      : await holdoutContaminated(
+          runId,
+          h.rows.map((r) => r.questionId),
+        );
   return sql.begin(async (tx) => {
     await tx`delete from autotune_runs where id = ${runId} and config_id = ${cfg.id}`;
     const [run] = await tx<{ id: string }[]>`
@@ -161,16 +167,24 @@ export async function insertAutotuneRun(
          ${h?.before.holdout.ndcg ?? null},   ${h?.after.holdout.ndcg ?? null})
       returning id
     `;
-    for (const o of outcomes) {
+    // ONE multi-row insert (cut 3, docs/autotune-press-latency-plan.md §9): a
+    // row per statement was 28 round trips on the pinned connection. Fragments
+    // rather than the values helper, for the nullable columns.
+    if (outcomes.length > 0) {
+      const rows = outcomes.map(
+        (o) => tx`(
+          ${run.id}, ${o.questionId}, ${o.sourceChunkId}, ${o.metric},
+          ${o.beforeValue}, ${o.beforeRank}, ${o.afterValue}, ${o.afterRank},
+          ${o.overrideKind}, ${o.overrideModel}, ${o.overrideSize}
+        )`,
+      );
+      const allRows = rows.reduce((acc, row) => tx`${acc}, ${row}`);
       await tx`
         insert into autotune_question_outcomes
           (autotune_run_id, eval_question_id, source_chunk_id, metric,
            before_value, before_rank, after_value, after_rank,
            override_kind, override_model, override_size)
-        values
-          (${run.id}, ${o.questionId}, ${o.sourceChunkId}, ${o.metric},
-           ${o.beforeValue}, ${o.beforeRank}, ${o.afterValue}, ${o.afterRank},
-           ${o.overrideKind}, ${o.overrideModel}, ${o.overrideSize})
+        values ${allRows}
       `;
     }
     // The durable snapshot. The delete above cascades to this table, so a
@@ -267,7 +281,9 @@ export const HOLDOUT_REASON = "holdout";
 // leaving them in the pool would only inflate the drawn count.
 export async function listHoldoutCandidates(): Promise<HoldoutCandidate[]> {
   const cfg = activeConfig();
-  const rows = await sql<{ eval_question_id: string; difficulty: string | null }[]>`
+  const rows = await sql<
+    { eval_question_id: string; difficulty: string | null }[]
+  >`
     select distinct q.id as eval_question_id, q.difficulty
     from eval_questions q
     join eval_labels l on l.eval_question_id = q.id
@@ -277,7 +293,10 @@ export async function listHoldoutCandidates(): Promise<HoldoutCandidate[]> {
     where de.config_id = ${cfg.id}
       and (ig.eval_question_id is null or ig.reason = ${HOLDOUT_REASON})
   `;
-  return rows.map((r) => ({ questionId: r.eval_question_id, difficulty: r.difficulty }));
+  return rows.map((r) => ({
+    questionId: r.eval_question_id,
+    difficulty: r.difficulty,
+  }));
 }
 
 // The current test set. Read by the results step, which must compute holdout
@@ -378,8 +397,18 @@ export type HoldoutRunSummary = {
   // were somehow not recorded; `holdout_n is not null` is what gets it listed.
   splitKey: string | null;
   contaminated: boolean;
-  train: { n: number; recall: MetricDelta; mrr: MetricDelta; ndcg: MetricDelta };
-  holdout: { n: number; recall: MetricDelta; mrr: MetricDelta; ndcg: MetricDelta };
+  train: {
+    n: number;
+    recall: MetricDelta;
+    mrr: MetricDelta;
+    ndcg: MetricDelta;
+  };
+  holdout: {
+    n: number;
+    recall: MetricDelta;
+    mrr: MetricDelta;
+    ndcg: MetricDelta;
+  };
 };
 
 type HoldoutRunRow = {
@@ -392,12 +421,18 @@ type HoldoutRunRow = {
   holdout_split_key: string | null;
   holdout_contaminated: boolean | null;
   train_n: number | null;
-  train_recall_before: number | null; train_recall_after: number | null;
-  train_mrr_before: number | null; train_mrr_after: number | null;
-  train_ndcg_before: number | null; train_ndcg_after: number | null;
-  holdout_recall_before: number | null; holdout_recall_after: number | null;
-  holdout_mrr_before: number | null; holdout_mrr_after: number | null;
-  holdout_ndcg_before: number | null; holdout_ndcg_after: number | null;
+  train_recall_before: number | null;
+  train_recall_after: number | null;
+  train_mrr_before: number | null;
+  train_mrr_after: number | null;
+  train_ndcg_before: number | null;
+  train_ndcg_after: number | null;
+  holdout_recall_before: number | null;
+  holdout_recall_after: number | null;
+  holdout_mrr_before: number | null;
+  holdout_mrr_after: number | null;
+  holdout_ndcg_before: number | null;
+  holdout_ndcg_after: number | null;
 };
 
 // Every run of the active config that recorded a holdout, newest first.
@@ -426,7 +461,9 @@ export async function listHoldoutRuns(): Promise<HoldoutRunSummary[]> {
     runId: r.id,
     createdAt: r.created_at.getTime(),
     dials:
-      r.holdout_mode === null || r.holdout_size === null || r.holdout_seed === null
+      r.holdout_mode === null ||
+      r.holdout_size === null ||
+      r.holdout_seed === null
         ? null
         : { mode: r.holdout_mode, size: r.holdout_size, seed: r.holdout_seed },
     splitKey: r.holdout_split_key,
@@ -439,7 +476,10 @@ export async function listHoldoutRuns(): Promise<HoldoutRunSummary[]> {
     },
     holdout: {
       n: r.holdout_n,
-      recall: { before: r.holdout_recall_before, after: r.holdout_recall_after },
+      recall: {
+        before: r.holdout_recall_before,
+        after: r.holdout_recall_after,
+      },
       mrr: { before: r.holdout_mrr_before, after: r.holdout_mrr_after },
       ndcg: { before: r.holdout_ndcg_before, after: r.holdout_ndcg_after },
     },
@@ -457,17 +497,23 @@ export type HoldoutRunQuestion = HoldoutQuestionOutcome & {
 // The per-question detail for one run. Config-scoped through the run row, so a
 // run id from another user's config returns nothing rather than someone else's
 // questions.
-export async function listHoldoutRunQuestions(runId: string): Promise<HoldoutRunQuestion[]> {
+export async function listHoldoutRunQuestions(
+  runId: string,
+): Promise<HoldoutRunQuestion[]> {
   const cfg = activeConfig();
   const rows = await sql<
     {
       eval_question_id: string;
       question: string;
       difficulty: string | null;
-      before_hit: boolean | null; before_rank: number | null;
-      before_rr: number | null; before_ndcg: number | null;
-      after_hit: boolean | null; after_rank: number | null;
-      after_rr: number | null; after_ndcg: number | null;
+      before_hit: boolean | null;
+      before_rank: number | null;
+      before_rr: number | null;
+      before_ndcg: number | null;
+      after_hit: boolean | null;
+      after_rank: number | null;
+      after_rr: number | null;
+      after_ndcg: number | null;
     }[]
   >`
     select h.eval_question_id, q.question, q.difficulty,

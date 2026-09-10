@@ -23,10 +23,24 @@
 // THIS MODULE READS THE MASTER through privilegedSql, like lib/demo/captureRankings
 // and every other publish-time step in scripts/demo-snapshot: a script has no
 // request scope, so the request-scoped `sql` would throw before it read.
+//
+// FROM A SIBLING, SINCE docs/demo-voyage-tuning-plan.md. The winners a guest
+// installs are no longer the publish config's own: they come from a sibling
+// config tuned over the board with only ONE difficulty set's questions and only
+// the demo's own provider (§1), one sibling per set. `source` names that
+// sibling; the overrides and trials are read there and every chunk id — the
+// entry's own and each trial's pool — is rewritten into the publish config's id
+// space through a (document_id, position) join on the base model's chunk table,
+// which is exact because scripts/demo-tuning-configs copied the corpus
+// position-for-position. Unmapped ids are dropped, not held: both are sets, the
+// 0083 rule. Clone step 5j then maps publish → snapshot → guest as it always
+// has. Omitting `source` reads the publish config itself through the same join,
+// which is then the identity — today's behaviour, byte for byte.
 import "server-only";
 
 import { privilegedSql } from "@/lib/db";
 import { modelSpec } from "@/lib/rag/embeddingModels";
+import { chunksTable, modelDimension } from "@/lib/rag/vectorStore";
 import {
   packEmbedding,
   type ReplayTrialOutcome,
@@ -55,28 +69,49 @@ export async function tuningCensus(
   configId: string,
   board: string[],
   baseModel: string,
+  source: string = configId,
 ): Promise<TuningCensus> {
   if (board.length === 0) {
     return { boardChunks: 0, overridden: 0, overrideRows: 0, trials: 0, foreign: 0 };
   }
+  const table = privilegedSql(chunksTable(baseModel, modelDimension(baseModel)));
   const [row] = await privilegedSql<
     { overridden: number; rows: number; trials: number; models: string[] }[]
   >`
+    with map as (
+      select s.id as src_id, d.id as dst_id
+        from ${table} s
+        join ${table} d on d.document_id = s.document_id and d.position = s.position
+       where s.config_id = ${source} and d.config_id = ${configId}
+         and d.id = any(${board}::uuid[])
+    )
     select
-      (select count(distinct source_chunk_id) from config_chunk_overrides
-        where config_id = ${configId} and source_chunk_id = any(${board}::uuid[]))::int as overridden,
-      (select count(*) from config_chunk_overrides
-        where config_id = ${configId} and source_chunk_id = any(${board}::uuid[]))::int as rows,
+      (select count(distinct o.source_chunk_id) from config_chunk_overrides o
+         join map on map.src_id = o.source_chunk_id
+        where o.config_id = ${source})::int as overridden,
+      (select count(*) from config_chunk_overrides o
+         join map on map.src_id = o.source_chunk_id
+        where o.config_id = ${source})::int as rows,
       (select count(*) from eval_model_trials t
          join document_embeddings de on de.id = t.document_embedding_id
-        where de.config_id = ${configId} and t.source_chunk_id = any(${board}::uuid[]))::int as trials,
-      (select coalesce(array_agg(distinct model), '{}') from config_chunk_overrides
-        where config_id = ${configId} and source_chunk_id = any(${board}::uuid[])) as models
+         join map on map.src_id = t.source_chunk_id
+        where de.config_id = ${source})::int as trials,
+      (select coalesce(array_agg(distinct o.model), '{}') from config_chunk_overrides o
+         join map on map.src_id = o.source_chunk_id
+        where o.config_id = ${source}) as models
   `;
   const foreign = await privilegedSql<{ n: number }[]>`
-    select count(distinct source_chunk_id)::int as n from config_chunk_overrides
-     where config_id = ${configId} and source_chunk_id = any(${board}::uuid[])
-       and model <> all(${(row?.models ?? []).filter((m) => servableBy(m, baseModel))}::text[])
+    with map as (
+      select s.id as src_id
+        from ${table} s
+        join ${table} d on d.document_id = s.document_id and d.position = s.position
+       where s.config_id = ${source} and d.config_id = ${configId}
+         and d.id = any(${board}::uuid[])
+    )
+    select count(distinct o.source_chunk_id)::int as n from config_chunk_overrides o
+      join map on map.src_id = o.source_chunk_id
+     where o.config_id = ${source}
+       and o.model <> all(${(row?.models ?? []).filter((m) => servableBy(m, baseModel))}::text[])
   `;
   return {
     boardChunks: board.length,
@@ -156,27 +191,54 @@ export async function packTuning(
   configId: string,
   board: string[],
   baseModel: string,
+  source: string = configId,
 ): Promise<ReplayTuning> {
   if (board.length === 0) return { version: 1, entries: [] };
+  const table = privilegedSql(chunksTable(baseModel, modelDimension(baseModel)));
 
+  // Every id below comes back in the PUBLISH config's space: `map` is the
+  // (document, position) join described in the header, restricted to the board
+  // on the destination side so a sibling's override on a chunk outside it is
+  // never read at all.
   const overrides = await privilegedSql<OverrideRow[]>`
-    select o.source_chunk_id, o.model, o.kind, o.text, o.dimension,
+    with map as (
+      select s.id as src_id, d.id as dst_id
+        from ${table} s
+        join ${table} d on d.document_id = s.document_id and d.position = s.position
+       where s.config_id = ${source} and d.config_id = ${configId}
+         and d.id = any(${board}::uuid[])
+    )
+    select map.dst_id as source_chunk_id, o.model, o.kind, o.text, o.dimension,
            o.embedding::real[] as embedding, o.token_start, o.token_end
       from config_chunk_overrides o
-     where o.config_id = ${configId}
-       and o.source_chunk_id = any(${board}::uuid[])
-     order by o.source_chunk_id, o.piece_index
+      join map on map.src_id = o.source_chunk_id
+     where o.config_id = ${source}
+     order by map.dst_id, o.piece_index
   `;
 
+  // A pool member that does not map is dropped rather than held in place — the
+  // pool is a set, and the same rule clone step 5j applies on the next hop.
   const trials = await privilegedSql<TrialRow[]>`
-    select t.source_chunk_id, t.baseline_model, t.trial_model, t.kind,
+    with map as (
+      select s.id as src_id, d.id as dst_id
+        from ${table} s
+        join ${table} d on d.document_id = s.document_id and d.position = s.position
+       where s.config_id = ${source} and d.config_id = ${configId}
+    )
+    select map.dst_id as source_chunk_id, t.baseline_model, t.trial_model, t.kind,
            t.chunk_size, t.chunk_overlap, t.piece_count, t.k,
-           t.pool_chunk_ids, t.results
+           coalesce((
+             select array_agg(mp.dst_id order by u.ord)
+               from unnest(t.pool_chunk_ids) with ordinality u(old_id, ord)
+               join map mp on mp.src_id = u.old_id
+           ), '{}'::uuid[]) as pool_chunk_ids,
+           t.results
       from eval_model_trials t
       join document_embeddings de on de.id = t.document_embedding_id
-     where de.config_id = ${configId}
-       and t.source_chunk_id = any(${board}::uuid[])
-     order by t.source_chunk_id, t.created_at desc
+      join map on map.src_id = t.source_chunk_id
+     where de.config_id = ${source}
+       and map.dst_id = any(${board}::uuid[])
+     order by map.dst_id, t.created_at desc
   `;
 
   // Grouped by chunk before the entries are built, so a chunk with an override

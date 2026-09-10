@@ -1,0 +1,164 @@
+diff --git a/cjs/src/connection.js b/cjs/src/connection.js
+index 07f6716702ac888215c86ad6e0071aaf55ae519c..e453eec159099d1400bea8e3fce263415deb0532 100644
+--- a/cjs/src/connection.js
++++ b/cjs/src/connection.js
+@@ -170,11 +170,17 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+         : (query = q, query.active = true)
+ 
+       build(q)
+-      return write(toBuffer(q))
++      // PATCHED: `onexecute` used to run only when the connection could take
++      // another pipelined statement, which made max_pipeline: 0 (see index.js)
++      // skip the hook that reserves a connection for sql.begin -- every
++      // transaction then failed its own UNSAFE_TRANSACTION check. The hook
++      // runs regardless; the return value means what it always meant.
++      const more = write(toBuffer(q))
+         && !q.describeFirst
+         && !q.cursorFn
+         && sent.length < max_pipeline
+-        && (!q.options.onexecute || q.options.onexecute(connection))
++      const hook = q.options.onexecute ? q.options.onexecute(connection) : true
++      return more && hook
+     } catch (error) {
+       sent.length === 0 && write(Sync)
+       errored(error)
+@@ -221,6 +227,22 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     ])
+   }
+ 
++  function plainValue(x) {
++    return x === null || typeof x !== 'object' || (Array.isArray(x) && x.every(plainValue))
++  }
++
++  function needsDescribe(parameters, types, options) {
++    for (let i = 0; i < parameters.length; i++) {
++      const x = parameters[i]
++      if (types[i] || x === null || typeof x !== 'object')
++        continue
++      if (!Array.isArray(x) || !x.every(plainValue))
++        return true
++      parameters[i] = arraySerializer(x, undefined, options, 0)
++    }
++    return false
++  }
++
+   function build(q) {
+     const parameters = []
+         , types = []
+@@ -235,7 +257,15 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     q.onlyDescribe && (delete statements[q.signature])
+     q.parameters = q.parameters || parameters
+     q.prepared = q.prepare && q.signature in statements
+-    q.describeFirst = q.onlyDescribe || (parameters.length && !q.prepared)
++    // PATCHED (docs/demo-retrieval-bank-plan.md phase 3): an unnamed statement
++    // with parameters was sent as Parse+Describe, then Bind+Execute only after
++    // the server's ParameterDescription came back -- two round trips for every
++    // parameterized statement, on a pooler that forbids named statements. The
++    // description is only needed to pick a serializer, and strings, numbers,
++    // typed values and arrays of those need none: they go out in one buffer.
++    // Anything else (a plain object bound to a jsonb column, a Date inside an
++    // array) still describes first, exactly as before.
++    q.describeFirst = q.onlyDescribe || (parameters.length && !q.prepared && (q.prepare || needsDescribe(parameters, types, options)))
+     q.statement = q.prepared
+       ? statements[q.signature]
+       : { string, types, name: q.prepare ? statementId + statementCount++ : '' }
+diff --git a/cjs/src/index.js b/cjs/src/index.js
+index f09c61c7e998f411560b95c9a8e1ed6a97972c11..9f3199ccd66c7b572690729d04a8f15d206af6a4 100644
+--- a/cjs/src/index.js
++++ b/cjs/src/index.js
+@@ -452,7 +452,12 @@ function parseOptions(a, b) {
+     idle_timeout    : null,
+     connect_timeout : 30,
+     max_lifetime    : max_lifetime,
+-    max_pipeline    : 100,
++    // PATCHED: 0, not 100. Ten or more pipelined statements on one connection
++    // hang Supabase's transaction pooler (never answered, no error). Only
++    // statements that skip the describe round trip pipeline at all, so the
++    // describe-first patch in connection.js would have made every concurrent
++    // parameterized batch hang; a bare `select 1` batch always did.
++    max_pipeline    : 0,
+     backoff         : backoff,
+     keep_alive      : 60,
+     prepare         : true,
+diff --git a/src/connection.js b/src/connection.js
+index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..5d4dad7fa6f2f90fc0c67a6083519a0430301d7e 100644
+--- a/src/connection.js
++++ b/src/connection.js
+@@ -170,11 +170,17 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+         : (query = q, query.active = true)
+ 
+       build(q)
+-      return write(toBuffer(q))
++      // PATCHED: `onexecute` used to run only when the connection could take
++      // another pipelined statement, which made max_pipeline: 0 (see index.js)
++      // skip the hook that reserves a connection for sql.begin -- every
++      // transaction then failed its own UNSAFE_TRANSACTION check. The hook
++      // runs regardless; the return value means what it always meant.
++      const more = write(toBuffer(q))
+         && !q.describeFirst
+         && !q.cursorFn
+         && sent.length < max_pipeline
+-        && (!q.options.onexecute || q.options.onexecute(connection))
++      const hook = q.options.onexecute ? q.options.onexecute(connection) : true
++      return more && hook
+     } catch (error) {
+       sent.length === 0 && write(Sync)
+       errored(error)
+@@ -221,6 +227,22 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     ])
+   }
+ 
++  function plainValue(x) {
++    return x === null || typeof x !== 'object' || (Array.isArray(x) && x.every(plainValue))
++  }
++
++  function needsDescribe(parameters, types, options) {
++    for (let i = 0; i < parameters.length; i++) {
++      const x = parameters[i]
++      if (types[i] || x === null || typeof x !== 'object')
++        continue
++      if (!Array.isArray(x) || !x.every(plainValue))
++        return true
++      parameters[i] = arraySerializer(x, undefined, options, 0)
++    }
++    return false
++  }
++
+   function build(q) {
+     const parameters = []
+         , types = []
+@@ -235,7 +257,15 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     q.onlyDescribe && (delete statements[q.signature])
+     q.parameters = q.parameters || parameters
+     q.prepared = q.prepare && q.signature in statements
+-    q.describeFirst = q.onlyDescribe || (parameters.length && !q.prepared)
++    // PATCHED (docs/demo-retrieval-bank-plan.md phase 3): an unnamed statement
++    // with parameters was sent as Parse+Describe, then Bind+Execute only after
++    // the server's ParameterDescription came back -- two round trips for every
++    // parameterized statement, on a pooler that forbids named statements. The
++    // description is only needed to pick a serializer, and strings, numbers,
++    // typed values and arrays of those need none: they go out in one buffer.
++    // Anything else (a plain object bound to a jsonb column, a Date inside an
++    // array) still describes first, exactly as before.
++    q.describeFirst = q.onlyDescribe || (parameters.length && !q.prepared && (q.prepare || needsDescribe(parameters, types, options)))
+     q.statement = q.prepared
+       ? statements[q.signature]
+       : { string, types, name: q.prepare ? statementId + statementCount++ : '' }
+diff --git a/src/index.js b/src/index.js
+index c7fba3dace20173f4cb13f3f138bb6d213b43683..d5a8732ad0dbdfa4d2e578d52d1dc729e20bf3f1 100644
+--- a/src/index.js
++++ b/src/index.js
+@@ -452,7 +452,12 @@ function parseOptions(a, b) {
+     idle_timeout    : null,
+     connect_timeout : 30,
+     max_lifetime    : max_lifetime,
+-    max_pipeline    : 100,
++    // PATCHED: 0, not 100. Ten or more pipelined statements on one connection
++    // hang Supabase's transaction pooler (never answered, no error). Only
++    // statements that skip the describe round trip pipeline at all, so the
++    // describe-first patch in connection.js would have made every concurrent
++    // parameterized batch hang; a bare `select 1` batch always did.
++    max_pipeline    : 0,
+     backoff         : backoff,
+     keep_alive      : 60,
+     prepare         : true,

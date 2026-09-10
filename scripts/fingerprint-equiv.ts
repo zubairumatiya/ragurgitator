@@ -85,11 +85,14 @@ const raw = postgres(process.env.DATABASE_URL ?? "", { ssl: sslFor(process.env.D
 // A driver runs outside a request, so nothing has populated the user/config
 // scopes every lib/rag function reads. The owner comes from the config row so
 // the two cannot disagree (the cases below span more than one account).
-async function inScope<T>(configId: string, pool: number | undefined, fn: () => Promise<T>): Promise<T> {
+async function inScope<T>(configId: string, pool: number | undefined, fn: () => Promise<T>): Promise<T | null> {
   const [row] = await raw<{ user_id: string; email: string }[]>`
     select c.user_id, u.email from configs c join auth.users u on u.id = c.user_id
     where c.id = ${configId}`;
-  if (!row) throw new Error(`config ${configId} not found`);
+  // A case whose config has since been deleted is skipped, not failed: the
+  // script asserts the SQL digest against the JS reference wherever both can
+  // run, and a missing row says nothing about either.
+  if (!row) return null;
   return withUser({ id: row.user_id, email: row.email }, async () => {
     const cfg = await resolveConfig(configId);
     if (!cfg) throw new Error(`config ${configId} not visible in its owner's scope`);
@@ -100,10 +103,15 @@ async function inScope<T>(configId: string, pool: number | undefined, fn: () => 
 async function main() {
   let failed = 0;
   for (const c of CASES) {
-    const [ref, live] = await inScope(c.id, c.pool, async () => [
+    const pair = await inScope(c.id, c.pool, async () => [
       await referenceFingerprint(),
       await retrievalStateFingerprint(),
     ]);
+    if (pair === null) {
+      console.log(`SKIP  ${c.id.slice(0, 8)}  ${c.what} (config no longer exists)`);
+      continue;
+    }
+    const [ref, live] = pair;
     const ok = ref === live;
     if (!ok) failed++;
     console.log(`${ok ? "OK  " : "FAIL"}  ${c.id.slice(0, 8)}  ${c.what}`);

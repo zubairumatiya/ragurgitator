@@ -29,9 +29,18 @@
 import type { StreamErrorEvent } from "@/lib/http/missingKey";
 import { autotuneModelLadder } from "@/lib/config";
 import { activeConfig } from "@/lib/rag/activeConfig";
-import { listIgnoredQuestionIds, type AutotuneStopReason } from "@/lib/rag/autotuneStore";
+import {
+  listIgnoredQuestionIds,
+  type AutotuneStopReason,
+} from "@/lib/rag/autotuneStore";
 import { splitText } from "@/lib/rag/chunker";
-import { cosine, embedDocsCached, embedQueryCached } from "@/lib/rag/embedCache";
+import {
+  cosine,
+  embedDocsCached,
+  embedQueryCached,
+} from "@/lib/rag/embedCache";
+import { stage } from "@/lib/autotuneTiming";
+import { confirmVerdict, type ConfirmMode } from "@/lib/rag/autotuneConfirm";
 import { modelSpec } from "@/lib/rag/embeddingModels";
 import { availableProviders } from "@/lib/rag/providerAvailability";
 import {
@@ -45,7 +54,6 @@ import {
 import { effectiveK, type EvalCriteria } from "@/lib/rag/evalSettingsStore";
 import {
   getChunkQuestions,
-  getQuestionToScore,
   type QuestionToScore,
   getChunksByIds,
   getModelTrialQuestions,
@@ -56,6 +64,7 @@ import {
 import {
   clearChunkOverride,
   getChunkOverridePieces,
+  type ChunkOverrideState,
   listOverrides,
   overrideSims,
   setChunkOverridePieces,
@@ -76,7 +85,11 @@ export type CandidateFamily = "size" | "model" | "size+model";
 // same ranks give identical floats): prefer the cheaper override family.
 // size stays in the base embedding space; model adds another space to fusion
 // (an extra query embedding per live retrieval); combo is both.
-const familyRank: Record<CandidateFamily, number> = { size: 0, model: 1, "size+model": 2 };
+const familyRank: Record<CandidateFamily, number> = {
+  size: 0,
+  model: 1,
+  "size+model": 2,
+};
 
 // One override candidate found by the search, with its approximate standing.
 export type AutotuneCandidate = {
@@ -221,7 +234,10 @@ export type TargetQuestion = {
 // "must be a hit"; MRR compares the per-question reciprocal rank at mrr_k;
 // nDCG is graded against its own min-rate). Unscored, stale, and ungraded-nDCG
 // questions are not targetable.
-export function failingMetrics(q: QuestionDetail, criteria: EvalCriteria): AutotuneMetric[] {
+export function failingMetrics(
+  q: QuestionDetail,
+  criteria: EvalCriteria,
+): AutotuneMetric[] {
   if (q.ignored || q.hit === null || q.stale) return [];
   const out: AutotuneMetric[] = [];
   const r = criteria.recall;
@@ -229,11 +245,22 @@ export function failingMetrics(q: QuestionDetail, criteria: EvalCriteria): Autot
     out.push("recall");
   }
   const m = criteria.mrr;
-  if (m.enabled && m.minRate !== null && m.minRate > 0 && q.rr !== null && q.rr < m.minRate) {
+  if (
+    m.enabled &&
+    m.minRate !== null &&
+    m.minRate > 0 &&
+    q.rr !== null &&
+    q.rr < m.minRate
+  ) {
     out.push("mrr");
   }
   const n = criteria.ndcg;
-  if (n.enabled && n.minRate !== null && q.ndcg !== null && q.ndcg < n.minRate) {
+  if (
+    n.enabled &&
+    n.minRate !== null &&
+    q.ndcg !== null &&
+    q.ndcg < n.minRate
+  ) {
     out.push("ndcg");
   }
   return out;
@@ -241,28 +268,45 @@ export function failingMetrics(q: QuestionDetail, criteria: EvalCriteria): Autot
 
 // The set of failing (questionId, metric) pairs for a chunk's questions — the
 // regression check compares this before vs after an applied override.
-function failingPairs(questions: QuestionDetail[], criteria: EvalCriteria): Set<string> {
+function failingPairs(
+  questions: QuestionDetail[],
+  criteria: EvalCriteria,
+): Set<string> {
   const pairs = new Set<string>();
   for (const q of questions) {
-    for (const m of failingMetrics(q, criteria)) pairs.add(`${q.questionId}:${m}`);
+    for (const m of failingMetrics(q, criteria))
+      pairs.add(`${q.questionId}:${m}`);
   }
   return pairs;
 }
 
 // The effective per-metric depths (and MRR's min-rate) one run targets — the
 // bar approxClears checks candidates against.
-type MetricBars = { recallK: number; mrrK: number; mrrMinRate: number; ndcgK: number };
+type MetricBars = {
+  recallK: number;
+  mrrK: number;
+  mrrMinRate: number;
+  ndcgK: number;
+};
 
 // Approximate bar-clearing for one question at a candidate's ground-truth rank.
 // recall: within recall_k. MRR: 1/rank at mrr_k must reach the min-rate (exact
 // — rr is fully determined by the rank). nDCG: within ndcg_k without losing
 // rank — the real graded value is only computed at confirm time (see header).
-function approxClears(t: TargetQuestion, rank: number | null, bars: MetricBars): boolean {
+function approxClears(
+  t: TargetQuestion,
+  rank: number | null,
+  bars: MetricBars,
+): boolean {
   if (rank === null) return false;
   for (const m of t.metrics) {
     if (m === "recall" && rank > bars.recallK) return false;
-    if (m === "mrr" && (rank > bars.mrrK || 1 / rank < bars.mrrMinRate)) return false;
-    if (m === "ndcg" && (rank > bars.ndcgK || (t.beforeRank !== null && rank > t.beforeRank))) {
+    if (m === "mrr" && (rank > bars.mrrK || 1 / rank < bars.mrrMinRate))
+      return false;
+    if (
+      m === "ndcg" &&
+      (rank > bars.ndcgK || (t.beforeRank !== null && rank > t.beforeRank))
+    ) {
       return false;
     }
   }
@@ -285,7 +329,10 @@ function mkCandidate(
     model,
     clears: targets.every((t, i) => approxClears(t, ranks[i], bars)),
     score: ranks.reduce<number>((s, r) => s + (r === null ? 0 : 1 / r), 0),
-    ranks: targets.map((t, i) => ({ questionId: t.questionId, rank: ranks[i] })),
+    ranks: targets.map((t, i) => ({
+      questionId: t.questionId,
+      rank: ranks[i],
+    })),
   };
 }
 
@@ -340,7 +387,9 @@ type SearchContext = {
 async function buildSearchContext(chunkId: string): Promise<SearchContext> {
   return {
     // This chunk's own override never competes — the candidate replaces it.
-    storedOverrides: (await listOverrides()).filter((o) => o.sourceChunkId !== chunkId),
+    storedOverrides: (await listOverrides()).filter(
+      (o) => o.sourceChunkId !== chunkId,
+    ),
     storedSims: new Map(),
     annCache: new Map(),
   };
@@ -373,7 +422,11 @@ async function fusedTrialRanks(
     }
     return stored.then((kept) =>
       m === model
-        ? withCandidateSims(kept, chunkId, candVecs.map((v) => cosine(qv, v)))
+        ? withCandidateSims(
+            kept,
+            chunkId,
+            candVecs.map((v) => cosine(qv, v)),
+          )
         : kept,
     );
   };
@@ -383,12 +436,12 @@ async function fusedTrialRanks(
   for (const t of targets) {
     const baseQVec = await embedQueryCached(t.question, cfg.embeddingModel);
     const { merged } = await fuseWithOverrides(
-        t.question,
-        baseQVec,
-        cfg.topK,
-        hypOverrides,
-        simsFor,
-        pool,
+      t.question,
+      baseQVec,
+      cfg.topK,
+      hypOverrides,
+      simsFor,
+      pool,
       search.annCache,
     );
     const idx = merged.findIndex((c) => c.id === chunkId);
@@ -431,15 +484,22 @@ async function saveKeptTrialSnapshot(
         ? { kind: "size", size: c.size!, overlap: c.overlap ?? 0 }
         : c.family === "model"
           ? { kind: "model", model: c.model! }
-          : { kind: "size+model", model: c.model!, size: c.size!, overlap: c.overlap ?? 0 };
+          : {
+              kind: "size+model",
+              model: c.model!,
+              size: c.size!,
+              overlap: c.overlap ?? 0,
+            };
     const questions = await getModelTrialQuestions(chunkId);
-    const poolIds = [...new Set(questions.flatMap((q) => q.retrievedIds))].filter(
-      (id) => id !== chunkId,
-    );
+    const poolIds = [
+      ...new Set(questions.flatMap((q) => q.retrievedIds)),
+    ].filter((id) => id !== chunkId);
     await runModelTrial(chunkId, variation, poolIds, true);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[rag:autotune] trial snapshot failed for chunk ${chunkId}: ${message}`);
+    console.warn(
+      `[rag:autotune] trial snapshot failed for chunk ${chunkId}: ${message}`,
+    );
   }
 }
 
@@ -481,16 +541,63 @@ export async function applyAutotuneCandidate(
   // dashboard runs are unchanged; a trial run turns it off — see the call site.
   opts: { snapshot?: boolean } = {},
 ): Promise<ApplyResult> {
+  const result = await confirmOverride(
+    chunkId,
+    async () => {
+      const persisted = await persistCandidate(chunkId, candidate);
+      return persisted === "ok"
+        ? null
+        : `Could not persist override (${persisted}).`;
+    },
+    mode,
+  );
+  if (result.status === "kept" && opts.snapshot !== false) {
+    await saveKeptTrialSnapshot(chunkId, candidate);
+  }
+  return result;
+}
+
+// INSTALL, RE-SCORE, KEEP OR REVERT — the confirm, with the install abstracted.
+//
+// Lifted out of applyAutotuneCandidate for docs/demo-voyage-tuning-plan.md §3.5:
+// the replayed autotune a guest runs installs a BANKED winner rather than a
+// searched candidate, and confirms it against the guest's own questions by
+// exactly this rule. One function rather than a copy, so the search and the
+// replay cannot drift on what "improved" means. The order of operations is the
+// original's, step for step, and every comment below is the reason for a step.
+//
+// `install` writes the override and returns null, or a failure detail, or —
+// when it went through setChunkOverridePieces and has it for free — the prior
+// override it replaced. The prior (if any) is what a revert restores, so a
+// failed confirm never clears an override an earlier run kept; an install that
+// does not report it is read before the install runs, as it always was.
+export type InstallOutcome =
+  | string
+  | null
+  | { prior: ChunkOverrideState | null };
+
+export async function confirmOverride(
+  chunkId: string,
+  install: () => Promise<InstallOutcome>,
+  mode: ConfirmMode = "clear",
+  // Where the prior override comes from. "read": read before the install runs
+  // (the search's install reports only a status). "install": the install
+  // returns what it replaced, and nothing is read first.
+  priorFrom: "read" | "install" = "read",
+): Promise<ApplyResult> {
   // L6 (docs/autotune-speedups-plan.md): chunk-scoped read, not the whole-config
   // getSummary(). This function only ever looked at THIS chunk's questions, but
   // getSummary is ~1.1s against a 162-question corpus and the confirm step ran it
   // 2-3 times per candidate — ~167s of an 894s run spent computing 160 questions
   // to read one or two. Same mapper underneath, so the values are identical.
-  let before = await getChunkQuestions(chunkId);
+  let before = await stage("confirm:read", () => getChunkQuestions(chunkId));
   const criteria = before.criteria;
   let chunkQs = before.questions;
   if (chunkQs.length === 0) {
-    return { status: "failed", detail: "Chunk has no questions under this config." };
+    return {
+      status: "failed",
+      detail: "Chunk has no questions under this config.",
+    };
   }
 
   // L2, revisited. The original verdict was "dead": its ceiling is
@@ -502,12 +609,22 @@ export async function applyAutotuneCandidate(
   //
   // The lookups run concurrently so the batch still costs one round trip to
   // assemble, then a single scoreQuestions call does the work.
-  const rescoreChunk = async () => {
-    const toScore = (
-      await Promise.all(chunkQs.map((q) => getQuestionToScore(q.questionId)))
-    ).filter((q): q is QuestionToScore => q !== null);
-    if (toScore.length > 0) await scoreQuestions(toScore);
-  };
+  //
+  // Phase 3 of docs/demo-retrieval-bank-plan.md took the lookups out: the chunk
+  // read above already holds every field a QuestionToScore needs, and it is
+  // seconds old in the same scope, so re-reading each question was one
+  // statement per question per re-score (30 of a banked press's 542) that
+  // could only ever return what `before` already said.
+  const rescoreChunk = (label: string) =>
+    stage(label, async () => {
+      const toScore: QuestionToScore[] = chunkQs.map((q) => ({
+        questionId: q.questionId,
+        question: q.question,
+        labelId: before.labels.get(q.questionId)!,
+        sourceChunkId: q.sourceChunkId,
+      }));
+      if (toScore.length > 0) await scoreQuestions(toScore);
+    });
 
   // Fresh baseline first: an override kept on ANOTHER chunk earlier in the run
   // changes the global retrieval fingerprint, flipping this chunk's questions
@@ -516,8 +633,8 @@ export async function applyAutotuneCandidate(
   // never be smaller). Re-score so before vs after is fresh-vs-fresh under the
   // same retrieval state.
   if (chunkQs.some((q) => q.stale)) {
-    await rescoreChunk();
-    before = await getChunkQuestions(chunkId);
+    await rescoreChunk("confirm:before-rescore");
+    before = await stage("confirm:reread", () => getChunkQuestions(chunkId));
     chunkQs = before.questions;
   }
   const beforeFailing = failingPairs(chunkQs, criteria);
@@ -535,44 +652,60 @@ export async function applyAutotuneCandidate(
     // Nothing failing under the CURRENT retrieval state (e.g. an override kept
     // earlier in the run already lifted this chunk's questions) — an override
     // here could only regress, so skip it.
-    return { status: "skipped", detail: "Chunk already passes under the current overrides." };
+    return {
+      status: "skipped",
+      detail: "Chunk already passes under the current overrides.",
+    };
   }
 
   const beforeSum = failingSum(chunkQs);
 
-  // Capture the chunk's CURRENT override (if any) before overwriting it —
-  // persistCandidate replaces it, so a failed confirm must put THIS back, not
-  // clear to baseline (which would destroy a working override kept by an
-  // earlier run just because a new candidate over-promised).
-  const prior = await getChunkOverridePieces(chunkId);
-
-  const persisted = await persistCandidate(chunkId, candidate);
-  if (persisted !== "ok") {
-    return { status: "failed", detail: `Could not persist override (${persisted}).` };
+  // The chunk's CURRENT override (if any) has to be in hand before the install
+  // overwrites it — a failed confirm must put THIS back, not clear to baseline
+  // (which would destroy a working override kept by an earlier run just
+  // because a new candidate over-promised). The replay's install returns it
+  // (the delete inside setChunkOverridePieces hands back what it removed, one
+  // statement per chunk fewer — phase 3 of docs/demo-retrieval-bank-plan.md);
+  // the search's install does not, and is preceded by the read.
+  const priorRead =
+    priorFrom === "read"
+      ? await stage("confirm:prior", () => getChunkOverridePieces(chunkId))
+      : null;
+  const installed = await stage("confirm:install", () => install());
+  if (typeof installed === "string") {
+    return { status: "failed", detail: installed };
   }
+  const prior = installed === null ? priorRead : installed.prior;
 
-  await rescoreChunk();
+  await rescoreChunk("confirm:after-rescore");
 
-  const after = await getChunkQuestions(chunkId);
+  const after = await stage("confirm:after-read", () =>
+    getChunkQuestions(chunkId),
+  );
   const afterQs = after.questions;
   const afterFailing = failingPairs(afterQs, criteria);
-  const newFailure = [...afterFailing].some((p) => !beforeFailing.has(p));
-  const progressed =
-    afterFailing.size < beforeFailing.size ||
-    (mode === "improve" && failingSum(afterQs) > beforeSum + 1e-9);
+  const verdict = confirmVerdict(
+    beforeFailing,
+    afterFailing,
+    beforeSum,
+    failingSum(afterQs),
+    mode,
+  );
 
-  if (newFailure || !progressed) {
-    if (prior !== null) {
-      await setChunkOverridePieces(
-        chunkId,
-        prior.model,
-        prior.kind,
-        prior.pieces,
-        "restored pre-confirm override (autotune candidate reverted)",
-      );
-    } else {
-      await clearChunkOverride(chunkId);
-    }
+  if (!verdict.keep) {
+    await stage("confirm:revert", async () => {
+      if (prior !== null) {
+        await setChunkOverridePieces(
+          chunkId,
+          prior.model,
+          prior.kind,
+          prior.pieces,
+          "restored pre-confirm override (autotune candidate reverted)",
+        );
+      } else {
+        await clearChunkOverride(chunkId);
+      }
+    });
     // Re-scored unconditionally. L7 (docs/autotune-speedups-plan.md) tried to
     // skip this by leaning on 0022's revert-awareness — restoring the prior
     // override restores the prior fingerprint, so the pre-confirm rows would
@@ -580,21 +713,19 @@ export async function applyAutotuneCandidate(
     // 2026-08-02, reverts are only 3% of confirms (1 of 33), so it saved one
     // re-score per run while costing an extra fingerprint query on all 33.
     // Removed. Don't re-propose without checking the revert counter first.
-    await rescoreChunk();
+    await rescoreChunk("confirm:revert-rescore");
     return {
       status: "reverted",
-      detail: newFailure
-        ? "Override regressed a previously-passing question on real retrieval."
-        : "Override made no real-retrieval progress (approximation over-promised).",
+      detail:
+        verdict.reason === "new-failure"
+          ? "Override regressed a previously-passing question on real retrieval."
+          : "Override made no real-retrieval progress (approximation over-promised).",
     };
-  }
-  if (opts.snapshot !== false) {
-    await saveKeptTrialSnapshot(chunkId, candidate);
   }
   return {
     status: "kept",
     detail:
-      afterFailing.size < beforeFailing.size
+      verdict.reason === "shrank"
         ? `Failing checks ${beforeFailing.size} → ${afterFailing.size}.`
         : `Still ${afterFailing.size} failing check(s), but their metric values rose.`,
     remaining: afterFailing.size,
@@ -653,8 +784,7 @@ export type AutotuneTargeting = {
 };
 
 export type PrepareResult =
-  | ({ ok: true } & AutotuneTargeting)
-  | { ok: false; error: string };
+  ({ ok: true } & AutotuneTargeting) | { ok: false; error: string };
 
 const overlapForSize = (size: number, pct: number) =>
   Math.min(size - 1, Math.max(0, Math.round(size * pct)));
@@ -662,18 +792,25 @@ const overlapForSize = (size: number, pct: number) =>
 // Read the config's criteria and the current summary, and work out what this run
 // would target if it started now. No writes, so a driver may call it once per
 // slice — which is exactly how a resumed run finds out what is left to do.
-export async function prepareAutotune(): Promise<PrepareResult> {
+//
+// `given` is a summary the caller has just read in the same scope with no
+// write since (the sliced replay's bank pick); absent, it is read here.
+export async function prepareAutotune(
+  given?: EvalSummary,
+): Promise<PrepareResult> {
   const cfg = activeConfig();
-  const summary = await getSummary();
+  const summary = given ?? (await getSummary());
   const criteria = summary.criteria;
 
-  const recallTargeting = criteria.recall.enabled && criteria.recall.minRate !== null;
+  const recallTargeting =
+    criteria.recall.enabled && criteria.recall.minRate !== null;
   const mrrTargeting = criteria.mrr.enabled && criteria.mrr.minRate !== null;
   const ndcgTargeting = criteria.ndcg.enabled && criteria.ndcg.minRate !== null;
   if (!recallTargeting && !mrrTargeting && !ndcgTargeting) {
     return {
       ok: false,
-      error: "Set a min-rate on an enabled metric in Settings before autotuning.",
+      error:
+        "Set a min-rate on an enabled metric in Settings before autotuning.",
     };
   }
 
@@ -687,7 +824,9 @@ export async function prepareAutotune(): Promise<PrepareResult> {
   // Chunk scope (0025): a non-null list restricts the run to those chunks;
   // null means every chunk, including ones labeled after the setting was saved.
   const scope =
-    criteria.autotune.chunkScope === null ? null : new Set(criteria.autotune.chunkScope);
+    criteria.autotune.chunkScope === null
+      ? null
+      : new Set(criteria.autotune.chunkScope);
 
   // Targets: every fresh below-bar question, minus ignores, within the chunk
   // scope, grouped by chunk.
@@ -724,7 +863,8 @@ export async function prepareAutotune(): Promise<PrepareResult> {
   // what makes stopEarly's cutoff cheap instead of arbitrary. Deterministic, so
   // a resumed run continues down the same ordering it was working through.
   const meanRr = (ts: TargetQuestion[]) =>
-    ts.reduce((s, t) => s + (t.beforeRank === null ? 0 : 1 / t.beforeRank), 0) / ts.length;
+    ts.reduce((s, t) => s + (t.beforeRank === null ? 0 : 1 / t.beforeRank), 0) /
+    ts.length;
   const orderedChunks = [...byChunk.entries()].sort(
     (a, b) => meanRr(a[1]) - meanRr(b[1]) || b[1].length - a[1].length,
   );
@@ -805,9 +945,12 @@ export function barsReached(
 ): boolean {
   const c = prep.criteria;
   return (
-    (!prep.recallTargeting || (rates.recall !== null && rates.recall >= c.recall.minRate!)) &&
-    (!prep.mrrTargeting || (rates.mrr !== null && rates.mrr >= c.mrr.minRate!)) &&
-    (!prep.ndcgTargeting || (rates.ndcg !== null && rates.ndcg >= c.ndcg.minRate!))
+    (!prep.recallTargeting ||
+      (rates.recall !== null && rates.recall >= c.recall.minRate!)) &&
+    (!prep.mrrTargeting ||
+      (rates.mrr !== null && rates.mrr >= c.mrr.minRate!)) &&
+    (!prep.ndcgTargeting ||
+      (rates.ndcg !== null && rates.ndcg >= c.ndcg.minRate!))
   );
 }
 
@@ -883,7 +1026,8 @@ export async function searchChunk(
       cand.score > baselineScore &&
       (cur === null ||
         cand.score > cur.score ||
-        (cand.score === cur.score && familyRank[cand.family] < familyRank[cur.family]))
+        (cand.score === cur.score &&
+          familyRank[cand.family] < familyRank[cur.family]))
     ) {
       bestEffort = cand;
     }
@@ -906,7 +1050,9 @@ export async function searchChunk(
     // L10: the kept-trial snapshot is deferred out of the chunk loop — see
     // PendingSnapshot. Measured 2026-08-03 at 97.6s, 41% of confirm, entirely to
     // populate a UI list the run itself never reads back.
-    const res = await applyAutotuneCandidate(chunkId, cand, mode, { snapshot: false });
+    const res = await applyAutotuneCandidate(chunkId, cand, mode, {
+      snapshot: false,
+    });
     // L8: how often the approximate search over-promises. Measured 2026-08-02 at
     // 3% (1 of 33) — the search is accurate, so confirm cycles are almost never
     // wasted on candidates that get rejected. Kept because it's free and it's the
@@ -923,7 +1069,10 @@ export async function searchChunk(
         model: cand.model,
       };
       emit({
-        type: mode === "clear" || res.remaining === 0 ? "chunk-resolved" : "chunk-improved",
+        type:
+          mode === "clear" || res.remaining === 0
+            ? "chunk-resolved"
+            : "chunk-improved",
         chunkId,
         candidate: cand,
       });
@@ -934,7 +1083,10 @@ export async function searchChunk(
     return false;
   };
 
-  const done = (status: ChunkResult["status"], pendingChoice = 0): ChunkResult => ({
+  const done = (
+    status: ChunkResult["status"],
+    pendingChoice = 0,
+  ): ChunkResult => ({
     status,
     kept,
     attempts,
@@ -947,7 +1099,11 @@ export async function searchChunk(
   const [chunkRow] = await getChunksByIds([chunkId]);
   const chunkText = chunkRow?.text ?? null;
   if (chunkText === null) {
-    emit({ type: "chunk-unresolved", chunkId, reason: "Chunk no longer exists." });
+    emit({
+      type: "chunk-unresolved",
+      chunkId,
+      reason: "Chunk no longer exists.",
+    });
     return done("unresolved");
   }
 
@@ -958,11 +1114,25 @@ export async function searchChunk(
     const overlap = overlapFor(size);
     const pieces = await splitText(chunkText, size, overlap);
     const ranks = await fusedTrialRanks(
-      chunkTargets, chunkId, pieces, "size", baseModel, trialPool, searchCtx,
+      chunkTargets,
+      chunkId,
+      pieces,
+      "size",
+      baseModel,
+      trialPool,
+      searchCtx,
     );
     attempts += chunkTargets.length;
-    emit({ type: "attempt", chunkId, stage: "size", detail: `size ${size}`, attempts });
-    const cand = consider(mkCandidate("size", size, overlap, null, chunkTargets, ranks, bars));
+    emit({
+      type: "attempt",
+      chunkId,
+      stage: "size",
+      detail: `size ${size}`,
+      attempts,
+    });
+    const cand = consider(
+      mkCandidate("size", size, overlap, null, chunkTargets, ranks, bars),
+    );
     if (cand.score > (bestSize?.score ?? baselineScore)) bestSize = cand;
     if (cand.clears) {
       if (prep.search === "first_success") {
@@ -990,17 +1160,35 @@ export async function searchChunk(
     const rungCands: AutotuneCandidate[] = [];
 
     const ranksB = await fusedTrialRanks(
-      chunkTargets, chunkId, [chunkText], "model", model, trialPool, searchCtx,
+      chunkTargets,
+      chunkId,
+      [chunkText],
+      "model",
+      model,
+      trialPool,
+      searchCtx,
     );
     attempts += chunkTargets.length;
     emit({ type: "attempt", chunkId, stage: "model", detail: model, attempts });
-    const candB = consider(mkCandidate("model", null, null, model, chunkTargets, ranksB, bars));
+    const candB = consider(
+      mkCandidate("model", null, null, model, chunkTargets, ranksB, bars),
+    );
     if (candB.clears) rungCands.push(candB);
 
     if (bestSize !== null) {
-      const pieces = await splitText(chunkText, bestSize.size!, bestSize.overlap ?? 0);
+      const pieces = await splitText(
+        chunkText,
+        bestSize.size!,
+        bestSize.overlap ?? 0,
+      );
       const ranksA = await fusedTrialRanks(
-        chunkTargets, chunkId, pieces, "size+model", model, trialPool, searchCtx,
+        chunkTargets,
+        chunkId,
+        pieces,
+        "size+model",
+        model,
+        trialPool,
+        searchCtx,
       );
       attempts += chunkTargets.length;
       emit({
@@ -1012,7 +1200,13 @@ export async function searchChunk(
       });
       const candA = consider(
         mkCandidate(
-          "size+model", bestSize.size, bestSize.overlap, model, chunkTargets, ranksA, bars,
+          "size+model",
+          bestSize.size,
+          bestSize.overlap,
+          model,
+          chunkTargets,
+          ranksA,
+          bars,
         ),
       );
       if (candA.clears) rungCands.push(candA);
@@ -1032,7 +1226,13 @@ export async function searchChunk(
         if (rungs >= rungCap) break outer;
         rungs += 1;
         const ranks = await fusedTrialRanks(
-          chunkTargets, chunkId, pieces, "size+model", model, trialPool, searchCtx,
+          chunkTargets,
+          chunkId,
+          pieces,
+          "size+model",
+          model,
+          trialPool,
+          searchCtx,
         );
         attempts += chunkTargets.length;
         emit({
@@ -1043,7 +1243,15 @@ export async function searchChunk(
           attempts,
         });
         const cand = consider(
-          mkCandidate("size+model", size, overlap, model, chunkTargets, ranks, bars),
+          mkCandidate(
+            "size+model",
+            size,
+            overlap,
+            model,
+            chunkTargets,
+            ranks,
+            bars,
+          ),
         );
         if (cand.clears) {
           candidates.push(cand);
@@ -1068,7 +1276,9 @@ export async function searchChunk(
     emit({
       type: "chunk-unresolved",
       chunkId,
-      reason: lastFailure ?? "No size, model, or combo cleared the bar (approximate search).",
+      reason:
+        lastFailure ??
+        "No size, model, or combo cleared the bar (approximate search).",
     });
     return done("unresolved");
   }

@@ -255,6 +255,55 @@ export function simsFor(matrix: ReplayMatrix, model: string): number[] | null {
 // replayed run reports it unresolved exactly as a real one would.
 export const TUNING_KEY = "overrides";
 
+// ONE BANK PER DIFFICULTY SET — docs/demo-voyage-tuning-plan.md §3.2.
+//
+// The master's winners were chosen against the PAIR of questions on each chunk,
+// so a guest holding only the easy ones was installing an override confirmed on
+// a question it does not have (§0). The publish now banks one tuning row per
+// set a guest can hold, keyed by the set: "set:easy", "set:medium",
+// "set:easy+medium". Sorted and de-duplicated so the key is a function of the
+// set and not of the order the board happened to list it in. TUNING_KEY above is
+// the pre-plan key and stays readable as the last fallback, so a build
+// published before this plan keeps working.
+export const TUNING_SET_PREFIX = "set:";
+
+export function tuningKey(difficulties: readonly string[]): string {
+  return TUNING_SET_PREFIX + [...new Set(difficulties)].sort().join("+");
+}
+
+// WHICH BANK A GUEST GETS (§3.4), from the keys the shelf actually holds:
+//
+//   1. the exact key for the difficulties on its board;
+//   2. else the smallest banked set that CONTAINS them — a guest holding easy
+//      only, on a build that banked just "easy+medium", gets that one, and the
+//      guest-side confirm (§3.5) is what keeps a full-set winner honest against
+//      the one question it holds;
+//   3. else the legacy key, for a build published before the sets existed;
+//   4. else nothing — the step then refuses, as it does for an empty shelf.
+//
+// A pure function of two lists so it can be tested without a store, and so the
+// step's log line can name the bank it chose.
+export function chooseTuningKey(
+  difficulties: readonly string[],
+  available: readonly string[],
+): string | null {
+  const have = new Set(available);
+  const exact = tuningKey(difficulties);
+  if (have.has(exact)) return exact;
+  const wanted = new Set(difficulties);
+  let best: { key: string; size: number } | null = null;
+  for (const key of available) {
+    if (!key.startsWith(TUNING_SET_PREFIX)) continue;
+    const set = key.slice(TUNING_SET_PREFIX.length).split("+").filter(Boolean);
+    if (![...wanted].every((d) => set.includes(d))) continue;
+    if (best === null || set.length < best.size || (set.length === best.size && key < best.key)) {
+      best = { key, size: set.length };
+    }
+  }
+  if (best) return best.key;
+  return have.has(TUNING_KEY) ? TUNING_KEY : null;
+}
+
 // One piece of a banked override — config_chunk_overrides row-for-row, except
 // for the vector.
 //
@@ -351,3 +400,179 @@ export const DEMO_TUNING_MAX_BYTES = 700_000;
 
 export const tuningBytes = (tuning: ReplayTuning): number =>
   Buffer.byteLength(JSON.stringify(tuning), "utf8");
+
+// THE BANKED RETRIEVAL — docs/demo-retrieval-bank-plan.md §3.2, and the eighth
+// kind (0085).
+//
+// One row per PORTABLE RETRIEVAL KEY (lib/rag/overrideStore.portableRetrievalKey):
+// the 0022 fingerprint with chunk row ids replaced by chunk text hashes, so it
+// names an override SET rather than a workspace. Under that key, one entry per
+// question the publish's walk scored in that state: the ranked list retrieval
+// returned, its scores, and the screen cutoffs the result was judged at. A
+// guest's re-score reads the entry instead of retrieving, and inserts a result
+// row field-for-field what the computed path would have — lib/rag/eval.ts holds
+// that equality and test/integration/demoRetrievalBank.itest.ts asserts it.
+//
+// TWO FORMS OF ONE PAYLOAD. `hash` is how it is recorded and how the master and
+// the snapshot hold it: every id is sha256(chunk text), which names nothing and
+// so can be written from any throwaway workspace. `id` is what a guest reads:
+// clone step 5l rewrites the hashes into the destination's chunk ids on the hop
+// that lands them there, and remaps id → id on any later one (the 5j shape).
+// A reader never sees `hash` form — the lookup below refuses it — so a bank
+// that skipped the rewrite misses rather than serving hashes as uuids.
+export const RETRIEVAL_KIND = "retrieval";
+
+// sha256 of a text, in full — the same 64-hex form clone step 4e's `_hash_scope`
+// computes in SQL (`encode(sha256(convert_to(text, 'UTF8')), 'hex')`), because
+// the two are joined on the seed → guest hop. Full rather than truncated like
+// questionIdentity because this one IS matched against a SQL-side hash, and a
+// truncation on one side only is a bank that never hits and never says why.
+export const textHash = (text: string): string =>
+  createHash("sha256").update(text, "utf8").digest("hex");
+
+export type ReplayRetrievalEntry = {
+  // Chunk ids in rank order — READER's id space in `id` form, sha256(chunk text)
+  // in `hash` form. NULL HOLDS A PLACE (the 0082 rule): position is rank, and an
+  // element the clone could not map stays as null rather than promoting what is
+  // behind it. The reader treats any null as a miss for the whole question.
+  ids: (string | null)[];
+  // Per `ids` entry, the chunk's cosine in its canonical space — the stored
+  // order is authoritative, exactly as eval_results.retrieved_scores is.
+  scores: number[];
+  // retriever.ScreenCutoffs, verbatim: the dirty screen reads these off the
+  // inserted row on the NEXT press, so they have to be the real ones.
+  cutoffs: { depth: number; deep: number | null; models: Record<string, number> };
+};
+
+export type ReplayRetrieval = {
+  version: 1;
+  form: "hash" | "id";
+  // retrievalDepth(criteria, topK) the lists were scored at. A bank at another
+  // depth is a bank for another list, and misses whole.
+  depth: number;
+  // By textHash(question text).
+  questions: Record<string, ReplayRetrievalEntry>;
+};
+
+// THE PURE LOOKUP, and the fail-closed rules in one place:
+//   - the bank must be in `id` form (a hash-form bank reached a reader — the
+//     clone skipped the rewrite, or the publish wrote to the wrong account);
+//   - the bank's depth must be the depth this score is retrieving at;
+//   - the question's text must be banked;
+//   - no element of the list may be null (a chunk that did not travel).
+// Any of those is a miss, which is the ordinary computed path — never a wrong
+// number. Returns the entry with `ids` narrowed to strings.
+export function bankedRetrieval(
+  bank: ReplayRetrieval | null,
+  question: string,
+  depth: number,
+): { ids: string[]; scores: number[]; cutoffs: ReplayRetrievalEntry["cutoffs"] } | null {
+  if (bank === null || bank.form !== "id" || bank.depth !== depth) return null;
+  const entry = bank.questions[textHash(question)];
+  if (!entry) return null;
+  if (entry.ids.some((id) => id === null)) return null;
+  if (entry.scores.length !== entry.ids.length) return null;
+  return { ids: entry.ids as string[], scores: entry.scores, cutoffs: entry.cutoffs };
+}
+
+// ONE RECORDED RETRIEVAL — the NDJSON line lib/rag/retrievalRecord appends per
+// computed (never banked) result while the publish's walk runs. `ids` are text
+// hashes: the recorder hashes the retrieved chunks' text in-process, so the
+// line names nothing that belongs to the workspace it was written from.
+export type RetrievalRecord = {
+  key: string;
+  q: string;
+  depth: number;
+  ids: string[];
+  scores: number[];
+  cutoffs: ReplayRetrievalEntry["cutoffs"];
+};
+
+// MERGE THE WALK'S LINES INTO ONE PAYLOAD PER KEY (hash form). Nine walks
+// record the same (key, question) many times — every confirm re-scores the
+// same handful before and after, and every guest's Score pending records the
+// 'baseline' state — so duplicates have to be reconciled, and the first walk
+// (2026-09-08, 499 lines) showed exactly what they look like:
+//
+//   - THE RANKS AGREE AND THE SCORES DRIFT, by ≤ 0.0022, across GUESTS. Each
+//     guest embeds its questions afresh, and the provider's query vectors are
+//     not bit-identical call to call, so two guests measure the same list with
+//     cosines a few thousandths apart. That is not two states under one key: it
+//     is one state seen through two real query vectors, and two real guests
+//     already differ from each other by exactly this much. The first recording
+//     is kept, and a drift over SCORE_TOLERANCE — an order of magnitude past
+//     anything observed — is still a defect and still throws.
+//   - THE RANKS DISAGREE, once in 420: a near-tie at the last rank that the same
+//     drift flipped. The bank cannot call either list exact for both guests, so
+//     the question is NOT banked under that key (`contested`) and every guest
+//     computes it — the fail-closed answer, and one that costs a single
+//     question's retrieval rather than a wrong rank under a real-looking bar.
+//
+// Depth is the one rule with no tolerance: one key, one depth, or the key is
+// broken.
+export const SCORE_TOLERANCE = 0.01;
+
+const within = (a: number | null, b: number | null): boolean =>
+  a === null || b === null ? a === b : Math.abs(a - b) <= SCORE_TOLERANCE;
+
+function sameEntry(a: ReplayRetrievalEntry, b: ReplayRetrievalEntry): "same" | "drift" | "differ" {
+  if (a.ids.length !== b.ids.length || a.ids.some((id, i) => id !== b.ids[i])) return "differ";
+  if (a.scores.length !== b.scores.length) return "differ";
+  const modelsA = Object.keys(a.cutoffs.models).sort();
+  const modelsB = Object.keys(b.cutoffs.models).sort();
+  if (a.cutoffs.depth !== b.cutoffs.depth || modelsA.join() !== modelsB.join()) return "differ";
+  const drift =
+    a.scores.some((s, i) => Math.abs(s - b.scores[i]) > SCORE_TOLERANCE) ||
+    !within(a.cutoffs.deep, b.cutoffs.deep) ||
+    modelsA.some((m) => !within(a.cutoffs.models[m], b.cutoffs.models[m]));
+  if (drift) return "differ";
+  return JSON.stringify(a) === JSON.stringify(b) ? "same" : "drift";
+}
+
+export function packRetrieval(records: RetrievalRecord[]): {
+  banks: Map<string, ReplayRetrieval>;
+  // (key, question) pairs recorded with two different RANK lists, and so left
+  // out of the bank. Keys and question hashes, for the census line.
+  contested: { key: string; q: string }[];
+} {
+  const out = new Map<string, ReplayRetrieval>();
+  const contested = new Map<string, { key: string; q: string }>();
+  for (const r of records) {
+    let bank = out.get(r.key);
+    if (!bank) {
+      bank = { version: 1, form: "hash", depth: r.depth, questions: {} };
+      out.set(r.key, bank);
+    }
+    if (bank.depth !== r.depth) {
+      throw new Error(
+        `retrieval bank ${r.key.slice(0, 8)}: recorded at depth ${bank.depth} and ${r.depth}`,
+      );
+    }
+    const entry: ReplayRetrievalEntry = { ids: r.ids, scores: r.scores, cutoffs: r.cutoffs };
+    const id = `${r.key}\n${r.q}`;
+    if (contested.has(id)) continue;
+    const have = bank.questions[r.q];
+    if (!have) {
+      bank.questions[r.q] = entry;
+      continue;
+    }
+    if (sameEntry(have, entry) === "differ") {
+      delete bank.questions[r.q];
+      contested.set(id, { key: r.key, q: r.q });
+    }
+    // "same" and "drift" both keep the first recording.
+  }
+  return { banks: out, contested: [...contested.values()] };
+}
+
+// What the retrieval kind may weigh per GUEST across every key, on
+// DEMO_TUNING_MAX_BYTES' terms (reported by scripts/demo-snapshot, never
+// enforced): §3.2 estimates ~400 kB — ~10 full states of ~60 questions plus
+// ~60 confirm-intermediate states of one or two.
+export const DEMO_RETRIEVAL_MAX_BYTES = 700_000;
+
+export const retrievalBytes = (banks: Iterable<ReplayRetrieval>): number => {
+  let n = 0;
+  for (const b of banks) n += Buffer.byteLength(JSON.stringify(b), "utf8");
+  return n;
+};

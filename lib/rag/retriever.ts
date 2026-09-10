@@ -22,6 +22,8 @@
 // fuseWithOverrides takes the override state as an argument so the model-trial
 // dry-run can inject a HYPOTHETICAL override and report the exact merged rank a
 // chunk would occupy — trial and live retrieval share this code and cannot drift.
+import { stage } from "@/lib/autotuneTiming";
+import { isolated } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import {
   cosine,
@@ -37,12 +39,12 @@ import { sameVectorSpace } from "@/lib/rag/embeddingModels";
 import {
   listOverrides,
   overrideSims,
-  overrideSimsBatch,
+  overrideSimsMulti,
   type ChunkOverride,
 } from "@/lib/rag/overrideStore";
 import {
   poolDocSims,
-  poolDocSimsBatch,
+  poolDocSimsMulti,
   query,
   queryBatch,
   queryExcludingIds,
@@ -69,9 +71,14 @@ const FUSION_DEEP_FLOOR = 200;
 // The effective fusion pool at depth k. `configured` is a caller-supplied pool;
 // null/undefined falls back to the config's retrieval_fusion_pool, then the auto
 // formula.
-export function effectiveFusionPool(k: number, configured?: number | null): number {
+export function effectiveFusionPool(
+  k: number,
+  configured?: number | null,
+): number {
   const pool =
-    configured ?? activeConfig().fusionPool ?? Math.max(k * FUSION_BASE_FACTOR, FUSION_POOL_FLOOR);
+    configured ??
+    activeConfig().fusionPool ??
+    Math.max(k * FUSION_BASE_FACTOR, FUSION_POOL_FLOOR);
   return Math.max(k, pool);
 }
 
@@ -145,7 +152,11 @@ export type RetrievalContext = {
   annFor: AnnFor;
   // The no-override fast path's read (the eval scorer's BASELINE leg), memoized
   // on the same terms.
-  fullFor: (text: string, vector: number[], k: number) => Promise<RetrievedChunk[]>;
+  fullFor: (
+    text: string,
+    vector: number[],
+    k: number,
+  ) => Promise<RetrievedChunk[]>;
   // The foreign lane's QUERY VECTOR under an override model. Memoized because
   // embedQueryCached is not free even on a hit: it books the avoided embed on
   // the savings ledger, which is a WRITE, once per question per model. A batch
@@ -333,51 +344,98 @@ export async function prefetchRetrieval(
   const texts = questions.map((q) => q.text);
   const vectors = questions.map((q) => q.vector);
 
+  // One savepoint around the whole prefetch, so a failed batch read still leaves
+  // the scope's transaction usable for the per-question fallback the catch
+  // promises. Before cut 1 (docs/autotune-press-latency-plan.md §9) each ANN read
+  // opened its own; now they share this one.
   try {
-    if (ctx.overrides.length > 0) {
-      const overriddenIds = ctx.overrides.map((o) => o.sourceChunkId);
-      const models = [...new Set(ctx.overrides.map((o) => o.model))];
-      const paidN = effectiveFusionPool(depth);
-      const deepN = Math.max(paidN * FUSION_DEEP_FACTOR, FUSION_DEEP_FLOOR);
+    await isolated(async () => {
+      if (ctx.overrides.length > 0) {
+        const overriddenIds = ctx.overrides.map((o) => o.sourceChunkId);
+        const models = [...new Set(ctx.overrides.map((o) => o.model))];
+        const paidN = effectiveFusionPool(depth);
+        const deepN = Math.max(paidN * FUSION_DEEP_FACTOR, FUSION_DEEP_FLOOR);
 
-      const lists = await queryExcludingIdsBatch(vectors, deepN, overriddenIds);
-      texts.forEach((t, i) => ctx.memo.ann.set(t, lists[i]));
+        const lists = await stage("prefetch:ann", () =>
+          queryExcludingIdsBatch(vectors, deepN, overriddenIds),
+        );
+        texts.forEach((t, i) => ctx.memo.ann.set(t, lists[i]));
 
-      for (const model of models) {
-        const isBaseSpace = sameVectorSpace(model, cfg.embeddingModel);
-        // One read for the batch's query vectors under this model — and it warms
-        // the same L1 the per-question embedQueryCached reads, so the fusion
-        // lane finds them in memory rather than asking again.
-        const qVecs = isBaseSpace
-          ? new Map(texts.map((t, i) => [t, vectors[i]]))
-          : await embedQueriesCached(texts, model);
-        const ordered = texts.map((t, i) => qVecs.get(t) ?? vectors[i]);
-        if (!isBaseSpace) {
-          texts.forEach((t, i) => ctx.memo.qv.set(`${model}\0${t}`, ordered[i]));
+        // Query vectors per model first (a read only for a foreign space, and
+        // only until L1 holds them), then the sims for EVERY model in one
+        // statement and the pools for every foreign model in another — cut 4,
+        // docs/autotune-press-latency-plan.md §9: this loop issued one of each
+        // per model, ~2.5 models per one-question call.
+        const perModel: {
+          model: string;
+          isBaseSpace: boolean;
+          ordered: number[][];
+        }[] = [];
+        for (const model of models) {
+          const isBaseSpace = sameVectorSpace(model, cfg.embeddingModel);
+          // One read for the batch's query vectors under this model — and it warms
+          // the same L1 the per-question embedQueryCached reads, so the fusion
+          // lane finds them in memory rather than asking again.
+          const qVecs = isBaseSpace
+            ? new Map(texts.map((t, i) => [t, vectors[i]]))
+            : await stage("prefetch:qvec", () =>
+                embedQueriesCached(texts, model),
+              );
+          const ordered = texts.map((t, i) => qVecs.get(t) ?? vectors[i]);
+          if (!isBaseSpace) {
+            texts.forEach((t, i) =>
+              ctx.memo.qv.set(`${model}\0${t}`, ordered[i]),
+            );
+          }
+          perModel.push({ model, isBaseSpace, ordered });
         }
 
         // simsFor memoizes on first call, so the batched answer is planted in
         // that memo directly — letting the per-question call reach the database
         // is exactly what this is here to stop.
-        const sims = await overrideSimsBatch(model, ordered);
-        texts.forEach((t, i) => ctx.seedSims(model, t, sims[i]));
+        const sims = await stage("prefetch:sims", () =>
+          overrideSimsMulti(
+            perModel.map((m) => ({ model: m.model, vectors: m.ordered })),
+          ),
+        );
+        for (const m of perModel) {
+          const forModel = sims.get(m.model)!;
+          texts.forEach((t, i) => ctx.seedSims(m.model, t, forModel[i]));
+        }
 
-        if (!isBaseSpace) {
+        const foreign = perModel.filter((m) => !m.isBaseSpace);
+        if (foreign.length > 0) {
           // The union of the batch's pools — every id any of these ANN lists
           // produced. Each question still reads back only its own.
-          const union = [...new Set(lists.flatMap((l) => l.map((rc) => rc.chunk.chunk.id)))];
-          const pools = await poolDocSimsBatch(union, model, ordered);
-          texts.forEach((t, i) => ctx.memo.pool.set(`${model}\0${t}`, pools[i]));
+          const union = [
+            ...new Set(lists.flatMap((l) => l.map((rc) => rc.chunk.chunk.id))),
+          ];
+          const pools = await stage("prefetch:pool", () =>
+            poolDocSimsMulti(
+              union,
+              foreign.map((m) => ({ model: m.model, vectors: m.ordered })),
+            ),
+          );
+          for (const m of foreign) {
+            const forModel = pools.get(m.model)!;
+            texts.forEach((t, i) =>
+              ctx.memo.pool.set(`${m.model}\0${t}`, forModel[i]),
+            );
+          }
         }
       }
-    }
 
-    if (baselineK !== undefined) {
-      const base = await queryBatch(vectors, baselineK);
-      texts.forEach((t, i) => ctx.memo.full.set(t, base[i]));
-    }
+      if (baselineK !== undefined) {
+        const base = await stage("prefetch:base", () =>
+          queryBatch(vectors, baselineK),
+        );
+        texts.forEach((t, i) => ctx.memo.full.set(t, base[i]));
+      }
+    });
   } catch (err) {
-    console.warn(`[rag:retriever] batch prefetch failed, falling back to per-question reads: ${(err as Error).message}`);
+    console.warn(
+      `[rag:retriever] batch prefetch failed, falling back to per-question reads: ${(err as Error).message}`,
+    );
   }
 }
 
@@ -524,7 +582,10 @@ export async function fuseWithOverrides(
   const models = [...new Set(overrides.map((o) => o.model))];
 
   const lists: FusedCandidate[][] = [];
-  const meta = new Map<string, { documentId: string; position: number; text: string }>();
+  const meta = new Map<
+    string,
+    { documentId: string; position: number; text: string }
+  >();
   const cutoffModels: Record<string, number> = {};
 
   // Base space: ANN over the non-overridden chunks. Pulled past the paid pool so
@@ -551,12 +612,17 @@ export async function fuseWithOverrides(
     (await (lanes?.annFor
       ? lanes.annFor(text, baseVector, deepN, overriddenIds)
       : queryExcludingIds(baseVector, deepN, overriddenIds)));
-  if (annKey !== null && cachedAnn === undefined) annCache!.set(annKey, baseChunks);
+  if (annKey !== null && cachedAnn === undefined)
+    annCache!.set(annKey, baseChunks);
   // `meta` therefore starts EMPTY, always: retrieveForQuery's resolveChunks
   // fallback fills the topK that survive — the same path override winners have
   // always taken.
   lists.push(
-    baseChunks.map((rc, i) => ({ id: rc.chunk.chunk.id, rank: i + 1, sim: rc.score })),
+    baseChunks.map((rc, i) => ({
+      id: rc.chunk.chunk.id,
+      rank: i + 1,
+      sim: rc.score,
+    })),
   );
 
   // Override spaces: score each override model's PIECES against the query
@@ -611,7 +677,8 @@ export async function fuseWithOverrides(
     // caller's retrieval depth for eval scoring). Competitor sims only — see
     // ScreenCutoffs.
     const sortedCompetitors = [...competitorSims].sort((a, b) => b - a);
-    if (sortedCompetitors.length >= k) cutoffModels[model] = sortedCompetitors[k - 1];
+    if (sortedCompetitors.length >= k)
+      cutoffModels[model] = sortedCompetitors[k - 1];
 
     const overriddenSims = [...bestByChunk.values()];
     lists.push(
@@ -636,14 +703,20 @@ export async function fuseWithOverrides(
 
   // Base-model cutoff even when no current override lives in base space, so a
   // FUTURE size-only override can still be screened against this result.
-  if (cutoffModels[cfg.embeddingModel] === undefined && baseChunks.length >= k) {
+  if (
+    cutoffModels[cfg.embeddingModel] === undefined &&
+    baseChunks.length >= k
+  ) {
     cutoffModels[cfg.embeddingModel] = baseChunks[k - 1].score;
   }
   const cutoffs: ScreenCutoffs = {
     depth: k,
     // Only a FULL deep list bounds base-lane membership; a shorter one means
     // the whole corpus competed, so nothing can be proven "outside" it.
-    deep: baseChunks.length >= deepN ? baseChunks[baseChunks.length - 1].score : null,
+    deep:
+      baseChunks.length >= deepN
+        ? baseChunks[baseChunks.length - 1].score
+        : null,
     models: cutoffModels,
   };
   return { merged, meta, cutoffs };
@@ -679,7 +752,9 @@ export async function retrieveWithCutoffs(
   // deep is null (no fusion pools existed) and the base cutoff is simply the
   // k-th retrieved score.
   if (overrides.length === 0) {
-    const retrieved = ctx ? await ctx.fullFor(text, baseVector, k) : await query(baseVector, k);
+    const retrieved = ctx
+      ? await ctx.fullFor(text, baseVector, k)
+      : await query(baseVector, k);
     return {
       retrieved,
       cutoffs: {
@@ -715,7 +790,9 @@ export async function retrieveWithCutoffs(
   // Through the context when there is one, so repeated re-scores under the same
   // override state don't re-read the same chunk rows (L14).
   const unresolved = top.map(({ id }) => id).filter((id) => !meta.has(id));
-  const resolved = ctx ? await ctx.resolve(unresolved) : await resolveChunks(unresolved);
+  const resolved = ctx
+    ? await ctx.resolve(unresolved)
+    : await resolveChunks(unresolved);
   for (const [id, m] of resolved) meta.set(id, m);
 
   const retrieved = top.map(({ id, sim }) => {
