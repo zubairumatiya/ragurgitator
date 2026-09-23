@@ -53,6 +53,16 @@ jobs:
         if: '!cancelled()'
         run: npm run lint
 
+      # THE SEMANTIC CACHE GATE (docs/semantic-cache-gate-plan.md): re-runs the
+      # cache's match decision — cosine under the key model, τ, both halves of
+      # the entity guard — over frozen labelled pairs and fails on any NEW false
+      # accept against the committed baseline. A step here rather than a job:
+      # it is pure (no database, no provider, no network — an import allow-list
+      # test enforces that), takes seconds, and is enforced through `ci` today.
+      - name: Cache gate
+        if: '!cancelled()'
+        run: npm run cache:gate -- gate ${{ github.event_name != 'pull_request' && '--strict' || '' }}
+
       # These are placeholders, not secrets. next build evaluates module scope and
       # prerenders, so the two db URLs and the Supabase pair have to parse or the
       # build throws before it compiles anything; nothing here is dialled, because
