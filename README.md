@@ -327,7 +327,7 @@ it, and nothing that runs before a deploy makes one.
   problem.
 - **`e2e.yml`** — same trigger as smoke, one step further: a headless Chromium
   walks the login wall and the guest demo on the finished preview (front door →
-  workspace → a banked answer → Evals → Add → Score pending), so a button wired
+  workspace → a banked answer → Evals → Add → Score pending → Auto tune), so a button wired
   to the wrong route or a pending state that never paints fails the deploy, not
   the next visitor. Mints one guest per run; the demo's caps can refuse a burst
   of deploys, and the spec says so by name. Advisory, not yet required.
@@ -345,8 +345,9 @@ it, and nothing that runs before a deploy makes one.
 Two runners on top of `npm test`, both from docs/ui-tests-plan.md:
 
 - `npm run test:ui` — Vitest + jsdom + Testing Library over the Client Components
-  a stranger meets first: the chat window, the sign-in form, the demo's front
-  door and banner. `fetch` and the router are stubbed, so it is hermetic and runs
+  a stranger meets first (the chat window, the sign-in form, the demo's front
+  door and banner) plus the upload form and the key row. `fetch`, the router and
+  the Server Actions are stubbed, so it is hermetic and runs
   in `ci.yml`. Files are `*.test.tsx`, colocated; `npm test` owns `*.test.ts`,
   and the two globs never overlap.
 - `npm run e2e` — Playwright, Chromium only, against a RUNNING deployment: a

@@ -90,3 +90,35 @@ test("Evals: Add fills the board from the bank, Score pending puts a recall numb
   await expect(recall).toBeVisible();
   await expect(recall.locator("xpath=following-sibling::span[1]")).toHaveText(/^\d+(\.\d+)?%$/);
 });
+
+test("⚙ Auto tune runs on the tuning shelf and ends with a summary line", async () => {
+  // A replayed press is ~20 s on a warm Lambda and more on a cold one, on top
+  // of the estimate round trip; the default budget is for the shorter walks.
+  test.slow();
+
+  // Live for a guest only because the published config carries min-rates on
+  // enabled metrics AND the clone ships a stocked tuning shelf (plan §5, phase
+  // 6). Greyed here means one of those was lost in a republish.
+  const open = page.getByRole("button", { name: "⚙ Auto tune" });
+  await expect(open).toBeEnabled();
+  await open.click();
+  await expect(page.getByRole("heading", { name: "Auto tune" })).toBeVisible();
+
+  const run = page.getByRole("button", { name: "Run autotune" });
+  // Disabled reads "Nothing is below its min-rate": Score pending just put
+  // questions on the board, so at least one must sit below a 0.98 recall bar.
+  await expect(run).toBeEnabled();
+  await run.click();
+
+  // The estimate may interpose the background offer when its ETA crosses the
+  // threshold; the press is what is under test, so run it here in the tab.
+  const runHere = page.getByRole("button", { name: "Run here" });
+  await runHere.waitFor({ state: "visible", timeout: 5_000 }).catch(() => undefined);
+  if (await runHere.isVisible()) await runHere.click();
+
+  await expect(page.getByText(/experiment\(s\) in .*Recall \d+(\.\d+)?% · MRR/)).toBeVisible({
+    timeout: 150_000,
+  });
+  await page.getByRole("button", { name: "Close" }).click();
+  await expect(page.getByRole("heading", { name: "Auto tune" })).not.toBeVisible();
+});
