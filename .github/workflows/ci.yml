@@ -140,3 +140,72 @@ jobs:
       - name: Integration tests
         if: '!cancelled()'
         run: npm run itest
+
+  # THE RETRIEVAL REGRESSION GATE (docs/ci-eval-gate-plan.md). Loads a frozen
+  # 236-chunk corpus with every lane's cached vectors, runs 118 held-out
+  # questions through the real retriever with the HNSW index dropped (exact
+  # scan, so the numbers are deterministic), and compares Recall@5 / MRR /
+  # nDCG@5 against the committed baseline. Its own job for the same reason
+  # `integration` is: "retrieval regressed" has to be distinguishable from "a
+  # migration broke" at a glance.
+  #
+  # NO SECRETS and no provider calls — the fixture carries every vector, and
+  # `score` fails the run if a provider key was ever touched — so fork PRs run
+  # it too. The margin lives here, in the one place a reviewer will look.
+  eval-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: rag_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/rag_test
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/rag_test
+      # Below one question in 118 (0.0085): any lost hit is red, float
+      # formatting is not.
+      EVAL_GATE_MARGIN: "0.005"
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Replay migrations
+        env:
+          MIGRATE_BOOTSTRAP: test/sql
+        run: npm run migrate
+
+      - name: Load fixture
+        run: npm run eval:gate -- load
+
+      # On a PR: red when Recall@5 falls past the margin; MRR and nDCG warn.
+      - name: Gate
+        if: github.event_name == 'pull_request'
+        run: npm run eval:gate -- gate
+
+      # On main: the committed baseline must be reproduced EXACTLY, in both
+      # directions, or "the stored baseline from main" has quietly stopped
+      # being true and main goes red until someone refreshes it.
+      - name: Gate (strict)
+        if: github.event_name != 'pull_request'
+        run: npm run eval:gate -- gate --strict
