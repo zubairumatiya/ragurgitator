@@ -21,6 +21,7 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { apiFetch } from "@/lib/http/client";
@@ -39,28 +40,46 @@ function remaining(expiresAt: string): string {
 }
 
 export function DemoBanner() {
+  const pathname = usePathname();
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
   const [isGuest, setIsGuest] = useState(false);
+  // Has /api/auth/me ever answered 200 for this mount? Until it has, the banner
+  // does not know who it is about, and must ask again.
+  const [settled, setSettled] = useState(false);
   // Re-render the countdown on a timer. The state is a tick counter rather than
   // the formatted string so the format lives in one place.
   const [, setTick] = useState(0);
 
+  // ASKED AGAIN ON EVERY NAVIGATION UNTIL IT HAS AN ANSWER, not once on mount.
+  // This lives in the root layout, so it mounts on /demo — where there is no
+  // session yet — and STAYS mounted through the router.replace that StartDemo
+  // makes after the cookie is set. A mount-once fetch had already come back
+  // 401 by then and was never repeated, so a visitor who arrived through the
+  // front door never saw the banner at all until a hard reload; only the
+  // Sidebar's AccountRow, which remounts on /c/…, knew they were a guest. The
+  // first e2e run found it (e2e/demo.spec.ts).
+  //
+  // Bounded on purpose: a 200 settles it, guest or not, so a signed-in account
+  // pays for exactly one request per session and never one per navigation.
   useEffect(() => {
+    if (settled) return;
     let live = true;
     void (async () => {
       // A 401 here is the ordinary case on /login, not an error worth surfacing:
-      // the banner simply has nobody to be about.
+      // the banner simply has nobody to be about — yet.
       const res = await apiFetch("/api/auth/me").catch(() => null);
       if (!live || !res?.ok) return;
       const body = (await res.json().catch(() => null)) as Me | null;
-      if (!live || !body?.guest?.isGuest) return;
+      if (!live) return;
+      setSettled(true);
+      if (!body?.guest?.isGuest) return;
       setIsGuest(true);
       setExpiresAt(body.guest.expiresAt);
     })();
     return () => {
       live = false;
     };
-  }, []);
+  }, [pathname, settled]);
 
   useEffect(() => {
     if (!expiresAt) return;
