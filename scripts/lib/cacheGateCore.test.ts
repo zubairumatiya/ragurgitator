@@ -197,7 +197,14 @@ describe("compare", () => {
 describe("import allow-list", () => {
   it("cacheGateCore reaches nothing that opens a database or a provider", () => {
     const src = readFileSync(join(__dirname, "cacheGateCore.ts"), "utf8");
-    const imports = [...src.matchAll(/^import .* from "([^"]+)";$/gm)].map((m) => m[1]);
+    // Every `import` statement, including multi-line `import {\n …\n} from "x";`
+    // (the house style) and side-effect `import "x";` — a single-line-only
+    // match would let a wrapped db import through and the property would be
+    // enforced in name only. The count is cross-checked against the raw
+    // statement count so an unmatched form cannot slip past silently.
+    const statements = src.match(/^import\b/gm)?.length ?? 0;
+    const imports = [...src.matchAll(/^import\b[^"]*"([^"]+)";/gm)].map((m) => m[1]);
+    assert.equal(imports.length, statements, "every import statement must be parsed");
     assert.ok(imports.length >= 4);
     const allowed = /^(\.\.\/\.\.\/lib\/config|\.\.\/\.\.\/lib\/rag\/semanticCacheCore|\.\.\/\.\.\/lib\/rag\/keyModelSweepCore|\.\/[A-Za-z]+)$/;
     for (const i of imports) assert.match(i, allowed, `import "${i}" is outside the allow-list`);

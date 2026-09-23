@@ -65,6 +65,10 @@ export type Run = {
 // Cosines rounded like lib/demo/replayCore's SIM_PRECISION: bit-exact float
 // sums are not a promise across Node versions, six decimals are.
 const SIM_PRECISION = 1e6;
+// Half a rounding unit: the smallest possible move between two rounded sims is
+// one unit, and |a - b| for two 6-decimal doubles lands on either side of
+// exactly 1e-6 depending on the operands, so `> 1e-6` would miss some of them.
+const SIM_DRIFT_TOLERANCE = 0.5 / SIM_PRECISION;
 export const roundSim = (x: number): number => Math.round(x * SIM_PRECISION) / SIM_PRECISION;
 
 const expectedVerdict = (label: PairLabel): "accept" | "reject" => (label === "same" ? "accept" : "reject");
@@ -263,7 +267,7 @@ export function compare(baseline: Baseline, run: Run, opts: { strict: boolean })
   if (opts.strict) {
     // main's code must reproduce main's baseline EXACTLY.
     if (movers.length > 0) errors.push(`baseline stale — ${movers.length} pair(s) decide differently from baseline.json; refresh it with \`npm run cache:gate -- baseline\``);
-    if (maxSimDrift > 1e-6) errors.push(`baseline stale — a cosine moved by ${maxSimDrift.toExponential(2)}`);
+    if (maxSimDrift > SIM_DRIFT_TOLERANCE) errors.push(`baseline stale — a cosine moved by ${maxSimDrift.toExponential(2)}`);
   } else {
     // THE GATE. One new false accept is one confidently wrong answer served
     // without the LLM; there is no margin on that.
@@ -279,7 +283,7 @@ export function compare(baseline: Baseline, run: Run, opts: { strict: boolean })
     }
     const orientation = byKind("orientation-only");
     if (orientation.length > 0) notices.push(`${orientation.length} pair(s) changed in one orientation only, with the same outcome — refresh the baseline if intended`);
-    if (maxSimDrift > 1e-6) notices.push(`cosines moved by up to ${maxSimDrift.toExponential(2)} — did you mean to change the similarity?`);
+    if (maxSimDrift > SIM_DRIFT_TOLERANCE) notices.push(`cosines moved by up to ${maxSimDrift.toExponential(2)} — did you mean to change the similarity?`);
   }
 
   return { ok: errors.length === 0, errors, warnings, notices, movers, maxSimDrift };
