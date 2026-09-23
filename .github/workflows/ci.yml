@@ -49,6 +49,14 @@ jobs:
         if: '!cancelled()'
         run: npm test
 
+      # Component tests: Vitest + jsdom over the Client Components a visitor
+      # meets first (docs/ui-tests-plan.md §3). Hermetic — fetch and the router
+      # are stubbed — and a separate runner because node:test cannot host jsdom
+      # and JSX; the two runners' globs are disjoint by extension.
+      - name: Component tests
+        if: '!cancelled()'
+        run: npm run test:ui
+
       - name: Lint
         if: '!cancelled()'
         run: npm run lint
