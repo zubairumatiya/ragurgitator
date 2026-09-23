@@ -1,0 +1,603 @@
+{
+ "fixtureHash": "3bba1471ab771982b60b6849e94819477391e10c80e3f78b5ad887530cd92b1f",
+ "gitSha": "6a96869955214280acfea78f8fa91e33db99970e",
+ "scoredAt": "2026-09-23T15:50:47.920Z",
+ "k": 5,
+ "recall": 0.9745762711864406,
+ "mrr": 0.919774011299435,
+ "ndcg": 0.9473958175018564,
+ "questions": 118,
+ "hits": 115,
+ "perQuestion": [
+  {
+   "key": "cold-war.md#10",
+   "question": "What was the aim of the broadcasting effort called Radio Free Europe/Radio Liberty that started in 1949?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#12",
+   "question": "What secret 1950 document proposed quadrupling US defense spending and reinforcing pro-Western alliances?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#14",
+   "question": "Roughly how many Hungarians fled the country after Soviet forces crushed the 1956 uprising?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#17",
+   "question": "Who was the American pilot shot down in April 1958 after bombing government-held Ambon, exposing CIA support for Indonesian rebels?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#18",
+   "question": "Along what line of latitude was Vietnam divided between North and South after the 1954 Geneva Conference?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#19",
+   "question": "What dismissive nickname did Khrushchev give Mao Zedong over Mao's casual attitude toward nuclear war?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#22",
+   "question": "Besides a public pledge not to invade Cuba, what secret concession did Kennedy make to end the missile crisis?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#23",
+   "question": "On what date did Vietnam invade Cambodia, ultimately deposing Pol Pot?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#24",
+   "question": "How many US troops were in Vietnam by 1963, up from under a thousand in 1959?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#26",
+   "question": "On what date did the Soviet Union invade Czechoslovakia to end the Prague Spring?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#29",
+   "question": "In what year did Afghanistan's communist party first seize power in the Saur Revolution, kicking off the civil war that preceded the Soviet invasion?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#32",
+   "question": "By how much did the Reagan administration increase U.S. military spending as a percentage of GNP between 1981 and 1986?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#34",
+   "question": "Which Central American rebel group did the Reagan administration back in an effort to overthrow Nicaragua's Sandinista government?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#34",
+   "question": "Which Guatemalan military ruler's regime received controversial backing from the Reagan administration during the Guatemalan Civil War?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#39",
+   "question": "What failed August 1991 event by hardline Communist Party and KGB officials effectively ended Gorbachev's political power?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#40",
+   "question": "In January 1993, what follow-up arms reduction agreement did Bush and Yeltsin agree to?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#42",
+   "question": "By 2016, roughly how many Lenin statues had been taken down in Ukraine under its decommunization laws?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#44",
+   "question": "Which historical interpretation places most of the blame for the Cold War's outbreak on early American efforts to isolate and confront the Soviet Union?",
+   "rank": 1
+  },
+  {
+   "key": "cold-war.md#5",
+   "question": "What three institutions did Truman create by signing the National Security Act of 1947 shortly after enacting the Marshall Plan?",
+   "rank": 1
+  },
+  {
+   "key": "great-depression.md#1",
+   "question": "What event in 1939 is credited with ending the Great Depression?",
+   "rank": 2
+  },
+  {
+   "key": "great-depression.md#14",
+   "question": "In which book did Keynes argue that lower aggregate expenditures caused a massive decline in income and employment?",
+   "rank": 1
+  },
+  {
+   "key": "great-depression.md#14",
+   "question": "What vicious cycle did Irving Fisher identify as the main driver of the economic collapse?",
+   "rank": 2
+  },
+  {
+   "key": "great-depression.md#16",
+   "question": "In what month and year did key economic indicators turn positive as Roosevelt took office, per the expectations hypothesis?",
+   "rank": 1
+  },
+  {
+   "key": "great-depression.md#17",
+   "question": "What share of the 1933–1937 recovery in output and prices is credited to the shift in public expectations?",
+   "rank": 1
+  },
+  {
+   "key": "great-depression.md#18",
+   "question": "What phrase did Milton Friedman use to dismiss the Austrian 'leave-it-alone' liquidationist approach?",
+   "rank": 1
+  },
+  {
+   "key": "great-depression.md#19",
+   "question": "According to Hans Sennholz, what caused America's recurring boom-and-bust cycles, such as those of 1819–20 and 1920–21?",
+   "rank": 1
+  },
+  {
+   "key": "great-depression.md#2",
+   "question": "At the depression's worst point, roughly what proportion of Great Plains farms changed ownership despite federal assistance?",
+   "rank": 1
+  },
+  {
+   "key": "great-depression.md#22",
+   "question": "What Chilean government agency did Pedro Aguirre Cerda's Popular Front create to promote industrialization?",
+   "rank": 1
+  },
+  {
+   "key": "great-depression.md#25",
+   "question": "What happened to Greece's foreign exchange reserves in 1932 after it pegged the drachma to the U.S. dollar?",
+   "rank": 1
+  },
+  {
+   "key": "great-depression.md#27",
+   "question": "What Italian institute, formed in January 1933, took control of bank-owned companies to become Europe's largest state-owned industrial sector outside the USSR?",
+   "rank": 1
+  },
+  {
+   "key": "great-depression.md#30",
+   "question": "By what percentage did Poland's overall industrial production fall during the Great Depression?",
+   "rank": 1
+  },
+  {
+   "key": "great-depression.md#30",
+   "question": "How much did Poland's total manufacturing output shrink over the course of this economic crisis?",
+   "rank": 1
+  },
+  {
+   "key": "great-depression.md#32",
+   "question": "According to the Carnegie Commission, what fraction of Afrikaners were living in poverty in 1931?",
+   "rank": 1
+  },
+  {
+   "key": "great-depression.md#32",
+   "question": "Per a 1931 investigative commission, what proportion of the white Afrikaner population was found to be destitute?",
+   "rank": 1
+  },
+  {
+   "key": "great-depression.md#36",
+   "question": "What happened to the National Recovery Administration in 1935?",
+   "rank": 4
+  },
+  {
+   "key": "great-depression.md#36",
+   "question": "What ruling from the nation's highest court struck down the NRA in 1935?",
+   "rank": 1
+  },
+  {
+   "key": "great-depression.md#40",
+   "question": "Which economist is most frequently credited with coining the term 'The Great Depression'?",
+   "rank": 3
+  },
+  {
+   "key": "great-depression.md#5",
+   "question": "Which four farm commodities were hit hardest by declining American exports during the Depression?",
+   "rank": 1
+  },
+  {
+   "key": "russian-revolution.md#1",
+   "question": "What was the name of the secret police established by the Bolsheviks to carry out the Red Terror?",
+   "rank": 1
+  },
+  {
+   "key": "russian-revolution.md#11",
+   "question": "Which major Petrograd factory's shutdown due to a labor strike helped ignite the uprising?",
+   "rank": 1
+  },
+  {
+   "key": "russian-revolution.md#14",
+   "question": "Which document laid out the Bolsheviks' key policy demands after Lenin traveled through Germany to reach Russia in spring 1917?",
+   "rank": 1
+  },
+  {
+   "key": "russian-revolution.md#17",
+   "question": "By what vote count did the Bolshevik Central Committee pass the resolution calling for the overthrow of the Provisional Government?",
+   "rank": 1
+  },
+  {
+   "key": "russian-revolution.md#18",
+   "question": "In the late-November 1917 elections, what share of the votes went to the Socialist-Revolutionaries?",
+   "rank": 1
+  },
+  {
+   "key": "russian-revolution.md#18",
+   "question": "What percentage of the vote did the Bolshevik party receive in the November 1917 State Duma elections?",
+   "rank": 1
+  },
+  {
+   "key": "russian-revolution.md#2",
+   "question": "Which single incident sparked the wave of unrest across Russia in 1905 that foreshadowed 1917?",
+   "rank": 1
+  },
+  {
+   "key": "russian-revolution.md#22",
+   "question": "According to historians Edvard Radzinsky and Dmitrii Volkogonov, who allegedly gave the direct order for executing the Russian imperial family?",
+   "rank": 1
+  },
+  {
+   "key": "russian-revolution.md#22",
+   "question": "In what year did the hammer and sickle become the official symbol of the USSR?",
+   "rank": 1
+  },
+  {
+   "key": "russian-revolution.md#23",
+   "question": "What are the three main schools of thought in the historiography of the Russian Revolution?",
+   "rank": 1
+  },
+  {
+   "key": "russian-revolution.md#25",
+   "question": "Approximately how many active soldiers did the Bolsheviks manage to raise for the Red Army during the civil war?",
+   "rank": 1
+  },
+  {
+   "key": "russian-revolution.md#27",
+   "question": "Which Trotskyist historian argued that crushing the Left Opposition was the primary function of Stalinist terror?",
+   "rank": 1
+  },
+  {
+   "key": "russian-revolution.md#6",
+   "question": "What did an early-1900s housing survey find about the typical number of occupants per flat in the imperial capital?",
+   "rank": 1
+  },
+  {
+   "key": "russian-revolution.md#9",
+   "question": "What was the approximate combined total of Russian military losses by the end of October 1916?",
+   "rank": 1
+  },
+  {
+   "key": "treaty-of-versailles.md#0",
+   "question": "What is Article 231 of the Treaty of Versailles commonly known as?",
+   "rank": 5
+  },
+  {
+   "key": "treaty-of-versailles.md#14",
+   "question": "For how many years would Allied troops occupy the Rhineland bridgeheads as a guarantee of German compliance?",
+   "rank": null
+  },
+  {
+   "key": "treaty-of-versailles.md#16",
+   "question": "What was the political outcome for Clemenceau shortly after he sought the French presidency in early 1920?",
+   "rank": 1
+  },
+  {
+   "key": "treaty-of-versailles.md#17",
+   "question": "How many Portuguese Armed Forces troops died as a result of the war, given Portugal's limited gains from the treaty?",
+   "rank": 1
+  },
+  {
+   "key": "treaty-of-versailles.md#21",
+   "question": "By what vote count did the German National Assembly approve signing the peace treaty?",
+   "rank": 2
+  },
+  {
+   "key": "treaty-of-versailles.md#22",
+   "question": "What total reparations figure did the London Schedule of Payments set for all the Central Powers combined?",
+   "rank": 1
+  },
+  {
+   "key": "treaty-of-versailles.md#23",
+   "question": "How much cash did Germany have to pay within twenty-five days under the reparations payment schedule?",
+   "rank": 1
+  },
+  {
+   "key": "treaty-of-versailles.md#24",
+   "question": "What share of the Upper Silesia plebiscite vote favored staying part of Germany?",
+   "rank": 1
+  },
+  {
+   "key": "treaty-of-versailles.md#26",
+   "question": "Roughly how many children were estimated to have resulted from relationships between French colonial soldiers and German women during the occupation?",
+   "rank": 1
+  },
+  {
+   "key": "treaty-of-versailles.md#27",
+   "question": "What tactic did German coal miners and railway workers use to resist the 1923 occupation of the Ruhr?",
+   "rank": 1
+  },
+  {
+   "key": "treaty-of-versailles.md#27",
+   "question": "What was the total value, in gold marks, that the occupying powers collected from the Ruhr occupation?",
+   "rank": 1
+  },
+  {
+   "key": "treaty-of-versailles.md#28",
+   "question": "At what 1932 conference was a plan floated to permanently cancel Germany's remaining reparations, though it was never ratified?",
+   "rank": 1
+  },
+  {
+   "key": "treaty-of-versailles.md#3",
+   "question": "Near which three German cities did Allied troops establish bridgeheads across the Rhine after the armistice?",
+   "rank": 1
+  },
+  {
+   "key": "treaty-of-versailles.md#31",
+   "question": "How many alleged war criminals did the Allies formally request for extradition after the treaty's ratification in January 1920?",
+   "rank": 2
+  },
+  {
+   "key": "treaty-of-versailles.md#32",
+   "question": "What term did John Maynard Keynes coin to describe the treaty as an overly punitive settlement, likening it to ancient Rome's treatment of a defeated rival?",
+   "rank": 1
+  },
+  {
+   "key": "treaty-of-versailles.md#34",
+   "question": "What did historian Richard J. Evans argue was the real cause of the collapse of German democracy in the early 1930s, rather than the Treaty of Versailles?",
+   "rank": 1
+  },
+  {
+   "key": "treaty-of-versailles.md#37",
+   "question": "How many residents fled across the border into France after the result of the Saar plebiscite was announced?",
+   "rank": 2
+  },
+  {
+   "key": "treaty-of-versailles.md#4",
+   "question": "How many private meetings did the top Allied leaders hold to decide the major peace terms at the Paris conference?",
+   "rank": 1
+  },
+  {
+   "key": "treaty-of-versailles.md#4",
+   "question": "What nickname was given to the group formed by the leaders of Britain, France, Italy, and the United States who made all major Versailles decisions in closed sessions?",
+   "rank": 1
+  },
+  {
+   "key": "treaty-of-versailles.md#6",
+   "question": "Why did Lloyd George want a revived Germany to remain an economically viable power rather than being crippled by reparations?",
+   "rank": 1
+  },
+  {
+   "key": "treaty-of-versailles.md#7",
+   "question": "To avoid Japan refusing to join the League of Nations, which Chinese territory did Wilson agree to concede to Japanese control?",
+   "rank": 1
+  },
+  {
+   "key": "treaty-of-versailles.md#9",
+   "question": "On what anniversary did the signing of the Treaty of Versailles fall, and whose assassination did it mark?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#0",
+   "question": "How did large-scale troop and population movements tied to the 1914-1918 conflict contribute to a global influenza outbreak?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#1",
+   "question": "Who is credited with the earliest known use of a term equivalent to \"World War I,\" writing about the conflict in September 1914?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#10",
+   "question": "Which German general disobeyed orders during the advance on Paris, opening a gap between German armies that the Allies exploited?",
+   "rank": null
+  },
+  {
+   "key": "world-war-i.md#11",
+   "question": "What name was given to the series of maneuvers after the First Battle of the Marne in which Allied and German forces tried to outflank each other toward the coast?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#14",
+   "question": "Which Macedonian town did French and Serbian forces recapture on 19 November 1916 after the costly Monastir offensive?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#15",
+   "question": "Which three Christian ethnic groups were targeted in genocidal campaigns carried out by the Ottoman Empire during the war?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#17",
+   "question": "Which country did Italy secretly promise in 1902 to stay neutral toward if it were attacked by Germany, undercutting its Triple Alliance obligations?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#18",
+   "question": "What armistice, signed on 3 November, ended the fighting between Italy and Austria-Hungary?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#2",
+   "question": "What was the name of the secret 1887 pact Bismarck arranged between Germany and Russia, promising neutrality if either was attacked by France or Austria-Hungary?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#26",
+   "question": "What armistice ended the fighting between the Ottoman Empire and the Allies on 30 October 1918?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#27",
+   "question": "Under the British law defining the war's termination, when did the state of war with Turkey officially cease?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#3",
+   "question": "What ship, launched in 1906, made every existing battleship obsolete and gave Britain a lasting naval advantage over Germany?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#30",
+   "question": "Roughly how many people worldwide did the Spanish flu pandemic kill?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#32",
+   "question": "What percentage of Austro-Hungarian losses ended up as prisoners of war?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#33",
+   "question": "How much World War I debt did Britain still owe the United States as of 1934?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#34",
+   "question": "What was the total reparation sum initially placed on Germany in 1921, in gold marks?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#36",
+   "question": "What newspaper did Benito Mussolini found in October 1914 to promote Italian intervention in the war?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#37",
+   "question": "How many rifles did Germany send to Ireland to help stir unrest around the Easter Rising?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#37",
+   "question": "What two US laws made it a federal crime to oppose military recruitment or make disloyal statements during the war?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#4",
+   "question": "Which territory did Austria-Hungary formally annex during the 1908-1909 Bosnian Crisis, having occupied it since 1878?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#5",
+   "question": "Which region did Bulgaria have to give up to Romania after losing the Second Balkan War?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#6",
+   "question": "What was the name of the Bosniak militia set up to carry out persecution of Serbs following the assassination?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-i.md#7",
+   "question": "What deadline, tied to a British demand that Germany pull back from a neutral country, passed at midnight without a response and put Britain and Germany at war?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#0",
+   "question": "How many people are estimated to have died as a result of World War II?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#10",
+   "question": "Which military leader took authoritarian control of Romania after King Carol II was ousted?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#11",
+   "question": "When did the British Home Fleet sink the German battleship Bismarck?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#12",
+   "question": "In the British carrier strike on the Italian fleet at its harbor, how many enemy battleships were disabled?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#13",
+   "question": "Which two French-controlled territories did British-led forces invade and occupy between June and July 1941?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#14",
+   "question": "What share of Soviet prisoners held by Germany ultimately died in captivity over the course of the war?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#17",
+   "question": "What did Japan's interim proposal of 20 November 1941 request in exchange for withdrawing troops from southern Indochina?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#25",
+   "question": "How many Poles were killed when the Germans quelled the Warsaw Uprising?",
+   "rank": 4
+  },
+  {
+   "key": "world-war-ii.md#28",
+   "question": "Who replaced Winston Churchill as British Prime Minister during the Potsdam Conference?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#29",
+   "question": "Roughly how many Germans were forced to relocate to Germany from territories that Poland and the Soviet Union took over after the war?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#30",
+   "question": "In what year did the Chinese Civil War resume between nationalist and communist forces after World War II?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#31",
+   "question": "What two institutions were created at the Bretton Woods Conference in July 1944?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#32",
+   "question": "About how many people with mental and physical disabilities were systematically killed in Germany and its occupied territories during the war?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#35",
+   "question": "About how many ethnic Poles did the Nazis kill, not counting Polish-Jewish Holocaust victims?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#36",
+   "question": "In 1938, how many times larger was China's population compared to Japan's?",
+   "rank": null
+  },
+  {
+   "key": "world-war-ii.md#37",
+   "question": "What late-war infantry weapon combined features of the rifle and submachine gun to become the standard postwar firearm for most armies?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#37",
+   "question": "Which German machine gun became a widely used example of portable machine guns during the war?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#4",
+   "question": "In what month and year did German troops move into the demilitarized zone along the Rhine, breaking the Versailles and Locarno treaties?",
+   "rank": 2
+  },
+  {
+   "key": "world-war-ii.md#7",
+   "question": "What region did Hitler force Lithuania to concede on 20 March 1939?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#7",
+   "question": "Which formerly German territory did Lithuania have to hand over after a spring 1939 ultimatum?",
+   "rank": 1
+  },
+  {
+   "key": "world-war-ii.md#8",
+   "question": "Which country was assigned to Germany's sphere of influence under the secret protocol of the 1939 Nazi-Soviet pact?",
+   "rank": 2
+  }
+ ]
+}

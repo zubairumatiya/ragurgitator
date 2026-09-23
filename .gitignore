@@ -56,3 +56,6 @@ next-env.d.ts
 
 # headless phase-loop transcripts
 .loop-logs/
+
+# eval gate: a scoring run's output (the committed baseline lives in test/fixtures/eval-gate/)
+/eval-gate-results.json
