@@ -7,18 +7,24 @@
 //
 //   load    fixture files → a user, a config, chunks, overrides and the two
 //           embedding_cache banks; then drops the HNSW index (exact scan)
-//   score   the 118 held-out questions through the REAL retriever; writes
-//           results.json and nothing to any eval table
+//   score     the 118 held-out questions through the REAL retriever; writes
+//             results.json and nothing to any eval table
+//   baseline  score, then write test/fixtures/eval-gate/baseline.json — the
+//             committed numbers a PR is measured against (plan §3)
+//   gate      score, compare with baseline.json, exit 1 if Recall@k fell past
+//             the margin; --strict (main) demands an exact reproduction
 //
 // score is scoreQuestions (lib/rag/eval.ts) minus its writes, its baseline leg
 // and the demo bank: same criteria, same context, same prefetch, same
 // retrieveWithCutoffs. It calls those rather than scoreQuestions itself because
 // the gate's subject is what retrieval RETURNS, and eval_results rows in a CI
 // database are nobody's evidence.
-import { readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { assertLocal } from "../test/support/dbUrls";
+import { DEFAULT_MARGIN, annotations, compare, summaryMarkdown, type Baseline } from "./lib/evalGateCompare";
 import { readVec, fixtureHash, manifestProblems, chunkKey, type Manifest, type VecRef } from "./lib/evalGateFixture";
 
 // Before the dynamic imports below, on purpose: lib/db.ts builds its pools from
@@ -30,8 +36,14 @@ for (const name of ["DATABASE_URL", "RAG_APP_DATABASE_URL"]) {
 }
 
 const FIXTURE_DIR = "test/fixtures/eval-gate";
+const BASELINE_FILE = join(FIXTURE_DIR, "baseline.json");
 const CORPUS_PREFIX = "eval-gate ";
 const INSERT_BATCH = 100;
+
+const flag = (args: string[], name: string): string | undefined => {
+  const i = args.indexOf(`--${name}`);
+  return i === -1 ? undefined : args[i + 1];
+};
 
 type Fixture = { manifest: Manifest; blob: Buffer };
 
@@ -174,7 +186,9 @@ async function load(): Promise<void> {
     // builds, so with the index every ANN here would be a slightly different
     // approximation per run; without it every one is an exact kNN, which is what
     // lets the gate's margin be one question. The index path keeps its own itest.
-    await admin.unsafe(`drop index if exists ${chunksTable}_hnsw`);
+    // (client_min_messages: a reloaded local database has no index to drop, and
+    // postgres.js prints the NOTICE as an object.)
+    await admin.unsafe(`set client_min_messages = warning; drop index if exists ${chunksTable}_hnsw`);
     // Planner statistics NOW, not whenever autovacuum gets to it: the unordered
     // DISTINCT that lane order falls out of (overrideStore's retrievalState) is
     // ordered by whichever plan runs it, and a plan that flips
@@ -193,10 +207,15 @@ async function load(): Promise<void> {
 
 type QuestionResult = { key: string; question: string; rank: number | null; hit: boolean; rr: number; ndcg: number | null; retrieved: string[] };
 
-async function score(args: string[]): Promise<void> {
-  const outAt = args.indexOf("--out");
-  const out = outAt === -1 ? "eval-gate-results.json" : args[outAt + 1];
+type ScoreResult = {
+  fixtureHash: string;
+  scan: "exact";
+  k: number;
+  aggregates: { questions: number; hits: number; recall: number; mrr: number; ndcg: number; ndcgGraded: number };
+  perQuestion: QuestionResult[];
+};
 
+async function runScore(): Promise<ScoreResult> {
   const { adminClient } = await import("../test/support/harness");
   const { withUser } = await import("../lib/auth/userScope");
   const { fragment, privilegedSql, sql } = await import("../lib/db");
@@ -296,13 +315,6 @@ async function score(args: string[]): Promise<void> {
       ndcgGraded: graded.length,
     };
 
-    // No timestamp and no ids: two runs of the same code over the same fixture
-    // must produce the same BYTES, and that is tested, not assumed.
-    writeFileSync(
-      out,
-      JSON.stringify({ fixtureHash: m.fixtureHash, scan: "exact", k: m.config.topK, aggregates, perQuestion: results }, null, 1) + "\n",
-    );
-
     const k = m.config.topK;
     console.log(`eval gate — REGRESSION gate over frozen data · exact scan · ${m.foreignModels.length} foreign lanes fired · 0 provider calls`);
     console.log(`  fixture    ${m.fixtureHash.slice(0, 16)}… · ${results.length} questions`);
@@ -311,24 +323,91 @@ async function score(args: string[]): Promise<void> {
     console.log(`  nDCG@${k}     ${aggregates.ndcg.toFixed(4)}  (${graded.length} graded)`);
     const misses = results.filter((r) => !r.hit);
     for (const r of misses) console.log(`  miss       ${r.key}  rank ${r.rank ?? "—"}  "${r.question.slice(0, 60)}"`);
-    console.log(`wrote ${out}`);
 
     await (fragment as unknown as { end: () => Promise<void> }).end();
     await privilegedSql.end();
+    return { fixtureHash: m.fixtureHash, scan: "exact", k, aggregates, perQuestion: results };
   } finally {
     await admin.end();
   }
+}
+
+async function score(args: string[]): Promise<void> {
+  const out = flag(args, "out") ?? "eval-gate-results.json";
+  const result = await runScore();
+  // No timestamp and no ids: two runs of the same code over the same fixture
+  // must produce the same BYTES, and that is tested, not assumed.
+  writeFileSync(out, JSON.stringify(result, null, 1) + "\n");
+  console.log(`wrote ${out}`);
+}
+
+// The committed numbers. gitSha and scoredAt are provenance for the reviewer of
+// the PR that refreshes this file; `gate` compares on none of them.
+async function baseline(): Promise<void> {
+  const r = await runScore();
+  const gitSha = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const b: Baseline = {
+    fixtureHash: r.fixtureHash,
+    gitSha,
+    scoredAt: new Date().toISOString(),
+    k: r.k,
+    recall: r.aggregates.recall,
+    mrr: r.aggregates.mrr,
+    ndcg: r.aggregates.ndcg,
+    questions: r.aggregates.questions,
+    hits: r.aggregates.hits,
+    perQuestion: r.perQuestion.map((q) => ({ key: q.key, question: q.question, rank: q.rank })),
+  };
+  writeFileSync(BASELINE_FILE, JSON.stringify(b, null, 1) + "\n");
+  console.log(`wrote ${BASELINE_FILE} at ${gitSha.slice(0, 10)} — commit it`);
+}
+
+async function gate(args: string[]): Promise<void> {
+  const strict = args.includes("--strict");
+  // Precedence: --margin, then EVAL_GATE_MARGIN (the workflow's one visible
+  // place for the number), then the plan's default. Strict ignores all three.
+  const marginArg = flag(args, "margin") ?? process.env.EVAL_GATE_MARGIN;
+  const margin = strict ? 0 : marginArg === undefined ? DEFAULT_MARGIN : Number(marginArg);
+  if (!(margin >= 0 && margin < 1)) throw new Error(`--margin wants a fraction in [0, 1), got ${marginArg}`);
+
+  let baselineJson: string;
+  try {
+    baselineJson = readFileSync(BASELINE_FILE, "utf8");
+  } catch {
+    throw new Error(`${BASELINE_FILE} is missing — run \`npm run eval:gate -- baseline\` and commit it`);
+  }
+  const b: Baseline = JSON.parse(baselineJson);
+  const r = await runScore();
+  const v = compare(b, r, { margin, strict });
+
+  const md = summaryMarkdown(b, r, v, { margin, strict });
+  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, md);
+  // Locally there is no summary page, so the movers table goes to the console.
+  else if (v.movers.length > 0) console.log("\n" + md.slice(md.indexOf("### ")));
+  for (const line of annotations(v)) console.log(line);
+
+  const d = v.delta;
+  const sd = (x: number, digits: number, pct = false) => `${x > 0 ? "+" : ""}${pct ? (x * 100).toFixed(digits) + "%" : x.toFixed(digits)}`;
+  console.log(
+    `\ngate ${v.ok ? "PASS" : "FAIL"} — vs baseline ${b.gitSha.slice(0, 10)}: ` +
+      `Recall@${r.k} ${sd(d.recall, 2, true)} · MRR ${sd(d.mrr, 4)} · nDCG ${sd(d.ndcg, 4)} · ` +
+      (strict ? "strict (exact match required)" : `margin ${(margin * 100).toFixed(2)}%`) +
+      ` · ${v.movers.length} question(s) moved`,
+  );
+  if (!v.ok) process.exitCode = 1;
 }
 
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
   if (command === "load") return load();
   if (command === "score") return score(args);
+  if (command === "baseline") return baseline();
+  if (command === "gate") return gate(args);
   throw new Error(`unknown subcommand ${command}`);
 }
 
 main().then(
-  () => process.exit(0),
+  () => process.exit(Number(process.exitCode ?? 0)),
   (err) => {
     console.error(err instanceof Error ? err.message : err);
     process.exit(1);

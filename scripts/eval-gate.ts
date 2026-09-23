@@ -3,6 +3,8 @@
 //   npm run eval:gate -- export [--seed N] [--pct N] [--out DIR]
 //   npm run eval:gate -- load
 //   npm run eval:gate -- score [--out FILE]
+//   npm run eval:gate -- baseline
+//   npm run eval:gate -- gate [--margin F] [--strict]
 //
 // `export` freezes the master config's retrieval inputs into
 // test/fixtures/eval-gate/ — corpus, overrides, every foreign lane's pool and
@@ -343,7 +345,7 @@ function census(m: Manifest, blob: Buffer, outDir: string): void {
 // It also refuses a non-local URL, which is what makes `load`'s truncate safe to
 // expose as an npm script. `export` is the reverse case — it needs the live URL
 // that preload exists to refuse — hence two processes rather than one flag.
-const LOCAL_COMMANDS = ["load", "score"];
+const LOCAL_COMMANDS = ["load", "score", "baseline", "gate"];
 
 function runLocal(argv: string[]): never {
   const child = spawnSync(
@@ -358,7 +360,9 @@ async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
   if (command === "export") return exportFixture(args);
   if (LOCAL_COMMANDS.includes(command)) runLocal([command, ...args]);
-  console.error("usage: npm run eval:gate -- export [--seed N] [--pct N] [--out DIR] | load | score [--out FILE]");
+  console.error(
+    "usage: npm run eval:gate -- export [--seed N] [--pct N] [--out DIR] | load | score [--out FILE] | baseline | gate [--margin F] [--strict]",
+  );
   process.exit(2);
 }
 
