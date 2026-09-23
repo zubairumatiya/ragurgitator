@@ -11,7 +11,13 @@ test("a cookie-less visitor to a workbench page is sent to /login with the path 
 });
 
 test("an API route answers 401 JSON in place rather than redirecting", async ({ request }) => {
-  const res = await request.get("/api/configs", { maxRedirects: 0 });
+  // Redirects are FOLLOWED here, deliberately: on a protected preview the
+  // bypass cookie is set through a 307 back to the same URL, so a no-redirect
+  // probe sees Vercel's hop and never the app. The proxy's rule is proven by
+  // where the chain ENDS — still on the API route with the app's own 401, not
+  // on /login with a 200 page.
+  const res = await request.get("/api/configs");
+  expect(new URL(res.url()).pathname).toBe("/api/configs");
   expect(res.status()).toBe(401);
   expect(res.headers()["content-type"]).toContain("application/json");
 });
