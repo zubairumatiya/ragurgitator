@@ -32,8 +32,8 @@ function fixture(): { manifest: Manifest; blob: Buffer } {
     split: { mode: "pct", size: 25, seed: 1, candidates: 4, splitKey: "abc" },
     documents: [{ fileName: "a.md", contentHash: "h", content: "body" }],
     chunks: [
-      { key: a, document: "a.md", position: 0, text: "one", vec: v(1, 0) },
-      { key: b, document: "a.md", position: 1, text: "two", vec: v(0, 1) },
+      { key: a, id: "00000000-0000-4000-8000-00000000000a", document: "a.md", position: 0, text: "one", vec: v(1, 0) },
+      { key: b, id: "00000000-0000-4000-8000-00000000000b", document: "a.md", position: 1, text: "two", vec: v(0, 1) },
     ],
     overrides: [
       { chunk: a, pieceIndex: 0, model: FOREIGN, dimension: 3, kind: "model", text: null, tokenStart: null, tokenEnd: null, vec: v(1, 2, 3) },
@@ -113,6 +113,12 @@ describe("the eval gate fixture", () => {
     const problems = manifestProblems(manifest, blob.length / 4);
     assert.ok(problems.includes(`poolDoc ${FOREIGN}/a.md#1: missing`), problems.join("\n"));
     assert.ok(problems.some((p) => p.includes(`no query vector under ${FOREIGN}`)));
+  });
+
+  it("rejects chunks that share an id", () => {
+    const { manifest, blob } = fixture();
+    manifest.chunks[1].id = manifest.chunks[0].id;
+    assert.ok(manifestProblems(manifest, blob.length / 4).includes("chunk a.md#1: duplicate id"));
   });
 
   it("rejects a vector of the wrong width", () => {

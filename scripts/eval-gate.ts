@@ -1,6 +1,8 @@
 // THE CI EVAL GATE (docs/ci-eval-gate-plan.md).
 //
 //   npm run eval:gate -- export [--seed N] [--pct N] [--out DIR]
+//   npm run eval:gate -- load
+//   npm run eval:gate -- score [--out FILE]
 //
 // `export` freezes the master config's retrieval inputs into
 // test/fixtures/eval-gate/ — corpus, overrides, every foreign lane's pool and
@@ -20,6 +22,7 @@
 // RAW SQL ON PURPOSE. The app's stores read an AsyncLocalStorage scope and
 // import the server graph; this reads eight tables once, as the `postgres` role,
 // so it names the owner's user_id itself wherever RLS would have.
+import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -129,7 +132,7 @@ async function build(sql: Sql, seed: number, pct: number): Promise<{ manifest: M
       if (!document) throw new Error(`chunk ${r.id} belongs to a document outside the config`);
       const key = chunkKey(document, r.position);
       keyOf.set(r.id, key);
-      return { key, document, position: r.position, text: r.text, vec: add(r.vec) };
+      return { key, id: r.id, document, position: r.position, text: r.text, vec: add(r.vec) };
     })
     .sort((a, b) => a.document.localeCompare(b.document) || a.position - b.position);
 
@@ -334,10 +337,28 @@ function census(m: Manifest, blob: Buffer, outDir: string): void {
   console.log(`wrote ${outDir}/manifest.json and ${outDir}/vectors.f32`);
 }
 
+// Everything but `export` runs against the throwaway database, in a CHILD started
+// under the itest preload: test/support/env.ts has to claim DATABASE_URL before
+// lib/db.ts is evaluated, and a preload is the only place that is early enough.
+// It also refuses a non-local URL, which is what makes `load`'s truncate safe to
+// expose as an npm script. `export` is the reverse case — it needs the live URL
+// that preload exists to refuse — hence two processes rather than one flag.
+const LOCAL_COMMANDS = ["load", "score"];
+
+function runLocal(argv: string[]): never {
+  const child = spawnSync(
+    process.execPath,
+    ["--conditions=react-server", "--import", "tsx", "--import", "./test/support/env.ts", "scripts/eval-gate-run.ts", ...argv],
+    { stdio: "inherit" },
+  );
+  process.exit(child.status ?? 1);
+}
+
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
   if (command === "export") return exportFixture(args);
-  console.error("usage: npm run eval:gate -- export [--seed N] [--pct N] [--out DIR]");
+  if (LOCAL_COMMANDS.includes(command)) runLocal([command, ...args]);
+  console.error("usage: npm run eval:gate -- export [--seed N] [--pct N] [--out DIR] | load | score [--out FILE]");
   process.exit(2);
 }
 

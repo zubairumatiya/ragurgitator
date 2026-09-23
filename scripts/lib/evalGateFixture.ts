@@ -13,9 +13,8 @@ import { createHash } from "node:crypto";
 // [offset, length] into vectors.f32, both counted in FLOATS, not bytes.
 export type VecRef = [offset: number, length: number];
 
-// Chunk ids are minted fresh on every load, so nothing id-shaped travels: a
-// chunk is `<file_name>#<position>` and the loader maps keys to the ids it gets
-// back (the same rule as lib/demo/clone.ts steps 4b/4c).
+// Everything in the file REFERS to a chunk by `<file_name>#<position>`: readable
+// in a diff and in a red run's movers table, where a uuid is neither.
 export const chunkKey = (fileName: string, position: number): string =>
   `${fileName}#${position}`;
 
@@ -37,6 +36,12 @@ export type FixtureDocument = { fileName: string; contentHash: string; content: 
 
 export type FixtureChunk = {
   key: string;
+  // The master's own chunk id, and the loader inserts it verbatim. It has to
+  // travel: fused ranks TIE (two lanes can both place a chunk at rank 3.5), the
+  // merge breaks a tie by lane order, and lane order falls out of an unordered
+  // `select distinct source_chunk_id, …` — so it follows the ids. Minting fresh
+  // ids per load moved 40+ retrieved lists between two loads of the same files.
+  id: string;
   document: string;
   position: number;
   text: string;
@@ -161,6 +166,8 @@ export function fixtureHash(manifest: Manifest, blob: Buffer): string {
   return createHash("sha256").update(JSON.stringify(identity)).update(blob).digest("hex");
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 // Every way the file can point at something that is not there. Returns ALL the
 // problems rather than throwing on the first: a broken export usually has one
 // cause and many symptoms, and the list is what shows the cause.
@@ -179,9 +186,13 @@ export function manifestProblems(m: Manifest, blobFloats: number): string[] {
   if (docs.size !== m.documents.length) problems.push("documents: duplicate file_name");
 
   const chunks = new Set<string>();
+  const ids = new Set<string>();
   for (const c of m.chunks) {
     if (chunks.has(c.key)) problems.push(`chunk ${c.key}: duplicate key`);
     chunks.add(c.key);
+    if (!UUID.test(c.id)) problems.push(`chunk ${c.key}: id is not a uuid`);
+    if (ids.has(c.id)) problems.push(`chunk ${c.key}: duplicate id`);
+    ids.add(c.id);
     if (c.key !== chunkKey(c.document, c.position)) problems.push(`chunk ${c.key}: key does not match document#position`);
     if (!docs.has(c.document)) problems.push(`chunk ${c.key}: unknown document ${c.document}`);
     vec(`chunk ${c.key}`, c.vec, m.config.dimension);
