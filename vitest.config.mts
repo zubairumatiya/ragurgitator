@@ -3,11 +3,12 @@
 // whole mechanism keeping each runner off the other's files — do not widen
 // either one. See docs/ui-tests-plan.md §1.
 import react from "@vitejs/plugin-react";
-import tsconfigPaths from "vite-tsconfig-paths";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  plugins: [tsconfigPaths(), react()],
+  plugins: [react()],
+  // `@/…` imports resolve through tsconfig's `paths`; Vite reads them itself.
+  resolve: { tsconfigPaths: true },
   test: {
     environment: "jsdom",
     include: ["**/*.test.tsx"],
