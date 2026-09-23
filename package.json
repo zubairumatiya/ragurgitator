@@ -39,6 +39,7 @@
     "fusion:replay": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/fusion-replay.ts",
     "autotune:bench": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/autotune-bench.ts",
     "eval:gate": "node --import tsx scripts/eval-gate.ts",
+    "cache:gate": "node --import tsx scripts/cache-gate.ts",
     "migrate": "node --import tsx scripts/migrate.ts",
     "itest": "node --conditions=react-server --import tsx --import ./test/support/env.ts --test --test-concurrency=1 \"test/integration/**/*.itest.ts\"",
     "itest:up": "node --import tsx scripts/itest-up.ts",
