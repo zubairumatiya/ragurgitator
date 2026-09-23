@@ -1,9 +1,10 @@
 {
   "version": 1,
-  "exportedAt": "2026-09-23T17:02:50.127Z",
+  "exportedAt": "2026-09-23T18:44:26.621Z",
   "sourceConfigId": "45b73063-403e-4a44-8d6e-b9eacf7e316a",
-  "fixtureHash": "9b58aaa3b282f6f5fd03bfa603f4e6ba7225724ea901e2fa1211a5e3afec6a8d",
+  "fixtureHash": "558c1b6047449d7f1e3065e2221bcbcfca5f97eb89820d993190812981f7f11a",
   "keyModel": "voyage-4-lite",
+  "keyModelSource": "default",
   "space": "voyage-4",
   "dimension": 1024,
   "tau": {"value":0.95,"source":"config"},

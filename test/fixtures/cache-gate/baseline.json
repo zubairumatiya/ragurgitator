@@ -1,8 +1,9 @@
 {
- "fixtureHash": "9b58aaa3b282f6f5fd03bfa603f4e6ba7225724ea901e2fa1211a5e3afec6a8d",
- "gitSha": "23c5551b620277e8befb9a488e88a5898cd85981",
- "scoredAt": "2026-09-23T17:05:59.066Z",
+ "fixtureHash": "558c1b6047449d7f1e3065e2221bcbcfca5f97eb89820d993190812981f7f11a",
+ "gitSha": "140732d4301ee3c7699aa98232eb8cdec1c238f6",
+ "scoredAt": "2026-09-23T18:44:33.830Z",
  "keyModel": "voyage-4-lite",
+ "keyModelSource": "default",
  "tau": {
   "value": 0.95,
   "source": "config"

@@ -56,6 +56,7 @@ export type Aggregates = {
 export type Run = {
   fixtureHash: string;
   keyModel: string;
+  keyModelSource: Manifest["keyModelSource"];
   tau: Manifest["tau"];
   guardEnabled: boolean;
   aggregates: Aggregates;
@@ -92,6 +93,12 @@ export function population(m: Manifest): Array<{ textA: string; textB: string; t
     quarantined.map((g) => ({ textA: g.textA, textB: g.textB })),
     shadow,
   );
+  // poolPairs drops a PROBE that collides with a quarantined pair but lets a
+  // TRAFFIC row through, so a quarantined pair that was later served live would
+  // be decided twice under one key, possibly with opposite truths. The pooled
+  // row already represents that pair; the quarantine append must not add a
+  // second.
+  const pooledKeys = new Set(pooled.map((p) => pairKey(p.textA, p.textB)));
   return [
     ...pooled.map((p) => ({
       textA: p.textA,
@@ -99,12 +106,14 @@ export function population(m: Manifest): Array<{ textA: string; textB: string; t
       truth: p.label as PairLabel,
       source: (p.source === "generated" ? "generated" : p.origin!) as PairSource,
     })),
-    ...quarantined.map((g) => ({
-      textA: g.textA,
-      textB: g.textB,
-      truth: (g.verdict === "accept" ? "same" : "different") as PairLabel,
-      source: "quarantined" as const,
-    })),
+    ...quarantined
+      .filter((g) => !pooledKeys.has(pairKey(g.textA, g.textB)))
+      .map((g) => ({
+        textA: g.textA,
+        textB: g.textB,
+        truth: (g.verdict === "accept" ? "same" : "different") as PairLabel,
+        source: "quarantined" as const,
+      })),
   ];
 }
 
@@ -158,7 +167,7 @@ export function decideAll(m: Manifest, blob: Buffer): Run {
     trueAccepts: perPair.filter((d) => d.truth === "same" && d.served).length,
     guardSaves: perPair.filter((d) => d.truth === "different" && !d.served && (d.ab.hit || d.ba.hit)).length,
   };
-  return { fixtureHash: m.fixtureHash, keyModel: m.keyModel, tau: m.tau, guardEnabled, aggregates, perPair };
+  return { fixtureHash: m.fixtureHash, keyModel: m.keyModel, keyModelSource: m.keyModelSource, tau: m.tau, guardEnabled, aggregates, perPair };
 }
 
 // --- the verdict --------------------------------------------------------------
@@ -170,6 +179,7 @@ export type Baseline = {
   gitSha: string;
   scoredAt: string;
   keyModel: string;
+  keyModelSource: Manifest["keyModelSource"];
   tau: Manifest["tau"];
   guardEnabled: boolean;
   aggregates: Aggregates;
@@ -214,11 +224,18 @@ export function compare(baseline: Baseline, run: Run, opts: { strict: boolean })
   const movers: Mover[] = [];
   let maxSimDrift = 0;
 
-  // A fixture exported under the code default is only right while the code
-  // default stays put; the export recorded which dial τ came from.
+  // A fixture exported under a code default is only right while that default
+  // stays put; the export recorded which dial τ and the key model came from.
+  // The key model matters more than τ: under another model the frozen vectors
+  // are the wrong experiment entirely, and "0 pairs moved" would be a lie.
   if (run.tau.source === "default" && config.semanticCache.defaultThreshold !== run.tau.value) {
     errors.push(
       `config.semanticCache.defaultThreshold is ${config.semanticCache.defaultThreshold} but the fixture was exported at ${run.tau.value} (source: default) — re-export, or set the config's own threshold`,
+    );
+  }
+  if (run.keyModelSource === "default" && config.semanticCache.keyModel !== run.keyModel) {
+    errors.push(
+      `config.semanticCache.keyModel is ${config.semanticCache.keyModel} but the fixture's vectors are ${run.keyModel} (source: default) — re-export under the new model, or set the config's own key model`,
     );
   }
   if (baseline.guardEnabled !== run.guardEnabled) {

@@ -17,7 +17,7 @@ const N2 = "how many times larger was China's population compared to Japan's";
 const X = "what is dark vision";
 const Y = "who wrote the treaty";
 
-function fixture(opts: { tau?: number; source?: Manifest["tau"]["source"] } = {}): { manifest: Manifest; blob: Buffer } {
+function fixture(opts: { tau?: number; source?: Manifest["tau"]["source"]; keyModel?: string; keyModelSource?: Manifest["keyModelSource"]; extraShadow?: Manifest["shadow"] } = {}): { manifest: Manifest; blob: Buffer } {
   const blob = new VectorBlob();
   const v = (a: number, b: number) => blob.add(Float32Array.from([a, b]));
   const manifest: Manifest = {
@@ -25,7 +25,8 @@ function fixture(opts: { tau?: number; source?: Manifest["tau"]["source"] } = {}
     exportedAt: "2026-09-23T00:00:00.000Z",
     sourceConfigId: "cfg",
     fixtureHash: "",
-    keyModel: "voyage-4-lite",
+    keyModel: opts.keyModel ?? "voyage-4-lite",
+    keyModelSource: opts.keyModelSource ?? "config",
     space: "voyage-4",
     dimension: 2,
     tau: { value: opts.tau ?? 0.95, source: opts.source ?? "config" },
@@ -40,6 +41,7 @@ function fixture(opts: { tau?: number; source?: Manifest["tau"]["source"] } = {}
       // A reversed comparison at high cosine: the guard's job.
       { textA: N1, textB: N2, verdict: "reject", origin: "probe", simAtCapture: 0.99, guardBlockedAtCapture: false },
       { textA: P, textB: X, verdict: "reject", origin: "traffic", simAtCapture: 0.81, guardBlockedAtCapture: false },
+      ...(opts.extraShadow ?? []),
     ],
     vectors: {
       [textHash(P)]: v(1, 0.1),
@@ -60,6 +62,7 @@ const baselineOf = (run: Run): Baseline => ({
   gitSha: "abc1234",
   scoredAt: "2026-09-23T00:00:00.000Z",
   keyModel: run.keyModel,
+  keyModelSource: run.keyModelSource,
   tau: run.tau,
   guardEnabled: run.guardEnabled,
   aggregates: run.aggregates,
@@ -76,6 +79,20 @@ describe("population", () => {
       pop.map((p) => `${p.source}:${p.truth}`).sort(),
       ["generated:same", "probe:different", "quarantined:same", "traffic:different"],
     );
+  });
+
+  it("a quarantined pair that was later served as traffic is decided once, not under two truths", () => {
+    // poolPairs keeps a TRAFFIC row that collides with a quarantined pair; the
+    // quarantine append must not then add the same pair again.
+    const { manifest, blob } = fixture({
+      extraShadow: [{ textA: X, textB: Y, verdict: "reject", origin: "traffic", simAtCapture: 0.99, guardBlockedAtCapture: false }],
+    });
+    const pop = population(manifest);
+    const xy = pop.filter((p) => (p.textA === X && p.textB === Y) || (p.textA === Y && p.textB === X));
+    assert.equal(xy.length, 1, "one decision per unordered pair");
+    assert.equal(xy[0].source, "traffic");
+    const keys = decideAll(manifest, blob).perPair.map((d) => d.key);
+    assert.equal(new Set(keys).size, keys.length, "decision keys are unique");
   });
 });
 
@@ -182,6 +199,20 @@ describe("compare", () => {
     const v = compare(baselineOf(run), run, { strict: false });
     assert.equal(v.ok, false);
     assert.match(v.errors[0], /defaultThreshold is 0\.95 but the fixture was exported at 0\.5/);
+  });
+
+  it("a fixture exported under the code-default key model fails when that default moves", () => {
+    // The frozen vectors are the wrong experiment under another model; "0 pairs
+    // moved" would be a lie, so this is an error, not a notice.
+    const { manifest, blob } = fixture({ keyModel: "voyage-3-lite", keyModelSource: "default" });
+    const run = decideAll(manifest, blob);
+    const v = compare(baselineOf(run), run, { strict: false });
+    assert.equal(v.ok, false);
+    assert.match(v.errors[0], /keyModel is voyage-4-lite but the fixture's vectors are voyage-3-lite/);
+    // A config-pinned key model is the config's business, not the default's.
+    const pinned = fixture({ keyModel: "voyage-3-lite", keyModelSource: "config" });
+    const pinnedRun = decideAll(pinned.manifest, pinned.blob);
+    assert.equal(compare(baselineOf(pinnedRun), pinnedRun, { strict: false }).ok, true);
   });
 
   it("summary carries the counts and the movers table", () => {

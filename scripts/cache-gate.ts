@@ -85,9 +85,11 @@ async function build(sql: Sql): Promise<{ manifest: Manifest; blob: Buffer }> {
 
   // resolveKeyModel and resolveThreshold (lib/rag/semanticCache.ts), restated
   // for a raw connection: per-config override → calibrated space row → the code
-  // default. The source travels so a red run can say whose dial τ was.
+  // default. The sources travel so a red run can say whose dial τ and the key
+  // model were, and so the gate can tell when a code default has moved.
   const keyOverride = cfg.sc?.keyModel ?? null;
-  const keyModel = keyOverride !== null && EMBEDDING_MODELS[keyOverride] ? keyOverride : config.semanticCache.keyModel;
+  const keyModelSource: Manifest["keyModelSource"] = keyOverride !== null && EMBEDDING_MODELS[keyOverride] ? "config" : "default";
+  const keyModel = keyModelSource === "config" ? keyOverride! : config.semanticCache.keyModel;
   const space = spaceOf(keyModel);
   const dimension = EMBEDDING_MODELS[keyModel]?.dimension;
   if (!dimension) throw new Error(`key model ${keyModel} has no dimension in EMBEDDING_MODELS`);
@@ -169,6 +171,7 @@ async function build(sql: Sql): Promise<{ manifest: Manifest; blob: Buffer }> {
     sourceConfigId: CONFIG_ID,
     fixtureHash: "",
     keyModel,
+    keyModelSource,
     space,
     dimension,
     tau,
@@ -194,7 +197,7 @@ function census(m: Manifest, blob: Buffer, outDir: string): void {
   };
   const quarantined = m.generated.filter((g) => g.verdict !== null && g.verdict !== (g.label === "same" ? "accept" : "reject"));
   console.log(`semantic cache gate fixture — the MATCH DECISION over frozen pairs, not a precision estimate`);
-  console.log(`  source     config ${m.sourceConfigId.slice(0, 8)} · key model ${m.keyModel} (${m.space}, ${m.dimension}d)`);
+  console.log(`  source     config ${m.sourceConfigId.slice(0, 8)} · key model ${m.keyModel} (${m.keyModelSource}, ${m.space}, ${m.dimension}d)`);
   console.log(`  tau        ${m.tau.value} (${m.tau.source})`);
   console.log(`  generated  ${m.generated.length} (${count(m.generated, (g) => `${g.label}/${g.difficulty}`)}) · ${quarantined.length} quarantined by verdict`);
   console.log(`  shadow     ${m.shadow.length} judged (${count(m.shadow, (s) => `${s.origin}/${s.verdict}`)})`);

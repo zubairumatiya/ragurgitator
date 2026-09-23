@@ -58,6 +58,7 @@ export async function run(command: "score" | "baseline" | "gate", args: string[]
       gitSha,
       scoredAt: new Date().toISOString(),
       keyModel: r.keyModel,
+      keyModelSource: r.keyModelSource,
       tau: r.tau,
       guardEnabled: r.guardEnabled,
       aggregates: r.aggregates,

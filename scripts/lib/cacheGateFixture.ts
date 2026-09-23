@@ -51,6 +51,10 @@ export type Manifest = {
   sourceConfigId: string;
   fixtureHash: string;
   keyModel: string;
+  // Which dial named keyModel, for the same reason tau carries a source: a
+  // fixture frozen under the code default is only right while that default
+  // stays put, and the gate must notice when it moves.
+  keyModelSource: "config" | "default";
   space: string;
   dimension: number;
   tau: FixtureTau;
@@ -77,6 +81,7 @@ export function manifestProblems(m: Manifest, blobFloats: number): string[] {
   if (m.generated.length === 0) problems.push("generated: no pairs");
   if (m.shadow.length === 0) problems.push("shadow: no judged rows");
   if (!(m.tau.value > 0 && m.tau.value <= 1)) problems.push(`tau: ${m.tau.value} is not in (0, 1]`);
+  if (m.keyModelSource !== "config" && m.keyModelSource !== "default") problems.push(`keyModelSource: ${String(m.keyModelSource)} — re-export`);
 
   const seen = new Set<string>();
   for (const g of m.generated) {

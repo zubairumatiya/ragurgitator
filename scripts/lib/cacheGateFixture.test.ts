@@ -17,6 +17,7 @@ function fixture(): { manifest: Manifest; blob: Buffer } {
     sourceConfigId: "cfg",
     fixtureHash: "",
     keyModel: "voyage-4-lite",
+    keyModelSource: "config",
     space: "voyage-4",
     dimension: 2,
     tau: { value: 0.95, source: "config" },
