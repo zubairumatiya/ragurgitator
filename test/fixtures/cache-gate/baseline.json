@@ -1,0 +1,5050 @@
+{
+ "fixtureHash": "9b58aaa3b282f6f5fd03bfa603f4e6ba7225724ea901e2fa1211a5e3afec6a8d",
+ "gitSha": "23c5551b620277e8befb9a488e88a5898cd85981",
+ "scoredAt": "2026-09-23T17:05:59.066Z",
+ "keyModel": "voyage-4-lite",
+ "tau": {
+  "value": 0.95,
+  "source": "config"
+ },
+ "guardEnabled": true,
+ "aggregates": {
+  "pairs": 335,
+  "bySource": {
+   "generated": 170,
+   "traffic": 57,
+   "probe": 93,
+   "quarantined": 15
+  },
+  "falseAccepts": 11,
+  "trueAccepts": 93,
+  "guardSaves": 3
+ },
+ "perPair": [
+  {
+   "key": "A South African statesman contacted Lloyd George with concerns about Wilson's Fourteen Points and labeled the treaty unstable—who was he?\u0000Which South African statesman wrote to Lloyd George questioning what had become of Wilson's Fourteen Points and calling the treaty unstable?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.945594,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "A South African statesman sent a letter to Lloyd George questioning the fate of Wilson's Fourteen Points and suggesting the treaty was unstable—who was it?\u0000Which South African statesman wrote to Lloyd George questioning what had become of Wilson's Fourteen Points and calling the treaty unstable?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.961757,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "A Soviet officer in 1983 stopped a nuclear retaliation by recognizing an early-warning system alert as false—who was this person?\u0000Which Soviet officer is credited with averting a nuclear retaliation by correctly identifying a 1983 early-warning system alert as a false alarm?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.963165,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "A Trotskyist historian claimed the main aim of Stalinist terror was suppressing the Left Opposition—who was this?\u0000What Trotskyist historian contended that the main purpose of Stalinist terror was to suppress the Left Opposition?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.950989,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "About how many Allied troops occupied the Rhineland after the peace treaty was signed?\u0000About how many Allied troops occupied the Rhineland before the peace treaty was signed?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.985522,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "About how many Allied troops occupied the Rhineland before the peace treaty was signed?\u0000About how many Allied troops occupied the Ruhr region before the peace treaty was signed?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.836798,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "About how many Allied troops occupied the Rhineland before the peace treaty was signed?\u0000Approximately how many Allied soldiers were stationed in the Rhineland prior to the signing of the peace treaty?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.913985,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "About how many Allied troops occupied the Rhineland before the peace treaty was signed?\u0000Can you tell me the approximate size of the Allied occupying force in the Rhineland before the peace agreement was signed?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.906721,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "About how many Allied troops occupied the Rhineland before the peace treaty was signed?\u0000How many German troops occupied the Rhineland before the peace treaty was signed?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.935229,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "About how many Allied troops occupied the Rhineland before the peace treaty was signed?\u0000What was the roughly estimated number of Allied forces occupying the Rhineland before the treaty was finalized?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.903606,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "According to historian Detlev Peukert, what was the approach to international relations that German Chancellor Gustav Stresemann adopted during the period from 1923 to 1929?\u0000What foreign policy did German Chancellor Gustav Stresemann pursue between 1923 and 1929, according to historian Detlev Peukert?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.94643,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "According to historian Richard Debo, what occurrence did the German and Polish governments both regard as having influenced voters in favor of Germany during the East Prussia plebiscite?\u0000According to historian Richard Debo, which event did the German and Polish governments both think influenced voters in favor of Germany during the East Prussia plebiscite?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.972747,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "According to historian Richard Debo, which event did the German and Polish governments both think influenced voters in favor of Germany during the East Prussia plebiscite?\u0000What event did both the German and Polish governments believe had swayed voters toward Germany in the East Prussia plebiscite, according to historian Richard Debo?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.980755,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "Approximately how large were the combined Russian military losses through October 1916?\u0000What was the approximate combined total of Russian military losses by the end of October 1916?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.981239,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "Approximately how many deaths occurred during the Second World War?\u0000How many people are estimated to have died as a result of World War II?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.887435,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "At the depression's worst point, roughly what proportion of Great Plains farms changed ownership despite federal assistance?\u0000Despite receiving federal assistance, approximately what fraction of Great Plains farms underwent ownership transfers at the depression's lowest point?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.92951,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "At what point did American officials understand that their confidential Soviet codebreaking efforts had been exposed?\u0000By when did the United States realize that its secret codebreaking program against Soviet communications had been compromised?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.821688,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "At what point did American officials understand that their confidential Soviet codebreaking efforts had been exposed?\u0000When did the United States discover that its classified effort to break Soviet communication codes had been exposed?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.823869,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "At what point did the United States become aware that its classified effort to decrypt Soviet communications had been breached?\u0000When did the United States discover that its classified effort to break Soviet communication codes had been exposed?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.841444,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Besides the United States, how many countries participated in the 1980 Moscow Summer Olympics boycott?\u0000What is the number of additional countries that participated alongside the United States in the boycott of the 1980 Summer Olympics in Moscow?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.955071,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "Besides the United States, how many other nations participated in the boycott of the 1980 Moscow Summer Olympics?\u0000How many other nations joined the United States in boycotting the 1980 Summer Olympics in Moscow?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.96509,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "Bulgaria attacked Serbia and Greece to start the Second Balkan War—on what date?\u0000On what date did Bulgaria attack Serbia and Greece, starting the Second Balkan War?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.992727,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "By 1933, world trade had decreased to what fraction of its 1929 value?\u0000By 1933, world trade had fallen to what fraction of its level four years earlier?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.889939,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "By 1933, world trade had decreased to what fraction of its 1929 value?\u0000What fraction of its 1929 level had world trade declined to by 1933?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.960084,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "By 1933, world trade had fallen to what fraction of its level eight years earlier?\u0000By 1933, world trade had fallen to what fraction of its level four years earlier?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.952705,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "By 1933, world trade had fallen to what fraction of its level four years earlier?\u0000By 1933, world trade had fallen to what fraction of its level two years earlier?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.968533,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "By 1933, world trade had fallen to what fraction of its level four years earlier?\u0000By 1935, world trade had fallen to what fraction of its level four years earlier?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.852251,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "By 1933, world trade had fallen to what fraction of its level four years earlier?\u0000In 1933, world trade represented what portion of its 1929 level?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.861642,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "By 1933, world trade had fallen to what fraction of its level four years earlier?\u0000What fraction did world trade decline to by 1933 compared to 1929?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.877312,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "By 1933, world trade had fallen to what fraction of its level four years earlier?\u0000What fraction of its 1929 level had world trade declined to by 1933?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.896405,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "By October 1916, what was roughly the total combined number of Russian military casualties?\u0000By the conclusion of October 1916, what were the estimated aggregate Russian armed forces casualties?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.935105,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "By October 1916, what was roughly the total combined number of Russian military casualties?\u0000What was the approximate combined total of Russian military losses by the end of October 1916?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.917218,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "By how much did domestic trade decline during the worst of the global downturn?\u0000By how much did international trade decline during the worst of the global downturn?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.862441,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "By how much did international trade decline during the worst of the global downturn?\u0000By how much did international trade recover after the worst of the global downturn?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.813652,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "By how much did international trade decline during the worst of the global downturn?\u0000How much did world trade fall at the peak of the global downturn?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.816439,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "By how much did international trade decline during the worst of the global downturn?\u0000What was the extent of the drop in international trade during the deepest part of the global economic crisis?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.839122,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "By how much did international trade decline during the worst of the global downturn?\u0000What was the magnitude of the decline in international trade during the worst period of the global downturn?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.970072,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "By how much did international trade decline during the worst of the global downturn?\u0000What was the magnitude of the decrease in international trade at the peak of the global economic contraction?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.824375,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "By how much did international trade decline during the worst of the global downturn?\u0000When did international trade reach its lowest point during the global downturn?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.843013,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "By late October 1916, roughly how many Russian soldiers had been killed, wounded, or captured combined?\u0000What was the approximate combined total of Russian military losses by the end of October 1916?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.855614,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "By the conclusion of October 1916, what were the estimated aggregate Russian armed forces casualties?\u0000By the end of October 1916, what was the estimated aggregate figure for Russian military losses?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.905022,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "By the end of October 1916, what was the estimated aggregate figure for Russian military losses?\u0000What was the approximate combined total of Russian military losses by the end of October 1916?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.939535,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "By when did the Soviet Union discover that the United States had compromised their codebreaking program?\u0000By when did the United States realize that its secret codebreaking program against Soviet communications had been compromised?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.933393,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "By when did the Soviet Union realize that its secret codebreaking program against American communications had been compromised?\u0000By when did the United States realize that its secret codebreaking program against Soviet communications had been compromised?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.96686,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "By when did the United States realize that its secret codebreaking program against Soviet communications had been compromised?\u0000How soon after the compromise was discovered did the United States become aware that its secret signals intelligence operation targeting Soviet communications had been breached?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.798536,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "By when did the United States realize that its secret codebreaking program against Soviet communications had been compromised?\u0000When did the US discover that the Soviet Union had compromised its classified communications intelligence program?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.85217,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "By when did the United States realize that its secret codebreaking program against Soviet communications had been compromised?\u0000When did the United States discover that its classified effort to break Soviet communication codes had been exposed?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.8187,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "By when did the United States realize that its secret codebreaking program against Soviet communications had been compromised?\u0000When did the United States realize that its secret codebreaking program against Nazi Germany had been compromised?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.899927,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "During the Guatemalan Civil War, which Reagan administration-backed Guatemalan military ruler's regime proved to be a source of controversy?\u0000Which Guatemalan military ruler's regime received controversial backing from the Reagan administration during the Guatemalan Civil War?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.968669,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "During the Potsdam Conference, who became the new British Prime Minister following Winston Churchill's departure from the position?\u0000Who became British Prime Minister when Churchill stepped down during the Potsdam Conference?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.953003,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "During the Potsdam Conference, who became the new British Prime Minister following Winston Churchill's departure from the position?\u0000Who replaced Winston Churchill as British Prime Minister during the Potsdam Conference?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.962094,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "For how many years would Allied troops occupy the Rhineland as reparations for German aggression?\u0000For how many years would Allied troops occupy the Rhineland bridgeheads as a guarantee of German compliance?",
+   "truth": "same",
+   "source": "quarantined",
+   "sim": 0.813441,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "For how many years would Allied troops occupy the Rhineland bridgeheads as a guarantee of German compliance?\u0000For how many years would Allied troops occupy the Ruhr Valley as a guarantee of German compliance?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.789728,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "For how many years would Allied troops occupy the Rhineland bridgeheads as a guarantee of German compliance?\u0000For how many years would Allied troops occupy the left bank of the Rhine?",
+   "truth": "same",
+   "source": "quarantined",
+   "sim": 0.753575,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "For how many years would Allied troops occupy the Rhineland bridgeheads as a guarantee of German compliance?\u0000For what period would the Rhineland bridgeheads remain under Allied occupation as a pledge of German cooperation?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.852766,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "For how many years would Allied troops occupy the Rhineland bridgeheads as a guarantee of German compliance?\u0000How long did Allied forces maintain occupation of the Rhineland bridgeheads to ensure Germany's adherence to treaty terms?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.891271,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "For how many years would Allied troops occupy the Rhineland bridgeheads as a guarantee of German compliance?\u0000How long would Allied forces maintain their presence in the Rhineland bridgeheads to ensure German adherence to the agreement?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.829654,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "For how many years would Allied troops occupy the Rhineland bridgeheads as a guarantee of German compliance?\u0000What was the duration in years that Allied forces would maintain occupation of the Rhineland bridgeheads to ensure German adherence to agreements?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.920635,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "For how many years would Allied troops occupy the Rhineland bridgeheads as a guarantee of German compliance?\u0000What was the duration of the Allied military occupation of the Rhineland bridgeheads as security for German compliance?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.915256,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "For what period would the Rhineland bridgeheads remain under Allied occupation as a pledge of German cooperation?\u0000What was the duration in years that Allied forces would maintain occupation of the Rhineland bridgeheads to ensure German adherence to agreements?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.853442,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "How did David Lloyd George seek to boost Britain's portion of German reparations payments?\u0000What did British Prime Minister David Lloyd George want included in the German reparations sum to increase Britain's share?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.87284,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "How did David Lloyd George seek to boost Britain's portion of German reparations payments?\u0000What was David Lloyd George's objective regarding what should be incorporated into the German reparations sum to boost Britain's portion?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.90799,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "How did German coal miners and railway workers in the Ruhr resist the 1923 occupation through their tactics?\u0000What tactic did German coal miners and railway workers use to resist the 1923 occupation of the Ruhr?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.984557,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "How did German coal miners and railway workers resist the 1923 Ruhr occupation?\u0000What method of resistance did German coal miners and railway workers employ during the 1923 occupation of the Ruhr?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.959718,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "How did German coal miners and railway workers resist the 1923 Ruhr occupation?\u0000What tactic did German coal miners and railway workers use to resist the 1923 occupation of the Ruhr?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.952327,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "How long did Allied forces maintain occupation of the Rhineland bridgeheads to ensure Germany's adherence to treaty terms?\u0000What was the duration in years that Allied forces would maintain occupation of the Rhineland bridgeheads to ensure German adherence to agreements?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.945147,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "How long did the Meuse-Argonne offensive last?\u0000When did the Meuse-Argonne offensive start?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.847306,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "How many Russian military personnel had been lost in total by late October 1916?\u0000What was the approximate combined total of Russian military losses by the end of October 1916?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.927357,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "How many civilians died as a result of World War II?\u0000How many people are estimated to have died as a result of World War II?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.859411,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "How many countries besides the US boycotted the 1980 Moscow Summer Olympics?\u0000How many other nations joined the United States in boycotting the 1980 Summer Olympics in Moscow?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.941461,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "How many countries participated in the 1980 Summer Olympics boycott without the United States?\u0000What is the number of additional countries that participated alongside the United States in the boycott of the 1980 Summer Olympics in Moscow?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.924231,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "How many deaths were caused by World War II?\u0000How many people are estimated to have died as a result of World War II?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.90893,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "How many military deaths occurred in World War II?\u0000What is the estimated death toll from World War II?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.870096,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "How many nations boycotted the 1984 Summer Olympics in Los Angeles?\u0000How many other nations joined the United States in boycotting the 1980 Summer Olympics in Moscow?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.751954,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "How many nations joined the Soviet Union in boycotting the 1984 Summer Olympics?\u0000How many other nations joined the United States in boycotting the 1980 Summer Olympics in Moscow?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.828165,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "How many other countries joined the United States in boycotting the 1980 Summer Olympics held in Moscow?\u0000How many other nations joined the United States in boycotting the 1980 Summer Olympics in Moscow?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.987978,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "How many other nations joined the United States in boycotting the 1980 Summer Olympics in Moscow?\u0000What is the number of additional countries that participated alongside the United States in the boycott of the 1980 Summer Olympics in Moscow?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.938129,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "How many other nations joined the United States in boycotting the 1980 Summer Olympics in Moscow?\u0000What was the total number of nations that joined the United States in boycotting the 1980 Summer Olympics held in Moscow?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.979372,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "How many other nations joined the United States in boycotting the 1980 Summer Olympics in Moscow?\u0000Which specific countries joined the United States in boycotting the 1980 Moscow Summer Olympics?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.932809,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "How many people are estimated to have died as a result of World War II?\u0000How many people died in World War I?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.743725,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "How many people are estimated to have died as a result of World War II?\u0000How many people died in World War II?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.946946,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "How many people are estimated to have died as a result of World War II?\u0000How many soldiers died in World War II?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.869496,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "How many people are estimated to have died as a result of World War II?\u0000What is the estimated death toll from World War II?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.951419,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "How many people are estimated to have died as a result of World War II?\u0000What is the estimated number of people who died in World War II?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.984353,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "How many people are estimated to have died as a result of World War II?\u0000What's the estimated death toll from World War II?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.952712,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "How many republics participated in the referendum to preserve the Soviet Union, and on what date was it held?\u0000On what date was the referendum on preserving the Soviet Union held, and in how many republics?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.97168,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "How much did world trade fall at the peak of the global downturn?\u0000What was the magnitude of the decrease in international trade at the peak of the global downturn?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.889625,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "How much larger was China's population than Japan's in 1938?\u0000In 1938, how many times larger was China's population compared to Japan's?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.979533,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "How much of the Allied powers' munitions supply came from American manufacturing?\u0000What share of all munitions used by the Allied powers during the war did the United States manufacture?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.872943,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "How much of the popular vote did the Nazis secure in Germany's September 1930 election, marking their rise from political obscurity?\u0000What share of the vote did the Nazi Party win in the September 1930 German election, marking its rise from a fringe party?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.858536,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "How much of the total German reparations sum did David Lloyd George believe Britain should receive?\u0000What did British Prime Minister David Lloyd George want included in the German reparations sum to increase Britain's share?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.881537,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In 1918, on which date did Romania resume combat operations with the Allied powers after being knocked out of the war?\u0000On what date in 1918 did Romania rejoin the fighting on the Allied side after being forced out of the war earlier?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.874675,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In 1933, world trade represented what portion of its 1929 level?\u0000What fraction of its 1929 level had world trade declined to by 1933?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.932905,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In 1938, by what factor did China's population exceed Japan's?\u0000In 1938, how many times larger was China's population compared to Japan's?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.961002,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "In 1938, how many times larger was China's population compared to Japan's?\u0000In 1938, how many times larger was Japan's population compared to China's?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.996213,
+   "served": false,
+   "ab": {
+    "hit": true,
+    "guard": false
+   },
+   "ba": {
+    "hit": true,
+    "guard": false
+   }
+  },
+  {
+   "key": "In 1938, how many times larger was China's population compared to Japan's?\u0000In 1938, what was the total combined population of China and Japan?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.868619,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In 1938, how many times larger was China's population compared to Japan's?\u0000In 1948, how many times larger was China's population compared to Japan's?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.867651,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "In 1938, how many times larger was China's population compared to Japan's?\u0000What was the ratio of China's population to Japan's population in 1938?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.946668,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In 1938, what was the total combined population of China and Japan?\u0000What was the ratio of China's population to Japan's population in 1938?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.87938,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In 1939, France passed a law that increased public assistance to families raising children and protected fathers' jobs. What was this law called?\u0000What French law enacted in 1939 increased state assistance to families with children and protected fathers' jobs?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.914147,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In 1960, on which date did the Congo Crisis start, causing Katanga and South Kasai to secede?\u0000On what date in 1960 did the Congo Crisis erupt, leading to the secession of Katanga and South Kasai?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.984018,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "In 1960, what was the date when the Congo Crisis began, resulting in the breakaway of Katanga and South Kasai?\u0000On what date in 1960 did the Congo Crisis erupt, leading to the secession of Katanga and South Kasai?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.953678,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "In April 1917, the German government provided passage from Switzerland to Russia to whom?\u0000Who was helped by the German government to travel from Switzerland into Russia in mid-April 1917?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.914751,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In March 1938, what location was the site of the first significant military triumph achieved by Nationalist Chinese forces over Japan?\u0000Where did Nationalist Chinese forces win their first major victory against Japan in March 1938?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.91425,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In how many republics was the referendum on preserving the Soviet Union conducted, and what was the date it took place?\u0000On what date was the referendum on preserving the Soviet Union held, and in how many republics?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.991904,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "In how many republics was the referendum on preserving the Soviet Union held, and what date did it take place?\u0000On what date was the referendum on preserving the Soviet Union held, and in how many republics?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.994533,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "In mid-April 1917, who did the German government assist in journeying from Switzerland to Russia?\u0000Who received assistance from the German government to journey from Switzerland to Russia during mid-April 1917?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.981393,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "In the July 1930 German election, what percentage of the vote was obtained by the Nazi Party?\u0000What share of the vote did the Nazi Party win in the September 1930 German election, marking its rise from a fringe party?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.776839,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In the September 1930 German election, how many seats did the Nazi Party win in the Reichstag?\u0000What share of the vote did the Nazi Party win in the September 1930 German election, marking its rise from a fringe party?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.798797,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In the September 1930 German election, what percentage of the vote was obtained by the German Communist Party?\u0000What share of the vote did the Nazi Party win in the September 1930 German election, marking its rise from a fringe party?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.764132,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In the September 1930 German election, what percentage of the vote was obtained by the Nazi Party, demonstrating its emergence from a marginal political position?\u0000What share of the vote did the Nazi Party win in the September 1930 German election, marking its rise from a fringe party?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.887241,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In the Tauride Palace, which numbered chamber hosted the workers' council's gatherings?\u0000What numbered chamber inside the Tauride Palace served as the meeting place for the workers' council?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.969665,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "In the secret division of Eastern Europe agreed between Berlin and Moscow in August 1939, which nations fell under Soviet influence?\u0000what creatures have dark vision",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.210967,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "In what month and year did British Imperial forces capture Baghdad from the Ottomans?\u0000In what month and year did British Imperial forces capture Baghdad from the Persians?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.946818,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In what month and year did British Imperial forces capture Baghdad from the Ottomans?\u0000In what month and year did British Imperial forces capture Damascus from the Ottomans?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.729883,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In what month and year did British Imperial forces capture Baghdad from the Ottomans?\u0000In what month and year did the British Imperial army take Baghdad from the Ottomans?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.946941,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In what month and year did British Imperial forces capture Baghdad from the Ottomans?\u0000In what year did the Ottoman Empire capture Baghdad?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.814169,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In what month and year did British Imperial forces capture Baghdad from the Ottomans?\u0000What month and year saw British forces seize Baghdad from the Ottoman Empire?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.943789,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In what month and year did British Imperial forces capture Baghdad from the Ottomans?\u0000When did the British capture Baghdad from Ottoman control?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.919159,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In what year did Mikhail Gorbachev deliver his 'Secret Speech' criticizing Stalin's cult of personality?\u0000In what year did Nikita Khrushchev deliver his 'Secret Speech' criticizing Stalin's cult of personality?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.836498,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In what year did Nikita Khrushchev deliver his 'Secret Speech' criticizing Beria's cult of personality?\u0000In what year did Nikita Khrushchev deliver his 'Secret Speech' criticizing Stalin's cult of personality?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.944809,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In what year did Nikita Khrushchev deliver his 'Secret Speech' criticizing Lenin's cult of personality?\u0000In what year did Nikita Khrushchev deliver his 'Secret Speech' criticizing Stalin's cult of personality?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.959509,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "In what year did Nikita Khrushchev deliver his 'Secret Speech' criticizing Stalin's cult of personality?\u0000In which year did Nikita Khrushchev make his 'Secret Speech' criticizing the Stalin cult of personality?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.99305,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "In what year did Nikita Khrushchev deliver his 'Secret Speech' criticizing Stalin's cult of personality?\u0000What year was Khrushchev's 'Secret Speech' denouncing Stalin delivered?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.918952,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In what year did Nikita Khrushchev deliver his 'Secret Speech' criticizing Stalin's cult of personality?\u0000When did Khrushchev give his famous speech attacking Stalin's personality cult?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.867392,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "In what year did Romania rejoin the Allied side of the fighting after being forced out of the war earlier, and on what specific date in 1918 did this occur?\u0000On what date in 1918 did Romania rejoin the fighting on the Allied side after being forced out of the war earlier?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.990914,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "Name the 1939 French statute that expanded state aid to families with children while preserving employment protections for fathers.\u0000What French law enacted in 1939 increased state assistance to families with children and protected fathers' jobs?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.942181,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Name the Bosniak militia that was formed to carry out the persecution of Serbs following the assassination.\u0000What was the name of the Bosniak militia set up to carry out persecution of Serbs following the assassination?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.955821,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "Name the German industrial center that endured an early large-scale firebombing intended to damage the war economy and break German morale.\u0000What German industrial city suffered an early large-scale incendiary raid meant to disrupt Germany's war economy and morale?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.877596,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Name the big industrial works whose strike-forced closure contributed to igniting the February Revolution\u0000What was the name of the large industrial plant whose closure by a strike helped spark the February Revolution?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.890717,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Name the two defense pacts created in 1951 and 1954 that characterized the US alliance-building campaign known as 'Pactomania'.\u0000Which two defense pacts, formed in 1951 and 1954, exemplified the US alliance push nicknamed 'Pactomania'?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.965672,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date did Bulgaria attack Serbia and Greece, starting the First Balkan War?\u0000On what date did Bulgaria attack Serbia and Greece, starting the Second Balkan War?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.944106,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date did Bulgaria attack Serbia and Greece, starting the Second Balkan War?\u0000On what date did Serbia and Greece attack Bulgaria, starting the Second Balkan War?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.988872,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date did Bulgaria attack Serbia and Greece, starting the Second Balkan War?\u0000What date marks Bulgaria's assault on Serbia and Greece that began the Second Balkan War?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.94683,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date did Bulgaria attack Serbia and Greece, starting the Second Balkan War?\u0000What date marks the beginning of the Second Balkan War, when Bulgaria launched attacks against Serbia and Greece?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.963441,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date did Bulgaria attack Serbia and Greece, starting the Second Balkan War?\u0000When did Bulgaria launch attacks on Serbia and Greece, initiating the Second Balkan War?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.955621,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date did Bulgaria attack Serbia and Greece, starting the Second Balkan War?\u0000When did Bulgaria launch its assault on Serbia and Greece, initiating the Second Balkan War?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.941148,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date did Bulgaria attack Serbia and Greece, starting the Second Balkan War?\u0000Which countries did Bulgaria attack on June 29, 1913, starting the Second Balkan War?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.777624,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "On what date did the Congo Crisis erupt, leading to the independence of the Democratic Republic of Congo?\u0000On what date in 1960 did the Congo Crisis erupt, leading to the secession of Katanga and South Kasai?",
+   "truth": "same",
+   "source": "quarantined",
+   "sim": 0.768057,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "On what date did the Meuse-Argonne offensive begin?\u0000On what date did the Meuse-Argonne offensive commence?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.997307,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date did the Meuse-Argonne offensive begin?\u0000What is the start date of the Meuse-Argonne offensive?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.98263,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date did the Meuse-Argonne offensive begin?\u0000When did the Meuse-Argonne offensive start?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.978208,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date in 1917 did Romania rejoin the fighting on the Allied side after being forced out of the war earlier?\u0000On what date in 1918 did Romania rejoin the fighting on the Allied side after being forced out of the war earlier?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.922492,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "On what date in 1918 did Romania rejoin the fighting on the Allied side after being forced out of the war earlier?\u0000On what date in 1918 did Romania rejoin the fighting on the Central Powers side?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.928896,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date in 1918 did Romania rejoin the fighting on the Allied side after being forced out of the war earlier?\u0000On what date in 1918 did Romania withdraw from fighting on the Allied side?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.850842,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date in 1918 did Romania rejoin the fighting on the Allied side after being forced out of the war earlier?\u0000What was the specific date Romania rejoined the Allied forces in 1918 following its forced withdrawal?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.943309,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date in 1918 did Romania rejoin the fighting on the Allied side after being forced out of the war earlier?\u0000When did Romania return to World War I fighting alongside the Allies in 1918 after its earlier exit?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.916798,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date in 1960 did the Congo Crisis erupt in Katanga province?\u0000On what date in 1960 did the Congo Crisis erupt, leading to the secession of Katanga and South Kasai?",
+   "truth": "same",
+   "source": "quarantined",
+   "sim": 0.93146,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date in 1960 did the Congo Crisis erupt, leading to the secession of Katanga and South Kasai?\u0000What date in 1961 did the secession of Katanga occur during the Congo Crisis?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.866904,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "On what date in 1960 did the Congo Crisis erupt, leading to the secession of Katanga and South Kasai?\u0000What was the specific date in 1960 when the Congo Crisis began, triggering the secession of Katanga and South Kasai?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.982623,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date in 1960 did the Congo Crisis erupt, leading to the secession of Katanga and South Kasai?\u0000When in 1960 did the Congo Crisis break out, resulting in Katanga and South Kasai's secession?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.975482,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date was the referendum on dissolving the Soviet Union held, and in how many republics?\u0000On what date was the referendum on preserving the Soviet Union held, and in how many republics?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.834194,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date was the referendum on preserving the Soviet Union held, and in how many republics voted in favor?\u0000On what date was the referendum on preserving the Soviet Union held, and in how many republics?",
+   "truth": "same",
+   "source": "quarantined",
+   "sim": 0.984829,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date was the referendum on preserving the Soviet Union held, and in how many republics?\u0000On what date was the referendum on preserving the Soviet Union held, and what was the percentage turnout?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.907536,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date was the referendum on preserving the Soviet Union held, and in how many republics?\u0000What was the date of the Soviet Union preservation referendum, and in how many republics did it occur?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.971677,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "On what date was the referendum on preserving the Soviet Union held, and in how many republics?\u0000When did the referendum on preserving the Soviet Union take place, and across how many republics?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.985434,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "The February Revolution was partly sparked by a strike that closed what large industrial facility?\u0000What was the name of the large industrial plant whose closure by a strike helped spark the February Revolution?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.931085,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "The February Revolution was partly sparked by a strike that closed what large industrial facility?\u0000Which large industrial facility's shutdown due to strike action contributed to igniting the February Revolution, and what was it called?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.95734,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "The fighting between the Allies and Ottoman Empire ended on 30 October 1918 when which armistice was signed?\u0000What armistice ended the fighting between the Ottoman Empire and the Allies on 30 October 1918?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.97915,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "The treaty established what international body to regulate worker protections and maximum working hours?\u0000What new international body did the treaty set up to regulate things like maximum working hours and worker protections?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.953897,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "The treaty established what international body to regulate worker protections and maximum working hours?\u0000Which international organization did the treaty establish to govern matters such as maximum working hours and worker protections?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.963957,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What 1936 French legislation enhanced governmental support for families raising children while safeguarding paternal employment?\u0000What 1939 French legislation enhanced governmental support for families raising children while safeguarding paternal employment?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.893799,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "What 1939 French legislation enhanced governmental support for families raising children while reducing paternal employment protections?\u0000What 1939 French legislation enhanced governmental support for families raising children while safeguarding paternal employment?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.976546,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What 1939 French legislation enhanced governmental support for families raising children while safeguarding maternal employment?\u0000What 1939 French legislation enhanced governmental support for families raising children while safeguarding paternal employment?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.928955,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What 1939 French legislation enhanced governmental support for families raising children while safeguarding paternal employment?\u0000What 1939 French legislation provided enhanced government support to families with children and safeguarded paternal employment?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.980868,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What 1939 French legislation enhanced governmental support for families raising children while safeguarding paternal employment?\u0000What French law enacted in 1939 increased state assistance to families with children and protected fathers' jobs?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.894642,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What 1939 French legislation enhanced governmental support for families raising children while safeguarding paternal employment?\u0000What piece of legislation passed in France during 1939 provided enhanced government support to families raising children and safeguarded employment for fathers?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.967105,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What 1939 French legislation enhanced governmental support for families raising children while safeguarding paternal employment?\u0000What was the 1939 French legislation that boosted family support for child-rearing and maintained paternal job security?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.95976,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What 1939 French legislation enhanced governmental support for families raising children while safeguarding paternal employment?\u0000Which 1939 French legislation expanded government support for families raising children and safeguarded paternal employment?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.985921,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What 1939 French legislation provided enhanced government support to families with children and safeguarded paternal employment?\u0000What French law enacted in 1939 increased state assistance to families with children and protected fathers' jobs?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.904425,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What British statesman sent correspondence to Lloyd George expressing concerns about the fate of Wilson's Fourteen Points and characterizing the treaty as unstable?\u0000What South African statesman sent correspondence to Lloyd George expressing concerns about the fate of Wilson's Fourteen Points and characterizing the treaty as unstable?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.863064,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What French law enacted in 1938 increased state assistance to families with children and protected fathers' jobs?\u0000What French law enacted in 1939 increased state assistance to families with children and protected fathers' jobs?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.909571,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "What French law enacted in 1939 decreased state assistance to families with children?\u0000What French law enacted in 1939 increased state assistance to families with children and protected fathers' jobs?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.872205,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What French law enacted in 1939 increased state assistance to families with children and protected fathers' jobs?\u0000What French law enacted in 1939 increased state assistance to families with children and protected mothers' jobs?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.931428,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What French law enacted in 1939 increased state assistance to families with children and protected fathers' jobs?\u0000Which 1939 French law increased government assistance for families with children and protected fathers' jobs?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.976082,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What French law enacted in 1939 increased state assistance to families with children and protected fathers' jobs?\u0000Which French law from 1939 boosted state aid for families with kids and defended fathers' workplace security?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.937315,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What German industrial city suffered an early large-scale incendiary raid meant to disrupt Germany's war economy and morale?\u0000What German industrial city suffered the largest incendiary raid of World War II?",
+   "truth": "same",
+   "source": "quarantined",
+   "sim": 0.920551,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "What German industrial city suffered an early large-scale incendiary raid meant to disrupt Germany's war economy and morale?\u0000What German industrial city was firebombed primarily to kill civilians rather than disrupt the war economy?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.83539,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What German industrial city suffered an early large-scale incendiary raid meant to disrupt Germany's war economy and morale?\u0000What major German manufacturing hub experienced a significant early incendiary bombing raid designed to cripple the war effort and lower morale?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.878458,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What German industrial city suffered an early large-scale incendiary raid meant to disrupt Germany's war economy and morale?\u0000Which German city received the first incendiary bombing raid of the war?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.844914,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What German industrial city suffered an early large-scale incendiary raid meant to disrupt Germany's war economy and morale?\u0000Which German industrial city was targeted in an early large-scale incendiary bombing campaign to undermine the war economy and German morale?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.931631,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What Marxist historian contended that the main purpose of Stalinist terror was to suppress the Left Opposition?\u0000What Trotskyist historian contended that the main purpose of Stalinist terror was to suppress the Left Opposition?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.942179,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What South African leader wrote to Lloyd George expressing doubts about what happened to Wilson's Fourteen Points and warning that the treaty was unstable?\u0000Which South African statesman wrote to Lloyd George questioning what had become of Wilson's Fourteen Points and calling the treaty unstable?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.959284,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What South African statesman sent correspondence to Clemenceau expressing concerns about the fate of Wilson's Fourteen Points?\u0000What South African statesman sent correspondence to Lloyd George expressing concerns about the fate of Wilson's Fourteen Points and characterizing the treaty as unstable?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.83364,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What South African statesman sent correspondence to Lloyd George expressing concerns about the fate of Wilson's Fourteen Points and characterizing the treaty as unstable?\u0000What South African statesman sent correspondence to Lloyd George expressing doubt about the fate of Wilson's Fourteen Points and arguing that the treaty was unstable?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.98472,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What South African statesman sent correspondence to Lloyd George expressing concerns about the fate of Wilson's Fourteen Points and characterizing the treaty as unstable?\u0000What South African statesman sent correspondence to Lloyd George expressing support for Wilson's Fourteen Points and characterizing the treaty as stable?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.923912,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What South African statesman sent correspondence to Lloyd George expressing concerns about the fate of Wilson's Fourteen Points and characterizing the treaty as unstable?\u0000Which South African leader wrote to Lloyd George about worries regarding Wilson's Fourteen Points and describing the treaty as unstable?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.961673,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What South African statesman sent correspondence to Lloyd George expressing concerns about the fate of Wilson's Fourteen Points and characterizing the treaty as unstable?\u0000Which South African statesman wrote to Lloyd George questioning what had become of Wilson's Fourteen Points and calling the treaty unstable?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.960758,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What South African statesman sent correspondence to Lloyd George expressing concerns about the fate of Wilson's Fourteen Points and characterizing the treaty as unstable?\u0000Who was the South African statesman that corresponded with Lloyd George about Wilson's Fourteen Points and expressed concern about the treaty's stability?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.9634,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What South African statesman sent correspondence to Lloyd George expressing concerns about the fate of Wilson's Fourteen Points and characterizing the treaty as unstable?\u0000Who was the South African statesman that corresponded with Lloyd George expressing anxiety about the fate of Wilson's Fourteen Points and calling the treaty unstable?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.96828,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What Trotskyist historian claimed that suppressing the Left Opposition was the central aim of Stalinist terror?\u0000What Trotskyist historian contended that the main purpose of Stalinist terror was to suppress the Left Opposition?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.971413,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What Trotskyist historian claimed that suppressing the Left Opposition was the central aim of Stalinist terror?\u0000Which Trotskyist historian argued that crushing the Left Opposition was the primary function of Stalinist terror?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.931798,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What Trotskyist historian contended that the main purpose of Stalinist terror was to consolidate Stalin's personal power?\u0000What Trotskyist historian contended that the main purpose of Stalinist terror was to suppress the Left Opposition?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.866754,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What Trotskyist historian contended that the main purpose of Stalinist terror was to suppress the Left Opposition?\u0000What Trotskyist historian contended that the main purpose of Stalinist terror was to suppress the Right Opposition?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.949692,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What Trotskyist historian contended that the main purpose of Stalinist terror was to suppress the Left Opposition?\u0000What Trotskyist historian contended that the suppression of the Left Opposition served as the main objective of Stalinist terror?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.974425,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What Trotskyist historian contended that the main purpose of Stalinist terror was to suppress the Left Opposition?\u0000What historian from the Trotskyist tradition contended that suppressing the Left Opposition was the central purpose of Stalinist terror?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.978296,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What Trotskyist historian contended that the main purpose of Stalinist terror was to suppress the Left Opposition?\u0000Which Trotskyist historian argued that Stalinist terror was primarily directed at peasant resistance rather than the Left Opposition?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.850809,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What Trotskyist historian contended that the main purpose of Stalinist terror was to suppress the Left Opposition?\u0000Which Trotskyist historian argued that crushing the Left Opposition was the primary function of Stalinist terror?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.944722,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What Trotskyist historian contended that the main purpose of Stalinist terror was to suppress the Left Opposition?\u0000Which historian, a Trotskyist, argued that the primary goal of Stalinist terror was the destruction of the Left Opposition?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.939066,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What Trotskyist historian contended that the main purpose of Stalinist terror was to suppress the Left Opposition?\u0000Who was the Trotskyist historian that contended Stalinist terror's main purpose was to eliminate the Left Opposition?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.969889,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What agreement terminated hostilities between the Allies and Ottoman Empire on that date in 1918?\u0000What armistice ended the fighting between the Ottoman Empire and the Allies on 30 October 1918?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.755948,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "What armistice ended the fighting between the Ottoman Empire and the Allies on 11 November 1918?\u0000What armistice ended the fighting between the Ottoman Empire and the Allies on 30 October 1918?",
+   "truth": "same",
+   "source": "quarantined",
+   "sim": 0.844748,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "What armistice ended the fighting between the Ottoman Empire and the Allies on 30 October 1918?\u0000What armistice ended the fighting between the Ottoman Empire and the British on 31 October 1918?",
+   "truth": "same",
+   "source": "quarantined",
+   "sim": 0.905502,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "What armistice ended the fighting between the Ottoman Empire and the Allies on 30 October 1918?\u0000What armistice ended the fighting between the Ottoman Empire and the Central Powers on 30 October 1918?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.93622,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What armistice ended the fighting between the Ottoman Empire and the Allies on 30 October 1918?\u0000Which armistice brought an end to combat between the Allies and the Ottoman Empire on 30 October 1918?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.977095,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What armistice ended the fighting between the Ottoman Empire and the Allies on 30 October 1918?\u0000Which armistice was signed on 30 October 1918 to end Ottoman-Allied fighting?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.970673,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What date marks Bulgaria's assault on Serbia and Greece that began the Second Balkan War?\u0000When did Bulgaria launch its assault on Serbia and Greece, initiating the Second Balkan War?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.965533,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What decision did the nation's highest court make in 1935 that invalidated the NRA?\u0000What ruling from the nation's highest court struck down the NRA in 1935?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.943725,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What did British Prime Minister David Lloyd George want included in the German reparations sum to increase Britain's share?\u0000What did David Lloyd George want excluded from the German reparations sum to reduce Britain's burden?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.822468,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What did British Prime Minister David Lloyd George want included in the German reparations sum to increase Britain's share?\u0000What did David Lloyd George want included in the German reparations sum to increase France's share?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.897788,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What did British Prime Minister David Lloyd George want included in the German reparations sum to increase Britain's share?\u0000What did Lloyd George propose to add to German reparations in order to enlarge the British share?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.896447,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What did British Prime Minister David Lloyd George want included in the German reparations sum to increase Britain's share?\u0000What was David Lloyd George's objective regarding what should be incorporated into the German reparations sum to boost Britain's portion?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.899917,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What did British Prime Minister David Lloyd George want included in the German reparations sum to increase Britain's share?\u0000Which items did British PM Lloyd George want factored into the German reparations bill to increase what Britain would receive?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.891801,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "What did Churchill discuss with Truman at the Potsdam Conference?\u0000Who replaced Winston Churchill as British Prime Minister during the Potsdam Conference?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.706384,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What did they call the Bosniak militia organization that was set up to conduct persecution against Serbs after the assassination occurred?\u0000What was the name of the Bosniak militia set up to carry out persecution of Serbs following the assassination?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.976541,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What economic school attributes economic downturns to insufficient private and government spending?\u0000What economic school of thought attributes the economic downturn to insufficient spending from both the private sector and fiscal policy?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.927029,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What economic school attributes economic downturns to insufficient private and government spending?\u0000Which school of economic thought blames a shortfall in private-sector and fiscal spending for the downturn?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.898504,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What economic school of thought attributes the economic decline to insufficient spending from both the private sector and government fiscal policy?\u0000Which school of economic thought blames a shortfall in private-sector and fiscal spending for the downturn?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.878313,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What economic school of thought attributes the economic downturn to insufficient spending from both the private sector and fiscal policy?\u0000Which economic theory holds that recessions result from inadequate demand in both private and public sectors?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.641937,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What economic school of thought attributes the economic downturn to insufficient spending from both the private sector and fiscal policy?\u0000Which school of economic thought blames a shortfall in private-sector and fiscal spending for the downturn?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.943936,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What existing international body did the treaty empower to regulate maximum working hours and worker protections?\u0000What new international body did the treaty set up to regulate things like maximum working hours and worker protections?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.924961,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What existing international body did the treaty empower to regulate maximum working hours and worker protections?\u0000Which international organization did the treaty establish to govern matters such as maximum working hours and worker protections?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.93181,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What fraction did world trade decline to by 1933 compared to 1929?\u0000What fraction of its 1929 level had world trade declined to by 1933?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.976027,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What fraction of munitions used by the Allies in the war were made in the United States?\u0000What share of all munitions used by the Allied powers during the war did the United States manufacture?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.913945,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What international organization was established by the treaty to set standards for working hours and labor protections?\u0000What new international body did the treaty set up to regulate things like maximum working hours and worker protections?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.87198,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What international organization was established by the treaty to set standards for working hours and labor protections?\u0000Which international organization did the treaty establish to govern matters such as maximum working hours and worker protections?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.914169,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What is the estimated death toll from World War I?\u0000What is the estimated death toll from World War II?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.819825,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "What is the estimated death toll from World War II?\u0000What was the death toll in Europe during World War II?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.837259,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What is the estimated death toll from World War II?\u0000What was the death toll of WW2?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.935832,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "What is the estimated death toll from World War II?\u0000What's the estimated death toll from World War II?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.998989,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What is the number of additional countries that participated alongside the Soviet Union in the boycott of the 1984 Summer Olympics in Los Angeles?\u0000What is the number of additional countries that participated alongside the United States in the boycott of the 1980 Summer Olympics in Moscow?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.853466,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "What is the number of additional countries that participated alongside the United States in the boycott of the 1976 Summer Olympics?\u0000What is the number of additional countries that participated alongside the United States in the boycott of the 1980 Summer Olympics in Moscow?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.854739,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "What is the number of additional countries that participated alongside the United States in the boycott of the 1980 Summer Olympics in Moscow?\u0000What was the total count of additional nations that participated in the 1980 Summer Olympics boycott alongside the United States?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.951528,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What method of resistance did German coal miners and railway workers employ during the 1923 occupation of the Ruhr?\u0000What resistance methods did German coal and rail workers employ during the 1923 Ruhr occupation?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.957819,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What method of resistance did German coal miners and railway workers employ during the 1923 occupation of the Ruhr?\u0000What tactic did German coal miners and railway workers use to resist the 1923 occupation of the Ruhr?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.975368,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What militia group did the Bosniaks establish to persecute Serbs after the assassination?\u0000What was the name of the Bosniak militia set up to carry out persecution of Serbs following the assassination?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.963306,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What new international body did the treaty set up to regulate environmental standards and pollution limits?\u0000What new international body did the treaty set up to regulate things like maximum working hours and worker protections?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.634548,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What new international body did the treaty set up to regulate things like maximum working hours and worker protections?\u0000What new international body did the treaty set up to regulate trade and tariffs?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.714723,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What new international body did the treaty set up to regulate things like maximum working hours and worker protections?\u0000Which new global institution did the treaty create to oversee worker protections and maximum working hours?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.919404,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What new international body did the treaty set up to regulate things like maximum working hours and worker protections?\u0000Which new international organization did the treaty establish to govern matters such as maximum working hours and protections for workers?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.955627,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What numbered chamber inside the Tauride Palace served as the meeting place for the imperial parliament?\u0000What numbered chamber inside the Tauride Palace served as the meeting place for the workers' council?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.761078,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What numbered chamber inside the Tauride Palace served as the meeting place for the workers' council?\u0000What numbered chamber inside the Winter Palace served as the meeting place for the workers' council?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.835356,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What numbered chamber inside the Tauride Palace served as the meeting place for the workers' council?\u0000What was the number of the chamber in the Tauride Palace where the workers' council held its meetings?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.957603,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What numbered chamber inside the Tauride Palace served as the meeting place for the workers' council?\u0000Which chamber number in the Tauride Palace functioned as the assembly location for the workers' council?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.96333,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What numbered chamber inside the Tauride Palace served as the meeting place for the workers' council?\u0000Which numbered room in the Tauride Palace functioned as the assembly hall for the workers' council?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.901822,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What numbered chamber inside the Tauride Palace served as the meeting place for the workers' council?\u0000Which numbered room in the Tauride Palace was used by the soldiers' council?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.75974,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What numbered chamber inside the Tauride Palace served as the meeting place for the workers' council?\u0000Which room number in the Tauride Palace functioned as the assembly location for the workers' soviet?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.809981,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What percentage of munitions manufactured by the United States were used by Allied powers during the war?\u0000What share of all munitions used by the Allied powers during the war did the United States manufacture?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.96078,
+   "served": false,
+   "ab": {
+    "hit": true,
+    "guard": false
+   },
+   "ba": {
+    "hit": true,
+    "guard": false
+   }
+  },
+  {
+   "key": "What percentage of the total munitions employed by the Allied powers throughout the war was produced by the United States?\u0000What percentage of the total munitions used by Allied forces during World War II were produced by the United States?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.943115,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "What percentage of the total munitions employed by the Allied powers throughout the war was produced by the United States?\u0000What share of all munitions used by the Allied powers during the war did the United States manufacture?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.922508,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What percentage of the total munitions used by Allied forces during World War II were produced by the United States?\u0000What share of all munitions used by the Allied powers during the war did the United States manufacture?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.90777,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "What resistance methods did German coal and rail workers employ during the 1923 Ruhr occupation?\u0000What tactic did German coal miners and railway workers use to resist the 1923 occupation of the Ruhr?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.931933,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What school of economic thought attributes downturns to a lack of private-sector and fiscal spending?\u0000Which school of economic thought blames a shortfall in private-sector and fiscal spending for the downturn?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.941809,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What share of all munitions used by the Allied powers during the war did the United States manufacture?\u0000What share of all munitions used by the Axis powers during the war did Germany manufacture?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.801536,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What share of all munitions used by the Allied powers during the war did the United States manufacture?\u0000What share of munitions used by the United States during the war did Allied powers manufacture?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.979831,
+   "served": false,
+   "ab": {
+    "hit": true,
+    "guard": false
+   },
+   "ba": {
+    "hit": true,
+    "guard": false
+   }
+  },
+  {
+   "key": "What share of the vote did the Nazi Party win in the September 1930 German election, marking its rise from a fringe party?\u0000What share of votes did the Nazi Party win in the September 1930 German election?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.915582,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What share of the vote did the Nazi Party win in the September 1930 German election, marking its rise from a fringe party?\u0000What was the Nazi Party's vote percentage in the 1930 German election held in September?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.893111,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What tactic did German coal miners and railway workers use to resist the 1918 occupation of the Ruhr?\u0000What tactic did German coal miners and railway workers use to resist the 1923 occupation of the Ruhr?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.949022,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "What tactic did German coal miners and railway workers use to resist the 1923 occupation of the Ruhr Valley?\u0000What tactic did German coal miners and railway workers use to resist the 1923 occupation of the Ruhr?",
+   "truth": "same",
+   "source": "quarantined",
+   "sim": 0.987667,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What tactic did German coal miners and railway workers use to resist the 1923 occupation of the Ruhr?\u0000What tactic did German factory workers use to resist the 1923 occupation of the Ruhr?",
+   "truth": "same",
+   "source": "quarantined",
+   "sim": 0.908732,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What tactic did German coal miners and railway workers use to resist the 1923 occupation of the Ruhr?\u0000Which tactic was used by German miners and railway staff to oppose the 1923 occupation of the Ruhr?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.959595,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the approximate combined total of German military losses by the end of October 1916?\u0000What was the approximate combined total of Russian military losses by the end of October 1916?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.869112,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the approximate combined total of Russian military losses by the end of June 1916?\u0000What was the approximate combined total of Russian military losses by the end of October 1916?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.837781,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the approximate combined total of Russian military losses by the end of October 1916?\u0000What was the approximate combined total of Russian military losses by the end of October 1917?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.880232,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "What was the designation of the Bosniak civilian organization established to provide humanitarian aid to Serbs after the assassination?\u0000What was the designation of the Bosniak militia group established to execute persecution against Serbs after the assassination?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.753708,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the designation of the Bosniak militia group established before the assassination to prepare for persecution against Serbs?\u0000What was the designation of the Bosniak militia group established to execute persecution against Serbs after the assassination?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.949328,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the designation of the Bosniak militia group established to conduct persecution against Serbs in the aftermath of the assassination?\u0000What was the designation of the Bosniak militia group established to execute persecution against Serbs after the assassination?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.985968,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the designation of the Bosniak militia group established to execute persecution against Serbs after the assassination?\u0000What was the designation of the Serbian militia group established to execute persecution against Bosniaks after the assassination?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.979546,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the designation of the Bosniak militia group established to execute persecution against Serbs after the assassination?\u0000What was the name of the Bosniak militia set up to carry out persecution of Serbs following the assassination?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.961238,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the designation of the Bosniak militia group established to execute persecution against Serbs after the assassination?\u0000What was the title or name of the Bosniak militia group created to perpetrate persecution against Serbs in the wake of the assassination?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.965144,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the magnitude of the decrease in international trade at the peak of the global downturn?\u0000What was the magnitude of the decrease in international trade at the peak of the global economic contraction?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.912306,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the name of the Bosniak militia set up to carry out persecution of Croats following the assassination?\u0000What was the name of the Bosniak militia set up to carry out persecution of Serbs following the assassination?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.950067,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the name of the Bosniak militia set up to carry out persecution of Serbs following the assassination?\u0000What was the name of the Bosniak militia set up to carry out persecution of Serbs following the coup?",
+   "truth": "same",
+   "source": "quarantined",
+   "sim": 0.875954,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the name of the Bosniak militia set up to carry out persecution of Serbs following the assassination?\u0000What was the name of the Bosniak militia unit formed to carry out persecution of Serbs following the assassination?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.963647,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the name of the Bosniak militia set up to carry out persecution of Serbs following the assassination?\u0000What was the name of the Serbian militia set up to carry out persecution of Bosniaks following the assassination?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.978463,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the name of the Bosniak militia set up to carry out persecution of Serbs following the assassination?\u0000Which Bosniak militia was created to conduct persecution of Serbs in the aftermath of the assassination?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.975523,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the name of the large industrial plant whose closure by a strike helped spark the February Revolution?\u0000What was the name of the large industrial plant whose closure by a strike helped spark the October Revolution?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.895259,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the name of the large industrial plant whose closure by a strike helped spark the February Revolution?\u0000What was the name of the large industrial plant whose expansion helped spark the February Revolution?",
+   "truth": "same",
+   "source": "quarantined",
+   "sim": 0.872045,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the name of the large industrial plant whose closure by a strike helped spark the February Revolution?\u0000Which large industrial plant's shutdown due to strike action contributed to igniting the February Revolution, and what was it called?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.96333,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the name of the large industrial plant whose closure by a strike helped spark the February Revolution?\u0000Which major factory's shutdown due to a strike was instrumental in triggering the February Revolution?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.87548,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What was the name of the large industrial plant whose closure by a strike helped spark the February Revolution?\u0000Which major industrial plant's strike led to the February Revolution in Russia?",
+   "truth": "same",
+   "source": "quarantined",
+   "sim": 0.900893,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "What were the two defense alliances established in 1951 and 1954 that demonstrated the US 'Pactomania' strategy?\u0000Which two defense pacts, formed in 1951 and 1954, exemplified the US alliance push nicknamed 'Pactomania'?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.924369,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "When did Winston Churchill leave office as British Prime Minister?\u0000Who replaced Winston Churchill as British Prime Minister during the Potsdam Conference?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.710211,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "When did the Meuse-Argonne offensive begin?\u0000When did the Meuse-Argonne offensive start?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.994808,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "When did the Meuse-Argonne offensive commence?\u0000When did the Meuse-Argonne offensive start?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.99426,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "When did the Meuse-Argonne offensive end?\u0000When did the Meuse-Argonne offensive start?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.888713,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "When did the Meuse-Argonne offensive start?\u0000Who commanded the Meuse-Argonne offensive?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.820156,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which American officer is credited with averting a nuclear retaliation by correctly identifying a 1983 early-warning system alert as a false alarm?\u0000Which Soviet officer is credited with averting a nuclear retaliation by correctly identifying a 1983 early-warning system alert as a false alarm?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.885564,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which British statesman wrote to Lloyd George questioning what had become of Wilson's Fourteen Points and calling the treaty unstable?\u0000Which South African statesman wrote to Lloyd George questioning what had become of Wilson's Fourteen Points and calling the treaty unstable?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.866118,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which Prime Minister took over from Winston Churchill at the Potsdam Conference?\u0000Who replaced Winston Churchill as British Prime Minister during the Potsdam Conference?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.94589,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which South African statesman wrote to Lloyd George questioning what had become of Wilson's Fourteen Points and calling the treaty beneficial?\u0000Which South African statesman wrote to Lloyd George questioning what had become of Wilson's Fourteen Points and calling the treaty unstable?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.920745,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which South African statesman wrote to Lloyd George questioning what had become of Wilson's Fourteen Points and calling the treaty unstable?\u0000Which South African statesman wrote to Wilson questioning what had become of Lloyd George's proposals and calling the treaty unstable?",
+   "truth": "same",
+   "source": "quarantined",
+   "sim": 0.92353,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which South African statesman wrote to Lloyd George questioning what had become of Wilson's Fourteen Points and calling the treaty unstable?\u0000Who was the South African statesman that corresponded with Lloyd George about Wilson's Fourteen Points and expressed concern about the treaty's stability?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.949326,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which Soviet commander correctly identified a false early-warning system alert in 1983 and averted nuclear retaliation as a result?\u0000Which Soviet officer is credited with averting a nuclear retaliation by correctly identifying a 1983 early-warning system alert as a false alarm?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.901157,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which Soviet officer is credited with averting a nuclear retaliation by correctly identifying a 1979 early-warning system alert as a false alarm?\u0000Which Soviet officer is credited with averting a nuclear retaliation by correctly identifying a 1983 early-warning system alert as a false alarm?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.92558,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "Which Soviet officer is credited with averting a nuclear retaliation by correctly identifying a 1983 early-warning system alert as a false alarm?\u0000Which Soviet officer is credited with initiating nuclear retaliation based on a 1983 early-warning system alert?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.869543,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which Soviet officer is credited with averting a nuclear retaliation by correctly identifying a 1983 early-warning system alert as a false alarm?\u0000Who is the Soviet military officer that prevented nuclear retaliation in 1983 by correctly determining an early-warning system alert was a false alarm?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.971314,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which Soviet officer is credited with averting a nuclear retaliation by correctly identifying a 1983 early-warning system alert as a false alarm?\u0000Who is the Soviet officer that is given credit for preventing nuclear retaliation after correctly determining that a 1983 early-warning system alert was not genuine?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.956189,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which Soviet officer is credited with initiating nuclear retaliation based on a 1983 early-warning system alert?\u0000Who is the Soviet officer that is given credit for preventing nuclear retaliation after correctly determining that a 1983 early-warning system alert was not genuine?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.871552,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which Trotskyist historian argued that Stalinist terror served multiple functions beyond just crushing the Left Opposition?\u0000Which Trotskyist historian argued that crushing the Left Opposition was the primary function of Stalinist terror?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.937525,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which Trotskyist historian argued that Stalinist terror was primarily directed at peasant resistance rather than the Left Opposition?\u0000Which Trotskyist historian argued that crushing the Left Opposition was the primary function of Stalinist terror?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.844442,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which Trotskyist historian argued that Stalinist terror's primary goal was to crush the Left Opposition?\u0000Which Trotskyist historian argued that crushing the Left Opposition was the primary function of Stalinist terror?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.96517,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which Trotskyist historian argued that crushing the Left Opposition was the primary function of Stalinist terror?\u0000Which historian argued that the primary function of Stalinist terror was eliminating the Right Opposition?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.865865,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which Trotskyist historian argued that crushing the Left Opposition was the primary function of Stalinist terror?\u0000Which historian, a Trotskyist, argued that the primary goal of Stalinist terror was the destruction of the Left Opposition?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.932601,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which Trotskyist historian argued that crushing the Left Opposition was the primary function of Stalinist terror?\u0000Who was the Trotskyist historian that contended Stalinist terror's main purpose was to eliminate the Left Opposition?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.933723,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which chamber number in the Tauride Palace functioned as the assembly location for the workers' council?\u0000Which numbered room in the Tauride Palace functioned as the assembly hall for the workers' council?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.920073,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which defense agreements from 1951 and 1954 were central examples of the US diplomatic initiative called 'Pactomania'?\u0000Which two defense pacts, formed in 1951 and 1954, exemplified the US alliance push nicknamed 'Pactomania'?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.892918,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which defense pacts formed in 1951 and 1954 were criticized as failures of US 'Pactomania'?\u0000Which two defense pacts, formed in 1951 and 1954, exemplified the US alliance push nicknamed 'Pactomania'?",
+   "truth": "same",
+   "source": "quarantined",
+   "sim": 0.868761,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which economic theory holds that recessions result from inadequate demand in both private and public sectors?\u0000Which school of economic thought blames a shortfall in private-sector and fiscal spending for the downturn?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.625423,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which international organization did the treaty establish to govern matters such as maximum working hours and worker protections?\u0000Which new international organization did the treaty establish to govern matters such as maximum working hours and protections for workers?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.964631,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which large industrial facility's shutdown due to strike action contributed to igniting the February Revolution, and what was it called?\u0000Which large industrial plant's shutdown due to strike action contributed to igniting the February Revolution, and what was it called?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.941151,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which large industrial facility's shutdown due to strike action contributed to igniting the February Revolution, and what was it called?\u0000Which major factory's shutdown due to a strike was instrumental in triggering the February Revolution?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.925527,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which large industrial plant's shutdown due to strike action contributed to igniting the February Revolution, and what was it called?\u0000Which major industrial plant's strike led to the February Revolution in Russia?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.903022,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which military figure's August 1917 effort to lead forces toward Petrograd was primarily prevented by the actions of railway and telegraph workers who supported the Bolsheviks?\u0000Who had their effort to advance military forces toward Petrograd in August 1917 largely prevented by railway and telegraph workers who supported the Bolsheviks?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.942413,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which new global institution did the treaty create to oversee worker protections and maximum working hours?\u0000Which new international organization did the treaty establish to govern matters such as maximum working hours and protections for workers?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.924433,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which person was given German government assistance for transport from Switzerland to Russia around April 1917?\u0000Who received assistance from the German government to journey from Switzerland to Russia during mid-April 1917?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.930317,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which school of economic thought attributes downturns to monetary policy failures rather than spending shortfalls?\u0000Which school of economic thought blames a shortfall in private-sector and fiscal spending for the downturn?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.767271,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which school of economic thought blames a shortfall in private-sector and fiscal spending for the downturn?\u0000Which school of economic thought blames excessive private-sector and fiscal spending for inflation?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.759128,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which school of economic thought blames a shortfall in private-sector and fiscal spending for the downturn?\u0000Which school of economic thought blames supply-side constraints for economic downturns?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.692048,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which three defense pacts formed during the 1950s exemplified US 'Pactomania'?\u0000Which two defense pacts, formed in 1951 and 1954, exemplified the US alliance push nicknamed 'Pactomania'?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.853843,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "Which two Soviet Salyut space stations secretly doubled as covers for military Almaz reconnaissance operations?\u0000define dark vision",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.218639,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which two Soviet Salyut space stations secretly doubled as covers for military Almaz reconnaissance operations?\u0000explain what dark vision is",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.185439,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which two Soviet Salyut space stations secretly doubled as covers for military Almaz reconnaissance operations?\u0000how does dark vision work",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.222201,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which two Soviet Salyut space stations secretly doubled as covers for military Almaz reconnaissance operations?\u0000what are the limits of dark vision",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.20235,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which two Soviet Salyut space stations secretly doubled as covers for military Almaz reconnaissance operations?\u0000what does dark vision mean",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.194052,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Which two defense pacts, formed in 1951 and 1954, exemplified the US alliance push nicknamed 'Pactomania'?\u0000Which two defense pacts, formed in 1955 and 1956, exemplified the US alliance push nicknamed 'Pactomania'?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.904524,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "Who became British Prime Minister when Churchill stepped down during the Potsdam Conference?\u0000Who replaced Winston Churchill as British Prime Minister during the Potsdam Conference?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.941233,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Who did the German government help travel from Switzerland to Russia in mid-April 1917?\u0000Who was helped by the German government to travel from Switzerland into Russia in mid-April 1917?",
+   "truth": "same",
+   "source": "probe",
+   "sim": 0.984547,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "Who had their effort to advance military forces toward Petrograd in August 1917 largely prevented by railway and telegraph workers who supported the Bolsheviks?\u0000Whose attempt to march troops on Petrograd in August 1917 was thwarted largely through the efforts of railway and telegraph workers aligned with the Bolsheviks?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.914075,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Who received assistance from the German government to journey from France to Russia during mid-April 1917?\u0000Who received assistance from the German government to journey from Switzerland to Russia during mid-April 1917?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.926346,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Who received assistance from the German government to journey from Switzerland to Germany during mid-April 1917?\u0000Who received assistance from the German government to journey from Switzerland to Russia during mid-April 1917?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.939871,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  },
+  {
+   "key": "Who received assistance from the German government to journey from Switzerland to Russia during mid-April 1917?\u0000Who received assistance from the Russian government to journey from Switzerland to Russia during mid-April 1917?",
+   "truth": "different",
+   "source": "probe",
+   "sim": 0.96665,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "Who received assistance from the German government to journey from Switzerland to Russia during mid-April 1917?\u0000Who was helped by the German government to travel from Switzerland into Russia in mid-April 1917?",
+   "truth": "same",
+   "source": "traffic",
+   "sim": 0.96762,
+   "served": true,
+   "ab": {
+    "hit": true,
+    "guard": true
+   },
+   "ba": {
+    "hit": true,
+    "guard": true
+   }
+  },
+  {
+   "key": "Who replaced Winston Churchill as British Prime Minister during the Potsdam Conference?\u0000Who was Churchill's successor as British PM during the Potsdam Conference?",
+   "truth": "same",
+   "source": "generated",
+   "sim": 0.940848,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": false
+   },
+   "ba": {
+    "hit": false,
+    "guard": false
+   }
+  },
+  {
+   "key": "Who replaced Winston Churchill as British Prime Minister during the Potsdam Conference?\u0000Who was the British Prime Minister at the beginning of the Potsdam Conference?",
+   "truth": "different",
+   "source": "generated",
+   "sim": 0.839578,
+   "served": false,
+   "ab": {
+    "hit": false,
+    "guard": true
+   },
+   "ba": {
+    "hit": false,
+    "guard": true
+   }
+  }
+ ]
+}
