@@ -14,6 +14,7 @@ import { cache } from "react";
 
 import { activeUserId } from "@/lib/auth/userScope";
 import { privilegedSql, scopeMemo, sql } from "@/lib/db";
+import { setRequestTags } from "@/lib/observability/sentry";
 
 export type GuestStatus = {
   isGuest: boolean;
@@ -36,6 +37,9 @@ export const guestStatus = cache(async (): Promise<GuestStatus> =>
         select is_guest, expires_at from user_profiles where id = ${activeUserId()}
       `;
     if (!row?.is_guest) return NOT_A_GUEST;
+    // Tagged here, where the answer is already paid for, rather than with a
+    // lookup of its own on every request.
+    setRequestTags({ guest: true });
     return { isGuest: true, expiresAt: row.expires_at?.toISOString() ?? null };
   }),
 );

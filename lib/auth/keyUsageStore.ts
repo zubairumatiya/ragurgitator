@@ -31,6 +31,7 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { isolated, sql } from "@/lib/db";
 import { detached } from "@/lib/detached";
 import { keyLastFourFor } from "@/lib/llm/client";
+import { captureException } from "@/lib/observability/sentry";
 import { activeConfigOrNull } from "@/lib/rag/activeConfig";
 import { SURFACE_LABELS, type Surface } from "@/lib/rag/pricing";
 
@@ -151,6 +152,7 @@ export async function withKeyUsageBuffer<T>(
         await drain(batch);
       } catch (err) {
         console.warn(`[keyusage] drain failed: ${(err as Error).message}`);
+        captureException(err, { tags: { site: "keyusage" } });
       }
     }
   }
@@ -275,6 +277,9 @@ export async function flushKeyUsageEvents(events: KeyUsageEvent[]): Promise<void
   } catch (err) {
     if (isMissingTable(err)) return;
     console.warn(`[keyusage] insert of ${events.length} failed: ${(err as Error).message}`);
+    // Swallowed on purpose — telemetry must not fail the call — which is exactly
+    // why it is reported: a spend control that fails silently is the defect.
+    captureException(err, { tags: { site: "keyusage" } });
   }
 }
 

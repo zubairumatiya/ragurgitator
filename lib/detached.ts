@@ -30,6 +30,7 @@ import {
   withConfig,
   type ResolvedConfig,
 } from "@/lib/rag/activeConfig";
+import { captureException } from "@/lib/observability/sentry";
 
 type DetachedTask = { fn: () => Promise<void>; config: ResolvedConfig | null };
 type DetachedQueue = DetachedTask[];
@@ -112,6 +113,8 @@ async function flushDetached(user: RequestUser, queue: DetachedQueue): Promise<v
               await (task.config ? withConfig(task.config, task.fn) : task.fn());
             } catch (err) {
               console.warn(`[detached] task failed: ${(err as Error).message}`);
+              // after() restored the request's context, so its tags are present.
+              captureException(err, { tags: { site: "detached" } });
             }
           }
         }),
@@ -123,5 +126,6 @@ async function flushDetached(user: RequestUser, queue: DetachedQueue): Promise<v
     // "An error occurred in a function passed to after()" — an alarming message
     // for a counter.
     console.warn(`[detached] flush failed: ${(err as Error).message}`);
+    captureException(err, { tags: { site: "detached" } });
   }
 }

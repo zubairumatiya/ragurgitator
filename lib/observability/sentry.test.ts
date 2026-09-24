@@ -1,46 +1,22 @@
-// The wrapper's test door: an in-memory transport installed through initSentry, a
-// dummy DSN, and no network. Proves a capture made through lib/observability/sentry
-// arrives as an envelope carrying the request tags and the thrown error.
+// The wrapper's test door: an in-memory transport installed through initSentry
+// (lib/observability/testing.ts), a dummy DSN, and no network. Proves a capture
+// made through lib/observability/sentry arrives as an envelope carrying the
+// request tags and the thrown error.
 //
 // Run with: pnpm test
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import * as Sentry from "@sentry/nextjs";
+import { AsyncResource } from "node:async_hooks";
 
 import {
   captureException,
   flushSentry,
-  initSentry,
   setRequestTags,
 } from "./sentry";
+import { initSentryInMemory, withRequestIsolation } from "./testing";
 
-type Item = { type: string; payload: Record<string, unknown> };
-const events: Record<string, unknown>[] = [];
-
-// An envelope is newline-separated JSON: one envelope header, then header/payload
-// pairs. Only event items are kept.
-function parse(body: string | Uint8Array): Item[] {
-  const text = typeof body === "string" ? body : new TextDecoder().decode(body);
-  const lines = text.split("\n").filter(Boolean);
-  const items: Item[] = [];
-  for (let i = 1; i + 1 < lines.length; i += 2) {
-    items.push({ type: JSON.parse(lines[i]).type, payload: JSON.parse(lines[i + 1]) });
-  }
-  return items;
-}
-
-initSentry({
-  dsn: "https://public@o0.ingest.sentry.io/0",
-  tracesSampleRate: 0,
-  transport: (options: Parameters<typeof Sentry.createTransport>[0]) =>
-    Sentry.createTransport(options, async (request) => {
-      for (const item of parse(request.body)) {
-        if (item.type === "event") events.push(item.payload);
-      }
-      return { statusCode: 200 };
-    }),
-});
+const events = initSentryInMemory();
 
 test("an error thrown in an async fn arrives as one envelope with the request tags", async () => {
   setRequestTags({ userId: "u-1", configId: "c-1", route: "/api/test" });
@@ -83,4 +59,34 @@ test("no request data rides along: a guest tag is the literal 'true', nothing el
   assert.equal(event.tags.guest, "true");
   assert.equal(event.request, undefined);
   assert.equal(event.user, undefined);
+});
+
+// The mechanism the NDJSON producer relies on (Trap 1): the producer runs after its
+// handler has returned, re-entered through AsyncResource.bind. The handler's
+// isolation scope must come back with it — and a second request tagging its own
+// scope in between must not bleed in. The real ndjsonStream needs a database
+// transaction, so its end-to-end case is test/integration/sentryNdjson.itest.ts.
+test("tags set in a request survive an AsyncResource.bind re-entry after the request returns", async () => {
+  events.length = 0;
+  const producer = withRequestIsolation(() => {
+    setRequestTags({ userId: "u-a", configId: "c-a", route: "/api/stream" });
+    return AsyncResource.bind(async () => {
+      try {
+        throw new Error("thrown inside the producer");
+      } catch (err) {
+        return captureException(err, { tags: { site: "ndjson" } });
+      }
+    });
+  });
+  withRequestIsolation(() => setRequestTags({ userId: "u-b", configId: "c-b" }));
+
+  const id = await producer();
+  assert.ok(await flushSentry());
+  assert.equal(events.length, 1);
+  const event = events[0] as { event_id: string; tags: Record<string, string> };
+  assert.equal(event.event_id, id);
+  assert.equal(event.tags["config.id"], "c-a");
+  assert.equal(event.tags["user.id"], "u-a");
+  assert.equal(event.tags.route, "/api/stream");
+  assert.equal(event.tags.site, "ndjson");
 });

@@ -39,6 +39,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import { withUserTransaction } from "@/lib/db";
+import { setRequestTags } from "@/lib/observability/sentry";
 
 // Mirrors SessionUser in lib/auth/dal.ts rather than importing it: dal.ts is
 // "server-only" and pulls in the Supabase client, while this module is imported
@@ -59,7 +60,12 @@ const store = new AsyncLocalStorage<RequestUser>();
 // predicate and be denied every row, which is a confusing way to learn that the
 // two identities drifted. Nesting is free — withUserTransaction reuses an
 // already-open transaction for the same user.
+//
+// The Sentry `user.id` tag is set here rather than in each entry point because
+// this is where every one of them — routes, pages, the MCP endpoint, a job slice,
+// the NDJSON producer's re-entry — first has the id in hand.
 export function withUser<T>(user: RequestUser, fn: () => Promise<T>): Promise<T> {
+  setRequestTags({ userId: user.id });
   return store.run(user, () => withUserTransaction(user.id, fn));
 }
 

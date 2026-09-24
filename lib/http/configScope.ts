@@ -31,6 +31,7 @@ import { withKeyUsageBuffer } from "@/lib/auth/keyUsageStore";
 import { withDetachedQueue } from "@/lib/detached";
 import { DEMO_BLOCKED, isDemoBlocked } from "@/lib/demo/policy";
 import { missingKeyResponse } from "@/lib/http/missingKeyServer";
+import { setRequestTags } from "@/lib/observability/sentry";
 import { UnknownConfigError, resolveRequestConfig, withConfig } from "@/lib/rag/activeConfig";
 
 // A MISSING PROVIDER KEY BELONGS HERE for the same reason the 401 does: under
@@ -92,6 +93,9 @@ export async function withRequestConfig<T>(
           }
           throw err;
         }
+        // withRequestUser has no Request to read a route from; Sentry's own
+        // transaction name still carries it there.
+        setRequestTags({ configId: cfg.id, route: new URL(request.url).pathname });
         return withConfig(cfg, () => catchingMissingKey(fn));
       }),
     ),

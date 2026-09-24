@@ -81,6 +81,7 @@ import { activeUser, withUser } from "@/lib/auth/userScope";
 import { registerRun, isCancelled, unregisterRun } from "@/lib/http/cancelRegistry";
 import { runOutsideUserTransaction } from "@/lib/db";
 import { runOutsideDetachedQueue } from "@/lib/detached";
+import { captureException } from "@/lib/observability/sentry";
 
 // The first line of every NDJSON stream, carrying the id a cancel request needs.
 // Not part of any route's event union — see the note above.
@@ -129,6 +130,13 @@ export function ndjsonStream<E>(
       emit({ type: "run-started", runId } satisfies RunStartedEvent);
       try {
         await boundRun(send);
+      } catch (err) {
+        // `run` owns its errors (streamError reports those); this is one that broke
+        // the contract and escaped. Next never sees it either — the handler
+        // returned long ago — so it is reported here and the stream ends with an
+        // error line rather than a truncated body.
+        captureException(err, { tags: { site: "ndjson" } });
+        emit({ type: "error", message: err instanceof Error ? err.message : "Stream failed." });
       } finally {
         unregisterRun(runId);
         try {

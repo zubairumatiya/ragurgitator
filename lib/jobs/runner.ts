@@ -72,6 +72,7 @@ import {
   activeConfig,
   type ResolvedConfig,
 } from "@/lib/rag/activeConfig";
+import { captureException } from "@/lib/observability/sentry";
 import { getConfig } from "@/lib/rag/configStore";
 
 // How long one slice may work before it must checkpoint and hand over. Under
@@ -143,6 +144,11 @@ export async function runSlice(jobId: string): Promise<SliceOutcome> {
     // error rather than ending a forty-minute job over one bad request (0064).
     const message = msg(e);
     const failures = await inOwnScope(owner, () => recordSliceFailure(jobId, message));
+    // A tick is sessionless, so nothing upstream saw this; tagged with the job so
+    // a retrying failure and its final give-up group together.
+    captureException(e, {
+      tags: { site: "jobs", jobId, kind: claimed.job.kind, failures },
+    });
     if (failures > 0 && failures < MAX_SLICE_FAILURES) {
       console.warn(
         `[jobs] slice for ${jobId} failed (${failures}/${MAX_SLICE_FAILURES}), retrying: ${message}`,

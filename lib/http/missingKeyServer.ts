@@ -14,6 +14,7 @@ import {
   type MissingKeyBody,
   type StreamErrorEvent,
 } from "@/lib/http/missingKey";
+import { captureException } from "@/lib/observability/sentry";
 
 // The 400 for a plain JSON route, or null when this isn't a missing-key error
 // (so a caller can `?? rethrow`). 400 rather than 500 because the request is
@@ -34,9 +35,18 @@ export function missingKeyResponse(err: unknown): Response | null {
 // error becomes the ordinary `{type:"error", message}` with `fallback` when the
 // throw carried no message — so the twelve streaming catch blocks are one line
 // each and none of them can forget the enriched case.
+//
+// It is also the NDJSON producer's Sentry capture (Trap 1 in
+// docs/obs-1-sentry-plan.md): those catch blocks swallow the error into an event,
+// so Next's onRequestError never sees it. The bound context is live here, so the
+// request's tags ride along. A missing key is the user's to fix, not a defect,
+// and is not reported.
 export function streamError(err: unknown, fallback: string): StreamErrorEvent {
   const message = err instanceof Error ? err.message : fallback;
-  if (!isMissingProviderKey(err)) return { type: "error", message };
+  if (!isMissingProviderKey(err)) {
+    captureException(err, { tags: { site: "ndjson" } });
+    return { type: "error", message };
+  }
   return {
     type: "error",
     message,
