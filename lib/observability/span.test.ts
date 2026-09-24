@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { flushSentry } from "./sentry";
-import { setAttr, span } from "./span";
+import { addAttr, currentSpanIs, setAttr, span } from "./span";
 import { initSentryTracingInMemory } from "./testing";
 import { PRODUCTION_TRACE_RATE, tracesSamplerFor } from "./sampler";
 
@@ -22,6 +22,8 @@ test("uninitialised: span returns the callback's value and setAttr is inert", as
   });
   assert.equal(out, 42);
   setAttr("no.span", "fine");
+  addAttr("no.span", 1);
+  assert.equal(currentSpanIs("rag.test"), false);
 });
 
 test("uninitialised: an error thrown in the callback propagates unchanged", async () => {
@@ -52,6 +54,15 @@ test("initialised: nested spans arrive parented, with their attributes", async (
       await span("rag.retrieve.fuse", {}, async () => {});
       r.setAttr("retrieve.lanes.fired", "base,voyage-4-lite");
     });
+    // The embed shape: a callee joins the span it is already in, and a value
+    // that arrives per batch accumulates on it.
+    await span("rag.embed", { "embed.count": 3 }, async () => {
+      assert.equal(currentSpanIs("rag.embed"), true);
+      assert.equal(currentSpanIs("rag.ask"), false);
+      addAttr("embed.tokens", 40);
+      addAttr("embed.tokens", 2);
+    });
+    assert.equal(currentSpanIs("rag.ask"), true);
     // After the child ends, the current span is the parent again.
     setAttr("answer.tokens.in", 120);
     s.setAttr("cache.outcome", "miss");
@@ -59,7 +70,8 @@ test("initialised: nested spans arrive parented, with their attributes", async (
   assert.ok(await flushSentry());
 
   const byName = new Map(shipped.map((sp) => [sp.name, sp]));
-  assert.deepEqual([...byName.keys()].sort(), ["rag.ask", "rag.retrieve", "rag.retrieve.fuse"]);
+  assert.deepEqual([...byName.keys()].sort(), ["rag.ask", "rag.embed", "rag.retrieve", "rag.retrieve.fuse"]);
+  assert.equal(byName.get("rag.embed")!.attributes["embed.tokens"], 42);
   const root = byName.get("rag.ask")!;
   const retrieve = byName.get("rag.retrieve")!;
   const fuse = byName.get("rag.retrieve.fuse")!;

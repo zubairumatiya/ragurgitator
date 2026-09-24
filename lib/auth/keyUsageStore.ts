@@ -33,6 +33,7 @@ import { detached } from "@/lib/detached";
 import { keyLastFourFor } from "@/lib/llm/client";
 import { log } from "@/lib/log";
 import { captureException } from "@/lib/observability/sentry";
+import { addAttr, setAttr, span } from "@/lib/observability/span";
 import { activeConfigOrNull } from "@/lib/rag/activeConfig";
 import { SURFACE_LABELS, type Surface } from "@/lib/rag/pricing";
 
@@ -87,6 +88,9 @@ export type KeyUsageAmounts = {
   inputTokens: number;
   outputTokens: number;
   costUsd: number;
+  // Prompt-cache read tokens, for the llm.chat span only — the ledger has no
+  // column for it.
+  cachedInputTokens?: number;
 };
 
 const NO_AMOUNTS: KeyUsageAmounts = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
@@ -164,7 +168,41 @@ export async function withKeyUsageBuffer<T>(
 // THE INVERSION FROM recordSpend: that only ever sees successes, because a
 // rejected call spends nothing. Here a rejection is the point — a burst of 401s
 // is the single most legible signature of a key being spent by someone else.
+//
+// ALSO THE ONE PLACE SPANS GET COST (docs/obs-5-pipeline-spans-plan.md §1). The
+// amounts written to the span are the same object written to the ledger row, so
+// the waterfall and /usage cannot disagree. A message opens its own `llm.chat`
+// span; an embed adds to the enclosing `rag.embed` (embeddings.ts opens it), which
+// may span several batches; batch control calls carry nothing worth a span.
 export async function trackKeyUsage<T>(
+  meta: KeyUsageMeta,
+  call: () => Promise<T>,
+  usageOf?: (result: T) => KeyUsageAmounts,
+): Promise<T> {
+  if (meta.kind !== "message") return trackAndRecord(meta, call, usageOf);
+  return span("llm.chat", { "llm.provider": meta.provider, "llm.model": meta.model }, () =>
+    trackAndRecord(meta, call, usageOf),
+  );
+}
+
+function spanAmounts(meta: KeyUsageMeta, amounts: KeyUsageAmounts): void {
+  if (meta.kind === "message") {
+    setAttr("llm.tokens.in", amounts.inputTokens);
+    setAttr("llm.tokens.out", amounts.outputTokens);
+    setAttr("llm.cost.usd", amounts.costUsd);
+    setAttr("llm.cached_input", amounts.cachedInputTokens ?? 0);
+  } else if (meta.kind === "embed") {
+    addAttr("embed.tokens", amounts.inputTokens);
+    addAttr("embed.cost.usd", amounts.costUsd);
+  }
+}
+
+function spanFailure(meta: KeyUsageMeta, errorCode: string): void {
+  if (meta.kind === "message") setAttr("llm.error", errorCode);
+  else if (meta.kind === "embed") setAttr("embed.error", errorCode);
+}
+
+async function trackAndRecord<T>(
   meta: KeyUsageMeta,
   call: () => Promise<T>,
   usageOf?: (result: T) => KeyUsageAmounts,
@@ -179,10 +217,13 @@ export async function trackKeyUsage<T>(
     } catch (err) {
       log.warn("usage read failed", { component: "keyusage", provider: meta.provider, err });
     }
+    spanAmounts(meta, amounts);
     await recordKeyUsage(meta, true, null, amounts);
     return result;
   } catch (err) {
-    await recordKeyUsage(meta, false, errorCodeOf(err), NO_AMOUNTS);
+    const code = errorCodeOf(err);
+    spanFailure(meta, code);
+    await recordKeyUsage(meta, false, code, NO_AMOUNTS);
     throw err;
   }
 }

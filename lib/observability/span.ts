@@ -23,21 +23,47 @@ function defined(attrs: Attrs): Record<string, AttrValue> {
   return out;
 }
 
+type SentrySpan = NonNullable<ReturnType<typeof Sentry.getActiveSpan>>;
+
+// Our own bookkeeping per live span: its name (so a callee can ask whether it is
+// already inside one) and the running totals addAttr keeps. Weak, so a finished
+// span takes its entry with it.
+const opened = new WeakMap<SentrySpan, { name: string; sums: Map<string, number> }>();
+
 export function span<T>(
   name: string,
   attrs: Attrs,
   fn: (s: SpanHandle) => Promise<T>,
 ): Promise<T> {
-  return Sentry.startSpan({ name, op: name, attributes: defined(attrs) }, (s) =>
-    fn({
+  return Sentry.startSpan({ name, op: name, attributes: defined(attrs) }, (s) => {
+    opened.set(s, { name, sums: new Map() });
+    return fn({
       setAttr: (key, value) => {
         if (value !== undefined) s.setAttribute(key, value);
       },
-    }),
-  );
+    });
+  });
 }
 
 // On whichever span is current — for a value known only deep inside a callee.
 export function setAttr(key: string, value: AttrValue | undefined): void {
   if (value !== undefined) Sentry.getActiveSpan()?.setAttribute(key, value);
+}
+
+// Add to a running total on the current span — for a value that arrives in
+// pieces, like the tokens of an embed the dispatcher split into batches.
+export function addAttr(key: string, delta: number): void {
+  const s = Sentry.getActiveSpan();
+  const entry = s && opened.get(s);
+  if (!entry) return;
+  const total = (entry.sums.get(key) ?? 0) + delta;
+  entry.sums.set(key, total);
+  s.setAttribute(key, total);
+}
+
+// Is the current span one this module opened under `name`? Lets a callee join
+// its caller's span instead of nesting a second one of the same kind.
+export function currentSpanIs(name: string): boolean {
+  const s = Sentry.getActiveSpan();
+  return !!s && opened.get(s)?.name === name;
 }

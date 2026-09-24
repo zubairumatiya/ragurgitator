@@ -1265,6 +1265,104 @@ function sweepLogging() {
   );
 }
 
+// 13. Span attributes are ids, numbers and enums — never content, never a key
+//
+// docs/obs-5-pipeline-spans-plan.md §1: a span ships to a third party at 20% of
+// production requests, so a question, an answer, a chunk or a key on one is a
+// leak with a sampling rate. Every span()/setAttr()/addAttr() in lib/ and app/ is
+// read with the TS parser. Keys must be string literals (span()'s attributes an
+// object literal) so the sweep can read them. A key fails when any word of it is
+// key/secret/text, or when its LAST word names content (question, answer, query,
+// prompt, content, chunk) — `answer.tokens.in` is a count about an answer,
+// `question.text` is the question. A value fails when it is read straight off a
+// name like that (`q.question`, `chunkText`); `.length` of one is fine.
+const SPAN_ANY_WORD = new Set(["key", "keys", "secret", "secrets", "text", "texts"]);
+const SPAN_LAST_WORD = new Set([
+  "question", "questions", "answer", "answers", "query", "queries",
+  "prompt", "prompts", "content", "contents", "chunk", "chunks",
+]);
+const SPAN_KEY_ALLOWED: Record<string, string> = {
+  "prefetch.questions": "a count — questions.length, set once per prefetch",
+};
+const SPAN_CALLS = new Set(["span", "setAttr", "addAttr"]);
+
+function spanKeyWords(key: string): string[] {
+  return key.split(".").flatMap(fieldWords);
+}
+
+function sweepSpanAttributes() {
+  console.log("\n13. span attributes carry no question, answer, chunk text or key\n");
+  const files = [
+    ...walk(join(ROOT, "lib"), (f) => /\.tsx?$/.test(f)),
+    ...walk(join(ROOT, "app"), (f) => /\.tsx?$/.test(f)),
+  ].filter((f) => !/\.test\.tsx?$/.test(f) && rel(f) !== "lib/observability/span.ts");
+  let keys = 0;
+  for (const file of files) {
+    const path = rel(file);
+    const text = read(file);
+    if (!/\b(?:span|setAttr|addAttr)\(/.test(text)) continue;
+    const sf = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
+    const at = (n: ts.Node) => `${path}:${sf.getLineAndCharacterOfPosition(n.getStart()).line + 1}`;
+
+    const checkKey = (key: string, call: ts.Node) => {
+      keys++;
+      if (key in SPAN_KEY_ALLOWED) return;
+      const words = spanKeyWords(key);
+      if (words.some((w) => SPAN_ANY_WORD.has(w)) || SPAN_LAST_WORD.has(words[words.length - 1])) {
+        fail(`${at(call)} — span attribute \`${key}\`: ids, numbers and enums only, never content or a key`);
+      }
+    };
+    const checkValue = (value: ts.Expression, call: ts.Node) => {
+      const name = ts.isIdentifier(value)
+        ? value.text
+        : ts.isPropertyAccessExpression(value)
+          ? value.name.text
+          : null;
+      if (!name) return;
+      const words = fieldWords(name);
+      if (words.some((w) => SPAN_ANY_WORD.has(w) || SPAN_LAST_WORD.has(w))) {
+        fail(`${at(call)} — span attribute value \`${value.getText(sf)}\` reads content straight onto a span`);
+      }
+    };
+
+    const visit = (n: ts.Node) => {
+      if (ts.isCallExpression(n)) {
+        const callee = ts.isIdentifier(n.expression)
+          ? n.expression.text
+          : ts.isPropertyAccessExpression(n.expression)
+            ? n.expression.name.text
+            : "";
+        if (callee === "span" && ts.isIdentifier(n.expression)) {
+          const attrs = n.arguments[1];
+          if (!attrs || !ts.isObjectLiteralExpression(attrs)) {
+            fail(`${at(n)} — span() attributes must be an object literal the sweep can read`);
+          } else {
+            for (const prop of attrs.properties) {
+              if (!ts.isPropertyAssignment(prop)) {
+                fail(`${at(n)} — span() attributes must be plain \`"key": value\` pairs`);
+                continue;
+              }
+              checkKey(prop.name.getText(sf).replace(/^["']|["']$/g, ""), n);
+              checkValue(prop.initializer, n);
+            }
+          }
+        } else if (SPAN_CALLS.has(callee) && callee !== "span") {
+          const [key, value] = n.arguments;
+          if (!key || !ts.isStringLiteral(key)) {
+            fail(`${at(n)} — ${callee}() key must be a string literal the sweep can read`);
+          } else {
+            checkKey(key.text, n);
+          }
+          if (value) checkValue(value, n);
+        }
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+  }
+  console.log(`   ${keys} attribute key(s) checked, ${Object.keys(SPAN_KEY_ALLOWED).length} allowlisted`);
+}
+
 sweepExpose();
 sweepScopes();
 sweepApiGates();
@@ -1277,6 +1375,7 @@ sweepAutotuneTiming();
 sweepRetrievalRecorder();
 sweepSentryImports();
 sweepLogging();
+sweepSpanAttributes();
 
 console.log(
   failures === 0
@@ -1284,7 +1383,8 @@ console.log(
         "baseline rows stay out of live reads, no guest can spend outside the " +
         "demo's frozen scope, the transformers barrel is unimported, the " +
         "probe path neither serves nor judges, and server code logs through " +
-        "lib/log with no key, body or text in its fields."
+        "lib/log with no key, body or text in its fields, and no span " +
+        "attribute carries content or a key."
     : `\nFAILED — ${failures} violation(s).`,
 );
 if (failures) process.exitCode = 1;

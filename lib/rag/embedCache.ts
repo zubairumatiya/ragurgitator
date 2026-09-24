@@ -33,6 +33,8 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { isolated, sql } from "@/lib/db";
 import { detached } from "@/lib/detached";
 import { log } from "@/lib/log";
+import { span } from "@/lib/observability/span";
+import { EMBEDDING_MODELS } from "@/lib/rag/embeddingModels";
 import { embedQueries, embedQuery, embedTexts } from "@/lib/rag/embeddings";
 import {
   costEmbed,
@@ -295,12 +297,53 @@ async function writePersisted(
   }
 }
 
+// The `rag.embed` span around a cached embed (docs/obs-5-pipeline-spans-plan.md
+// §1). `embed.cache` is how the whole call resolved: `miss` if any text was
+// bought, else `disk` if any came from a persisted layer (the embedding_cache
+// table, or EMBED_DISK_CACHE in front of it), else `hit` — process memory. A miss
+// reaches embeddings.embed, which joins this span rather than nesting a second
+// one, and the ledger seam adds `embed.tokens` to it.
+type Resolved = (memory: number, stored: number, bought: number) => void;
+
+function embedSpan<T>(
+  model: string,
+  kind: InputKind,
+  count: number,
+  fn: (resolved: Resolved) => Promise<T>,
+): Promise<T> {
+  return span(
+    "rag.embed",
+    {
+      // Looked up, not modelSpec(): that throws on an unregistered id, and a
+      // cache hit has never needed the model to be registered.
+      "embed.provider": EMBEDDING_MODELS[model]?.provider,
+      "embed.model": model,
+      "embed.role": kind,
+      "embed.count": count,
+    },
+    (s) =>
+      fn((memory, stored, bought) => {
+        s.setAttr("embed.cache", bought > 0 ? "miss" : stored > 0 ? "disk" : "hit");
+        s.setAttr("embed.bought", bought);
+        s.setAttr("embed.stored", stored);
+        s.setAttr("embed.memory", memory);
+      }),
+  );
+}
+
 // Embed `texts` as documents under `model`, returning vectors in input order.
 // L1 hit → free; L2 hit → one batched point-read; only never-seen texts hit the
 // provider API (de-duplicated), and those are banked in both layers.
-export async function embedDocsCached(
+export function embedDocsCached(texts: string[], model: string): Promise<number[][]> {
+  return embedSpan(model, "document", texts.length, (resolved) =>
+    embedDocsCachedInSpan(texts, model, resolved),
+  );
+}
+
+async function embedDocsCachedInSpan(
   texts: string[],
   model: string,
+  resolved: Resolved,
 ): Promise<number[][]> {
   const unique = uniq(texts);
   const l1hits = unique.filter((t) => memory.has(memKey(model, "document", t)));
@@ -318,6 +361,7 @@ export async function embedDocsCached(
       missing.map((t, i) => ({ text: t, vector: vecs[i] })),
     );
   }
+  resolved(l1hits.length, persisted.size, missing.length);
   await meterEmbeds(model, [...l1hits, ...persisted.keys()], missing);
   return texts.map((t) => memory.get(memKey(model, "document", t))!);
 }
@@ -432,9 +476,19 @@ export async function cachedQueryVectors(
 // metering call. Same cost math and the same `embed_cache` lever as the per-text
 // path — the saving is priced off the hit list either way, just banked once
 // instead of per text.
-export async function embedQueriesCached(
+export function embedQueriesCached(
   texts: string[],
   model: string,
+): Promise<Map<string, number[]>> {
+  return embedSpan(model, "query", texts.length, (resolved) =>
+    embedQueriesCachedInSpan(texts, model, resolved),
+  );
+}
+
+async function embedQueriesCachedInSpan(
+  texts: string[],
+  model: string,
+  resolved: Resolved,
 ): Promise<Map<string, number[]>> {
   const unique = uniq(texts);
   const l1hits = unique.filter((t) => memory.has(memKey(model, "query", t)));
@@ -452,15 +506,25 @@ export async function embedQueriesCached(
       missing.map((t, i) => ({ text: t, vector: vecs[i] })),
     );
   }
+  resolved(l1hits.length, persisted.size, missing.length);
   await meterEmbeds(model, [...l1hits, ...persisted.keys()], missing);
   return new Map(unique.map((t) => [t, memory.get(memKey(model, "query", t))!]));
 }
 
 // Embed one query string under `model`, cached through both layers.
-export async function embedQueryCached(text: string, model: string): Promise<number[]> {
+export function embedQueryCached(text: string, model: string): Promise<number[]> {
+  return embedSpan(model, "query", 1, (resolved) => embedQueryCachedInSpan(text, model, resolved));
+}
+
+async function embedQueryCachedInSpan(
+  text: string,
+  model: string,
+  resolved: Resolved,
+): Promise<number[]> {
   const key = memKey(model, "query", text);
   let vec = memory.get(key);
   if (vec) {
+    resolved(1, 0, 0);
     await meterEmbeds(model, [text], []);
     return vec;
   }
@@ -470,8 +534,10 @@ export async function embedQueryCached(text: string, model: string): Promise<num
   if (!vec) {
     vec = await embedQuery(text, model);
     await writePersisted(model, "query", [{ text, vector: vec }]);
+    resolved(0, 0, 1);
     await meterEmbeds(model, [], [text]);
   } else {
+    resolved(0, 1, 0);
     await meterEmbeds(model, [text], []);
   }
   memory.set(key, vec);
