@@ -1130,6 +1130,38 @@ function sweepRetrievalRecorder() {
   );
 }
 
+// 11. Sentry is reached through one door
+//
+// docs/obs-1-sentry-plan.md §4: app code imports lib/observability/sentry, never
+// @sentry/* — so the vendor can be swapped in one file, the tests install their
+// transport through initSentry, and the dataCollection switch-off (sentry.base.config.ts)
+// cannot be bypassed by a second Sentry.init somewhere in lib/.
+const SENTRY_IMPORT = /(?:from\s+|import\s*\(\s*|require\s*\(\s*)["']@sentry\//;
+const SENTRY_ALLOWED = (path: string) =>
+  path.startsWith("lib/observability/") ||
+  /^instrumentation(?:-client)?\.ts$/.test(path) ||
+  /^sentry\.[\w-]+\.config\.ts$/.test(path) ||
+  path === "next.config.ts";
+
+function sweepSentryImports() {
+  console.log("\n11. @sentry/ is imported only behind lib/observability\n");
+  const files = walk(
+    ROOT,
+    (f) => /\.(?:ts|tsx|mts|cts|js|mjs)$/.test(f) && !f.includes("/docs/"),
+  );
+  let allowed = 0;
+  for (const file of files) {
+    const path = rel(file);
+    if (!SENTRY_IMPORT.test(codeOnly(read(file)))) continue;
+    if (SENTRY_ALLOWED(path)) {
+      allowed++;
+      continue;
+    }
+    fail(`${path} — imports @sentry/ directly; use @/lib/observability/sentry`);
+  }
+  console.log(`   ${allowed} allowed importer(s), ${files.length} files swept`);
+}
+
 sweepExpose();
 sweepScopes();
 sweepApiGates();
@@ -1140,6 +1172,7 @@ sweepDemoScope();
 sweepProbeReplay();
 sweepAutotuneTiming();
 sweepRetrievalRecorder();
+sweepSentryImports();
 
 console.log(
   failures === 0
