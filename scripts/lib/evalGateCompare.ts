@@ -60,7 +60,7 @@ export const DEFAULT_MARGIN = 0.005;
 // change, not for noise.
 export const DEFAULT_STMT_MARGIN = 0.02;
 
-function prefixMovers(before: Record<string, number>, after: Record<string, number>): PrefixMover[] {
+export function prefixMovers(before: Record<string, number>, after: Record<string, number>): PrefixMover[] {
   const names = new Set([...Object.keys(before), ...Object.keys(after)]);
   const out: PrefixMover[] = [];
   for (const prefix of names) {
@@ -71,7 +71,7 @@ function prefixMovers(before: Record<string, number>, after: Record<string, numb
   return out.sort((x, y) => y.after - y.before - (x.after - x.before) || (x.prefix < y.prefix ? -1 : 1));
 }
 
-const topGrown = (ms: PrefixMover[]): string =>
+export const topGrown = (ms: PrefixMover[]): string =>
   ms
     .filter((m) => m.after > m.before)
     .slice(0, 5)
