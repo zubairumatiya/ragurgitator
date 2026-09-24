@@ -27,6 +27,8 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type OpenAI from "openai";
 
+import { log } from "@/lib/log";
+
 export function toChatParams(
   params: Anthropic.Messages.MessageCreateParamsNonStreaming,
 ): OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming {
@@ -189,5 +191,5 @@ const warnedUsage = new Set<string>();
 function warnMissingUsage(model: string): void {
   if (warnedUsage.has(model)) return;
   warnedUsage.add(model);
-  console.warn(`[rag:openaiChat] OpenAI response for "${model}" carried no usage — metering it as $0`);
+  log.warn("OpenAI response carried no usage, metering it as $0", { component: "rag:openaiChat", model });
 }

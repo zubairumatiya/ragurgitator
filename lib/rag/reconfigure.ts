@@ -16,6 +16,7 @@
 // config row changes — instead every chunk of that document gets a per-chunk
 // override, the same mechanism the autotuner and the per-chunk trial use.
 import { sql } from "@/lib/db";
+import { log } from "@/lib/log";
 import { resolveConfig, withConfig, type ResolvedConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";
 import { updateConfigSettings } from "@/lib/rag/configStore";
@@ -128,11 +129,19 @@ export async function reconfigureConfig(
   const next = await resolveConfig(configId);
   if (!next) throw new Error("Config vanished during reconfigure.");
 
-  console.log(
-    `[rag:reconfigure] config=${configId.slice(0, 8)}: ${old.embeddingModel}/${old.chunkSize}/${old.chunkOverlap}` +
-      ` → ${next.embeddingModel}/${next.chunkSize}/${next.chunkOverlap}` +
-      ` (${docs.length} doc(s), ${labels.length} label(s))`,
-  );
+  // The route scopes a user, not this config, so the context carries no configId.
+  log.info("reconfigure start", {
+    component: "rag:reconfigure",
+    configId,
+    fromModel: old.embeddingModel,
+    fromChunkSize: old.chunkSize,
+    fromChunkOverlap: old.chunkOverlap,
+    toModel: next.embeddingModel,
+    toChunkSize: next.chunkSize,
+    toChunkOverlap: next.chunkOverlap,
+    docs: docs.length,
+    labels: labels.length,
+  });
   onEvent({ type: "start", total: docs.length });
 
   const results: IngestResult[] = [];
@@ -236,15 +245,19 @@ export async function reconfigureConfig(
       results.push({ fileName, chunksAdded: chunks.length });
     } catch (err) {
       const error = err instanceof Error ? err.message : "Re-embedding failed.";
-      console.error(`[rag:reconfigure] failed for "${fileName}": ${error}`);
+      log.error("reconfigure failed", { component: "rag:reconfigure", configId, fileName, err });
       results.push({ fileName, error });
     }
     onEvent({ type: "file-done", index, result: results[results.length - 1] });
   }
 
-  console.log(
-    `[rag:reconfigure] done: ${results.length} doc(s), labels remapped=${remapped} dropped=${dropped}`,
-  );
+  log.info("reconfigure done", {
+    component: "rag:reconfigure",
+    configId,
+    docs: results.length,
+    remapped,
+    dropped,
+  });
   onEvent({ type: "done", results });
   return { results, remapped, dropped };
 }

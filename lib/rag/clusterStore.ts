@@ -9,6 +9,7 @@ import { sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { vectorLiteral } from "@/lib/rag/vectorStore";
 import { computeCandidate, seedForRestart, type Candidate } from "@/lib/rag/cluster";
+import { log } from "@/lib/log";
 
 const RESTARTS = 3;
 const CC_INSERT_BATCH = 2000; // chunk_clusters rows per insert (param-limit safety)
@@ -265,10 +266,7 @@ export async function topUpSavedRuns(chunkIds: string[]): Promise<number> {
   }
 
   if (assigned > 0) {
-    console.log(
-      `[rag:clusters] topped up ${assigned} chunk assignment(s) across ` +
-        `${runs.length} saved preset(s) for config=${cfg.id.slice(0, 8)}`,
-    );
+    log.info("saved presets topped up", { component: "rag:clusters", assigned, presets: runs.length });
   }
   return assigned;
 }

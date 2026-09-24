@@ -40,7 +40,7 @@ import {
 } from "@/lib/auth/keyUsageStore";
 import { withUser, type RequestUser } from "@/lib/auth/userScope";
 import { runOutsideUserTransaction } from "@/lib/db";
-import { withLogContext } from "@/lib/log";
+import { log, withLogContext } from "@/lib/log";
 import { postJobTick } from "@/lib/http/jobSecret";
 import { sendJobCompletionEmail } from "@/lib/jobs/notify";
 import { stepFor } from "@/lib/jobs/registry";
@@ -158,13 +158,16 @@ async function sliceOf(jobId: string): Promise<SliceOutcome> {
       tags: { site: "jobs", jobId, kind: claimed.job.kind, failures },
     });
     if (failures > 0 && failures < MAX_SLICE_FAILURES) {
-      console.warn(
-        `[jobs] slice for ${jobId} failed (${failures}/${MAX_SLICE_FAILURES}), retrying: ${message}`,
-      );
+      log.warn("slice failed, retrying", {
+        component: "jobs",
+        failures,
+        maxFailures: MAX_SLICE_FAILURES,
+        err: e,
+      });
       await postJobTick(jobId);
       return "retrying";
     }
-    console.warn(`[jobs] slice for ${jobId} failed, giving up: ${message}`);
+    log.warn("slice failed, giving up", { component: "jobs", failures, err: e });
     // failJob is not lease-guarded on purpose: this slice may have lost its lease,
     // and a job whose work threw still has to stop being "running".
     const failed = await inOwnScope(owner, () => failJob(jobId, message));
@@ -222,7 +225,7 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
         }),
       );
     } catch (e) {
-      console.warn(`[jobs] progress write for ${job.id} failed: ${msg(e)}`);
+      log.warn("progress write failed", { component: "jobs", err: e });
     }
   };
 
@@ -404,7 +407,7 @@ async function notify(owner: RequestUser, job: BackgroundJob): Promise<void> {
     const sent = await sendJobCompletionEmail(job, owner.email);
     if (sent) await inOwnScope(owner, () => markEmailSent(job.id));
   } catch (e) {
-    console.warn(`[jobs] completion email for ${job.id} failed: ${msg(e)}`);
+    log.warn("completion email failed", { component: "jobs", err: e });
   }
 }
 

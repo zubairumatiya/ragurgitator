@@ -7,6 +7,7 @@
 import mammoth from "mammoth";
 import { extractText, getDocumentProxy } from "unpdf";
 
+import { log } from "@/lib/log";
 import type { SourceDocument } from "@/types/rag";
 
 export type LoadInput =
@@ -29,25 +30,25 @@ export async function loadDocument(input: LoadInput): Promise<SourceDocument> {
     const text = input.text.trim();
     if (!text) throw new Error("Cannot load empty text.");
     const name = labelFor(input);
-    console.log(`[rag:loader] text input "${name}" (${text.length} chars) in ${ms(t0)}`);
+    log.debug("loaded pasted input", { component: "rag:loader", fileName: name, chars: text.length, ms: ms(t0) });
     return toDocument(text, name);
   }
 
   const { file } = input;
   const dot = file.name.lastIndexOf(".");
   const ext = dot === -1 ? "" : file.name.slice(dot).toLowerCase();
-  console.log(`[rag:loader] file "${file.name}" (${file.size} bytes, ${ext})`);
+  log.debug("loading file", { component: "rag:loader", fileName: file.name, bytes: file.size, ext });
   const text = (await extractFileText(file, ext)).trim();
 
   if (!text) {
     throw new Error(`No text could be extracted from "${file.name}".`);
   }
-  console.log(`[rag:loader] extracted ${text.length} chars in ${ms(t0)}`);
+  log.debug("extracted file", { component: "rag:loader", fileName: file.name, chars: text.length, ms: ms(t0) });
   return toDocument(text, file.name);
 }
 
-function ms(t0: number): string {
-  return `${Math.round(performance.now() - t0)}ms`;
+function ms(t0: number): number {
+  return Math.round(performance.now() - t0);
 }
 
 async function extractFileText(file: File, ext: string): Promise<string> {

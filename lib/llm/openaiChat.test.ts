@@ -8,6 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type Anthropic from "@anthropic-ai/sdk";
 import type OpenAI from "openai";
+import { log } from "@/lib/log";
 import { toChatParams, toAnthropicMessage } from "./openaiChat";
 
 // Minimal valid request; each test overrides just the field under study.
@@ -165,9 +166,7 @@ test("toAnthropicMessage: content null yields an EMPTY content array, not an emp
 });
 
 test("toAnthropicMessage: missing usage meters as zero, warns once, does not throw", () => {
-  const warnings: unknown[][] = [];
-  const original = console.warn;
-  console.warn = (...args: unknown[]) => warnings.push(args);
+  const cap = log.__capture();
   try {
     const a = toAnthropicMessage(completion({ usage: undefined, model: "gpt-usage-test" }));
     const b = toAnthropicMessage(completion({ usage: undefined, model: "gpt-usage-test" }));
@@ -175,8 +174,11 @@ test("toAnthropicMessage: missing usage meters as zero, warns once, does not thr
     assert.equal(a.usage.output_tokens, 0);
     assert.equal(b.usage.input_tokens, 0);
   } finally {
-    console.warn = original;
+    cap.stop();
   }
+  const warnings = cap.lines
+    .map((l) => JSON.parse(l) as { level: string; msg: string; model?: string })
+    .filter((l) => l.level === "warn" && l.msg.includes("carried no usage") && l.model === "gpt-usage-test");
   assert.equal(warnings.length, 1); // once per model, not once per call
 });
 

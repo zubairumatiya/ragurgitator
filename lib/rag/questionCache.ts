@@ -39,6 +39,7 @@ import { recordSaving } from "@/lib/rag/savingsStore";
 import { insertQuestionWithLabel, type ChunkWithQuestions } from "@/lib/rag/evalStore";
 import { normalizeQuestion, selectNewQuestions } from "@/lib/rag/questionCacheCore";
 import type { GeneratedQuestionPayload } from "@/lib/rag/eval";
+import { log } from "@/lib/log";
 
 // Same convention as embedCache.hashText: sha256 hex over the exact UTF-8 text.
 const hashText = (text: string): string =>
@@ -215,7 +216,7 @@ export async function fillChunksFromCache(
     }
   }
 
-  console.log(`[rag:questionCache] reused ${reused} question(s), saving $${savedUsd.toFixed(6)}`);
+  log.info("questions reused", { component: "rag:questionCache", reused, savedUsd });
   await detached(() => recordSaving("question_reuse", savedUsd, savedTokens, { events: reused }));
   return { reused, difficulties: [...difficulties] };
 }
@@ -259,9 +260,7 @@ export async function uncacheQuestion(
     return ids.length;
   } catch (err) {
     if (isMissingTable(err)) return 0; // no bank, nothing to unbank
-    console.warn(
-      `[rag:questionCache] uncache failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    log.warn("uncache failed", { component: "rag:questionCache", err });
     return null;
   }
 }
@@ -300,9 +299,7 @@ export async function bankedSlotCounts(
     // `on conflict do nothing` drops what already exists. Banking is not worth
     // failing an apply that already paid for its results.
     if (!isMissingTable(err)) {
-      console.warn(
-        `[rag:questionCache] slot count failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      log.warn("slot count failed", { component: "rag:questionCache", err });
     }
     return out;
   }
@@ -365,10 +362,6 @@ export async function bankQuestions(args: {
   } catch (err) {
     // Best-effort by nature: a missed row costs one future generation. It must
     // never fail the run that just PAID for these questions.
-    console.warn(
-      `[rag:questionCache] could not bank ${rows.length} question(s): ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
+    log.warn("question bank insert failed", { component: "rag:questionCache", questions: rows.length, err });
   }
 }

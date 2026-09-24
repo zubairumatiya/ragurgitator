@@ -51,6 +51,8 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
+import { log } from "@/lib/log";
+
 export type DiskKind = "document" | "query";
 
 // The .idx header travels WITH the mapping so a mismatched file can be refused
@@ -87,7 +89,7 @@ const key = (user: string, model: string, kind: DiskKind): string =>
 // Said once per file, not once per miss: a broken cache should be obvious in the
 // log without burying the run's own output.
 function refuse(k: string, why: string): null {
-  console.warn(`[embed-disk-cache] ignoring ${k}: ${why}`);
+  log.warn("ignoring disk cache file", { component: "embed-disk-cache", cache: k, reason: why });
   loaded.set(k, null);
   return null;
 }
@@ -209,10 +211,14 @@ export function appendDisk(
       vectors.delete(key(user, model, kind));
       const current = load(user, model, kind);
       if (current && current.dim !== dim) {
-        console.warn(
-          `[embed-disk-cache] not appending to ${model}/${kind}: on disk is ${current.dim}-dim, ` +
-            `these vectors are ${dim}-dim. Delete ${base}.* to reset.`,
-        );
+        log.warn("not appending, dimension mismatch", {
+          component: "embed-disk-cache",
+          model,
+          kind,
+          diskDim: current.dim,
+          dim,
+          path: base,
+        });
         return;
       }
 
@@ -240,6 +246,6 @@ export function appendDisk(
       vectors.delete(key(user, model, kind));
     });
   } catch (err) {
-    console.warn(`[embed-disk-cache] append failed: ${(err as Error).message}`);
+    log.warn("append failed", { component: "embed-disk-cache", err });
   }
 }

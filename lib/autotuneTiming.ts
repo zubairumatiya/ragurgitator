@@ -16,6 +16,9 @@
 //
 // No imports on purpose: lib/db.ts reaches for the statement counter, and a
 // module lib/db.ts imports must not import lib/db.ts.
+//
+// It prints with console.log, not lib/log.ts: scripts/autotune-bench.ts parses
+// these lines, and the TABLE and STATEMENTS blocks are multi-line.
 export const AUTOTUNE_TIMING = process.env.AUTOTUNE_TIMING === "1";
 
 // Every statement postgres.js writes on the app pool, from lib/db.ts's `debug`

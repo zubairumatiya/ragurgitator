@@ -17,6 +17,7 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { config } from "@/lib/config";
 import { isolated, sql, toJsonb } from "@/lib/db";
 import { detached } from "@/lib/detached";
+import { log } from "@/lib/log";
 import { activeConfig, type ResolvedConfig } from "@/lib/rag/activeConfig";
 import { cacheKey, DigestMemo } from "@/lib/rag/digestMemo";
 import { getBatchSavings } from "@/lib/rag/batchStore";
@@ -72,9 +73,6 @@ const isMissingTable = (err: unknown): boolean =>
 
 const sha256 = (text: string): string =>
   createHash("sha256").update(text, "utf8").digest("hex");
-
-const truncate = (s: string, n = 80): string =>
-  s.length <= n ? s : `${s.slice(0, n - 1)}…`;
 
 // A signature of WHICH DOCUMENTS this config can answer from: the set of document
 // ids with chunks ingested under it. Adding or removing a document invalidates
@@ -160,10 +158,11 @@ export async function currentFingerprint(cfg: ResolvedConfig): Promise<string> {
 export function resolveKeyModel(override: string | null): string {
   if (override !== null && EMBEDDING_MODELS[override]) return override;
   if (override !== null) {
-    console.warn(
-      `[rag:semantic-cache] unknown cache-key model "${override}" — ` +
-        `falling back to ${config.semanticCache.keyModel}.`,
-    );
+    log.warn("unknown cache model, falling back", {
+      component: "rag:semantic-cache",
+      model: override,
+      fallbackModel: config.semanticCache.keyModel,
+    });
   }
   return config.semanticCache.keyModel;
 }
@@ -437,21 +436,23 @@ export async function semanticCacheLookup(
     // the ordinary miss log below — the guard flag still rides into the shadow
     // row above, so a later sweep at a lower τ can still see it was blocked.
     if (guardBlocked && isHit(match.sim, threshold)) {
-      console.log(
-        `[rag:semantic-cache] guard-blocked sim=${match.sim.toFixed(4)} ≥ ${threshold} (${source}) — ` +
-          `entity/number mismatch, reporting a miss. new="${truncate(question)}" ` +
-          `matched="${truncate(match.value.text)}"`,
-      );
+      log.debug("cache guard-blocked", {
+        component: "rag:semantic-cache",
+        sim: match.sim,
+        threshold,
+        source,
+      });
       return miss;
     }
 
     if (isHit(match.sim, threshold)) {
       if (serve) {
-        console.log(
-          `[rag:semantic-cache] HIT sim=${match.sim.toFixed(4)} ≥ ${threshold} (${source}) — ` +
-            `served cached answer, skipped retrieval. new="${truncate(question)}" ` +
-            `matched="${truncate(match.value.text)}"`,
-        );
+        log.debug("cache hit served", {
+          component: "rag:semantic-cache",
+          sim: match.sim,
+          threshold,
+          source,
+        });
         // Deferred telemetry; a failure must not fail the answer, and the caller must not
         // wait for it. These two are the reason lib/detached.ts exists: a served hit
         // returns straight out of ask() and /api/chat does no further database work, so a
@@ -470,16 +471,21 @@ export async function semanticCacheLookup(
       }
       // Serving is off (Settings → Savings): shadow-log the would-be hit for
       // threshold validation, then report a miss so a fresh answer is computed.
-      console.log(
-        `[rag:semantic-cache] would-hit sim=${match.sim.toFixed(4)} ≥ ${threshold} (${source}) but ` +
-          `serving is OFF — recomputing. new="${truncate(question)}" matched="${truncate(match.value.text)}"`,
-      );
+      log.debug("cache would-hit, serving off", {
+        component: "rag:semantic-cache",
+        sim: match.sim,
+        threshold,
+        source,
+      });
       return miss;
     }
 
-    console.log(
-      `[rag:semantic-cache] miss (nearest sim=${match.sim.toFixed(4)} < ${threshold} (${source})) for "${truncate(question)}"`,
-    );
+    log.debug("cache miss", {
+      component: "rag:semantic-cache",
+      sim: match.sim,
+      threshold,
+      source,
+    });
     return miss;
   } catch (err) {
     if (isMissingTable(err)) return miss;
@@ -571,7 +577,7 @@ async function recordSemanticSaving(result: CachedResult, question: string): Pro
     await recordSaving("semantic_cache", saved, inTokens + outTokens);
   } catch (err) {
     // Telemetry only — swallow so a savings-record failure never breaks a hit.
-    console.warn(`[rag:semantic-cache] savings record failed: ${(err as Error).message}`);
+    log.warn("savings record failed", { component: "rag:semantic-cache", err });
   }
 }
 
@@ -633,11 +639,11 @@ async function recordShadow(
       if (isMissingTable(err)) return;
       if ((err as { code?: string }).code === "42703") continue;
       // Telemetry only — swallow so a shadow-log failure never breaks a lookup.
-      console.warn(`[rag:semantic-cache] shadow log failed: ${(err as Error).message}`);
+      log.warn("shadow log failed", { component: "rag:semantic-cache", err });
       return;
     }
   }
-  console.warn("[rag:semantic-cache] shadow log failed: no insert shape matched the table");
+  log.warn("shadow log failed, no insert shape matched the table", { component: "rag:semantic-cache" });
 }
 
 // Matches on the FULL key, llm_model included: the same question banked under
@@ -663,7 +669,7 @@ async function bumpHit(
   } catch (err) {
     if (isMissingTable(err)) return;
     // Telemetry only — swallow so a bump failure never breaks a served answer.
-    console.warn(`[rag:semantic-cache] hit-count bump failed: ${(err as Error).message}`);
+    log.warn("hit-count bump failed", { component: "rag:semantic-cache", err });
   }
 }
 
@@ -799,9 +805,7 @@ export async function backfillKeyModel(
         // provider key fails every row and is obvious from `failed`, while a
         // single bad input shouldn't cost the whole run.
         out.failed += 1;
-        console.warn(
-          `[rag:semantic-cache] backfill embed failed under ${keyModel}: ${(err as Error).message}`,
-        );
+        log.warn("backfill embed failed", { component: "rag:semantic-cache", model: keyModel, err });
         continue;
       }
       // config_id is carried from the SOURCE row, not taken from the running

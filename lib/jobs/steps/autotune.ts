@@ -147,6 +147,7 @@ import {
   setChunkOverridePieces,
   type ChunkOverrideState,
 } from "@/lib/rag/overrideStore";
+import { log } from "@/lib/log";
 
 // Same size and the same reason as the re-score step's: big enough that
 // scoreQuestions' fixed per-batch setup isn't re-paid per question, small enough
@@ -639,9 +640,7 @@ async function runSettle(
     const message =
       `Could not re-score ${stale.length} stale question(s), so there is no ` +
       `trustworthy corpus to tune against. Re-score all questions, then try again.`;
-    console.warn(
-      `[rag:autotune] settle made no progress at ${stale.length} stale; giving up`,
-    );
+    log.warn("settle made no progress, giving up", { component: "rag:autotune", stale: stale.length });
     emit({ doneUnits: 0, event: { type: "error", message } });
     return { cursor: c, done: true, doneUnits: 0 };
   }
@@ -1292,10 +1291,10 @@ async function runRescore(
   // everything it found and does not shrink the set is not going to.
   const stuck = drainStuck(screen.dirty.length, c.lastDirty);
   if (stuck) {
-    console.warn(
-      `[rag:autotune] re-score made no progress at ${screen.dirty.length} dirty ` +
-        `question(s); settling anyway`,
-    );
+    log.warn("re-score made no progress, settling anyway", {
+      component: "rag:autotune",
+      dirty: screen.dirty.length,
+    });
   }
 
   if (screen.dirty.length === 0 || stuck) {
@@ -1447,11 +1446,17 @@ async function runOutcomes(c: AutotuneCursor, emit: Emit) {
     },
     outcomes,
   );
-  console.log(
-    `[rag:autotune] books closed: targeted=${targeted} resolved=${resolved} improved=${improved} ` +
-      `chunks=${c.covered.length}/${c.plan?.length ?? 0} stop=${c.stopReason ?? "complete"} ` +
-      `attempts=${c.attempts} pendingChoice=${c.pendingChoice}`,
-  );
+  log.info("books closed", {
+    component: "rag:autotune",
+    targeted,
+    resolved,
+    improved,
+    chunksCovered: c.covered.length,
+    chunksPlanned: c.plan?.length ?? 0,
+    stopReason: c.stopReason ?? "complete",
+    attempts: c.attempts,
+    pendingChoice: c.pendingChoice,
+  });
   emit({ doneUnits: c.covered.length, message: "Recording results" });
   return {
     cursor: {

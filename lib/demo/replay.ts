@@ -51,6 +51,7 @@ import {
   RETRIEVAL_KIND,
   TUNING_KEY,
 } from "@/lib/demo/replayCore";
+import { log } from "@/lib/log";
 
 // Same 42P01 tolerance published_sweep and demo_pair_bank hold, for the same
 // reason: a build deployed before 0080 has no store, which is not an error — it
@@ -396,10 +397,12 @@ export async function readTuning(
   const present = await difficulties();
   const key = chooseTuningKey(present, keys);
   if (key === null) return null;
-  console.log(
-    `[rag:demo] tuning bank "${key}" for a board of {${[...new Set(present)].sort().join(", ")}}` +
-      ` (shelf: ${keys.sort().join(", ")})`,
-  );
+  log.info("tuning bank chosen", {
+    component: "rag:demo",
+    bank: key,
+    board: [...new Set(present)].sort(),
+    shelf: keys.sort(),
+  });
   const memoed = tuningMemo.get(tuningMemoKey(userId, key));
   if (memoed) return memoed;
   const row = await withoutStore(sql<{ payload: ReplayTuning }[]>`

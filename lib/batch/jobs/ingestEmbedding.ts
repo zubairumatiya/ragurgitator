@@ -26,6 +26,7 @@ import { hasEmbeddingRun, insertEmbeddingRunWithChunks } from "@/lib/rag/vectorS
 import { bankVoyageBatchSaving } from "@/lib/batch/savings";
 import type { BatchRequest, BatchResultRow } from "@/lib/batch/types";
 import type { BuiltBatch, JobHandler } from "@/lib/batch/jobs/registry";
+import { log } from "@/lib/log";
 import type { SourceDocument } from "@/types/rag";
 
 export type IngestEmbeddingScope = { corpusIds?: string[]; documentIds?: string[] };
@@ -198,13 +199,15 @@ export const ingestEmbeddingHandler: JobHandler = {
       snapshot.chunkSize !== cfg.chunkSize ||
       snapshot.chunkOverlap !== cfg.chunkOverlap
     ) {
-      console.warn(
-        `[batch:ingest_embedding] config changed while this batch was in flight — ` +
-          `applying under the SNAPSHOT (model=${snapshot.embeddingModel}, ` +
-          `size=${snapshot.chunkSize}, overlap=${snapshot.chunkOverlap}); ` +
-          `live config is (model=${cfg.embeddingModel}, size=${cfg.chunkSize}, ` +
-          `overlap=${cfg.chunkOverlap}). These vectors belong to the snapshot's space.`,
-      );
+      log.warn("config changed in flight, applying under snapshot", {
+        component: "batch:ingest_embedding",
+        snapshotModel: snapshot.embeddingModel,
+        snapshotChunkSize: snapshot.chunkSize,
+        snapshotChunkOverlap: snapshot.chunkOverlap,
+        liveModel: cfg.embeddingModel,
+        liveChunkSize: cfg.chunkSize,
+        liveChunkOverlap: cfg.chunkOverlap,
+      });
     }
 
     const byId = new Map<string, BatchResultRow>(results.map((r) => [r.customId, r]));

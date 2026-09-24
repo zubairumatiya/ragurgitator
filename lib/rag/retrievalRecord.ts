@@ -24,6 +24,7 @@ import { appendFileSync } from "node:fs";
 
 import type { RetrievedChunk } from "@/types/rag";
 import { textHash, type RetrievalRecord } from "@/lib/demo/replayCore";
+import { log } from "@/lib/log";
 import type { ScreenCutoffs } from "@/lib/rag/retriever";
 
 export const RETRIEVAL_RECORD_FILE = process.env.DEMO_RETRIEVAL_RECORD ?? "";
@@ -42,10 +43,7 @@ export function recordRetrieval(input: {
   if (input.retrieved.some((r) => r.chunk.chunk.text === "")) {
     if (!warnedTextless) {
       warnedTextless = true;
-      console.warn(
-        "[rag:demo] retrieval recorder: a retrieved chunk carried no text; its line was not " +
-          "recorded (a bank keyed on sha256('') would hit on the wrong list)",
-      );
+      log.warn("retrieval recorder skipped a chunk with no content", { component: "rag:demo" });
     }
     return;
   }

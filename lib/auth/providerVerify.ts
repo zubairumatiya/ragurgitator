@@ -20,6 +20,7 @@ import OpenAI from "openai";
 import type { VoyageAIClient as VoyageAIClientType } from "voyageai";
 
 import type { ProviderId } from "@/lib/auth/providerKeys";
+import { log } from "@/lib/log";
 
 // Same CJS workaround as lib/llm/client.ts — voyageai@0.2.x ships a broken ESM
 // build. See the comment there.
@@ -75,13 +76,14 @@ export async function verifyProviderKey(
     await VERIFIERS[provider](apiKey);
     return { ok: true };
   } catch (e) {
-    // Log the shape of the failure without the payload, so a genuinely broken
-    // integration is still debuggable from the server log.
-    console.warn(
-      `[providerVerify] ${provider} rejected a candidate key: ${
-        e instanceof Error ? e.name : typeof e
-      }`,
-    );
+    // Log the shape of the failure without the payload — its name, never `err`,
+    // whose message can echo the candidate — so a genuinely broken integration is
+    // still debuggable from the server log.
+    log.warn("provider rejected a candidate", {
+      component: "providerVerify",
+      provider,
+      errorName: e instanceof Error ? e.name : typeof e,
+    });
     return {
       ok: false,
       message: `${provider} rejected that key. Check it was copied in full and has not been revoked.`,

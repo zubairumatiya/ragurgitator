@@ -26,6 +26,8 @@
 // invalidates in-flight signatures, which costs one janitor sweep to recover.
 import { createHmac, timingSafeEqual } from "node:crypto";
 
+import { log } from "@/lib/log";
+
 let cached: string | undefined;
 
 function secret(): string {
@@ -105,7 +107,8 @@ export async function postJobTick(jobId: string): Promise<boolean> {
     });
     return res.ok;
   } catch (e) {
-    console.warn(`[jobs] tick for ${jobId} failed to send: ${String(e)}`);
+    // jobId named explicitly: a launch or a sweep ticks a job outside its own scope.
+    log.warn("tick failed to send", { component: "jobs", jobId, err: e });
     return false;
   }
 }

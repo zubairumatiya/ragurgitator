@@ -72,6 +72,7 @@ import {
 } from "@/lib/rag/overrideStore";
 import { withCandidateSims } from "@/lib/rag/overrideSimMerge";
 import { fuseWithOverrides, type SimsFor } from "@/lib/rag/retriever";
+import { log } from "@/lib/log";
 import type { RetrievedChunk } from "@/types/rag";
 
 // Re-exported so the client panel can name a run's ending without importing the
@@ -496,10 +497,7 @@ async function saveKeptTrialSnapshot(
     ].filter((id) => id !== chunkId);
     await runModelTrial(chunkId, variation, poolIds, true);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn(
-      `[rag:autotune] trial snapshot failed for chunk ${chunkId}: ${message}`,
-    );
+    log.warn("trial snapshot failed", { component: "rag:autotune", chunkId, err });
   }
 }
 

@@ -25,6 +25,8 @@ import { join } from "node:path";
 
 import { Tokenizer } from "@huggingface/tokenizers";
 
+import { log } from "@/lib/log";
+
 // The two files a Hub tokenizer repo is made of. Both are required: a missing
 // tokenizer_config.json changes decode behaviour (clean-up rules, special
 // tokens) rather than merely losing a nicety, and silently tokenizing
@@ -68,7 +70,7 @@ function writeCached(dir: string, file: string, body: string) {
     writeFileSync(tmp, body);
     renameSync(tmp, join(dir, file));
   } catch (err) {
-    console.warn(`[rag:tokenizer] could not cache ${file} in ${dir}: ${err}`);
+    log.warn("could not cache tokenizer file", { component: "rag:tokenizer", file, dir, err });
   }
 }
 

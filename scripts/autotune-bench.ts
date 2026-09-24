@@ -116,7 +116,7 @@ type Summary = {
   ranks: Rank[];
   egressMb: number | null;
   // The demo's retrieval bank (docs/demo-retrieval-bank-plan.md §5), read off
-  // the `[rag:demo] retrieval bank` lines the server printed during Score
+  // the `retrieval bank read` log lines the server printed during Score
   // pending and during the press. Null when the server printed none — a guest
   // of a seed with no bank, or a build before the bank existed.
   bank: { scoreHits: number; scoreMisses: number; pressHits: number; pressMisses: number } | null;
@@ -246,8 +246,11 @@ function parseTiming(lines: string[]): {
 // failing when its turn comes (a kept install upstream moved it), and the two
 // baseline walks announced 9 and 12 such chunks — keying by the event collapsed
 // them into one "?#null" and the gate read three phantom differences.
-// `[rag:demo] retrieval bank 843fcf6f: 29 hit · 1 miss · depth 10 · baseline 29 hit · 1 miss`
-// — both legs summed, because a baseline miss retrieves exactly as a live one does.
+// lib/log.ts's `{"msg":"retrieval bank read","component":"rag:demo","hits":29,
+// "misses":1,"baselineHits":29,"baselineMisses":1,...}` — both legs summed, because
+// a baseline miss retrieves exactly as a live one does. The pre-O2 free-text line
+// (`[rag:demo] retrieval bank 843fcf6f: 29 hit · 1 miss · depth 10 · baseline …`)
+// is still read so an old dev log parses.
 const BANK_LINE = /\[rag:demo\] retrieval bank \S+: (\d+) hit · (\d+) miss · depth \d+(?: · baseline (\d+) hit · (\d+) miss)?/;
 function bankOf(lines: string[]): { hits: number; misses: number } | null {
   let seen = false;
@@ -255,10 +258,23 @@ function bankOf(lines: string[]): { hits: number; misses: number } | null {
   let misses = 0;
   for (const l of lines) {
     const m = BANK_LINE.exec(l);
-    if (!m) continue;
+    if (m) {
+      seen = true;
+      hits += Number(m[1]) + Number(m[3] ?? 0);
+      misses += Number(m[2]) + Number(m[4] ?? 0);
+      continue;
+    }
+    if (!l.includes('"retrieval bank read"')) continue;
+    let j: Record<string, unknown>;
+    try {
+      j = JSON.parse(l.slice(l.indexOf("{"))) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (j.msg !== "retrieval bank read") continue;
     seen = true;
-    hits += Number(m[1]) + Number(m[3] ?? 0);
-    misses += Number(m[2]) + Number(m[4] ?? 0);
+    hits += Number(j.hits ?? 0) + Number(j.baselineHits ?? 0);
+    misses += Number(j.misses ?? 0) + Number(j.baselineMisses ?? 0);
   }
   return seen ? { hits, misses } : null;
 }

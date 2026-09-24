@@ -32,6 +32,7 @@ import { createHash } from "node:crypto";
 import { activeUserId } from "@/lib/auth/userScope";
 import { isolated, sql } from "@/lib/db";
 import { detached } from "@/lib/detached";
+import { log } from "@/lib/log";
 import { embedQueries, embedQuery, embedTexts } from "@/lib/rag/embeddings";
 import {
   costEmbed,
@@ -287,7 +288,7 @@ async function writePersisted(
       // REMAINING batches too — whatever stopped one will stop the next — and
       // returns normally, so the caller's embed still succeeds.
       if (!isMissingTable(err)) {
-        console.warn(`[rag:embedCache] cache write failed: ${(err as Error).message}`);
+        log.warn("cache write failed", { component: "rag:embedCache", err });
       }
       return;
     }

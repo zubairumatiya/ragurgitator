@@ -11,6 +11,7 @@
 // number that decides whether to offer the background at all.
 import { activeUserId } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
+import { log } from "@/lib/log";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import type { JobKind } from "@/lib/jobs/types";
 
@@ -101,7 +102,7 @@ export async function recordTiming(
             updated_at = now()
     `;
   } catch (e) {
-    console.warn(`[jobs:timing] could not record ${kind}: ${String(e)}`);
+    log.warn("could not record timing", { component: "jobs:timing", kind, err: e });
   }
 }
 

@@ -11,6 +11,7 @@ import { submitIngestBatchIfEnabled } from "@/lib/batch/ingestLever";
 import { cheapModelFor, config } from "@/lib/config";
 import { detached } from "@/lib/detached";
 import type { StreamErrorEvent } from "@/lib/http/missingKey";
+import { log } from "@/lib/log";
 import { activeConfig, resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";
 import {
@@ -69,9 +70,11 @@ async function storeOne(doc: SourceDocument): Promise<string> {
     : await insertDocument(doc.metadata.fileName, contentHash, doc.text);
 
   if (existing) {
-    console.log(
-      `[rag:pipeline] document "${doc.metadata.fileName}" already exists (id=${documentId.slice(0, 8)})`,
-    );
+    log.debug("document already exists", {
+      component: "rag:pipeline",
+      fileName: doc.metadata.fileName,
+      documentId,
+    });
   }
 
   // Auto-sync (0017): only a synced config's uploads join its corpus. Detached
@@ -103,10 +106,13 @@ async function embedOne(
   // avoided embed worth counting is the cache's, banked below as embed_cache.
   const existingRun = (await embeddingRunChunkCounts([documentId])).get(documentId);
   if (existingRun !== undefined) {
-    console.log(
-      `[rag:pipeline] skip embed: ${doc.metadata.fileName} already embedded under ` +
-        `config=${cfg.id.slice(0, 8)} (${cfg.embeddingModel} size=${cfg.chunkSize} overlap=${cfg.chunkOverlap})`,
-    );
+    log.debug("skip embed, already embedded", {
+      component: "rag:pipeline",
+      fileName: doc.metadata.fileName,
+      model: cfg.embeddingModel,
+      chunkSize: cfg.chunkSize,
+      chunkOverlap: cfg.chunkOverlap,
+    });
     return existingRun;
   }
 
@@ -179,7 +185,7 @@ export async function ingest(
   onEvent: Emit = () => {},
 ): Promise<{ results: IngestResult[] }> {
   const t0 = performance.now();
-  console.log(`[rag:pipeline] ingest start (${inputs.length} source(s))`);
+  log.info("ingest start", { component: "rag:pipeline", sources: inputs.length });
   onEvent({ type: "start", total: inputs.length });
 
   // Indexed rather than pushed, so a file that fails to load in phase 1 still
@@ -205,7 +211,7 @@ export async function ingest(
       stored.push({ index, fileName, documentId: await storeOne(doc), doc });
     } catch (err) {
       const error = err instanceof Error ? err.message : "Ingestion failed.";
-      console.error(`[rag:pipeline] ingest failed for "${fileName}": ${error}`);
+      log.error("ingest failed", { component: "rag:pipeline", fileName, err });
       done(index, fileName, { fileName, error });
     }
   }
@@ -247,7 +253,7 @@ export async function ingest(
       done(s.index, s.fileName, { fileName: s.fileName, chunksAdded });
     } catch (err) {
       const error = err instanceof Error ? err.message : "Ingestion failed.";
-      console.error(`[rag:pipeline] ingest failed for "${s.fileName}": ${error}`);
+      log.error("ingest failed", { component: "rag:pipeline", fileName: s.fileName, err });
       done(s.index, s.fileName, { fileName: s.fileName, error });
     }
   }
@@ -257,10 +263,13 @@ export async function ingest(
     (sum, r) => sum + ("chunksAdded" in r ? r.chunksAdded : 0),
     0,
   );
-  console.log(
-    `[rag:pipeline] ingest done: ${queued ? "queued for batch" : `${chunksAdded} chunks`} from ` +
-      `${results.length} source(s) in ${Math.round(performance.now() - t0)}ms`,
-  );
+  log.info("ingest done", {
+    component: "rag:pipeline",
+    queued,
+    chunksAdded,
+    sources: results.length,
+    ms: Math.round(performance.now() - t0),
+  });
   onEvent({ type: "done", results });
   return { results };
 }
@@ -329,7 +338,7 @@ async function embedStoredDocs(
       }
     } catch (err) {
       const error = err instanceof Error ? err.message : "Embedding failed.";
-      console.error(`[rag:pipeline] stored-doc embed failed for "${fileName}": ${error}`);
+      log.error("stored-doc embed failed", { component: "rag:pipeline", fileName, err });
       result = { fileName, error };
     }
     results.push(result);
@@ -382,19 +391,22 @@ export async function embedCorpora(
   corpusIds: string[],
   onEvent: Emit = () => {},
 ): Promise<{ results: IngestResult[] }> {
-  const cfg = activeConfig();
   const t0 = performance.now();
   const { docs: selected } = await dedupCorporaDocuments(corpusIds);
   const docs = await documentsForEmbedding(selected.map((d) => d.id));
-  console.log(
-    `[rag:pipeline] spawn-embed ${corpusIds.length} corpus(es) into config=${cfg.id.slice(0, 8)}: ` +
-      `${docs.length}/${selected.length} doc(s) with stored text`,
-  );
+  log.info("spawn-embed start", {
+    component: "rag:pipeline",
+    corpora: corpusIds.length,
+    docs: docs.length,
+    selected: selected.length,
+  });
   onEvent({ type: "start", total: docs.length });
   const results = await embedOrQueue(docs, onEvent);
-  console.log(
-    `[rag:pipeline] spawn-embed done: ${results.length} doc(s) in ${Math.round(performance.now() - t0)}ms`,
-  );
+  log.info("spawn-embed done", {
+    component: "rag:pipeline",
+    docs: results.length,
+    ms: Math.round(performance.now() - t0),
+  });
   onEvent({ type: "done", results });
   return { results };
 }
@@ -410,9 +422,11 @@ export async function embedDocumentsById(
 ): Promise<{ results: IngestResult[] }> {
   const cfg = activeConfig();
   const docs = await documentsForEmbedding(docIds);
-  console.log(
-    `[rag:pipeline] library-embed ${docs.length}/${docIds.length} doc(s) into config=${cfg.id.slice(0, 8)}`,
-  );
+  log.info("library-embed start", {
+    component: "rag:pipeline",
+    docs: docs.length,
+    requested: docIds.length,
+  });
   if (cfg.corpusId && cfg.corpusSync) {
     for (const d of docs) await addDocumentToCorpus(cfg.corpusId, d.id);
   }

@@ -23,6 +23,7 @@ import { activeConfig } from "@/lib/rag/activeConfig";
 import { getConfig } from "@/lib/rag/configStore";
 import { meteredMessage } from "@/lib/rag/meter";
 import { judgeOne } from "@/lib/rag/semanticCacheCalibration";
+import { log } from "@/lib/log";
 
 export type PairLabel = "same" | "different";
 export type PairDifficulty = "paraphrase" | "hard-negative";
@@ -659,7 +660,7 @@ async function screenPair(
     if (verdict !== expectedVerdict(pair.label)) return { keep: false };
     return { keep: true, verdict, reason };
   } catch (err) {
-    console.warn(`[rag:semantic-cache] pair screen failed: ${(err as Error).message}`);
+    log.warn("pair screen failed", { component: "rag:semantic-cache", err });
     return { keep: true };
   }
 }
@@ -738,7 +739,7 @@ export async function generatePairs(opts: { limit?: number } = {}): Promise<Pair
       } catch (err) {
         // One bad question must not abandon the rest — it stays in the gap and
         // the next pass retries it.
-        console.warn(`[rag:semantic-cache] pair generation failed: ${(err as Error).message}`);
+        log.warn("pair generation failed", { component: "rag:semantic-cache", err });
         skipped++;
       }
     }

@@ -14,6 +14,7 @@
 //     share it).
 import type { StreamErrorEvent } from "@/lib/http/missingKey";
 import { stage } from "@/lib/autotuneTiming";
+import { log } from "@/lib/log";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import {
   addDifficulty,
@@ -356,9 +357,10 @@ export function parseQuestions(
     };
     return (parsed.questions ?? []).slice(0, count);
   } catch {
-    console.warn(
-      `[rag:eval] could not parse generated questions (stop_reason=${message.stop_reason ?? "?"}); skipping chunk`,
-    );
+    log.warn("could not parse generated questions; skipping chunk", {
+      component: "rag:eval",
+      stopReason: message.stop_reason ?? null,
+    });
     return [];
   }
 }
@@ -416,10 +418,11 @@ export async function generateMissingQuestions(
   // Progress is per question, not per gap: a gap needing 3 counts as 3 steps.
   const total = gaps.reduce((sum, g) => sum + g.needed, 0);
   const model = activeConfig().llmModel;
-  console.log(
-    `[rag:eval] generating ${total} question(s) across difficulties ` +
-      `[${targets.map((t) => `${t.difficulty}×${t.count}`).join(", ")}]`,
-  );
+  log.info("generating questions", {
+    component: "rag:eval",
+    total,
+    targets: Object.fromEntries(targets.map((t) => [t.difficulty, t.count])),
+  });
   emit({ type: "generate-start", total });
 
   let generated = 0;
@@ -444,7 +447,7 @@ export async function generateMissingQuestions(
     // keeps every question generated (and banked) so far — see the note on
     // ShouldStop above.
     if (shouldStop()) {
-      console.log(`[rag:eval] cancelled after ${generated} question(s)`);
+      log.info("question generation cancelled", { component: "rag:eval", generated });
       break;
     }
     const authored = await authorQuestions(
@@ -505,7 +508,7 @@ export async function generateMissingQuestions(
     bankedHere.set(bankKey, (bankedHere.get(bankKey) ?? 0) + banked.length);
   }
 
-  console.log(`[rag:eval] generated ${generated} question(s)`);
+  log.info("questions generated", { component: "rag:eval", generated });
   return generated;
 }
 
@@ -669,11 +672,15 @@ export async function scoreQuestions(
     const hits = bankedLive.filter((b) => b !== null).length;
     const baseWanted = questions.filter(needsBaseline).length;
     const baseHits = bankedBase.filter((b) => b !== null).length;
-    console.log(
-      `[rag:demo] retrieval bank ${portableKey.slice(0, 8)}: ${hits} hit · ` +
-        `${questions.length - hits} miss · depth ${depth}` +
-        (baseWanted > 0 ? ` · baseline ${baseHits} hit · ${baseWanted - baseHits} miss` : ""),
-    );
+    // scripts/autotune-bench.ts sums hits and misses from these lines.
+    log.info("retrieval bank read", {
+      component: "rag:demo",
+      bank: portableKey.slice(0, 8),
+      hits,
+      misses: questions.length - hits,
+      depth,
+      ...(baseWanted > 0 ? { baselineHits: baseHits, baselineMisses: baseWanted - baseHits } : {}),
+    });
   }
 
   // ONE SET OF READS FOR THE WHOLE BATCH, before any worker starts. Every store
@@ -886,9 +893,7 @@ export async function scoreUnscoredQuestions(
 ): Promise<number> {
   const pending = await questionsNeedingScoring();
   if (pending.length === 0) return 0;
-  console.log(
-    `[rag:eval] scoring ${pending.length} question(s) @ k=${activeConfig().topK}`,
-  );
+  log.info("scoring questions", { component: "rag:eval", questions: pending.length, k: activeConfig().topK });
   return scoreQuestions(pending, emit, shouldStop);
 }
 
@@ -928,10 +933,12 @@ export async function scorePendingQuestions(
     });
   }
 
-  console.log(
-    `[rag:eval] scorePendingQuestions done: scored=${scored} ` +
-      `recall=${summary.recall ?? "n/a"} in ${Math.round(performance.now() - t0)}ms`,
-  );
+  log.info("scorePendingQuestions done", {
+    component: "rag:eval",
+    scored,
+    recall: summary.recall ?? null,
+    ms: Math.round(performance.now() - t0),
+  });
   emit({
     // Nothing is generated here; the zero keeps the shared client event shape.
     type: "done",
@@ -1035,9 +1042,7 @@ export async function bulkAddCachedQuestions(
   // difficulties this config has used, which is what eval_difficulties is now
   // that nothing auto-generates from it.
   for (const d of difficulties) await addDifficulty(d as Difficulty);
-  console.log(
-    `[rag:eval] bulkAddCachedQuestions: reused=${reused} across ${chunks.length} chunk(s)`,
-  );
+  log.info("bulkAddCachedQuestions done", { component: "rag:eval", reused, chunks: chunks.length });
   emit({
     type: "done",
     cancelled: shouldStop(),
@@ -1174,11 +1179,14 @@ export async function screenAffectedQuestions(
   }
 
   const skipped = questions.length - dirty.length;
-  console.log(
-    `[rag:eval] dirty-set re-score: ${dirty.length}/${questions.length} dirty ` +
-      `(${cleanLabelIds.length} proven clean, ${skipped - cleanLabelIds.length} already fresh) ` +
-      `across ${changed.length} changed chunk(s)`,
-  );
+  log.info("dirty-set re-score", {
+    component: "rag:eval",
+    dirty: dirty.length,
+    questions: questions.length,
+    provenClean: cleanLabelIds.length,
+    alreadyFresh: skipped - cleanLabelIds.length,
+    changedChunks: changed.length,
+  });
   return { finalState, dirty, cleanLabelIds, total: questions.length };
 }
 
@@ -1215,10 +1223,11 @@ export async function settleAffectedRescore(
       k: summary.recallK,
     });
   }
-  console.log(
-    `[rag:eval] dirty-set re-score settled: recall=${summary.recall ?? "n/a"} ` +
-      `over ${screen.total} question(s)`,
-  );
+  log.info("dirty-set re-score settled", {
+    component: "rag:eval",
+    recall: summary.recall ?? null,
+    questions: screen.total,
+  });
   return { recall: summary.recall, mrr: summary.mrr, ndcg: summary.ndcg };
 }
 
@@ -1403,11 +1412,16 @@ export async function runRechunkExperiment(
   const subTexts = await splitText(ctx.chunkText, size, overlap);
   const result = await rankExperiment(ctx, subTexts);
 
-  console.log(
-    `[rag:eval] rechunk q=${questionId.slice(0, 8)} size=${size} overlap=${overlap}: ` +
-      `${result.subChunkCount} sub-chunk(s), hit=${result.hit} ` +
-      `bestRank=${result.bestSubRank ?? "n/a"} in ${Math.round(performance.now() - t0)}ms`,
-  );
+  log.info("rechunk experiment", {
+    component: "rag:eval",
+    questionId,
+    size,
+    overlap,
+    subChunks: result.subChunkCount,
+    hit: result.hit,
+    bestRank: result.bestSubRank ?? null,
+    ms: Math.round(performance.now() - t0),
+  });
   return result;
 }
 
@@ -1980,13 +1994,18 @@ export async function runModelTrial(
     };
   }
 
-  console.log(
-    `[rag:eval] config-trial chunk=${chunkId.slice(0, 8)} kind=${variation.kind} model=${model} ` +
-      `pieces=${pieceCount ?? 1} pool=${poolChunks.length} q=${questionsOut.length} ` +
-      `hits=${hitCount}/${questionsOut.length} ` +
-      `fused=${questionsOut.filter((o) => o.fusedHit).length}/${questionsOut.length} ` +
-      `${save ? "(saved) " : ""}` +
-      `in ${Math.round(performance.now() - t0)}ms`,
-  );
+  log.info("config trial", {
+    component: "rag:eval",
+    chunkId,
+    kind: variation.kind,
+    model,
+    pieces: pieceCount ?? 1,
+    pool: poolChunks.length,
+    questions: questionsOut.length,
+    hits: hitCount,
+    fused: questionsOut.filter((o) => o.fusedHit).length,
+    saved: save,
+    ms: Math.round(performance.now() - t0),
+  });
   return { result, savedTrial };
 }

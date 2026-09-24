@@ -9,6 +9,7 @@
 //
 // `encode` returns an Encoding, not a bare id array — hence the `.ids` at each
 // of the three call sites below.
+import { log } from "@/lib/log";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { loadTokenizer, type Tokenizer } from "@/lib/rag/tokenizerLoader";
 import type { Chunk, SourceDocument } from "@/types/rag";
@@ -129,9 +130,15 @@ export async function chunkDocument(
     position,
   }));
 
-  console.log(
-    `[rag:chunker] doc ${doc.id.slice(0, 8)} (${doc.metadata.fileName}): ` +
-      `${tokenIds.length} tokens -> ${chunks.length} chunks (size=${chunkSize}, overlap=${chunkOverlap}) in ${Math.round(performance.now() - t0)}ms`,
-  );
+  log.debug("chunked document", {
+    component: "rag:chunker",
+    documentId: doc.id,
+    fileName: doc.metadata.fileName,
+    tokens: tokenIds.length,
+    chunks: chunks.length,
+    chunkSize,
+    chunkOverlap,
+    ms: Math.round(performance.now() - t0),
+  });
   return chunks;
 }

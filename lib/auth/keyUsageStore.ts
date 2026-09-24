@@ -31,6 +31,7 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { isolated, sql } from "@/lib/db";
 import { detached } from "@/lib/detached";
 import { keyLastFourFor } from "@/lib/llm/client";
+import { log } from "@/lib/log";
 import { captureException } from "@/lib/observability/sentry";
 import { activeConfigOrNull } from "@/lib/rag/activeConfig";
 import { SURFACE_LABELS, type Surface } from "@/lib/rag/pricing";
@@ -151,7 +152,7 @@ export async function withKeyUsageBuffer<T>(
       try {
         await drain(batch);
       } catch (err) {
-        console.warn(`[keyusage] drain failed: ${(err as Error).message}`);
+        log.warn("drain failed", { component: "keyusage", events: batch.length, err });
         captureException(err, { tags: { site: "keyusage" } });
       }
     }
@@ -176,7 +177,7 @@ export async function trackKeyUsage<T>(
     try {
       amounts = usageOf?.(result) ?? NO_AMOUNTS;
     } catch (err) {
-      console.warn(`[keyusage] usage read failed: ${(err as Error).message}`);
+      log.warn("usage read failed", { component: "keyusage", provider: meta.provider, err });
     }
     await recordKeyUsage(meta, true, null, amounts);
     return result;
@@ -214,9 +215,12 @@ async function recordKeyUsage(
     // recorded nothing for guests: 744 embeddings bought on the operator's key
     // with `assertDemoEmbedBudget` reading zero. The drop is still best-effort —
     // telemetry must not fail the call — but it is no longer invisible.
-    console.warn(
-      `[keyusage] dropped a ${meta.provider}/${meta.kind} call: ${(err as Error).message}`,
-    );
+    log.warn("dropped a call with no user scope", {
+      component: "keyusage",
+      provider: meta.provider,
+      kind: meta.kind,
+      err,
+    });
     return;
   }
 
@@ -276,7 +280,7 @@ export async function flushKeyUsageEvents(events: KeyUsageEvent[]): Promise<void
     );
   } catch (err) {
     if (isMissingTable(err)) return;
-    console.warn(`[keyusage] insert of ${events.length} failed: ${(err as Error).message}`);
+    log.warn("insert failed", { component: "keyusage", events: events.length, err });
     // Swallowed on purpose — telemetry must not fail the call — which is exactly
     // why it is reported: a spend control that fails silently is the defect.
     captureException(err, { tags: { site: "keyusage" } });
@@ -597,6 +601,6 @@ export async function pruneKeyUsage(): Promise<void> {
     );
   } catch (err) {
     if (isMissingTable(err)) return;
-    console.warn(`[keyusage] prune failed: ${(err as Error).message}`);
+    log.warn("prune failed", { component: "keyusage", err });
   }
 }

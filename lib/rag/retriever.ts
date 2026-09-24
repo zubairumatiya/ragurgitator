@@ -24,6 +24,7 @@
 // chunk would occupy — trial and live retrieval share this code and cannot drift.
 import { stage } from "@/lib/autotuneTiming";
 import { isolated } from "@/lib/db";
+import { log } from "@/lib/log";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import {
   cosine,
@@ -433,9 +434,10 @@ export async function prefetchRetrieval(
       }
     });
   } catch (err) {
-    console.warn(
-      `[rag:retriever] batch prefetch failed, falling back to per-question reads: ${(err as Error).message}`,
-    );
+    log.warn("batch prefetch failed, falling back to per-question reads", {
+      component: "rag:retriever",
+      err,
+    });
   }
 }
 

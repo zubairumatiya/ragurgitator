@@ -20,6 +20,7 @@ import { cloneSeedWorkspace, type CloneSummary } from "@/lib/demo/clone";
 import { demo, demoDisabledReason, demoEnabled, demoVoyageKey, seedUserId } from "@/lib/demo/config";
 import { liveGuestCount, reapExpiredGuests } from "@/lib/demo/guest";
 import { overIpLimit, pruneProvisionLedger, recordProvision } from "@/lib/demo/rateLimit";
+import { log } from "@/lib/log";
 
 export type ProvisionResult =
   | { ok: true; email: string; password: string; expiresAt: string; clone: CloneSummary }
@@ -34,7 +35,7 @@ export async function provisionGuest(address: string): Promise<ProvisionResult> 
   if (!demoEnabled()) {
     // An operator-facing reason in the log, a flat "unavailable" to the visitor:
     // a misconfigured demo should look like no demo from outside.
-    console.warn(`[demo] provisioning refused — ${demoDisabledReason()}`);
+    log.warn("provisioning refused", { component: "demo", reason: demoDisabledReason() });
     return { ok: false, message: "The demo is not available right now.", retryable: false };
   }
 
@@ -45,7 +46,7 @@ export async function provisionGuest(address: string): Promise<ProvisionResult> 
   // (it only runs when someone arrives) and puts the sweep exactly where the
   // space is about to be needed.
   await reapExpiredGuests().catch((e) => {
-    console.warn(`[demo] reap before provision failed: ${String(e)}`);
+    log.warn("reap before provision failed", { component: "demo", err: e });
     return 0;
   });
 
@@ -122,12 +123,12 @@ export async function provisionGuest(address: string): Promise<ProvisionResult> 
       clone,
     };
   } catch (err) {
-    console.error(`[demo] provisioning failed for ${guest.id}: ${String(err)}`);
+    log.error("provisioning failed", { component: "demo", guestId: guest.id, err });
     // One statement, because the cascade is declared. If THIS fails the guest is
     // still expiring — the flag and expiry were the first thing written — so the
     // reaper collects it within the TTL either way.
     await privilegedSql`delete from auth.users where id = ${guest.id}`.catch((e) =>
-      console.error(`[demo] rollback of ${guest.id} failed: ${String(e)}`),
+      log.error("guest rollback failed", { component: "demo", guestId: guest.id, err: e }),
     );
     return {
       ok: false,

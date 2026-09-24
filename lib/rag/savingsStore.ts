@@ -27,6 +27,7 @@ import {
   type SavingsCategory,
   type Surface,
 } from "@/lib/rag/pricing";
+import { log } from "@/lib/log";
 
 const isMissingTable = (err: unknown): boolean =>
   (err as { code?: string }).code === "42P01";
@@ -144,9 +145,7 @@ async function writeSaving(
     );
   } catch (err) {
     if (isMissingTable(err)) return;
-    console.warn(
-      `[rag:savings] record ${lever} failed: ${(err as Error).message}`,
-    );
+    log.warn("saving record failed", { component: "rag:savings", lever, err });
   }
 }
 
@@ -185,9 +184,7 @@ async function writeSpend(
     );
   } catch (err) {
     if (isMissingTable(err)) return;
-    console.warn(
-      `[rag:savings] spend ${surface} failed: ${(err as Error).message}`,
-    );
+    log.warn("spend record failed", { component: "rag:savings", surface, err });
   }
 }
 
