@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { withSentryConfig } from "@sentry/nextjs/config";
 
 const nextConfig: NextConfig = {
   // voyageai@0.2.1 ships an ESM build with bad imports (missing .mjs extensions
@@ -70,4 +71,17 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+// Source-map upload needs SENTRY_AUTH_TOKEN, which only Vercel's production and
+// preview builds carry. CI builds with none, so the upload is switched off rather
+// than left to fail or warn. The tunnel sends browser events through our own origin
+// because ad blockers drop requests to sentry.io; /monitoring is in PUBLIC_PREFIXES
+// in proxy.ts so the login wall does not redirect a guest's events.
+export default withSentryConfig(nextConfig, {
+  org: process.env.SENTRY_ORG,
+  project: process.env.SENTRY_PROJECT,
+  authToken: process.env.SENTRY_AUTH_TOKEN,
+  silent: true,
+  sourcemaps: { disable: !process.env.SENTRY_AUTH_TOKEN },
+  widenClientFileUpload: true,
+  tunnelRoute: "/monitoring",
+});

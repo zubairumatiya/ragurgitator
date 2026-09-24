@@ -33,7 +33,11 @@ import { proxySupabase } from "@/lib/auth/supabase";
 // flags and renders — no store call, no user data — and the write it leads to
 // (POST /api/demo/start) does its own rate limiting rather than relying on this
 // file, which is not an authorization boundary.
-const PUBLIC_PREFIXES = ["/login", "/signup", "/auth", "/.well-known", "/demo"];
+//
+// /monitoring is the Sentry tunnel (next.config.ts). Browser error reports from a
+// visitor with no session — and from one whose session just broke — must still
+// arrive; the tunnel forwards only to the configured DSN's project.
+const PUBLIC_PREFIXES = ["/login", "/signup", "/auth", "/.well-known", "/demo", "/monitoring"];
 
 const isPublic = (path: string) => PUBLIC_PREFIXES.some((p) => path.startsWith(p));
 
