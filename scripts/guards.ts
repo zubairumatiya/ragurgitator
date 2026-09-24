@@ -24,6 +24,8 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
+import ts from "typescript";
+
 const ROOT = process.cwd();
 
 let failures = 0;
@@ -1162,6 +1164,102 @@ function sweepSentryImports() {
   console.log(`   ${allowed} allowed importer(s), ${files.length} files swept`);
 }
 
+// 12. Server code logs through lib/log, and never logs a secret
+//
+// docs/obs-2-structured-logging-plan.md: one JSON line per event with the
+// request's ids stamped on it, so a raw console.* in lib/ or app/ is a line that
+// joins nothing. Read with the TS parser, not a regex, so a console.* in a
+// comment or a string is not a hit. Client components (a "use client"
+// directive, which may sit below a header comment) have no request context and
+// keep console.*; tests are not shipped.
+//
+// The field check is §1's "never log a provider key, a request body, or a
+// document's text": every property name in a log.*() fields literal, split on
+// camelCase, must not contain key/secret/body/text. The fields argument must BE
+// a literal (spreads are read through) — a variable is a list nobody can check.
+const CONSOLE_ALLOWED: Record<string, string> = {
+  "lib/log.ts": "the sink itself — Vercel reads the level off the stream",
+  "lib/autotuneTiming.ts":
+    "sweep 9's instrument; scripts/autotune-bench.ts parses its multi-line output",
+};
+const FORBIDDEN_FIELD_WORDS = new Set(["key", "keys", "secret", "secrets", "body", "bodies", "text", "texts"]);
+const LOG_LEVEL_METHOD = /^(debug|info|warn|error)$/;
+
+function fieldWords(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[\s_-]+/)
+    .map((w) => w.toLowerCase());
+}
+
+function sweepLogging() {
+  console.log("\n12. server code logs through lib/log, and never a key, body or text\n");
+  const files = [
+    ...walk(join(ROOT, "lib"), (f) => /\.tsx?$/.test(f)),
+    ...walk(join(ROOT, "app"), (f) => /\.tsx?$/.test(f)),
+  ];
+  let logCalls = 0;
+  let clientFiles = 0;
+  for (const file of files) {
+    const path = rel(file);
+    const text = read(file);
+    const sf = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
+    const first = sf.statements[0];
+    const isClient =
+      !!first &&
+      ts.isExpressionStatement(first) &&
+      ts.isStringLiteral(first.expression) &&
+      first.expression.text === "use client";
+    if (isClient) clientFiles++;
+    const skipConsole = isClient || /\.test\.tsx?$/.test(path) || path in CONSOLE_ALLOWED;
+    const at = (n: ts.Node) => `${path}:${sf.getLineAndCharacterOfPosition(n.getStart()).line + 1}`;
+
+    const checkNames = (node: ts.Node, call: ts.Node) => {
+      const visit = (n: ts.Node) => {
+        if (ts.isObjectLiteralExpression(n)) {
+          for (const prop of n.properties) {
+            if (!prop.name) continue;
+            const name = prop.name.getText(sf).replace(/^["']|["']$/g, "");
+            if (fieldWords(name).some((w) => FORBIDDEN_FIELD_WORDS.has(w))) {
+              fail(`${at(call)} — log field \`${name}\`: never log a key, secret, body or text`);
+            }
+          }
+        }
+        ts.forEachChild(n, visit);
+      };
+      visit(node);
+    };
+
+    const visit = (n: ts.Node) => {
+      if (
+        ts.isCallExpression(n) &&
+        ts.isPropertyAccessExpression(n.expression) &&
+        ts.isIdentifier(n.expression.expression)
+      ) {
+        const owner = n.expression.expression.text;
+        const method = n.expression.name.text;
+        if (owner === "console" && !skipConsole) {
+          fail(`${at(n)} — console.${method}; use log.* from @/lib/log`);
+        }
+        if (owner === "log" && LOG_LEVEL_METHOD.test(method)) {
+          logCalls++;
+          const fields = n.arguments[1];
+          if (fields && !ts.isObjectLiteralExpression(fields)) {
+            fail(`${at(n)} — log.${method} fields must be an object literal the sweep can read`);
+          } else if (fields) {
+            checkNames(fields, n);
+          }
+        }
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+  }
+  console.log(
+    `   ${logCalls} log.* call(s) checked, ${Object.keys(CONSOLE_ALLOWED).length} console allowlisted, ${clientFiles} client file(s) exempt`,
+  );
+}
+
 sweepExpose();
 sweepScopes();
 sweepApiGates();
@@ -1173,13 +1271,15 @@ sweepProbeReplay();
 sweepAutotuneTiming();
 sweepRetrievalRecorder();
 sweepSentryImports();
+sweepLogging();
 
 console.log(
   failures === 0
     ? "\nOK — keys stay wrapped, scopes are entered, every handler is gated, " +
         "baseline rows stay out of live reads, no guest can spend outside the " +
-        "demo's frozen scope, the transformers barrel is unimported, and the " +
-        "probe path neither serves nor judges."
+        "demo's frozen scope, the transformers barrel is unimported, the " +
+        "probe path neither serves nor judges, and server code logs through " +
+        "lib/log with no key, body or text in its fields."
     : `\nFAILED — ${failures} violation(s).`,
 );
 if (failures) process.exitCode = 1;

@@ -13,6 +13,7 @@ import { FileUpload } from "@/app/components/FileUpload";
 import { withPageUser } from "@/lib/auth/dal";
 import { isGuest } from "@/lib/demo/guest";
 import { llmProviderFor } from "@/lib/llm/llmModels";
+import { log } from "@/lib/log";
 import { resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { getConfig } from "@/lib/rag/configStore";
 import { availableProviders } from "@/lib/rag/providerAvailability";
@@ -34,7 +35,7 @@ async function guestSuggestions(configId: string): Promise<string[]> {
     if (!cfg) return [];
     return await withConfig(cfg, () => bankedQuestions());
   } catch (err) {
-    console.warn(`[demo] suggestion chips unavailable: ${(err as Error).message}`);
+    log.warn("suggestion chips unavailable", { component: "demo", configId, err });
     return [];
   }
 }

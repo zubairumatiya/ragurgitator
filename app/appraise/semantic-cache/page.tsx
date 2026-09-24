@@ -43,6 +43,7 @@ import {
   type CollisionFloorPreload,
 } from "@/app/components/semanticCache/ThresholdPanel";
 import { withPageUser } from "@/lib/auth/dal";
+import { log } from "@/lib/log";
 // NO DEMO COPY CROSSES HERE ANY MORE — phase 5 of docs/demo-cache-replay-plan.md.
 // Six sentences used to be read on the server and handed down as `notes` props,
 // because lib/demo/policy is `import "server-only"` and every panel below is a
@@ -80,7 +81,7 @@ async function preloadFirstFloor(
     if (!cfg) return null;
     return { configId, ...(await withConfig(cfg, readCollisionFloorState)) };
   } catch (err) {
-    console.warn(`[rag:collision-floor] preload failed: ${(err as Error).message}`);
+    log.warn("preload failed", { component: "rag:collision-floor", configId, err });
     return null;
   }
 }

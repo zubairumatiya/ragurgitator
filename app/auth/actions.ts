@@ -18,6 +18,7 @@ import { allIssues, NewPassword } from "@/lib/auth/passwordPolicy";
 import { RECOVERY_COOKIE } from "@/lib/auth/recoveryIntent";
 import { revokeOtherSessions } from "@/lib/auth/sessions";
 import { serverSupabase } from "@/lib/auth/supabase";
+import { log } from "@/lib/log";
 
 export type AuthState = {
   error?: string;
@@ -168,7 +169,7 @@ export async function requestPasswordReset(
   // rate limit reached) is ours to notice, and surfacing it to the form would
   // leak the distinction the identical-reply rule above exists to hide.
   if (error) {
-    console.error("resetPasswordForEmail failed", error);
+    log.error("resetPasswordForEmail failed", { component: "auth", err: error });
   }
 
   redirect(`/auth/forgot-password/check-email?email=${encodeURIComponent(parsed.data.email)}`);
