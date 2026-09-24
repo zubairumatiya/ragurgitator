@@ -23,6 +23,7 @@
 // detached queue: the buffer's drain hands its one multi-row insert to that queue,
 // so a request's provider calls become a single statement written after the
 // response rather than N statements written during it.
+import { headers } from "next/headers";
 import { after } from "next/server";
 
 import { requireUserForApi, unauthorizedJson } from "@/lib/auth/dal";
@@ -31,6 +32,7 @@ import { withKeyUsageBuffer } from "@/lib/auth/keyUsageStore";
 import { withDetachedQueue } from "@/lib/detached";
 import { DEMO_BLOCKED, isDemoBlocked } from "@/lib/demo/policy";
 import { missingKeyResponse } from "@/lib/http/missingKeyServer";
+import { withLogContext } from "@/lib/log";
 import { setRequestTags } from "@/lib/observability/sentry";
 import { UnknownConfigError, resolveRequestConfig, withConfig } from "@/lib/rag/activeConfig";
 
@@ -78,7 +80,9 @@ export async function withRequestConfig<T>(
   const user = await requireUserForApi();
   if (!user) return unauthorizedJson();
 
-  return withDetachedQueue(user, after, () =>
+  const route = new URL(request.url).pathname;
+  const requestId = request.headers.get("x-vercel-id") ?? undefined;
+  return withLogContext({ requestId, route }, () => withDetachedQueue(user, after, () =>
     withKeyUsageBuffer(() =>
       withUser(user, async () => {
         let cfg;
@@ -95,11 +99,13 @@ export async function withRequestConfig<T>(
         }
         // withRequestUser has no Request to read a route from; Sentry's own
         // transaction name still carries it there.
-        setRequestTags({ configId: cfg.id, route: new URL(request.url).pathname });
-        return withConfig(cfg, () => catchingMissingKey(fn));
+        setRequestTags({ configId: cfg.id, route });
+        return withLogContext({ configId: cfg.id }, () =>
+          withConfig(cfg, () => catchingMissingKey(fn)),
+        );
       }),
     ),
-  );
+  ));
 }
 
 // Authenticate and enter the user scope only. For the handful of routes that are
@@ -110,7 +116,10 @@ export async function withRequestConfig<T>(
 export async function withRequestUser<T>(fn: () => Promise<T>): Promise<T | Response> {
   const user = await requireUserForApi();
   if (!user) return unauthorizedJson();
-  return withDetachedQueue(user, after, () =>
-    withKeyUsageBuffer(() => withUser(user, () => catchingMissingKey(fn))),
+  const requestId = (await headers()).get("x-vercel-id") ?? undefined;
+  return withLogContext({ requestId }, () =>
+    withDetachedQueue(user, after, () =>
+      withKeyUsageBuffer(() => withUser(user, () => catchingMissingKey(fn))),
+    ),
   );
 }

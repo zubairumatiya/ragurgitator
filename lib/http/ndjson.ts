@@ -96,7 +96,10 @@ export function ndjsonStream<E>(
   // the moment the client has its id — there is no window where a cancel that
   // arrives "too early" is silently dropped.
   const runId = registerRun(user.id);
-  // Bind the re-entry, not `run` itself — see the ordering note above.
+  // Bind the re-entry, not `run` itself — see the ordering note above. The log
+  // context (lib/log.ts) is the one scope bind restores that is deliberately NOT
+  // reset: it holds ids, not live resources, and the producer's lines should carry
+  // the handler's requestId.
   const boundRun = AsyncResource.bind((send: (event: E) => void) =>
     runOutsideDetachedQueue(() =>
       runOutsideUserTransaction(() =>

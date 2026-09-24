@@ -40,6 +40,7 @@ import {
 } from "@/lib/auth/keyUsageStore";
 import { withUser, type RequestUser } from "@/lib/auth/userScope";
 import { runOutsideUserTransaction } from "@/lib/db";
+import { withLogContext } from "@/lib/log";
 import { postJobTick } from "@/lib/http/jobSecret";
 import { sendJobCompletionEmail } from "@/lib/jobs/notify";
 import { stepFor } from "@/lib/jobs/registry";
@@ -125,7 +126,14 @@ export type SliceOutcome =
 
 // Advance one job by one slice. The entry point for POST /api/jobs/tick, and the
 // only function that should ever be doing so.
-export async function runSlice(jobId: string): Promise<SliceOutcome> {
+//
+// Every line a slice logs carries its jobId: a tick has no session, so the job is
+// the only id that joins one slice's lines to the next's.
+export function runSlice(jobId: string): Promise<SliceOutcome> {
+  return withLogContext({ jobId }, () => sliceOf(jobId));
+}
+
+async function sliceOf(jobId: string): Promise<SliceOutcome> {
   // Sessionless by nature — see the note on resolveJobOwner. Everything after this
   // line runs inside the owner's scope and under RLS.
   const found = await resolveJobOwner(jobId);
