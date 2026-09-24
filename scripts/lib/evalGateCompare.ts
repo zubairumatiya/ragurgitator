@@ -8,6 +8,10 @@ export type QuestionRank = { key: string; question: string; rank: number | null 
 
 export type Aggregates = { recall: number; mrr: number; ndcg: number; questions: number; hits: number };
 
+// lib/observability/statementMeter's snapshot over the scoring run
+// (docs/obs-4-ci-budgets-plan.md §1.1).
+export type Statements = { total: number; byPrefix: Record<string, number> };
+
 export type Baseline = {
   fixtureHash: string;
   gitSha: string;
@@ -19,9 +23,14 @@ export type Baseline = {
   questions: number;
   hits: number;
   perQuestion: QuestionRank[];
+  // Absent in a baseline written before the statement budget existed; the gate
+  // then says it cannot check the budget rather than inventing one.
+  statements?: Statements;
 };
 
-export type Run = { fixtureHash: string; k: number; aggregates: Aggregates; perQuestion: QuestionRank[] };
+export type Run = { fixtureHash: string; k: number; aggregates: Aggregates; perQuestion: QuestionRank[]; statements: Statements };
+
+export type PrefixMover = { prefix: string; before: number; after: number };
 
 export type Mover = { key: string; question: string; before: number | null; after: number | null };
 
@@ -34,6 +43,9 @@ export type Verdict = {
   // ::notice:: — an improvement, and the ask to refresh the baseline with it.
   notices: string[];
   movers: Mover[];
+  // Statement prefixes whose count changed, largest growth first; the top five
+  // are what a statement-budget failure names.
+  statementMovers: PrefixMover[];
   delta: { recall: number; mrr: number; ndcg: number };
 };
 
@@ -43,11 +55,36 @@ const EPS = 1e-9;
 
 export const DEFAULT_MARGIN = 0.005;
 
+// Statements over baseline by more than this fraction is red. The count is
+// deterministic over the fixture, so the margin is room for an intended small
+// change, not for noise.
+export const DEFAULT_STMT_MARGIN = 0.02;
+
+function prefixMovers(before: Record<string, number>, after: Record<string, number>): PrefixMover[] {
+  const names = new Set([...Object.keys(before), ...Object.keys(after)]);
+  const out: PrefixMover[] = [];
+  for (const prefix of names) {
+    const b = before[prefix] ?? 0;
+    const a = after[prefix] ?? 0;
+    if (a !== b) out.push({ prefix, before: b, after: a });
+  }
+  return out.sort((x, y) => y.after - y.before - (x.after - x.before) || (x.prefix < y.prefix ? -1 : 1));
+}
+
+const topGrown = (ms: PrefixMover[]): string =>
+  ms
+    .filter((m) => m.after > m.before)
+    .slice(0, 5)
+    .map((m) => `${m.prefix} ${m.before}→${m.after}`)
+    .join(", ");
+
 // A question is identified by its source chunk AND its text: 118 questions sit
 // on 106 chunks.
 const qid = (q: { key: string; question: string }): string => `${q.key}\u0000${q.question}`;
 
-export function compare(baseline: Baseline, run: Run, opts: { margin: number; strict: boolean }): Verdict {
+export type CompareOpts = { margin: number; strict: boolean; stmtMargin?: number };
+
+export function compare(baseline: Baseline, run: Run, opts: CompareOpts): Verdict {
   if (baseline.fixtureHash !== run.fixtureHash) {
     throw new Error(
       `baseline is for a different fixture (${baseline.fixtureHash.slice(0, 16)}… vs ${run.fixtureHash.slice(0, 16)}…) — ` +
@@ -105,7 +142,28 @@ export function compare(baseline: Baseline, run: Run, opts: { margin: number; st
     }
   }
 
-  return { ok: errors.length === 0, errors, warnings, notices, movers, delta };
+  const bs = baseline.statements;
+  const rs = run.statements;
+  const statementMovers = bs ? prefixMovers(bs.byPrefix, rs.byPrefix) : [];
+  if (!bs) {
+    warnings.push("baseline.json has no statement count — the statement budget is unchecked until `npm run eval:gate -- baseline` refreshes it");
+  } else if (opts.strict) {
+    if (rs.total !== bs.total) {
+      errors.push(`baseline stale — scoring issued ${rs.total} statements, baseline.json says ${bs.total}; refresh it with \`npm run eval:gate -- baseline\``);
+    }
+  } else {
+    const stmtMargin = opts.stmtMargin ?? DEFAULT_STMT_MARGIN;
+    if (rs.total > bs.total * (1 + stmtMargin)) {
+      errors.push(
+        `statement budget exceeded: ${bs.total} → ${rs.total} (+${(((rs.total - bs.total) / bs.total) * 100).toFixed(1)}%), ` +
+          `more than the ${pct(stmtMargin)} margin; grew: ${topGrown(statementMovers)}`,
+      );
+    } else if (rs.total < bs.total) {
+      notices.push(`statements fell ${bs.total} → ${rs.total} — refresh the baseline in this PR so main's budget keeps the win`);
+    }
+  }
+
+  return { ok: errors.length === 0, errors, warnings, notices, movers, statementMovers, delta };
 }
 
 // GitHub workflow commands: one line each on stdout, which the runner turns into
@@ -123,7 +181,7 @@ const signed = (x: number, digits: number, pct = false) => `${x > 0 ? "+" : ""}$
 
 // Markdown for $GITHUB_STEP_SUMMARY: the three numbers before/after, the margin,
 // and WHICH questions moved from what rank to what.
-export function summaryMarkdown(baseline: Baseline, run: Run, v: Verdict, opts: { margin: number; strict: boolean }): string {
+export function summaryMarkdown(baseline: Baseline, run: Run, v: Verdict, opts: CompareOpts): string {
   const a = run.aggregates;
   const k = run.k;
   const row = (name: string, b: number, n: number, d: number, pct: boolean) =>
@@ -139,6 +197,9 @@ export function summaryMarkdown(baseline: Baseline, run: Run, v: Verdict, opts: 
     row(`Recall@${k}`, baseline.recall, a.recall, v.delta.recall, true),
     row(`MRR@${k}`, baseline.mrr, a.mrr, v.delta.mrr, false),
     row(`nDCG@${k}`, baseline.ndcg, a.ndcg, v.delta.ndcg, false),
+    `| statements | ${baseline.statements?.total ?? "—"} | ${run.statements.total} | ${
+      baseline.statements ? signed(run.statements.total - baseline.statements.total, 0) : "—"
+    } |`,
     "",
   ];
   for (const m of [...v.errors, ...v.warnings, ...v.notices]) lines.push(`- ${m}`);
@@ -150,6 +211,12 @@ export function summaryMarkdown(baseline: Baseline, run: Run, v: Verdict, opts: 
     }
   } else {
     lines.push("No question changed rank.");
+  }
+  if (v.statementMovers.length > 0) {
+    lines.push("", `### ${v.statementMovers.length} statement prefix(es) changed count`, "", "| prefix | before | after | delta |", "|---|---|---|---|");
+    for (const m of v.statementMovers.slice(0, 10)) {
+      lines.push(`| \`${m.prefix}\` | ${m.before} | ${m.after} | ${signed(m.after - m.before, 0)} |`);
+    }
   }
   return lines.join("\n") + "\n";
 }

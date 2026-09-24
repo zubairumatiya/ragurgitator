@@ -4,7 +4,7 @@
 //   npm run eval:gate -- load
 //   npm run eval:gate -- score [--out FILE]
 //   npm run eval:gate -- baseline
-//   npm run eval:gate -- gate [--margin F] [--strict]
+//   npm run eval:gate -- gate [--margin F] [--stmt-margin F] [--strict]
 //
 // `export` freezes the master config's retrieval inputs into
 // test/fixtures/eval-gate/ — corpus, overrides, every foreign lane's pool and
@@ -351,7 +351,9 @@ function runLocal(argv: string[]): never {
   const child = spawnSync(
     process.execPath,
     ["--conditions=react-server", "--import", "tsx", "--import", "./test/support/env.ts", "scripts/eval-gate-run.ts", ...argv],
-    { stdio: "inherit" },
+    // The statement meter is always on for the gate: a budget that is only
+    // checked when someone remembers a flag is not a budget.
+    { stdio: "inherit", env: { ...process.env, RAG_STATEMENT_METER: "1" } },
   );
   process.exit(child.status ?? 1);
 }
@@ -361,7 +363,7 @@ async function main(): Promise<void> {
   if (command === "export") return exportFixture(args);
   if (LOCAL_COMMANDS.includes(command)) runLocal([command, ...args]);
   console.error(
-    "usage: npm run eval:gate -- export [--seed N] [--pct N] [--out DIR] | load | score [--out FILE] | baseline | gate [--margin F] [--strict]",
+    "usage: npm run eval:gate -- export [--seed N] [--pct N] [--out DIR] | load | score [--out FILE] | baseline | gate [--margin F] [--stmt-margin F] [--strict]",
   );
   process.exit(2);
 }

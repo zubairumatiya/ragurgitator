@@ -1048,7 +1048,10 @@ function sweepAutotuneTiming() {
   }
 
   const db = read(join(ROOT, "lib/db.ts"));
-  if (!db.includes("debug: AUTOTUNE_TIMING ? (_c, query) => countStatement(query) : false")) {
+  // The hook is shared with the CI statement meter (docs/obs-4-ci-budgets-plan.md
+  // §1.1), so what is held is the call, not the line: countStatement is reached
+  // exactly once, and only behind the literal flag.
+  if ((db.match(/countStatement\(/g) ?? []).length !== 1 || !db.includes("if (AUTOTUNE_TIMING) countStatement(query);")) {
     fail(
       "lib/db.ts — the app pool's debug hook is not gated on AUTOTUNE_TIMING",
     );

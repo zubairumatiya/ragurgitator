@@ -194,6 +194,13 @@ jobs:
       # Below one question in 118 (0.0085): any lost hit is red, float
       # formatting is not.
       EVAL_GATE_MARGIN: "0.005"
+      # The statement budget (docs/obs-4-ci-budgets-plan.md §1.1): the app's
+      # client-side statement count over the same scoring run. Deterministic
+      # over the fixture, so 2% is room for an intended change, not for noise.
+      # (scripts/eval-gate.ts turns the meter on regardless; named here so the
+      # job says what it measures.)
+      RAG_STATEMENT_METER: "1"
+      EVAL_GATE_STMT_MARGIN: "0.02"
 
     steps:
       - uses: actions/checkout@v5
