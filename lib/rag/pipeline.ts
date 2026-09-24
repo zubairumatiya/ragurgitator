@@ -12,6 +12,7 @@ import { cheapModelFor, config } from "@/lib/config";
 import { detached } from "@/lib/detached";
 import type { StreamErrorEvent } from "@/lib/http/missingKey";
 import { log } from "@/lib/log";
+import { setAttr, span, type SpanHandle } from "@/lib/observability/span";
 import { activeConfig, resolveConfig, withConfig } from "@/lib/rag/activeConfig";
 import { chunkDocument } from "@/lib/rag/chunker";
 import {
@@ -538,17 +539,27 @@ export async function syncRemoveDocFromConfigs(
 //   2. Generation cascade — the actual answer, cheap-model first with axis-2
 //      escalation when saver mode is on.
 export async function ask(question: string): Promise<CachedResult> {
+  return span("rag.ask", { "config.id": activeConfig().id }, (s) => askInSpan(question, s));
+}
+
+async function askInSpan(question: string, s: SpanHandle): Promise<CachedResult> {
   const trimmed = question.trim();
 
   // Disabled, or nothing to match on → straight to the cascade (retrieve() also
   // owns the empty-question error, so behaviour is byte-for-byte the same).
   if (!config.semanticCache.enabled || !trimmed) {
+    s.setAttr("cache.outcome", "bypass");
     return answerWithCascade(question, await retrieve(question));
   }
 
   const { serve, threshold, keyModel } = (await getActiveBatchSavings()).semanticCache;
   const probe = await semanticCacheLookup(trimmed, { serve, threshold, keyModel });
-  if (probe.hit) return probe.result;
+  s.setAttr("cache.tier", probe.tier);
+  if (probe.hit) {
+    s.setAttr("cache.outcome", probe.matchedQuery === trimmed ? "hit-exact" : "hit-semantic");
+    return probe.result;
+  }
+  s.setAttr("cache.outcome", "miss");
 
   // Miss (or would-hit with serving off): reuse the vector the cache already
   // embedded so we don't pay to embed the query twice, run the cascade, and always
@@ -583,6 +594,7 @@ async function answerWithCascade(
   // cascade's BASELINE, so it records no saving (its cost is the chat spend).
   if (!cfg.cascadeEnabled) {
     const gen = await generateAnswer(question, sources, strongModel);
+    setAnswerTokens(gen, null);
     return {
       answer: gen.answer,
       sources,
@@ -638,7 +650,15 @@ async function answerWithCascade(
     }),
   );
 
+  setAnswerTokens(cheap, strong);
   return { answer, sources, model, efficacy, escalated };
+}
+
+// On the current span, which here is rag.ask: every generation this answer paid
+// for, both cascade legs when it escalated.
+function setAnswerTokens(a: GeneratedAnswer, b: GeneratedAnswer | null): void {
+  setAttr("answer.tokens.in", a.inputTokens + (b?.inputTokens ?? 0));
+  setAttr("answer.tokens.out", a.outputTokens + (b?.outputTokens ?? 0));
 }
 
 // The cascade's saved dollars, honest and signed:

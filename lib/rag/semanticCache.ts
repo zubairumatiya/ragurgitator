@@ -18,6 +18,7 @@ import { config } from "@/lib/config";
 import { isolated, sql, toJsonb } from "@/lib/db";
 import { detached } from "@/lib/detached";
 import { log } from "@/lib/log";
+import { span, type SpanHandle } from "@/lib/observability/span";
 import { activeConfig, type ResolvedConfig } from "@/lib/rag/activeConfig";
 import { cacheKey, DigestMemo } from "@/lib/rag/digestMemo";
 import { getBatchSavings } from "@/lib/rag/batchStore";
@@ -29,7 +30,8 @@ import { costLlm, estimateTokens, estimateTokensAll } from "@/lib/rag/pricing";
 import { recordSaving } from "@/lib/rag/savingsStore";
 import {
   answerFingerprint,
-  entityGuardPasses,
+  entityOrderPasses,
+  entityTokensMatch,
   isHit,
   spaceOf,
 } from "@/lib/rag/semanticCacheCore";
@@ -64,9 +66,19 @@ export type ShadowOrigin = "traffic" | "probe";
 // and the caller embeds for retrieval itself.
 //
 // A hit carries neither: it skips retrieval AND generation.
+// How a lookup resolved, finer than hit/miss — the `cache.tier` span attribute
+// (docs/obs-5-pipeline-spans-plan.md, DECISIONS).
+export type CacheTier =
+  | "served"
+  | "would-hit"
+  | "guard-blocked"
+  | "below-threshold"
+  | "no-candidates"
+  | "unmigrated";
+
 export type CacheProbe =
-  | { hit: true; result: CachedResult; sim: number; matchedQuery: string }
-  | { hit: false; key: CacheKey; queryVector: number[] | null };
+  | { hit: true; result: CachedResult; sim: number; matchedQuery: string; tier: "served" }
+  | { hit: false; key: CacheKey; queryVector: number[] | null; tier: CacheTier };
 
 const isMissingTable = (err: unknown): boolean =>
   (err as { code?: string }).code === "42P01";
@@ -331,6 +343,19 @@ export async function semanticCacheLookup(
     shadow?: { floor?: number; origin?: ShadowOrigin };
   },
 ): Promise<CacheProbe> {
+  return span("rag.cache.probe", {}, (s) =>
+    probeInSpan(question, serve, override, keyModelOverride, shadow, s),
+  );
+}
+
+async function probeInSpan(
+  question: string,
+  serve: boolean,
+  override: number | null,
+  keyModelOverride: string | null,
+  shadow: { floor?: number; origin?: ShadowOrigin } | undefined,
+  s: SpanHandle,
+): Promise<CacheProbe> {
   const cfg = activeConfig();
   const keyModel = resolveKeyModel(keyModelOverride);
   // Embed under the key model first — the lookup can't proceed without it, so a
@@ -340,7 +365,10 @@ export async function semanticCacheLookup(
   const vector = await embedQueryCached(question, keyModel);
   const key: CacheKey = { model: keyModel, vector };
   const queryVector = keyModel === cfg.embeddingModel ? vector : null;
-  const miss = { hit: false, key, queryVector } as const;
+  const miss = (tier: CacheTier): CacheProbe => {
+    s.setAttr("cache.tier", tier);
+    return { hit: false, key, queryVector, tier };
+  };
 
   try {
     const fingerprint = await currentFingerprint(cfg);
@@ -379,21 +407,34 @@ export async function semanticCacheLookup(
     const match = row
       ? { value: { text: row.query_text, result: row.result }, sim: Number(row.sim) }
       : null;
-    if (match === null) return miss;
+    if (match === null) return miss("no-candidates");
     // Keyed by the KEY model's space, not the retrieval model's: the cosine
     // being thresholded was computed in the key model's space, and scores aren't
     // comparable across spaces. `source` rides along into the logs — when a hit
     // looks wrong, the first question is always which layer set the floor it
     // cleared.
     const { threshold, source } = await resolveThreshold(keyModel, override);
+    s.setAttr("cache.sim", match.sim);
+    s.setAttr("cache.threshold", threshold);
+    s.setAttr("cache.threshold.source", source);
 
     // Entity/number guard (docs/semantic-cache-key-model-plan.md, Phase 0): a
     // match that disagrees with the question on a numeral, acronym or quoted
     // span is refused NO MATTER how high its cosine, because that's precisely
     // where cosine can't tell "2023 revenue" from "2024 revenue". Evaluated
     // before the hit decision, and recorded either way — see below.
-    const guardBlocked =
-      config.semanticCache.entityGuard.enabled && !entityGuardPasses(question, match.value.text);
+    //
+    // The two halves are asked separately only so the span can say WHICH blocked;
+    // together they are exactly entityGuardPasses.
+    const guard = !config.semanticCache.entityGuard.enabled
+      ? "off"
+      : !entityTokensMatch(question, match.value.text)
+        ? "blocked-entity"
+        : !entityOrderPasses(question, match.value.text)
+          ? "blocked-reversed"
+          : "pass";
+    const guardBlocked = guard === "blocked-entity" || guard === "blocked-reversed";
+    s.setAttr("cache.entity_guard", guard);
 
     // Shadow-log the nearest match for threshold calibration. Recorded whenever it
     // clears the low shadowLogFloor, INDEPENDENT of the serving threshold and the
@@ -442,7 +483,7 @@ export async function semanticCacheLookup(
         threshold,
         source,
       });
-      return miss;
+      return miss("guard-blocked");
     }
 
     if (isHit(match.sim, threshold)) {
@@ -467,7 +508,14 @@ export async function semanticCacheLookup(
           bumpHit(userId, keyModel, cfg.llmModel, fingerprint, match.value.text),
         );
         await detached(() => recordSemanticSaving(match.value.result, question));
-        return { hit: true, result: match.value.result, sim: match.sim, matchedQuery: match.value.text };
+        s.setAttr("cache.tier", "served");
+        return {
+          hit: true,
+          result: match.value.result,
+          sim: match.sim,
+          matchedQuery: match.value.text,
+          tier: "served",
+        };
       }
       // Serving is off (Settings → Savings): shadow-log the would-be hit for
       // threshold validation, then report a miss so a fresh answer is computed.
@@ -477,7 +525,7 @@ export async function semanticCacheLookup(
         threshold,
         source,
       });
-      return miss;
+      return miss("would-hit");
     }
 
     log.debug("cache miss", {
@@ -486,9 +534,9 @@ export async function semanticCacheLookup(
       threshold,
       source,
     });
-    return miss;
+    return miss("below-threshold");
   } catch (err) {
-    if (isMissingTable(err)) return miss;
+    if (isMissingTable(err)) return miss("unmigrated");
     throw err;
   }
 }

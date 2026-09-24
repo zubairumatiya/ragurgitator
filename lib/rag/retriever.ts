@@ -25,6 +25,8 @@
 import { stage } from "@/lib/autotuneTiming";
 import { isolated } from "@/lib/db";
 import { log } from "@/lib/log";
+import { STATEMENT_METER, statementMeter } from "@/lib/observability/statementMeter";
+import { span, type SpanHandle } from "@/lib/observability/span";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import {
   cosine,
@@ -341,6 +343,27 @@ export async function prefetchRetrieval(
   baselineK?: number,
 ): Promise<void> {
   if (questions.length === 0) return;
+  // Round trips only when O4's meter is on; the meter is process-wide, so under
+  // concurrency the delta also counts whatever else ran meanwhile.
+  const before = STATEMENT_METER ? statementMeter.snapshot().total : 0;
+  await span(
+    "rag.retrieve.prefetch",
+    { "prefetch.questions": questions.length },
+    async (s) => {
+      await prefetchInSpan(ctx, questions, depth, baselineK);
+      if (STATEMENT_METER) {
+        s.setAttr("prefetch.round_trips", statementMeter.snapshot().total - before);
+      }
+    },
+  );
+}
+
+async function prefetchInSpan(
+  ctx: RetrievalContext,
+  questions: { text: string; vector: number[] }[],
+  depth: number,
+  baselineK: number | undefined,
+): Promise<void> {
   const cfg = activeConfig();
   const texts = questions.map((q) => q.text);
   const vectors = questions.map((q) => q.vector);
@@ -574,11 +597,44 @@ export async function fuseWithOverrides(
     annFor?: AnnFor;
     queryVectorFor?: (text: string, model: string) => Promise<number[]>;
   },
-): Promise<{
+): Promise<FuseResult> {
+  return span("rag.retrieve.fuse", { "retrieve.k": k }, async (s) => {
+    const out = await fuseInSpan(text, baseVector, k, overrides, simsFor, pool, annCache, lanes);
+    s.setAttr("fuse.candidates", out.merged.length);
+    s.setAttr("fuse.ties", out.ties);
+    return out;
+  });
+}
+
+type FuseResult = {
   merged: FusedCandidate[];
   meta: Map<string, { documentId: string; position: number; text: string }>;
   cutoffs: ScreenCutoffs;
-}> {
+  // Span attributes, carried out so rag.retrieve can set them on itself.
+  // "base" plus each override model; dark = the lane produced no candidate.
+  lanes: { fired: string[]; dark: string[] };
+  paidN: number;
+  // Candidates whose merged rank equals the one before — the ordering the sort
+  // leaves to chance (docs/ci-eval-gate-plan.md found it). Counted so it shows.
+  ties: number;
+};
+
+async function fuseInSpan(
+  text: string,
+  baseVector: number[],
+  k: number,
+  overrides: ChunkOverride[],
+  simsFor: SimsFor,
+  pool: number | null | undefined,
+  annCache: Map<string, RetrievedChunk[]> | undefined,
+  lanes:
+    | {
+        poolSimsFor?: PoolSimsFor;
+        annFor?: AnnFor;
+        queryVectorFor?: (text: string, model: string) => Promise<number[]>;
+      }
+    | undefined,
+): Promise<FuseResult> {
   const cfg = activeConfig();
   const overriddenIds = overrides.map((o) => o.sourceChunkId);
   const models = [...new Set(overrides.map((o) => o.model))];
@@ -721,7 +777,20 @@ export async function fuseWithOverrides(
         : null,
     models: cutoffModels,
   };
-  return { merged, meta, cutoffs };
+  const laneNames = ["base", ...models];
+  let ties = 0;
+  for (let i = 1; i < merged.length; i++) if (merged[i].rank === merged[i - 1].rank) ties++;
+  return {
+    merged,
+    meta,
+    cutoffs,
+    lanes: {
+      fired: laneNames.filter((_, i) => lists[i].length > 0),
+      dark: laneNames.filter((_, i) => lists[i].length === 0),
+    },
+    paidN,
+    ties,
+  };
 }
 
 // Retrieve a query's top results in the active config. `baseVector` is the query
@@ -747,8 +816,20 @@ export async function retrieveWithCutoffs(
   limit?: number,
   ctx?: RetrievalContext,
 ): Promise<{ retrieved: RetrievedChunk[]; cutoffs: ScreenCutoffs }> {
+  const k = limit ?? activeConfig().topK;
+  return span("rag.retrieve", { "retrieve.k": k }, (s) =>
+    retrieveInSpan(text, baseVector, k, ctx, s),
+  );
+}
+
+async function retrieveInSpan(
+  text: string,
+  baseVector: number[],
+  k: number,
+  ctx: RetrievalContext | undefined,
+  s: SpanHandle,
+): Promise<{ retrieved: RetrievedChunk[]; cutoffs: ScreenCutoffs }> {
   const cfg = activeConfig();
-  const k = limit ?? cfg.topK;
   const overrides = ctx?.overrides ?? (await listOverrides());
   // No overrides → the original single-space ANN. Identical behaviour + cost.
   // deep is null (no fusion pools existed) and the base cutoff is simply the
@@ -757,6 +838,9 @@ export async function retrieveWithCutoffs(
     const retrieved = ctx
       ? await ctx.fullFor(text, baseVector, k)
       : await query(baseVector, k);
+    s.setAttr("retrieve.lanes.fired", retrieved.length > 0 ? "base" : "");
+    s.setAttr("retrieve.lanes.dark", retrieved.length > 0 ? "" : "base");
+    s.setAttr("retrieve.pool.size", retrieved.length);
     return {
       retrieved,
       cutoffs: {
@@ -770,7 +854,7 @@ export async function retrieveWithCutoffs(
     };
   }
 
-  const { merged, meta, cutoffs } = await fuseWithOverrides(
+  const { merged, meta, cutoffs, lanes, paidN } = await fuseWithOverrides(
     text,
     baseVector,
     k,
@@ -786,6 +870,9 @@ export async function retrieveWithCutoffs(
         }
       : undefined,
   );
+  s.setAttr("retrieve.lanes.fired", lanes.fired.join(","));
+  s.setAttr("retrieve.lanes.dark", lanes.dark.join(","));
+  s.setAttr("retrieve.pool.size", paidN);
   const top = merged.slice(0, k);
 
   // Override winners weren't in the base ANN (they were excluded) — resolve them.
