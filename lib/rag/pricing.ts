@@ -3,7 +3,6 @@
 //
 // Prices are USD per 1M tokens. An UNKNOWN model costs 0 (with a one-time warn) —
 // we never fabricate a price, so a missing entry under-counts rather than lies.
-import { log } from "@/lib/log";
 
 // The offline/interactive surfaces that spend money, for the gross-spend tally.
 export type Surface =
@@ -195,7 +194,7 @@ function warnUnknown(kind: string, model: string): void {
   const key = `${kind}:${model}`;
   if (warned.has(key)) return;
   warned.add(key);
-  log.warn("no price for model, costing it as $0", { component: "rag:pricing", kind, model });
+  console.warn(`[rag:pricing] no ${kind} price for "${model}" — costing it as $0`);
 }
 
 // Look a model up in a price table, tolerating a VERSIONED id. Providers may

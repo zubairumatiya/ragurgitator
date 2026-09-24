@@ -1184,6 +1184,8 @@ const CONSOLE_ALLOWED: Record<string, string> = {
   "lib/log.ts": "the sink itself — Vercel reads the level off the stream",
   "lib/autotuneTiming.ts":
     "sweep 9's instrument; scripts/autotune-bench.ts parses its multi-line output",
+  "lib/rag/pricing.ts":
+    "isomorphic — the Appraise client components import it, and lib/log's AsyncLocalStorage breaks the client build",
 };
 const FORBIDDEN_FIELD_WORDS = new Set(["key", "keys", "secret", "secrets", "body", "bodies", "text", "texts"]);
 const LOG_LEVEL_METHOD = /^(debug|info|warn|error)$/;
