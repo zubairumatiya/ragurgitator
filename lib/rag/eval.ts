@@ -15,6 +15,7 @@
 import type { StreamErrorEvent } from "@/lib/http/missingKey";
 import { stage } from "@/lib/autotuneTiming";
 import { log } from "@/lib/log";
+import { setAttr, span } from "@/lib/observability/span";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import {
   addDifficulty,
@@ -586,6 +587,16 @@ export async function scoreQuestions(
   shouldStop: ShouldStop = NEVER_STOP,
 ): Promise<number> {
   if (questions.length === 0) return 0;
+  return span("eval.score", { "eval.questions": questions.length }, () =>
+    scoreBatch(questions, emit, shouldStop),
+  );
+}
+
+async function scoreBatch(
+  questions: QuestionToScore[],
+  emit: Emit,
+  shouldStop: ShouldStop,
+): Promise<number> {
 
   emit({ type: "score-start", total: questions.length });
 
@@ -857,6 +868,16 @@ export async function scoreQuestions(
       ...baselineResults.filter((r): r is ResultInsert => r !== undefined),
     ]),
   );
+  // Over the live results that landed, so a cancelled batch reports what it
+  // scored: Recall@recall_k and MRR@mrr_k, each k as the Eval tab reads it.
+  if (landed.length > 0) {
+    const mrrK = effectiveK(criteria.mrr, cfg.topK);
+    const rr = (r: ResultInsert) =>
+      r.foundRank !== null && r.foundRank <= mrrK ? 1 / r.foundRank : 0;
+    setAttr("eval.scored", landed.length);
+    setAttr("eval.recall", landed.filter((r) => r.hit).length / landed.length);
+    setAttr("eval.mrr", landed.reduce((sum, r) => sum + rr(r), 0) / landed.length);
+  }
   // The count is LIVE results only — baseline rows are shadow measurements, and
   // reporting them would claim scoring work the user didn't ask for.
   return landed.length;

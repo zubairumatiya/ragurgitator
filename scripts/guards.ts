@@ -1283,6 +1283,7 @@ const SPAN_LAST_WORD = new Set([
 ]);
 const SPAN_KEY_ALLOWED: Record<string, string> = {
   "prefetch.questions": "a count — questions.length, set once per prefetch",
+  "eval.questions": "a count — questions.length, set once per scoring batch",
 };
 const SPAN_CALLS = new Set(["span", "setAttr", "addAttr"]);
 

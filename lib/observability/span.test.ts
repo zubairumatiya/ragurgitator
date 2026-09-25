@@ -46,9 +46,13 @@ test("sampler: production samples a fifth, everything else all; a parent's decis
   assert.equal(tracesSamplerFor("preview")({ inheritOrSampleWith: inherit(false) }), 0);
 });
 
-// Last: init is process-wide and cannot be undone.
+// Init is process-wide and cannot be undone, so the initialised tests run last
+// and share one transport; each reads only the span names it made.
+let tracing: ReturnType<typeof initSentryTracingInMemory> | undefined;
+const inMemory = () => (tracing ??= initSentryTracingInMemory());
+
 test("initialised: nested spans arrive parented, with their attributes", async () => {
-  const shipped = initSentryTracingInMemory();
+  const shipped = inMemory();
   await span("rag.ask", { "config.id": "c-1" }, async (s) => {
     await span("rag.retrieve", { "retrieve.k": 5 }, async (r) => {
       await span("rag.retrieve.fuse", {}, async () => {});
@@ -83,4 +87,26 @@ test("initialised: nested spans arrive parented, with their attributes", async (
   assert.equal(root.attributes["answer.tokens.in"], 120);
   assert.equal(retrieve.attributes["retrieve.k"], 5);
   assert.equal(retrieve.attributes["retrieve.lanes.fired"], "base,voyage-4-lite");
+});
+
+test("initialised: a root span starts its own trace even inside another span", async () => {
+  const shipped = inMemory();
+  shipped.length = 0;
+  await span("rag.ask", {}, async () => {
+    await span("job.slice", { "job.id": "j-1" }, async (s) => {
+      await span("eval.score", { "eval.questions": 2 }, async () => {});
+      s.setAttr("job.outcome", "finished");
+    }, { root: true });
+  });
+  assert.ok(await flushSentry());
+
+  const byName = new Map(shipped.map((sp) => [sp.name, sp]));
+  const ask = byName.get("rag.ask")!;
+  const slice = byName.get("job.slice")!;
+  const score = byName.get("eval.score")!;
+  assert.ok(slice.is_segment);
+  assert.equal(slice.parent_span_id, undefined);
+  assert.notEqual(slice.trace_id, ask.trace_id);
+  assert.equal(score.parent_span_id, slice.span_id);
+  assert.equal(slice.attributes["job.outcome"], "finished");
 });

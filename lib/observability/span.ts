@@ -30,19 +30,33 @@ type SentrySpan = NonNullable<ReturnType<typeof Sentry.getActiveSpan>>;
 // span takes its entry with it.
 const opened = new WeakMap<SentrySpan, { name: string; sums: Map<string, number> }>();
 
+// `root` starts a trace of its own instead of joining the current one — for
+// work that outlives the request it was scheduled from (a job slice runs in
+// after(), minutes past its tick's response).
 export function span<T>(
   name: string,
   attrs: Attrs,
   fn: (s: SpanHandle) => Promise<T>,
+  opts: { root?: boolean } = {},
 ): Promise<T> {
-  return Sentry.startSpan({ name, op: name, attributes: defined(attrs) }, (s) => {
-    opened.set(s, { name, sums: new Map() });
-    return fn({
-      setAttr: (key, value) => {
-        if (value !== undefined) s.setAttribute(key, value);
+  const start = () =>
+    Sentry.startSpan(
+      {
+        name,
+        op: name,
+        attributes: defined(attrs),
+        ...(opts.root ? { parentSpan: null, forceTransaction: true } : {}),
       },
-    });
-  });
+      (s) => {
+        opened.set(s, { name, sums: new Map() });
+        return fn({
+          setAttr: (key, value) => {
+            if (value !== undefined) s.setAttribute(key, value);
+          },
+        });
+      },
+    );
+  return opts.root ? Sentry.startNewTrace(start) : start();
 }
 
 // On whichever span is current — for a value known only deep inside a callee.

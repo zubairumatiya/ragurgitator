@@ -74,6 +74,7 @@ import {
   type ResolvedConfig,
 } from "@/lib/rag/activeConfig";
 import { captureException } from "@/lib/observability/sentry";
+import { setAttr, span } from "@/lib/observability/span";
 import { getConfig } from "@/lib/rag/configStore";
 
 // How long one slice may work before it must checkpoint and hand over. Under
@@ -129,8 +130,22 @@ export type SliceOutcome =
 //
 // Every line a slice logs carries its jobId: a tick has no session, so the job is
 // the only id that joins one slice's lines to the next's.
+//
+// One `job.slice` span per slice, a trace of its own: the tick answered 202 and
+// this runs in after(), so the request it came from has already ended.
 export function runSlice(jobId: string): Promise<SliceOutcome> {
-  return withLogContext({ jobId }, () => sliceOf(jobId));
+  return withLogContext({ jobId }, () =>
+    span(
+      "job.slice",
+      { "job.id": jobId },
+      async (s) => {
+        const outcome = await sliceOf(jobId);
+        s.setAttr("job.outcome", outcome);
+        return outcome;
+      },
+      { root: true },
+    ),
+  );
 }
 
 async function sliceOf(jobId: string): Promise<SliceOutcome> {
@@ -142,6 +157,7 @@ async function sliceOf(jobId: string): Promise<SliceOutcome> {
 
   const claimed = await inOwnScope(owner, () => claimJob(jobId, LEASE_SECONDS));
   if (!claimed) return "busy";
+  setAttr("job.kind", claimed.job.kind);
 
   try {
     return await advance(owner, claimed);
@@ -302,6 +318,8 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
   );
   doneUnits = result.doneUnits;
   mustFinish = mustFinish || result.mustFinish === true;
+  // Cumulative over the job, like the row's done_units — not this slice's share.
+  setAttr("job.units_done", doneUnits);
 
   // The cursor moves only now, after the work above has committed.
   const stillOurs = await inOwnScope(owner, () =>

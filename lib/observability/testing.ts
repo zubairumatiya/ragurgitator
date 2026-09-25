@@ -41,6 +41,7 @@ export function initSentryInMemory(): Record<string, unknown>[] {
 // {value, type} form. `is_segment` marks the root (what Sentry calls a segment).
 export type ShippedSpan = {
   name: string;
+  trace_id: string;
   span_id: string;
   parent_span_id?: string;
   is_segment: boolean;
