@@ -28,6 +28,7 @@
     "f6": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f6-order.ts",
     "f7": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f7-prior.ts",
     "demo:snapshot": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/demo-snapshot.ts",
+    "obs:replay": "node --import tsx scripts/obs-replay.ts",
     "demo:walk": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/demo-walk.ts",
     "demo:tuning": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/demo-tuning-configs.ts",
     "demo:warm": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/demo-warm-answers.ts",
