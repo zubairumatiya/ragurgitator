@@ -3,12 +3,17 @@
 // File and Paste-text modes submit to /api/ingest as multipart/form-data; the
 // User-library mode POSTs previously-uploaded document ids to
 // /api/ingest/library so nothing is re-uploaded. All three stream the same
-// IngestEvents into one progress UI, with a per-source result line. Uses React
-// 19's <form action={...}> pattern, which hands us a FormData directly and
-// avoids deprecated synthetic-event types.
+// IngestEvents into one progress UI, with a per-source result line.
+//
+// SUBMITTED FROM onSubmit, NOT <form action>. React 19 holds every state update
+// made inside a form action until the action's first await settles, so with
+// `action={...}` the "Ingesting…" button and the progress bar did not paint until
+// the server's first stream event — after the whole upload had been sent, with
+// the Ingest button still enabled for a second click. The same reason
+// ChatWindow's handleSubmit is an onSubmit. The component test pins this.
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { RAG_INGESTED_EVENT } from "@/app/components/DocumentList";
 import { apiFetch } from "@/lib/http/client";
 import { config } from "@/lib/config";
@@ -218,9 +223,18 @@ export function FileUpload() {
 
   const loading = status.kind === "loading";
 
+  async function handleSubmit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const el = e.currentTarget;
+    await action(new FormData(el));
+    // What React's own post-action reset used to do: clear the pasted text and
+    // the file pick once the ingest has ended, whichever way it ended.
+    el.reset();
+  }
+
   return (
     <form
-      action={action}
+      onSubmit={handleSubmit}
       className="flex flex-col gap-4 rounded-lg border border-zinc-200 dark:border-zinc-800 p-4"
     >
       <div className="flex gap-2 text-sm">

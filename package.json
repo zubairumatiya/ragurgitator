@@ -8,6 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "test": "node --import tsx --test '**/*.test.ts'",
+    "test:ui": "vitest run",
+    "e2e": "playwright test",
     "vault:check": "node --env-file=.env.local --import tsx scripts/vault-check.ts",
     "rls:check": "node --env-file=.env.local --import tsx scripts/rls-check.ts",
     "cascade:check": "node --env-file=.env.local --import tsx scripts/cascade-check.ts",
@@ -19,7 +21,7 @@
     "phase8": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/phase8.ts",
     "phase10": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/phase10.ts",
     "probe:eligibility": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/probe-eligibility.ts",
-  "f1": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f1-negatives.ts",
+    "f1": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f1-negatives.ts",
     "f2": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f2-floor.ts",
     "f3": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f3-pairs.ts",
     "f3:sweep": "node --env-file=.env.local --import ./scripts/serverOnlyShim.cjs --import tsx scripts/f3-sweep.ts",
@@ -69,15 +71,23 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "^4",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^6.1.1",
     "eslint": "^9",
     "eslint-config-next": "16.2.4",
+    "jsdom": "^30.1.1",
     "tailwindcss": "^4",
     "tsx": "^4.22.4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^5.0.1"
   },
   "packageManager": "pnpm@10.33.0+sha512.10568bb4a6afb58c9eb3630da90cc9516417abebd3fabbe6739f0ae795728da1491e9db5a544c76ad8eb7570f5c4bb3d6c637b2cb41bfdcdb47fa823c8649319",
   "engines": {

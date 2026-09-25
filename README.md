@@ -264,6 +264,8 @@ npm run itest:up       # throwaway Postgres in Docker, schema replayed into it
 npm run itest          # integration tests against it
 npm run itest:down     # destroy the container
 
+npm run test:ui        # component tests (Vitest + jsdom), hermetic
+npm run e2e            # browser tests against E2E_BASE_URL (default: the dev server)
 npm run smoke          # every route's module tree loads on a deployed host
 npm run jobs:smoke     # drive a background job end to end
 npm run demo:snapshot  # publish one config into the account guests are cloned from
@@ -323,6 +325,12 @@ it, and nothing that runs before a deploy makes one.
   that only need to parse, and the throwaway database cannot reach the live
   project. Every step runs even when an earlier one fails, so one run shows every
   problem.
+- **`e2e.yml`** — same trigger as smoke, one step further: a headless Chromium
+  walks the login wall and the guest demo on the finished preview (front door →
+  workspace → a banked answer → Evals → Add → Score pending → Auto tune), so a button wired
+  to the wrong route or a pending state that never paints fails the deploy, not
+  the next visitor. Mints one guest per run; the demo's caps can refuse a burst
+  of deploys, and the spec says so by name. Advisory, not yet required.
 - **`smoke.yml`** — triggered by Vercel's `deployment_status`, not by the push,
   so it talks to the finished preview rather than racing it. It asserts each
   route's **specific** rejection (a 401, not merely "not a 500"), which proves the
@@ -331,6 +339,23 @@ it, and nothing that runs before a deploy makes one.
   through slice, chain, checkpoint and completion against a deployed host, which
   needs live credentials and can spend money, so the dispatch form labels each
   verb by cost.
+
+## Component and browser tests
+
+Two runners on top of `npm test`, both from docs/ui-tests-plan.md:
+
+- `npm run test:ui` — Vitest + jsdom + Testing Library over the Client Components
+  a stranger meets first (the chat window, the sign-in form, the demo's front
+  door and banner) plus the upload form and the key row. `fetch`, the router and
+  the Server Actions are stubbed, so it is hermetic and runs
+  in `ci.yml`. Files are `*.test.tsx`, colocated; `npm test` owns `*.test.ts`,
+  and the two globs never overlap.
+- `npm run e2e` — Playwright, Chromium only, against a RUNNING deployment: a
+  browser that signs in needs Supabase Auth, Key Vault and the seed's banks,
+  which the itest tier's throwaway Postgres does not have. CI drives the Vercel
+  preview; locally point `E2E_BASE_URL` anywhere (default `npm run dev`'s
+  :3002). The demo spec mints a real guest, so against a dev server set
+  `E2E_SPOOF_ADDRESS=1` to stay under the per-address cap while iterating.
 
 ## Integration tests
 

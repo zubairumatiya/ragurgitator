@@ -1,0 +1,76 @@
+# THE LAYER THAT PRESSES THE BUTTONS.
+#
+# smoke.yml proves a route answers. This drives a browser through the two paths
+# a stranger can take — the login wall and the guest demo — against the same
+# finished preview, so a control wired to the wrong route, a pending state that
+# never paints, or a front door that promises what the workbench withholds is
+# found before the merge rather than by the next visitor. docs/ui-tests-plan.md.
+#
+# SAME TRIGGER AND SAME THREE CONDITIONS AS smoke.yml, for the same reasons:
+# deployment_status is the only event that carries a URL to talk to, `success`
+# skips the queued/failed notifications, `environment_url != ''` skips the
+# statuses a CLI deploy creates without one, and a fork cannot read the bypass
+# secret so its run would report Vercel's 401 wall as an app failure.
+#
+# WHAT A RUN DOES TO PRODUCTION DATA (the preview points at it, by decision):
+# mints one guest — one Supabase MAU, reaped after the demo's TTL — embeds a few
+# queries on the operator's Voyage key, and writes that guest's rows. It creates
+# no permanent account and reads no real user's rows. The per-address cap can
+# refuse a burst of deploys; the spec reports that by name (e2e/support/demo.ts).
+#
+# NOT A REQUIRED CHECK YET. It depends on Vercel finishing, on the bypass secret
+# and on the caps above; let it run advisory first, then promote (plan §5).
+name: E2E
+
+on:
+  deployment_status:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    if: >-
+      github.event.deployment_status.state == 'success' &&
+      github.event.deployment_status.environment_url != '' &&
+      github.event.pull_request.head.repo.fork != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The bypass secret lives on this environment (see smoke.yml for the
+    # silent-empty-string failure this line prevents).
+    environment: Production
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Chromium only — playwright.config.ts runs one project, and the browser
+      # download is the slowest step here, so it is not multiplied by three.
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Drive the deployment
+        env:
+          CI: "1"
+          E2E_BASE_URL: ${{ github.event.deployment_status.environment_url }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        run: npm run e2e
+
+      # The trace is the only thing that says what the browser saw when an
+      # assertion failed on a machine nobody was watching.
+      - name: Upload report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
