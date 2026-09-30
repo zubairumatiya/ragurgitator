@@ -72,6 +72,7 @@ export {
   selectProbes,
   type ProbePair,
 } from "@/lib/rag/probeReplayCore";
+import { log } from "@/lib/log";
 
 // The core restates the generator's difficulty labels rather than importing them —
 // it imports nothing, by design. The two are held in agreement by the queries below,
@@ -304,9 +305,7 @@ export async function replayPairs(
     } catch (err) {
       // One bad probe must not end the pass; the row simply stays unwritten and a
       // later top-up finds it eligible again.
-      console.warn(
-        `[rag:probe-replay] probe failed for pair ${pair.pairId}: ${(err as Error).message}`,
-      );
+      log.warn("probe failed", { component: "rag:probe-replay", pairId: pair.pairId, err });
       failed++;
       onProgress(
         probed + failed,

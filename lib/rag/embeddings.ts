@@ -8,6 +8,8 @@
 // picks the matching adapter, and batches by that provider's cap. Adapters return
 // normalized vectors, so downstream cosine reduces to a dot product.
 import { assertDemoEmbedBudget } from "@/lib/demo/budget";
+import { log } from "@/lib/log";
+import { currentSpanIs, span } from "@/lib/observability/span";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { modelSpec } from "@/lib/rag/embeddingModels";
 import { PROVIDERS, type EmbedRole } from "@/lib/rag/embeddingProviders";
@@ -19,10 +21,34 @@ import { PROVIDERS, type EmbedRole } from "@/lib/rag/embeddingProviders";
 // ingest/query time). The per-chunk "try a different model" experiment passes an
 // alternate model to embed an ad-hoc candidate pool + queries for in-memory
 // re-ranking — never the live index (see lib/rag/eval.runModelTrial).
+//
+// The `rag.embed` span: opened here for a caller with no cache in front of it
+// (always a miss), joined when embedCache.ts has already opened one — that span
+// knows how the cache resolved, this one would only know it was asked to pay.
 async function embed(
   texts: string[],
   role: EmbedRole,
   model: string = activeConfig().embeddingModel,
+): Promise<number[][]> {
+  if (currentSpanIs("rag.embed")) return embedInSpan(texts, role, model);
+  return span(
+    "rag.embed",
+    {
+      "embed.provider": modelSpec(model).provider,
+      "embed.model": model,
+      "embed.role": role,
+      "embed.count": texts.length,
+      "embed.bought": texts.length,
+      "embed.cache": "miss",
+    },
+    () => embedInSpan(texts, role, model),
+  );
+}
+
+async function embedInSpan(
+  texts: string[],
+  role: EmbedRole,
+  model: string,
 ): Promise<number[][]> {
   const spec = modelSpec(model);
   const provider = PROVIDERS[spec.provider];
@@ -34,9 +60,15 @@ async function embed(
 
   const t0 = performance.now();
   const totalBatches = Math.ceil(texts.length / provider.batchLimit);
-  console.log(
-    `[rag:embeddings] embedding ${texts.length} ${role}(s) with ${model} (${spec.provider}) in ${totalBatches} batch(es) of up to ${provider.batchLimit}`,
-  );
+  log.info("embeddings start", {
+    component: "rag:embeddings",
+    count: texts.length,
+    role,
+    model,
+    provider: spec.provider,
+    batches: totalBatches,
+    batchLimit: provider.batchLimit,
+  });
 
   const vectors: number[][] = [];
 
@@ -53,12 +85,17 @@ async function embed(
     }
     vectors.push(...out);
 
-    console.log(
-      `[rag:embeddings] batch ${batchIdx}/${totalBatches}: ${batch.length} vectors (dim=${out[0]?.length ?? "?"}) in ${Math.round(performance.now() - tBatch)}ms`,
-    );
+    log.debug("embeddings batch", {
+      component: "rag:embeddings",
+      batch: batchIdx,
+      batches: totalBatches,
+      vectors: batch.length,
+      dim: out[0]?.length,
+      ms: Math.round(performance.now() - tBatch),
+    });
   }
 
-  console.log(`[rag:embeddings] done in ${Math.round(performance.now() - t0)}ms`);
+  log.info("embeddings done", { component: "rag:embeddings", ms: Math.round(performance.now() - t0) });
   return vectors;
 }
 

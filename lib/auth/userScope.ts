@@ -39,6 +39,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import { withUserTransaction } from "@/lib/db";
+import { withLogContext } from "@/lib/log";
 
 // Mirrors SessionUser in lib/auth/dal.ts rather than importing it: dal.ts is
 // "server-only" and pulls in the Supabase client, while this module is imported
@@ -59,8 +60,15 @@ const store = new AsyncLocalStorage<RequestUser>();
 // predicate and be denied every row, which is a confusing way to learn that the
 // two identities drifted. Nesting is free — withUserTransaction reuses an
 // already-open transaction for the same user.
+//
+// The Sentry `user.id` tag is set here rather than in each entry point because
+// this is where every one of them — routes, pages, the MCP endpoint, a job slice,
+// the NDJSON producer's re-entry — first has the id in hand. The log context's
+// userId is entered here for the same reason.
 export function withUser<T>(user: RequestUser, fn: () => Promise<T>): Promise<T> {
-  return store.run(user, () => withUserTransaction(user.id, fn));
+  return withLogContext({ userId: user.id }, () =>
+    store.run(user, () => withUserTransaction(user.id, fn)),
+  );
 }
 
 // The active user for the current scope. Throws when called outside withUser,

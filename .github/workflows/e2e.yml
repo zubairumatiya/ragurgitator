@@ -74,3 +74,56 @@ jobs:
           name: playwright-report
           path: playwright-report/
           retention-days: 7
+
+  # LIGHTHOUSE ON THE SAME PREVIEW (docs/obs-3-web-vitals-plan.md). Same trigger,
+  # same three conditions and same environment as the job above, for the same
+  # reasons. Three pages — /demo, /login and one guest's eval page — each run
+  # three times, median by performance; scripts/lighthouse.ts mints the guest
+  # through e2e/support/demo.ts, so this job spends ONE mint of the per-address
+  # cap per deploy, on top of the e2e job's one. Budgets come from
+  # lighthouse-budgets.json when it exists.
+  #
+  # ADVISORY until plan Phase 3: a red here does not block anything yet.
+  lighthouse:
+    if: >-
+      github.event.deployment_status.state == 'success' &&
+      github.event.deployment_status.environment_url != '' &&
+      github.event.pull_request.head.repo.fork != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Production
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Playwright's Chromium does both jobs: it mints the guest, and
+      # Lighthouse drives it through CHROME_PATH.
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Measure the deployment
+        env:
+          E2E_BASE_URL: ${{ github.event.deployment_status.environment_url }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        run: npm run lighthouse
+
+      # Uploaded pass or fail: the scores are the point, not only the failures.
+      # The reports carry no headers (the script scrubs them).
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-report
+          path: lighthouse-report/
+          retention-days: 14

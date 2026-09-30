@@ -24,6 +24,7 @@ import { activeJobsForConfig } from "@/lib/jobs/store";
 import type { BackgroundJob } from "@/lib/jobs/types";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import { eligiblePairs } from "@/lib/rag/probeReplay";
+import { log } from "@/lib/log";
 
 export type ProbeTrigger =
   | { launched: true; job: BackgroundJob; eligible: number }
@@ -84,9 +85,7 @@ export async function triggerProbeReplay(): Promise<ProbeTrigger> {
     const job = await launchJob("probe_replay", {});
     return { launched: true, job, eligible: eligible.length };
   } catch (err) {
-    console.warn(
-      `[rag:probe-replay] trigger failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    log.warn("trigger failed", { component: "rag:probe-replay", err });
     return none(null);
   }
 }

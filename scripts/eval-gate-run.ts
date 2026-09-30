@@ -24,7 +24,15 @@ import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { assertLocal } from "../test/support/dbUrls";
-import { DEFAULT_MARGIN, annotations, compare, summaryMarkdown, type Baseline } from "./lib/evalGateCompare";
+import {
+  DEFAULT_MARGIN,
+  DEFAULT_STMT_MARGIN,
+  annotations,
+  compare,
+  summaryMarkdown,
+  type Baseline,
+  type Statements,
+} from "./lib/evalGateCompare";
 import { readVec, fixtureHash, manifestProblems, chunkKey, type Manifest, type VecRef } from "./lib/evalGateFixture";
 
 // Before the dynamic imports below, on purpose: lib/db.ts builds its pools from
@@ -33,6 +41,12 @@ for (const name of ["DATABASE_URL", "RAG_APP_DATABASE_URL"]) {
   const url = process.env[name];
   if (!url) throw new Error(`${name} is not set — run this through \`npm run eval:gate\`, not directly`);
   assertLocal(url);
+}
+// The statement budget reads a meter lib/db.ts installs at module scope, so the
+// flag must be set before that import too. scripts/eval-gate.ts sets it; a
+// count of zero from a run that forgot would pass every budget.
+if (process.env.RAG_STATEMENT_METER !== "1") {
+  throw new Error("RAG_STATEMENT_METER=1 is not set — run this through `npm run eval:gate`, not directly");
 }
 
 const FIXTURE_DIR = "test/fixtures/eval-gate";
@@ -213,6 +227,7 @@ type ScoreResult = {
   k: number;
   aggregates: { questions: number; hits: number; recall: number; mrr: number; ndcg: number; ndcgGraded: number };
   perQuestion: QuestionResult[];
+  statements: Statements;
 };
 
 async function runScore(): Promise<ScoreResult> {
@@ -223,6 +238,7 @@ async function runScore(): Promise<ScoreResult> {
   const { effectiveK, getActiveCriteria, retrievalDepth } = await import("../lib/rag/evalSettingsStore");
   const { ndcg, reciprocalRank } = await import("../lib/rag/evalMetrics");
   const { buildRetrievalContext, prefetchRetrieval, retrieveWithCutoffs } = await import("../lib/rag/retriever");
+  const { statementMeter } = await import("../lib/observability/statementMeter");
 
   const { manifest: m, blob } = readFixture();
   const admin = adminClient();
@@ -237,6 +253,10 @@ async function runScore(): Promise<ScoreResult> {
       throw new Error("the database was loaded from a different fixture — run `npm run eval:gate -- load` again");
     }
 
+    // Metered: everything the app's clients issue inside the scope. The owner
+    // lookup above and the assertion below go through the harness's own client,
+    // which has no meter, so the budget is the app's statements and nothing else.
+    statementMeter.reset();
     const results = await withUser({ id: owner.user_id, email: owner.email }, async () => {
       const cfg = await resolveConfig(owner.config_id);
       if (!cfg) throw new Error("fixture config did not resolve in user scope");
@@ -298,6 +318,7 @@ async function runScore(): Promise<ScoreResult> {
         return scored;
       });
     });
+    const statements = statementMeter.snapshot();
 
     // Asserted with the admin handle, outside the scope: RLS would hide another
     // user's rows, and the claim is about the whole database.
@@ -323,10 +344,12 @@ async function runScore(): Promise<ScoreResult> {
     console.log(`  nDCG@${k}     ${aggregates.ndcg.toFixed(4)}  (${graded.length} graded)`);
     const misses = results.filter((r) => !r.hit);
     for (const r of misses) console.log(`  miss       ${r.key}  rank ${r.rank ?? "—"}  "${r.question.slice(0, 60)}"`);
+    console.log(`  statements ${statements.total}`);
+    for (const [prefix, n] of Object.entries(statements.byPrefix).slice(0, 10)) console.log(`    ${String(n).padStart(6)}  ${prefix}`);
 
     await (fragment as unknown as { end: () => Promise<void> }).end();
     await privilegedSql.end();
-    return { fixtureHash: m.fixtureHash, scan: "exact", k, aggregates, perQuestion: results };
+    return { fixtureHash: m.fixtureHash, scan: "exact", k, aggregates, perQuestion: results, statements };
   } finally {
     await admin.end();
   }
@@ -357,6 +380,7 @@ async function baseline(): Promise<void> {
     questions: r.aggregates.questions,
     hits: r.aggregates.hits,
     perQuestion: r.perQuestion.map((q) => ({ key: q.key, question: q.question, rank: q.rank })),
+    statements: r.statements,
   };
   writeFileSync(BASELINE_FILE, JSON.stringify(b, null, 1) + "\n");
   console.log(`wrote ${BASELINE_FILE} at ${gitSha.slice(0, 10)} — commit it`);
@@ -369,6 +393,9 @@ async function gate(args: string[]): Promise<void> {
   const marginArg = flag(args, "margin") ?? process.env.EVAL_GATE_MARGIN;
   const margin = strict ? 0 : marginArg === undefined ? DEFAULT_MARGIN : Number(marginArg);
   if (!(margin >= 0 && margin < 1)) throw new Error(`--margin wants a fraction in [0, 1), got ${marginArg}`);
+  const stmtArg = flag(args, "stmt-margin") ?? process.env.EVAL_GATE_STMT_MARGIN;
+  const stmtMargin = stmtArg === undefined ? DEFAULT_STMT_MARGIN : Number(stmtArg);
+  if (!(stmtMargin >= 0)) throw new Error(`--stmt-margin wants a non-negative fraction, got ${stmtArg}`);
 
   let baselineJson: string;
   try {
@@ -378,12 +405,13 @@ async function gate(args: string[]): Promise<void> {
   }
   const b: Baseline = JSON.parse(baselineJson);
   const r = await runScore();
-  const v = compare(b, r, { margin, strict });
+  const opts = { margin, strict, stmtMargin };
+  const v = compare(b, r, opts);
 
-  const md = summaryMarkdown(b, r, v, { margin, strict });
+  const md = summaryMarkdown(b, r, v, opts);
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, md);
   // Locally there is no summary page, so the movers table goes to the console.
-  else if (v.movers.length > 0) console.log("\n" + md.slice(md.indexOf("### ")));
+  else if (v.movers.length > 0 || v.statementMovers.length > 0) console.log("\n" + md.slice(md.indexOf("### ")));
   for (const line of annotations(v)) console.log(line);
 
   const d = v.delta;
@@ -392,7 +420,7 @@ async function gate(args: string[]): Promise<void> {
     `\ngate ${v.ok ? "PASS" : "FAIL"} — vs baseline ${b.gitSha.slice(0, 10)}: ` +
       `Recall@${r.k} ${sd(d.recall, 2, true)} · MRR ${sd(d.mrr, 4)} · nDCG ${sd(d.ndcg, 4)} · ` +
       (strict ? "strict (exact match required)" : `margin ${(margin * 100).toFixed(2)}%`) +
-      ` · ${v.movers.length} question(s) moved`,
+      ` · ${v.movers.length} question(s) moved · statements ${b.statements?.total ?? "—"} → ${r.statements.total}`,
   );
   if (!v.ok) process.exitCode = 1;
 }

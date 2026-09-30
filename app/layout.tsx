@@ -1,3 +1,5 @@
+import { Analytics } from "@vercel/analytics/next";
+import { SpeedInsights } from "@vercel/speed-insights/next";
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { DemoBanner } from "@/app/components/DemoBanner";
@@ -63,6 +65,11 @@ export default function RootLayout({
             {children}
           </div>
         </div>
+        {/* Real-user page views and web vitals; both only send on a Vercel
+            deployment, so local dev and CI are untouched
+            (docs/obs-3-web-vitals-plan.md). */}
+        <Analytics />
+        <SpeedInsights />
       </body>
     </html>
   );

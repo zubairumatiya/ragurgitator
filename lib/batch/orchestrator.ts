@@ -24,6 +24,7 @@ import { adapterFor, type SubmitMeta } from "@/lib/batch/providers";
 import { handlerFor, type JobHandler } from "@/lib/batch/jobs/registry";
 import { sendCompletionEmail } from "@/lib/batch/notify";
 import type { BatchJob, BatchProvider, BatchRequest, JobKind } from "@/lib/batch/types";
+import { log } from "@/lib/log";
 
 function msg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -165,7 +166,7 @@ async function chainFrom(job: BatchJob, handler: JobHandler): Promise<void> {
       submitMeta: built.submitMeta,
     });
   } catch (e) {
-    console.warn(`[batch:orchestrator] chain from ${job.id} failed: ${msg(e)}`);
+    log.warn("chain failed", { component: "batch:orchestrator", batchJobId: job.id, err: e });
   }
 }
 
@@ -194,17 +195,17 @@ export async function pollAndApply(): Promise<BatchJob[]> {
   try {
     const swept = await failStaleSubmittingJobs();
     if (swept > 0) {
-      console.warn(`[batch:orchestrator] failed ${swept} stranded submitting job(s)`);
+      log.warn("stranded submitting jobs failed", { component: "batch:orchestrator", swept });
     }
   } catch (e) {
-    console.warn(`[batch:orchestrator] stale-submit sweep failed: ${msg(e)}`);
+    log.warn("stale-submit sweep failed", { component: "batch:orchestrator", err: e });
   }
   const active = await listActiveJobs();
   for (const job of active) {
     try {
       await advanceJob(job);
     } catch (e) {
-      console.warn(`[batch:orchestrator] advance ${job.id} failed: ${msg(e)}`);
+      log.warn("advance failed", { component: "batch:orchestrator", batchJobId: job.id, err: e });
     }
   }
   return listBatchJobs();

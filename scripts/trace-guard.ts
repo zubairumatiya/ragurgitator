@@ -8,7 +8,8 @@
 // runtime, and every route that touched the chunker 500'd in production on a
 // missing libonnxruntime.so.1.
 //
-// So this reads the artifact. Three checks, weakest to most general:
+// So this reads the artifact. Three checks, weakest to most general, plus a size
+// budget:
 //
 //   1. Deny-list — no API route trace may carry onnxruntime, sharp or the
 //      transformers dist. The exact regression fence for this bug.
@@ -18,6 +19,9 @@
 //   3. Bundled, not external — @huggingface/tokenizers must appear in no trace at
 //      all, which is what proves it is compiled into the server chunks rather
 //      than left for a trace to find at runtime.
+//   4. Size budget — per route, the traced files' bytes against
+//      trace-budgets.json. Not the 250 MB Vercel limit: a dependency dragging
+//      40 MB into every route should be noticed on the PR that adds it.
 //
 // A trace records what nft found; scripts/guards.ts sweep 5 checks the source
 // form the mistake takes. Both, because either alone leaves a door open: source
@@ -25,7 +29,9 @@
 // can be clean on the day it is checked.
 //
 //   Usage: npm run guard:trace   (after npm run build; no database, no network)
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+//   TRACE_BUDGETS_WRITE=1 npm run guard:trace rewrites trace-budgets.json at
+//   measured +15% — an explicit, committed act, never done by CI.
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 
 const ROOT = process.cwd();
@@ -191,16 +197,99 @@ function checkTokenizersBundled(traces: Trace[]) {
   }
 }
 
+// Over budget by more than this fails; under by more than STALE is a notice to
+// tighten, because a budget with that much headroom no longer notices anything.
+const BUDGETS_PATH = join(ROOT, "trace-budgets.json");
+const OVER = 0.1;
+const STALE = 0.25;
+const WRITE_HEADROOM = 0.15;
+
+type Budgets = Record<string, number>;
+
+function routeOf(tracePath: string): string {
+  return relative(TRACE_ROOT, join(ROOT, tracePath)).replace(/\.nft\.json$/, "");
+}
+
+// Caches a dev machine writes and nft finds because their paths are built from
+// process.cwd(): the tokenizer download (lib/rag/tokenizerLoader.ts) and
+// EMBED_DISK_CACHE's vectors. A fresh CI or Vercel checkout has neither, so
+// counting them would make a budget written locally ~7 MB stale in CI.
+const MACHINE_LOCAL = /^(node_modules\/\.cache|data)\//;
+
+// A file listed twice or missing from disk counts once or not at all.
+function tracedBytes(trace: Trace): number {
+  let total = 0;
+  for (const file of new Set(trace.files)) {
+    if (MACHINE_LOCAL.test(file)) continue;
+    const full = join(ROOT, file);
+    if (existsSync(full)) total += statSync(full).size;
+  }
+  return total;
+}
+
+function mb(bytes: number): string {
+  return `${(bytes / 1_000_000).toFixed(1)} MB`;
+}
+
+function checkSizeBudget(traces: Trace[]) {
+  console.log("\n4. traced bytes per route against trace-budgets.json\n");
+  const sizes = traces
+    .map((t) => ({ route: routeOf(t.path), bytes: tracedBytes(t) }))
+    .sort((a, b) => b.bytes - a.bytes || a.route.localeCompare(b.route));
+
+  // Always print the top ten: the CI log is the size dashboard.
+  for (const { route, bytes } of sizes.slice(0, 10)) {
+    console.log(`   ${mb(bytes).padStart(9)}  ${route}`);
+  }
+
+  if (process.env.TRACE_BUDGETS_WRITE === "1") {
+    const budgets: Budgets = {
+      __default: Math.ceil(sizes[0].bytes * (1 + WRITE_HEADROOM)),
+    };
+    for (const { route, bytes } of [...sizes].sort((a, b) => a.route.localeCompare(b.route))) {
+      budgets[route] = Math.ceil(bytes * (1 + WRITE_HEADROOM));
+    }
+    writeFileSync(BUDGETS_PATH, JSON.stringify(budgets, null, 2) + "\n");
+    console.log(`\n   wrote ${Object.keys(budgets).length - 1} route budget(s) at measured +15%`);
+    return;
+  }
+
+  if (!existsSync(BUDGETS_PATH)) {
+    fail("trace-budgets.json not found — TRACE_BUDGETS_WRITE=1 npm run guard:trace");
+    return;
+  }
+  const budgets = JSON.parse(readFileSync(BUDGETS_PATH, "utf8")) as Budgets;
+  let stale = 0;
+  let over = 0;
+  for (const { route, bytes } of sizes) {
+    const budget = budgets[route] ?? budgets.__default;
+    if (bytes > budget * (1 + OVER)) {
+      over++;
+      fail(`${route} — ${mb(bytes)} traced, budget ${mb(budget)} (+${(((bytes - budget) / budget) * 100).toFixed(1)}%)`);
+    } else if (route in budgets && bytes < budget * (1 - STALE)) {
+      stale++;
+      console.log(`::notice title=trace budget::${route} is ${mb(bytes)} against a ${mb(budget)} budget — tighten it`);
+    }
+  }
+  const unbudgeted = sizes.filter((s) => !(s.route in budgets)).length;
+  console.log(
+    `\n   ${sizes.length - over} of ${sizes.length} route(s) within budget +${OVER * 100}%` +
+      (unbudgeted ? `, ${unbudgeted} on __default` : "") +
+      (stale ? `, ${stale} stale` : ""),
+  );
+}
+
 const traces = readTraces();
 if (traces.length > 0) {
   checkDenyList(traces);
   checkNativeBinaries(traces);
   checkTokenizersBundled(traces);
+  checkSizeBudget(traces);
 }
 
 console.log(
   failures === 0
-    ? `\nOK — ${traces.length} traces checked; no native runtime in the Lambda, no native package traced without its binary.`
+    ? `\nOK — ${traces.length} traces checked; no native runtime in the Lambda, no native package traced without its binary, every route within its size budget.`
     : `\nFAILED — ${failures} violation(s).`,
 );
 if (failures) process.exitCode = 1;

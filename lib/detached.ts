@@ -25,11 +25,13 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 import { withUser, type RequestUser } from "@/lib/auth/userScope";
 import { runOutsideUserTransaction } from "@/lib/db";
+import { log } from "@/lib/log";
 import {
   activeConfigOrNull,
   withConfig,
   type ResolvedConfig,
 } from "@/lib/rag/activeConfig";
+import { captureException } from "@/lib/observability/sentry";
 
 type DetachedTask = { fn: () => Promise<void>; config: ResolvedConfig | null };
 type DetachedQueue = DetachedTask[];
@@ -50,7 +52,7 @@ export async function detached(fn: () => Promise<void>): Promise<void> {
   try {
     await fn();
   } catch (err) {
-    console.warn(`[detached] ${(err as Error).message}`);
+    log.warn("inline task failed", { component: "detached", err });
   }
 }
 
@@ -111,7 +113,9 @@ async function flushDetached(user: RequestUser, queue: DetachedQueue): Promise<v
             try {
               await (task.config ? withConfig(task.config, task.fn) : task.fn());
             } catch (err) {
-              console.warn(`[detached] task failed: ${(err as Error).message}`);
+              log.warn("task failed", { component: "detached", err });
+              // after() restored the request's context, so its tags are present.
+              captureException(err, { tags: { site: "detached" } });
             }
           }
         }),
@@ -122,6 +126,7 @@ async function flushDetached(user: RequestUser, queue: DetachedQueue): Promise<v
     // fail. Left unguarded it reaches Next's onTaskError, which console.errors
     // "An error occurred in a function passed to after()" — an alarming message
     // for a counter.
-    console.warn(`[detached] flush failed: ${(err as Error).message}`);
+    log.warn("flush failed", { component: "detached", err });
+    captureException(err, { tags: { site: "detached" } });
   }
 }

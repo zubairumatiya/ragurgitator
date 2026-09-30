@@ -17,6 +17,7 @@
 import { isolated, sql } from "@/lib/db";
 import { activeConfig } from "@/lib/rag/activeConfig";
 import type { CollisionFloorReport } from "@/lib/rag/semanticCacheCalibration";
+import { log } from "@/lib/log";
 
 const isMissingTable = (err: unknown): boolean =>
   (err as { code?: string }).code === "42P01";
@@ -149,7 +150,7 @@ export async function saveCollisionFloor(report: CollisionFloorReport): Promise<
     );
   } catch (err) {
     if (isMissingTable(err)) return;
-    console.warn(`[rag:collision-floor] save failed: ${(err as Error).message}`);
+    log.warn("save failed", { component: "rag:collision-floor", err });
   }
 }
 
@@ -177,7 +178,7 @@ export async function countLabeledQuestions(): Promise<number | null> {
     );
     return rows[0]?.n ?? null;
   } catch (err) {
-    console.warn(`[rag:collision-floor] labeled-question count failed: ${(err as Error).message}`);
+    log.warn("labeled-question count failed", { component: "rag:collision-floor", err });
     return null;
   }
 }

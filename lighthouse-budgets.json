@@ -1,0 +1,23 @@
+{
+  "_source": "Measured on preview run 36067697329 (2026-09-24), desktop, median of 3: scores minus 0.05, bytes and script count plus 10% rounded up. Read by scripts/lighthouse.ts; docs/obs-3-web-vitals-plan.md.",
+  "pages": {
+    "demo": {
+      "performance": 0.95,
+      "accessibility": 0.93,
+      "totalByteWeight": 401618,
+      "scriptCount": 15
+    },
+    "login": {
+      "performance": 0.95,
+      "accessibility": 0.93,
+      "totalByteWeight": 475231,
+      "scriptCount": 16
+    },
+    "guest-eval": {
+      "performance": 0.88,
+      "accessibility": 0.91,
+      "totalByteWeight": 486400,
+      "scriptCount": 19
+    }
+  }
+}

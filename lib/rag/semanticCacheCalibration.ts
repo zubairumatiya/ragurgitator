@@ -34,6 +34,7 @@ import {
   type CalibrationResult,
   type CollisionFloorResult,
 } from "@/lib/rag/semanticCacheCore";
+import { log } from "@/lib/log";
 
 // Missing table (pre-migration) → treat the read as empty. Mirrors semanticCache.
 // Typed on the row element so a bare `[]` fallback unifies with postgres.js's
@@ -95,7 +96,7 @@ async function recordEvalEmbedReuse(
       }),
     );
   } catch (err) {
-    console.warn(`[rag:savings] eval-embed-reuse record failed: ${(err as Error).message}`);
+    log.warn("eval-embed-reuse record failed", { component: "rag:savings", err });
   }
 }
 
@@ -556,7 +557,7 @@ async function runJudgePass(opts: {
     try {
       out = await judgeOne(opts.model, row.new_query, row.matched_query, row.served_answer);
     } catch (err) {
-      console.warn(`[rag:semantic-cache] judge call failed: ${(err as Error).message}`);
+      log.warn("judge call failed", { component: "rag:semantic-cache", err });
       skipped++;
       continue;
     }

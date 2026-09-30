@@ -53,11 +53,16 @@ import postgres from "postgres";
 
 import { AUTOTUNE_TIMING, countStatement } from "./autotuneTiming";
 import { sslFor } from "./dbSsl";
+import { STATEMENT_METER, recordStatement } from "./observability/statementMeter";
 
 // Seconds a free connection may sit in the pool before it is closed. Short
 // enough that an idle instance stops hoarding a share of the database's 60
 // connections, long enough that ordinary click-to-click browsing reuses one.
 const IDLE_TIMEOUT_S = 30;
+
+// The CI statement budget (docs/obs-4-ci-budgets-plan.md §1.1). Off the flag
+// this is postgres.js's own default.
+const meterHook = STATEMENT_METER ? (_c: number, query: string) => recordStatement(query) : false;
 
 type Sql = ReturnType<typeof postgres>;
 
@@ -91,6 +96,7 @@ export const privilegedSql =
     // request path, so it does not need request-shaped headroom.
     max: 2,
     idle_timeout: IDLE_TIMEOUT_S,
+    debug: meterHook,
   });
 
 const appPool =
@@ -100,7 +106,13 @@ const appPool =
     ssl: sslFor(appUrl),
     // Phase-1 instrument (docs/autotune-press-latency-plan.md §2): a statement
     // count per stage. Off the flag this is postgres.js's own default.
-    debug: AUTOTUNE_TIMING ? (_c, query) => countStatement(query) : false,
+    debug:
+      AUTOTUNE_TIMING || STATEMENT_METER
+        ? (_c, query) => {
+            if (AUTOTUNE_TIMING) countStatement(query);
+            if (STATEMENT_METER) recordStatement(query);
+          }
+        : false,
     // SIZED FOR SERVERLESS, where this number is per INSTANCE and Vercel runs
     // several at once. The shared ceiling is the database's 60 connections (~44
     // free), and because a scope pins one connection for its whole life, that

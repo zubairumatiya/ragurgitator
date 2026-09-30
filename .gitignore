@@ -64,3 +64,5 @@ next-env.d.ts
 
 # semantic cache gate: a scoring run's output (the committed baseline lives in test/fixtures/cache-gate/)
 /cache-gate-results.json
+# O3 Lighthouse run output (scripts/lighthouse.ts); CI uploads it as an artifact
+/lighthouse-report/

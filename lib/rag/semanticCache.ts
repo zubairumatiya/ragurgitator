@@ -17,6 +17,8 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { config } from "@/lib/config";
 import { isolated, sql, toJsonb } from "@/lib/db";
 import { detached } from "@/lib/detached";
+import { log } from "@/lib/log";
+import { span, type SpanHandle } from "@/lib/observability/span";
 import { activeConfig, type ResolvedConfig } from "@/lib/rag/activeConfig";
 import { cacheKey, DigestMemo } from "@/lib/rag/digestMemo";
 import { getBatchSavings } from "@/lib/rag/batchStore";
@@ -28,7 +30,8 @@ import { costLlm, estimateTokens, estimateTokensAll } from "@/lib/rag/pricing";
 import { recordSaving } from "@/lib/rag/savingsStore";
 import {
   answerFingerprint,
-  entityGuardPasses,
+  entityOrderPasses,
+  entityTokensMatch,
   isHit,
   spaceOf,
 } from "@/lib/rag/semanticCacheCore";
@@ -63,18 +66,25 @@ export type ShadowOrigin = "traffic" | "probe";
 // and the caller embeds for retrieval itself.
 //
 // A hit carries neither: it skips retrieval AND generation.
+// How a lookup resolved, finer than hit/miss — the `cache.tier` span attribute
+// (docs/obs-5-pipeline-spans-plan.md, DECISIONS).
+export type CacheTier =
+  | "served"
+  | "would-hit"
+  | "guard-blocked"
+  | "below-threshold"
+  | "no-candidates"
+  | "unmigrated";
+
 export type CacheProbe =
-  | { hit: true; result: CachedResult; sim: number; matchedQuery: string }
-  | { hit: false; key: CacheKey; queryVector: number[] | null };
+  | { hit: true; result: CachedResult; sim: number; matchedQuery: string; tier: "served" }
+  | { hit: false; key: CacheKey; queryVector: number[] | null; tier: CacheTier };
 
 const isMissingTable = (err: unknown): boolean =>
   (err as { code?: string }).code === "42P01";
 
 const sha256 = (text: string): string =>
   createHash("sha256").update(text, "utf8").digest("hex");
-
-const truncate = (s: string, n = 80): string =>
-  s.length <= n ? s : `${s.slice(0, n - 1)}…`;
 
 // A signature of WHICH DOCUMENTS this config can answer from: the set of document
 // ids with chunks ingested under it. Adding or removing a document invalidates
@@ -160,10 +170,11 @@ export async function currentFingerprint(cfg: ResolvedConfig): Promise<string> {
 export function resolveKeyModel(override: string | null): string {
   if (override !== null && EMBEDDING_MODELS[override]) return override;
   if (override !== null) {
-    console.warn(
-      `[rag:semantic-cache] unknown cache-key model "${override}" — ` +
-        `falling back to ${config.semanticCache.keyModel}.`,
-    );
+    log.warn("unknown cache model, falling back", {
+      component: "rag:semantic-cache",
+      model: override,
+      fallbackModel: config.semanticCache.keyModel,
+    });
   }
   return config.semanticCache.keyModel;
 }
@@ -332,6 +343,19 @@ export async function semanticCacheLookup(
     shadow?: { floor?: number; origin?: ShadowOrigin };
   },
 ): Promise<CacheProbe> {
+  return span("rag.cache.probe", {}, (s) =>
+    probeInSpan(question, serve, override, keyModelOverride, shadow, s),
+  );
+}
+
+async function probeInSpan(
+  question: string,
+  serve: boolean,
+  override: number | null,
+  keyModelOverride: string | null,
+  shadow: { floor?: number; origin?: ShadowOrigin } | undefined,
+  s: SpanHandle,
+): Promise<CacheProbe> {
   const cfg = activeConfig();
   const keyModel = resolveKeyModel(keyModelOverride);
   // Embed under the key model first — the lookup can't proceed without it, so a
@@ -341,7 +365,10 @@ export async function semanticCacheLookup(
   const vector = await embedQueryCached(question, keyModel);
   const key: CacheKey = { model: keyModel, vector };
   const queryVector = keyModel === cfg.embeddingModel ? vector : null;
-  const miss = { hit: false, key, queryVector } as const;
+  const miss = (tier: CacheTier): CacheProbe => {
+    s.setAttr("cache.tier", tier);
+    return { hit: false, key, queryVector, tier };
+  };
 
   try {
     const fingerprint = await currentFingerprint(cfg);
@@ -380,21 +407,34 @@ export async function semanticCacheLookup(
     const match = row
       ? { value: { text: row.query_text, result: row.result }, sim: Number(row.sim) }
       : null;
-    if (match === null) return miss;
+    if (match === null) return miss("no-candidates");
     // Keyed by the KEY model's space, not the retrieval model's: the cosine
     // being thresholded was computed in the key model's space, and scores aren't
     // comparable across spaces. `source` rides along into the logs — when a hit
     // looks wrong, the first question is always which layer set the floor it
     // cleared.
     const { threshold, source } = await resolveThreshold(keyModel, override);
+    s.setAttr("cache.sim", match.sim);
+    s.setAttr("cache.threshold", threshold);
+    s.setAttr("cache.threshold.source", source);
 
     // Entity/number guard (docs/semantic-cache-key-model-plan.md, Phase 0): a
     // match that disagrees with the question on a numeral, acronym or quoted
     // span is refused NO MATTER how high its cosine, because that's precisely
     // where cosine can't tell "2023 revenue" from "2024 revenue". Evaluated
     // before the hit decision, and recorded either way — see below.
-    const guardBlocked =
-      config.semanticCache.entityGuard.enabled && !entityGuardPasses(question, match.value.text);
+    //
+    // The two halves are asked separately only so the span can say WHICH blocked;
+    // together they are exactly entityGuardPasses.
+    const guard = !config.semanticCache.entityGuard.enabled
+      ? "off"
+      : !entityTokensMatch(question, match.value.text)
+        ? "blocked-entity"
+        : !entityOrderPasses(question, match.value.text)
+          ? "blocked-reversed"
+          : "pass";
+    const guardBlocked = guard === "blocked-entity" || guard === "blocked-reversed";
+    s.setAttr("cache.entity_guard", guard);
 
     // Shadow-log the nearest match for threshold calibration. Recorded whenever it
     // clears the low shadowLogFloor, INDEPENDENT of the serving threshold and the
@@ -437,21 +477,23 @@ export async function semanticCacheLookup(
     // the ordinary miss log below — the guard flag still rides into the shadow
     // row above, so a later sweep at a lower τ can still see it was blocked.
     if (guardBlocked && isHit(match.sim, threshold)) {
-      console.log(
-        `[rag:semantic-cache] guard-blocked sim=${match.sim.toFixed(4)} ≥ ${threshold} (${source}) — ` +
-          `entity/number mismatch, reporting a miss. new="${truncate(question)}" ` +
-          `matched="${truncate(match.value.text)}"`,
-      );
-      return miss;
+      log.debug("cache guard-blocked", {
+        component: "rag:semantic-cache",
+        sim: match.sim,
+        threshold,
+        source,
+      });
+      return miss("guard-blocked");
     }
 
     if (isHit(match.sim, threshold)) {
       if (serve) {
-        console.log(
-          `[rag:semantic-cache] HIT sim=${match.sim.toFixed(4)} ≥ ${threshold} (${source}) — ` +
-            `served cached answer, skipped retrieval. new="${truncate(question)}" ` +
-            `matched="${truncate(match.value.text)}"`,
-        );
+        log.debug("cache hit served", {
+          component: "rag:semantic-cache",
+          sim: match.sim,
+          threshold,
+          source,
+        });
         // Deferred telemetry; a failure must not fail the answer, and the caller must not
         // wait for it. These two are the reason lib/detached.ts exists: a served hit
         // returns straight out of ask() and /api/chat does no further database work, so a
@@ -466,23 +508,35 @@ export async function semanticCacheLookup(
           bumpHit(userId, keyModel, cfg.llmModel, fingerprint, match.value.text),
         );
         await detached(() => recordSemanticSaving(match.value.result, question));
-        return { hit: true, result: match.value.result, sim: match.sim, matchedQuery: match.value.text };
+        s.setAttr("cache.tier", "served");
+        return {
+          hit: true,
+          result: match.value.result,
+          sim: match.sim,
+          matchedQuery: match.value.text,
+          tier: "served",
+        };
       }
       // Serving is off (Settings → Savings): shadow-log the would-be hit for
       // threshold validation, then report a miss so a fresh answer is computed.
-      console.log(
-        `[rag:semantic-cache] would-hit sim=${match.sim.toFixed(4)} ≥ ${threshold} (${source}) but ` +
-          `serving is OFF — recomputing. new="${truncate(question)}" matched="${truncate(match.value.text)}"`,
-      );
-      return miss;
+      log.debug("cache would-hit, serving off", {
+        component: "rag:semantic-cache",
+        sim: match.sim,
+        threshold,
+        source,
+      });
+      return miss("would-hit");
     }
 
-    console.log(
-      `[rag:semantic-cache] miss (nearest sim=${match.sim.toFixed(4)} < ${threshold} (${source})) for "${truncate(question)}"`,
-    );
-    return miss;
+    log.debug("cache miss", {
+      component: "rag:semantic-cache",
+      sim: match.sim,
+      threshold,
+      source,
+    });
+    return miss("below-threshold");
   } catch (err) {
-    if (isMissingTable(err)) return miss;
+    if (isMissingTable(err)) return miss("unmigrated");
     throw err;
   }
 }
@@ -571,7 +625,7 @@ async function recordSemanticSaving(result: CachedResult, question: string): Pro
     await recordSaving("semantic_cache", saved, inTokens + outTokens);
   } catch (err) {
     // Telemetry only — swallow so a savings-record failure never breaks a hit.
-    console.warn(`[rag:semantic-cache] savings record failed: ${(err as Error).message}`);
+    log.warn("savings record failed", { component: "rag:semantic-cache", err });
   }
 }
 
@@ -633,11 +687,11 @@ async function recordShadow(
       if (isMissingTable(err)) return;
       if ((err as { code?: string }).code === "42703") continue;
       // Telemetry only — swallow so a shadow-log failure never breaks a lookup.
-      console.warn(`[rag:semantic-cache] shadow log failed: ${(err as Error).message}`);
+      log.warn("shadow log failed", { component: "rag:semantic-cache", err });
       return;
     }
   }
-  console.warn("[rag:semantic-cache] shadow log failed: no insert shape matched the table");
+  log.warn("shadow log failed, no insert shape matched the table", { component: "rag:semantic-cache" });
 }
 
 // Matches on the FULL key, llm_model included: the same question banked under
@@ -663,7 +717,7 @@ async function bumpHit(
   } catch (err) {
     if (isMissingTable(err)) return;
     // Telemetry only — swallow so a bump failure never breaks a served answer.
-    console.warn(`[rag:semantic-cache] hit-count bump failed: ${(err as Error).message}`);
+    log.warn("hit-count bump failed", { component: "rag:semantic-cache", err });
   }
 }
 
@@ -799,9 +853,7 @@ export async function backfillKeyModel(
         // provider key fails every row and is obvious from `failed`, while a
         // single bad input shouldn't cost the whole run.
         out.failed += 1;
-        console.warn(
-          `[rag:semantic-cache] backfill embed failed under ${keyModel}: ${(err as Error).message}`,
-        );
+        log.warn("backfill embed failed", { component: "rag:semantic-cache", model: keyModel, err });
         continue;
       }
       // config_id is carried from the SOURCE row, not taken from the running

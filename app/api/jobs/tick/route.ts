@@ -18,6 +18,7 @@ import { withJobSecret } from "@/lib/http/jobSecret";
 import { demoEnabled } from "@/lib/demo/config";
 import { runDemoHousekeeping } from "@/lib/demo/housekeeping";
 import { runSlice, sweepStalledJobsAcrossUsers } from "@/lib/jobs/runner";
+import { log } from "@/lib/log";
 
 // Vercel kills a function at this many seconds (Hobby's ceiling; Pro allows more).
 // JOBS_SLICE_BUDGET_MS in lib/jobs/runner.ts must stay comfortably under it — the
@@ -37,7 +38,7 @@ export async function POST(request: Request) {
       try {
         await runSlice(jobId);
       } catch (e) {
-        console.warn(`[jobs] tick for ${jobId} threw: ${String(e)}`);
+        log.warn("tick threw", { component: "jobs", jobId, err: e });
       }
     });
     return Response.json({ accepted: true, jobId }, { status: 202 });
@@ -62,7 +63,7 @@ export async function GET(request: Request) {
     // sweep that is this route's actual job.
     const demo = demoEnabled()
       ? await runDemoHousekeeping().catch((e) => {
-          console.warn(`[demo] housekeeping failed: ${String(e)}`);
+          log.warn("housekeeping failed", { component: "demo", err: e });
           return null;
         })
       : null;

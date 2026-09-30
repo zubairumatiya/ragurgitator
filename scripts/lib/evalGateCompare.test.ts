@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { annotations, compare, summaryMarkdown, type Baseline, type QuestionRank, type Run } from "./evalGateCompare";
+import { annotations, compare, summaryMarkdown, type Baseline, type QuestionRank, type Run, type Statements } from "./evalGateCompare";
 
 const HASH = "f".repeat(64);
 const K = 5;
@@ -24,12 +24,15 @@ function aggregates(qs: QuestionRank[]) {
   return { questions: qs.length, hits, recall: hits / qs.length, mrr, ndcg: mrr };
 }
 
-function baseline(qs = ranks()): Baseline {
-  return { fixtureHash: HASH, gitSha: "abc1234", scoredAt: "2026-09-23T00:00:00.000Z", k: K, ...aggregates(qs), perQuestion: qs };
+const STMTS: Statements = { total: 1000, byPrefix: { "select chunks": 600, "select embedding_cache": 300, begin: 100 } };
+
+// null = a baseline written before the statement budget existed.
+function baseline(qs = ranks(), statements: Statements | null = STMTS): Baseline {
+  return { fixtureHash: HASH, gitSha: "abc1234", scoredAt: "2026-09-23T00:00:00.000Z", k: K, ...aggregates(qs), perQuestion: qs, statements: statements ?? undefined };
 }
 
-function run(qs = ranks(), fixtureHash = HASH): Run {
-  return { fixtureHash, k: K, aggregates: aggregates(qs), perQuestion: qs };
+function run(qs = ranks(), fixtureHash = HASH, statements: Statements = STMTS): Run {
+  return { fixtureHash, k: K, aggregates: aggregates(qs), perQuestion: qs, statements };
 }
 
 const loose = { margin: 0.005, strict: false };
@@ -100,6 +103,45 @@ describe("compare", () => {
   });
 });
 
+describe("compare — statement budget", () => {
+  const grown: Statements = { total: 1100, byPrefix: { "select chunks": 650, "select embedding_cache": 350, begin: 100 } };
+
+  it("fails past the margin and names the prefixes that grew, largest first", () => {
+    const v = compare(baseline(), run(ranks(), HASH, grown), loose);
+    assert.equal(v.ok, false);
+    assert.match(v.errors[0], /statement budget exceeded: 1000 → 1100 \(\+10\.0%\).*grew: select chunks 600→650, select embedding_cache 300→350/);
+    assert.deepEqual(
+      v.statementMovers.map((m) => m.prefix),
+      ["select chunks", "select embedding_cache"],
+    );
+  });
+
+  it("growth inside the margin passes", () => {
+    const small: Statements = { total: 1015, byPrefix: { ...STMTS.byPrefix, "select chunks": 615 } };
+    assert.equal(compare(baseline(), run(ranks(), HASH, small), loose).ok, true);
+    assert.equal(compare(baseline(), run(ranks(), HASH, grown), { ...loose, stmtMargin: 0.2 }).ok, true);
+  });
+
+  it("a drop passes and asks for a refresh", () => {
+    const fewer: Statements = { total: 900, byPrefix: { ...STMTS.byPrefix, begin: 0 } };
+    const v = compare(baseline(), run(ranks(), HASH, fewer), loose);
+    assert.equal(v.ok, true);
+    assert.match(v.notices[0], /statements fell 1000 → 900/);
+  });
+
+  it("strict demands the exact count, in either direction", () => {
+    const fewer: Statements = { total: 999, byPrefix: { ...STMTS.byPrefix, begin: 99 } };
+    assert.match(compare(baseline(), run(ranks(), HASH, fewer), strict).errors[0], /baseline stale — scoring issued 999 statements/);
+    assert.equal(compare(baseline(), run(), strict).ok, true);
+  });
+
+  it("a baseline without a count warns instead of guessing", () => {
+    const v = compare(baseline(ranks(), null), run(), loose);
+    assert.equal(v.ok, true);
+    assert.match(v.warnings[0], /no statement count/);
+  });
+});
+
 describe("summaryMarkdown", () => {
   it("carries the numbers, the margin and the movers table", () => {
     const b = baseline();
@@ -109,6 +151,14 @@ describe("summaryMarkdown", () => {
     assert.match(md, /\| Recall@5 \| 75\.00% \| 50\.00% \| -25\.00% \|/);
     assert.match(md, /Margin 0\.50%/);
     assert.match(md, /\| `b\.md#3` \| what is b \| 1 \| 7 \|/);
+    assert.match(md, /\| statements \| 1000 \| 1000 \| 0 \|/);
+  });
+
+  it("tables the statement prefixes that changed", () => {
+    const b = baseline();
+    const r = run(ranks(), HASH, { total: 1100, byPrefix: { ...STMTS.byPrefix, "select chunks": 700 } });
+    const md = summaryMarkdown(b, r, compare(b, r, loose), loose);
+    assert.match(md, /\| `select chunks` \| 600 \| 700 \| \+100 \|/);
   });
 
   it("says so when nothing moved", () => {

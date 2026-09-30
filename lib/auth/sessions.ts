@@ -12,12 +12,14 @@
 // ago.
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { log } from "@/lib/log";
+
 export async function revokeOtherSessions(supabase: SupabaseClient): Promise<void> {
   const { error } = await supabase.auth.signOut({ scope: "others" });
   // Reported, not thrown. The password IS already changed by the time this runs,
   // so failing the action here would tell the user their change did not happen
   // when it did — and send them to retry with a password that is now the old one.
   if (error) {
-    console.error("failed to revoke other sessions after a password change", error);
+    log.error("failed to revoke other sessions after a password change", { component: "auth", err: error });
   }
 }

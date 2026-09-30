@@ -47,6 +47,8 @@ import { sameVectorSpace } from "../lib/rag/embeddingModels";
 import { retrievalStateFingerprint } from "../lib/rag/overrideStore";
 import { withDetachedQueue } from "../lib/detached";
 import { CONFIG_ID, inScope, loadOwner } from "./lib/followup";
+import { flushSentry } from "../lib/observability/sentry";
+import { initSentryTracingInMemory } from "../lib/observability/testing";
 
 const raw = postgres(process.env.DATABASE_URL!, {
   prepare: false,
@@ -58,6 +60,10 @@ const raw = postgres(process.env.DATABASE_URL!, {
 // deliberately: a per-question latency measured alone is not the latency a
 // re-score sees, because four workers contend for the same connection pool.
 const CONCURRENCY = Number(process.env.TIMING_CONCURRENCY ?? 4);
+// TIMING_SPANS=1 records every rag.* span at 100% into memory, so the wall
+// includes what tracing costs when it is on (docs/obs-5-pipeline-spans-plan.md
+// V-latency). Unset, the spans are the SDK's no-op path.
+const shipped = process.env.TIMING_SPANS === "1" ? initSentryTracingInMemory() : null;
 const SAMPLE = Number(process.env.TIMING_SAMPLE ?? 60);
 
 const ms = (n: number) => `${n.toFixed(1)} ms`;
@@ -220,6 +226,10 @@ async function main() {
     }),
   );
   await raw.end();
+  if (shipped) {
+    await flushSentry();
+    console.log(`spans recorded     ${shipped.length}`);
+  }
 }
 
 main().catch((err) => {

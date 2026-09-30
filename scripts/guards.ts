@@ -24,6 +24,8 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
+import ts from "typescript";
+
 const ROOT = process.cwd();
 
 let failures = 0;
@@ -1046,7 +1048,10 @@ function sweepAutotuneTiming() {
   }
 
   const db = read(join(ROOT, "lib/db.ts"));
-  if (!db.includes("debug: AUTOTUNE_TIMING ? (_c, query) => countStatement(query) : false")) {
+  // The hook is shared with the CI statement meter (docs/obs-4-ci-budgets-plan.md
+  // §1.1), so what is held is the call, not the line: countStatement is reached
+  // exactly once, and only behind the literal flag.
+  if ((db.match(/countStatement\(/g) ?? []).length !== 1 || !db.includes("if (AUTOTUNE_TIMING) countStatement(query);")) {
     fail(
       "lib/db.ts — the app pool's debug hook is not gated on AUTOTUNE_TIMING",
     );
@@ -1130,6 +1135,252 @@ function sweepRetrievalRecorder() {
   );
 }
 
+// 11. Sentry is reached through one door
+//
+// docs/obs-1-sentry-plan.md §4: app code imports lib/observability/sentry, never
+// @sentry/* — so the vendor can be swapped in one file, the tests install their
+// transport through initSentry, and the dataCollection switch-off (sentry.base.config.ts)
+// cannot be bypassed by a second Sentry.init somewhere in lib/.
+const SENTRY_IMPORT = /(?:from\s+|import\s*\(\s*|require\s*\(\s*)["']@sentry\//;
+const SENTRY_ALLOWED = (path: string) =>
+  path.startsWith("lib/observability/") ||
+  /^instrumentation(?:-client)?\.ts$/.test(path) ||
+  /^sentry\.[\w-]+\.config\.ts$/.test(path) ||
+  path === "next.config.ts";
+
+function sweepSentryImports() {
+  console.log("\n11. @sentry/ is imported only behind lib/observability\n");
+  const files = walk(
+    ROOT,
+    (f) => /\.(?:ts|tsx|mts|cts|js|mjs)$/.test(f) && !f.includes("/docs/"),
+  );
+  let allowed = 0;
+  for (const file of files) {
+    const path = rel(file);
+    if (!SENTRY_IMPORT.test(codeOnly(read(file)))) continue;
+    if (SENTRY_ALLOWED(path)) {
+      allowed++;
+      continue;
+    }
+    fail(`${path} — imports @sentry/ directly; use @/lib/observability/sentry`);
+  }
+  // And through that door, nothing writes ids onto a Sentry scope. On Vercel the
+  // isolation scope is shared between requests, so a scope tag is another
+  // request's tag (docs/obs-1-sentry-plan.md, Phase 4 follow-up). Request ids
+  // travel as explicit tags read from lib/log's context at capture time instead.
+  let scopeWrites = 0;
+  for (const file of files) {
+    const path = rel(file);
+    if (!SENTRY_ALLOWED(path) || /\.test\.tsx?$/.test(path)) continue;
+    const code = codeOnly(read(file));
+    const m = code.match(SCOPE_WRITE);
+    if (m) fail(`${path} — ${m[0].trim()} writes to a Sentry scope; pass tags to captureException`);
+    scopeWrites++;
+  }
+  console.log(`   ${allowed} allowed importer(s), ${scopeWrites} checked for scope writes, ${files.length} files swept`);
+}
+// A getter-based write lands on a scope that outlives the request; a write inside
+// a withScope callback is scoped to that one capture and is fine.
+const SCOPE_WRITE =
+  /\b(?:get(?:Isolation|Current|Global)Scope\(\)|Sentry)\s*\.\s*set(?:Tag|Tags|User|Extra|Extras|Context)\s*\(/;
+
+// 12. Server code logs through lib/log, and never logs a secret
+//
+// docs/obs-2-structured-logging-plan.md: one JSON line per event with the
+// request's ids stamped on it, so a raw console.* in lib/ or app/ is a line that
+// joins nothing. Read with the TS parser, not a regex, so a console.* in a
+// comment or a string is not a hit. Client components (a "use client"
+// directive, which may sit below a header comment) have no request context and
+// keep console.*; tests are not shipped.
+//
+// The field check is §1's "never log a provider key, a request body, or a
+// document's text": every property name in a log.*() fields literal, split on
+// camelCase, must not contain key/secret/body/text. The fields argument must BE
+// a literal (spreads are read through) — a variable is a list nobody can check.
+const CONSOLE_ALLOWED: Record<string, string> = {
+  "lib/log.ts": "the sink itself — Vercel reads the level off the stream",
+  "lib/autotuneTiming.ts":
+    "sweep 9's instrument; scripts/autotune-bench.ts parses its multi-line output",
+  "lib/rag/pricing.ts":
+    "isomorphic — the Appraise client components import it, and lib/log's AsyncLocalStorage breaks the client build",
+};
+const FORBIDDEN_FIELD_WORDS = new Set(["key", "keys", "secret", "secrets", "body", "bodies", "text", "texts"]);
+const LOG_LEVEL_METHOD = /^(debug|info|warn|error)$/;
+
+function fieldWords(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[\s_-]+/)
+    .map((w) => w.toLowerCase());
+}
+
+function sweepLogging() {
+  console.log("\n12. server code logs through lib/log, and never a key, body or text\n");
+  const files = [
+    ...walk(join(ROOT, "lib"), (f) => /\.tsx?$/.test(f)),
+    ...walk(join(ROOT, "app"), (f) => /\.tsx?$/.test(f)),
+  ];
+  let logCalls = 0;
+  let clientFiles = 0;
+  for (const file of files) {
+    const path = rel(file);
+    const text = read(file);
+    const sf = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
+    const first = sf.statements[0];
+    const isClient =
+      !!first &&
+      ts.isExpressionStatement(first) &&
+      ts.isStringLiteral(first.expression) &&
+      first.expression.text === "use client";
+    if (isClient) clientFiles++;
+    const skipConsole = isClient || /\.test\.tsx?$/.test(path) || path in CONSOLE_ALLOWED;
+    const at = (n: ts.Node) => `${path}:${sf.getLineAndCharacterOfPosition(n.getStart()).line + 1}`;
+
+    const checkNames = (node: ts.Node, call: ts.Node) => {
+      const visit = (n: ts.Node) => {
+        if (ts.isObjectLiteralExpression(n)) {
+          for (const prop of n.properties) {
+            if (!prop.name) continue;
+            const name = prop.name.getText(sf).replace(/^["']|["']$/g, "");
+            if (fieldWords(name).some((w) => FORBIDDEN_FIELD_WORDS.has(w))) {
+              fail(`${at(call)} — log field \`${name}\`: never log a key, secret, body or text`);
+            }
+          }
+        }
+        ts.forEachChild(n, visit);
+      };
+      visit(node);
+    };
+
+    const visit = (n: ts.Node) => {
+      if (
+        ts.isCallExpression(n) &&
+        ts.isPropertyAccessExpression(n.expression) &&
+        ts.isIdentifier(n.expression.expression)
+      ) {
+        const owner = n.expression.expression.text;
+        const method = n.expression.name.text;
+        if (owner === "console" && !skipConsole) {
+          fail(`${at(n)} — console.${method}; use log.* from @/lib/log`);
+        }
+        if (owner === "log" && LOG_LEVEL_METHOD.test(method)) {
+          logCalls++;
+          const fields = n.arguments[1];
+          if (fields && !ts.isObjectLiteralExpression(fields)) {
+            fail(`${at(n)} — log.${method} fields must be an object literal the sweep can read`);
+          } else if (fields) {
+            checkNames(fields, n);
+          }
+        }
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+  }
+  console.log(
+    `   ${logCalls} log.* call(s) checked, ${Object.keys(CONSOLE_ALLOWED).length} console allowlisted, ${clientFiles} client file(s) exempt`,
+  );
+}
+
+// 13. Span attributes are ids, numbers and enums — never content, never a key
+//
+// docs/obs-5-pipeline-spans-plan.md §1: a span ships to a third party at 20% of
+// production requests, so a question, an answer, a chunk or a key on one is a
+// leak with a sampling rate. Every span()/setAttr()/addAttr() in lib/ and app/ is
+// read with the TS parser. Keys must be string literals (span()'s attributes an
+// object literal) so the sweep can read them. A key fails when any word of it is
+// key/secret/text, or when its LAST word names content (question, answer, query,
+// prompt, content, chunk) — `answer.tokens.in` is a count about an answer,
+// `question.text` is the question. A value fails when it is read straight off a
+// name like that (`q.question`, `chunkText`); `.length` of one is fine.
+const SPAN_ANY_WORD = new Set(["key", "keys", "secret", "secrets", "text", "texts"]);
+const SPAN_LAST_WORD = new Set([
+  "question", "questions", "answer", "answers", "query", "queries",
+  "prompt", "prompts", "content", "contents", "chunk", "chunks",
+]);
+const SPAN_KEY_ALLOWED: Record<string, string> = {
+  "prefetch.questions": "a count — questions.length, set once per prefetch",
+  "eval.questions": "a count — questions.length, set once per scoring batch",
+};
+const SPAN_CALLS = new Set(["span", "setAttr", "addAttr"]);
+
+function spanKeyWords(key: string): string[] {
+  return key.split(".").flatMap(fieldWords);
+}
+
+function sweepSpanAttributes() {
+  console.log("\n13. span attributes carry no question, answer, chunk text or key\n");
+  const files = [
+    ...walk(join(ROOT, "lib"), (f) => /\.tsx?$/.test(f)),
+    ...walk(join(ROOT, "app"), (f) => /\.tsx?$/.test(f)),
+  ].filter((f) => !/\.test\.tsx?$/.test(f) && rel(f) !== "lib/observability/span.ts");
+  let keys = 0;
+  for (const file of files) {
+    const path = rel(file);
+    const text = read(file);
+    if (!/\b(?:span|setAttr|addAttr)\(/.test(text)) continue;
+    const sf = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
+    const at = (n: ts.Node) => `${path}:${sf.getLineAndCharacterOfPosition(n.getStart()).line + 1}`;
+
+    const checkKey = (key: string, call: ts.Node) => {
+      keys++;
+      if (key in SPAN_KEY_ALLOWED) return;
+      const words = spanKeyWords(key);
+      if (words.some((w) => SPAN_ANY_WORD.has(w)) || SPAN_LAST_WORD.has(words[words.length - 1])) {
+        fail(`${at(call)} — span attribute \`${key}\`: ids, numbers and enums only, never content or a key`);
+      }
+    };
+    const checkValue = (value: ts.Expression, call: ts.Node) => {
+      const name = ts.isIdentifier(value)
+        ? value.text
+        : ts.isPropertyAccessExpression(value)
+          ? value.name.text
+          : null;
+      if (!name) return;
+      const words = fieldWords(name);
+      if (words.some((w) => SPAN_ANY_WORD.has(w) || SPAN_LAST_WORD.has(w))) {
+        fail(`${at(call)} — span attribute value \`${value.getText(sf)}\` reads content straight onto a span`);
+      }
+    };
+
+    const visit = (n: ts.Node) => {
+      if (ts.isCallExpression(n)) {
+        const callee = ts.isIdentifier(n.expression)
+          ? n.expression.text
+          : ts.isPropertyAccessExpression(n.expression)
+            ? n.expression.name.text
+            : "";
+        if (callee === "span" && ts.isIdentifier(n.expression)) {
+          const attrs = n.arguments[1];
+          if (!attrs || !ts.isObjectLiteralExpression(attrs)) {
+            fail(`${at(n)} — span() attributes must be an object literal the sweep can read`);
+          } else {
+            for (const prop of attrs.properties) {
+              if (!ts.isPropertyAssignment(prop)) {
+                fail(`${at(n)} — span() attributes must be plain \`"key": value\` pairs`);
+                continue;
+              }
+              checkKey(prop.name.getText(sf).replace(/^["']|["']$/g, ""), n);
+              checkValue(prop.initializer, n);
+            }
+          }
+        } else if (SPAN_CALLS.has(callee) && callee !== "span") {
+          const [key, value] = n.arguments;
+          if (!key || !ts.isStringLiteral(key)) {
+            fail(`${at(n)} — ${callee}() key must be a string literal the sweep can read`);
+          } else {
+            checkKey(key.text, n);
+          }
+          if (value) checkValue(value, n);
+        }
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+  }
+  console.log(`   ${keys} attribute key(s) checked, ${Object.keys(SPAN_KEY_ALLOWED).length} allowlisted`);
+}
+
 sweepExpose();
 sweepScopes();
 sweepApiGates();
@@ -1140,13 +1391,18 @@ sweepDemoScope();
 sweepProbeReplay();
 sweepAutotuneTiming();
 sweepRetrievalRecorder();
+sweepSentryImports();
+sweepLogging();
+sweepSpanAttributes();
 
 console.log(
   failures === 0
     ? "\nOK — keys stay wrapped, scopes are entered, every handler is gated, " +
         "baseline rows stay out of live reads, no guest can spend outside the " +
-        "demo's frozen scope, the transformers barrel is unimported, and the " +
-        "probe path neither serves nor judges."
+        "demo's frozen scope, the transformers barrel is unimported, the " +
+        "probe path neither serves nor judges, and server code logs through " +
+        "lib/log with no key, body or text in its fields, and no span " +
+        "attribute carries content or a key."
     : `\nFAILED — ${failures} violation(s).`,
 );
 if (failures) process.exitCode = 1;

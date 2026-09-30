@@ -21,6 +21,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { config } from "@/lib/config";
+import { log } from "@/lib/log";
 import { readLlmRankings } from "@/lib/demo/replay";
 import { questionIdentity } from "@/lib/demo/replayCore";
 import {
@@ -328,10 +329,13 @@ export async function buildAggregateRanking(
     },
   });
 
-  console.log(
-    `[rag:ranking] aggregate q=${questionId.slice(0, 8)} pool=${pool.length} ` +
-      `models=${models.length} in ${Math.round(performance.now() - t0)}ms`,
-  );
+  log.debug("ranking aggregate", {
+    component: "rag:ranking",
+    questionId,
+    pool: pool.length,
+    models: models.length,
+    ms: Math.round(performance.now() - t0),
+  });
   return resolve(await pickStored(questionId, id));
 }
 
@@ -368,7 +372,7 @@ export async function buildLlmRanking(
   // calling the LLM — this is what stops a repeat click from spending again.
   const cached = rankings.find((r) => r.kind === kind);
   if (cached && cached.details.signature === signature) {
-    console.log(`[rag:ranking] llm ${variant} q=${questionId.slice(0, 8)} cache hit`);
+    log.debug("ranking llm cache hit", { component: "rag:ranking", variant, questionId });
     return resolve(cached);
   }
 
@@ -636,10 +640,13 @@ export async function bulkBuildRankings(
     });
   }
 
-  console.log(
-    `[rag:ranking] bulk graded=${gradedIds.size}/${pending.length} scored=${scored} ` +
-      `in ${Math.round(performance.now() - t0)}ms`,
-  );
+  log.info("ranking bulk done", {
+    component: "rag:ranking",
+    graded: gradedIds.size,
+    pending: pending.length,
+    scored,
+    ms: Math.round(performance.now() - t0),
+  });
   emit({
     type: "done",
     cancelled,
@@ -771,11 +778,14 @@ export async function bulkBuildLlmRankings(
   // so no question's nDCG moved. The headline numbers ride along unchanged only
   // so the dashboard's summary line can render the same shape as the other runs.
   const summary = await getSummary();
-  console.log(
-    `[rag:ranking] bulk llm_rerank built=${built}/${pending.length} ` +
-      `skipped(no-aggregate)=${skippedNoAggregate} skipped(cached)=${skippedCached} ` +
-      `in ${Math.round(performance.now() - t0)}ms`,
-  );
+  log.info("ranking bulk llm_rerank done", {
+    component: "rag:ranking",
+    built,
+    pending: pending.length,
+    skippedNoAggregate,
+    skippedCached,
+    ms: Math.round(performance.now() - t0),
+  });
   emit({
     type: "done",
     cancelled: shouldStop(),

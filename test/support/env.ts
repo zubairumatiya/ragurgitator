@@ -48,3 +48,9 @@ function claim(name: string, derived: string) {
 // construction.
 claim("DATABASE_URL", testDatabaseUrl());
 claim("RAG_APP_DATABASE_URL", appDatabaseUrl());
+
+// Meter every statement the app's clients write (docs/obs-4-ci-budgets-plan.md
+// §1.1). Like the pools, the flag is read at module scope, so it has to be set
+// here rather than in statements.itest.ts. The count is only read there; every
+// other file just pays one Map update per statement.
+process.env.RAG_STATEMENT_METER = "1";

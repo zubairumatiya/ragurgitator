@@ -40,6 +40,7 @@ import {
 } from "@/lib/auth/keyUsageStore";
 import { withUser, type RequestUser } from "@/lib/auth/userScope";
 import { runOutsideUserTransaction } from "@/lib/db";
+import { log, withLogContext } from "@/lib/log";
 import { postJobTick } from "@/lib/http/jobSecret";
 import { sendJobCompletionEmail } from "@/lib/jobs/notify";
 import { stepFor } from "@/lib/jobs/registry";
@@ -72,6 +73,8 @@ import {
   activeConfig,
   type ResolvedConfig,
 } from "@/lib/rag/activeConfig";
+import { captureException } from "@/lib/observability/sentry";
+import { setAttr, span } from "@/lib/observability/span";
 import { getConfig } from "@/lib/rag/configStore";
 
 // How long one slice may work before it must checkpoint and hand over. Under
@@ -124,7 +127,28 @@ export type SliceOutcome =
 
 // Advance one job by one slice. The entry point for POST /api/jobs/tick, and the
 // only function that should ever be doing so.
-export async function runSlice(jobId: string): Promise<SliceOutcome> {
+//
+// Every line a slice logs carries its jobId: a tick has no session, so the job is
+// the only id that joins one slice's lines to the next's.
+//
+// One `job.slice` span per slice, a trace of its own: the tick answered 202 and
+// this runs in after(), so the request it came from has already ended.
+export function runSlice(jobId: string): Promise<SliceOutcome> {
+  return withLogContext({ jobId }, () =>
+    span(
+      "job.slice",
+      { "job.id": jobId },
+      async (s) => {
+        const outcome = await sliceOf(jobId);
+        s.setAttr("job.outcome", outcome);
+        return outcome;
+      },
+      { root: true },
+    ),
+  );
+}
+
+async function sliceOf(jobId: string): Promise<SliceOutcome> {
   // Sessionless by nature — see the note on resolveJobOwner. Everything after this
   // line runs inside the owner's scope and under RLS.
   const found = await resolveJobOwner(jobId);
@@ -133,6 +157,7 @@ export async function runSlice(jobId: string): Promise<SliceOutcome> {
 
   const claimed = await inOwnScope(owner, () => claimJob(jobId, LEASE_SECONDS));
   if (!claimed) return "busy";
+  setAttr("job.kind", claimed.job.kind);
 
   try {
     return await advance(owner, claimed);
@@ -143,14 +168,22 @@ export async function runSlice(jobId: string): Promise<SliceOutcome> {
     // error rather than ending a forty-minute job over one bad request (0064).
     const message = msg(e);
     const failures = await inOwnScope(owner, () => recordSliceFailure(jobId, message));
+    // A tick is sessionless, so nothing upstream saw this; tagged with the job so
+    // a retrying failure and its final give-up group together.
+    captureException(e, {
+      tags: { site: "jobs", jobId, kind: claimed.job.kind, failures },
+    });
     if (failures > 0 && failures < MAX_SLICE_FAILURES) {
-      console.warn(
-        `[jobs] slice for ${jobId} failed (${failures}/${MAX_SLICE_FAILURES}), retrying: ${message}`,
-      );
+      log.warn("slice failed, retrying", {
+        component: "jobs",
+        failures,
+        maxFailures: MAX_SLICE_FAILURES,
+        err: e,
+      });
       await postJobTick(jobId);
       return "retrying";
     }
-    console.warn(`[jobs] slice for ${jobId} failed, giving up: ${message}`);
+    log.warn("slice failed, giving up", { component: "jobs", failures, err: e });
     // failJob is not lease-guarded on purpose: this slice may have lost its lease,
     // and a job whose work threw still has to stop being "running".
     const failed = await inOwnScope(owner, () => failJob(jobId, message));
@@ -208,7 +241,7 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
         }),
       );
     } catch (e) {
-      console.warn(`[jobs] progress write for ${job.id} failed: ${msg(e)}`);
+      log.warn("progress write failed", { component: "jobs", err: e });
     }
   };
 
@@ -285,6 +318,8 @@ async function advance(owner: RequestUser, claimed: ClaimedJob): Promise<SliceOu
   );
   doneUnits = result.doneUnits;
   mustFinish = mustFinish || result.mustFinish === true;
+  // Cumulative over the job, like the row's done_units — not this slice's share.
+  setAttr("job.units_done", doneUnits);
 
   // The cursor moves only now, after the work above has committed.
   const stillOurs = await inOwnScope(owner, () =>
@@ -390,7 +425,7 @@ async function notify(owner: RequestUser, job: BackgroundJob): Promise<void> {
     const sent = await sendJobCompletionEmail(job, owner.email);
     if (sent) await inOwnScope(owner, () => markEmailSent(job.id));
   } catch (e) {
-    console.warn(`[jobs] completion email for ${job.id} failed: ${msg(e)}`);
+    log.warn("completion email failed", { component: "jobs", err: e });
   }
 }
 

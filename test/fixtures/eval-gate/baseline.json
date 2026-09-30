@@ -1,7 +1,7 @@
 {
  "fixtureHash": "3bba1471ab771982b60b6849e94819477391e10c80e3f78b5ad887530cd92b1f",
- "gitSha": "6a96869955214280acfea78f8fa91e33db99970e",
- "scoredAt": "2026-09-23T15:50:47.920Z",
+ "gitSha": "09a9b8c3ea71721a4a8372ae4a4672815b2b5aab",
+ "scoredAt": "2026-09-24T22:12:36.389Z",
  "k": 5,
  "recall": 0.9745762711864406,
  "mrr": 0.919774011299435,
@@ -599,5 +599,23 @@
    "question": "Which country was assigned to Germany's sphere of influence under the secret protocol of the 1939 Nazi-Soviet pact?",
    "rank": 2
   }
- ]
+ ],
+ "statements": {
+  "total": 112,
+  "byPrefix": {
+   "select chunks_voyage_4_lite_1024": 92,
+   "select embedding_cache": 6,
+   "savepoint": 2,
+   "select configs": 2,
+   "select unnest": 2,
+   "begin": 1,
+   "commit": 1,
+   "insert savings_totals": 1,
+   "select": 1,
+   "select config_chunk_overrides": 1,
+   "select pg_catalog.pg_type": 1,
+   "set": 1,
+   "with chunks_voyage_4_lite_1024": 1
+  }
+ }
 }

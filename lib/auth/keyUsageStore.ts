@@ -31,6 +31,9 @@ import { activeUserId } from "@/lib/auth/userScope";
 import { isolated, sql } from "@/lib/db";
 import { detached } from "@/lib/detached";
 import { keyLastFourFor } from "@/lib/llm/client";
+import { log } from "@/lib/log";
+import { captureException } from "@/lib/observability/sentry";
+import { addAttr, setAttr, span } from "@/lib/observability/span";
 import { activeConfigOrNull } from "@/lib/rag/activeConfig";
 import { SURFACE_LABELS, type Surface } from "@/lib/rag/pricing";
 
@@ -85,6 +88,9 @@ export type KeyUsageAmounts = {
   inputTokens: number;
   outputTokens: number;
   costUsd: number;
+  // Prompt-cache read tokens, for the llm.chat span only — the ledger has no
+  // column for it.
+  cachedInputTokens?: number;
 };
 
 const NO_AMOUNTS: KeyUsageAmounts = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
@@ -150,7 +156,8 @@ export async function withKeyUsageBuffer<T>(
       try {
         await drain(batch);
       } catch (err) {
-        console.warn(`[keyusage] drain failed: ${(err as Error).message}`);
+        log.warn("drain failed", { component: "keyusage", events: batch.length, err });
+        captureException(err, { tags: { site: "keyusage" } });
       }
     }
   }
@@ -161,7 +168,41 @@ export async function withKeyUsageBuffer<T>(
 // THE INVERSION FROM recordSpend: that only ever sees successes, because a
 // rejected call spends nothing. Here a rejection is the point — a burst of 401s
 // is the single most legible signature of a key being spent by someone else.
+//
+// ALSO THE ONE PLACE SPANS GET COST (docs/obs-5-pipeline-spans-plan.md §1). The
+// amounts written to the span are the same object written to the ledger row, so
+// the waterfall and /usage cannot disagree. A message opens its own `llm.chat`
+// span; an embed adds to the enclosing `rag.embed` (embeddings.ts opens it), which
+// may span several batches; batch control calls carry nothing worth a span.
 export async function trackKeyUsage<T>(
+  meta: KeyUsageMeta,
+  call: () => Promise<T>,
+  usageOf?: (result: T) => KeyUsageAmounts,
+): Promise<T> {
+  if (meta.kind !== "message") return trackAndRecord(meta, call, usageOf);
+  return span("llm.chat", { "llm.provider": meta.provider, "llm.model": meta.model }, () =>
+    trackAndRecord(meta, call, usageOf),
+  );
+}
+
+function spanAmounts(meta: KeyUsageMeta, amounts: KeyUsageAmounts): void {
+  if (meta.kind === "message") {
+    setAttr("llm.tokens.in", amounts.inputTokens);
+    setAttr("llm.tokens.out", amounts.outputTokens);
+    setAttr("llm.cost.usd", amounts.costUsd);
+    setAttr("llm.cached_input", amounts.cachedInputTokens ?? 0);
+  } else if (meta.kind === "embed") {
+    addAttr("embed.tokens", amounts.inputTokens);
+    addAttr("embed.cost.usd", amounts.costUsd);
+  }
+}
+
+function spanFailure(meta: KeyUsageMeta, errorCode: string): void {
+  if (meta.kind === "message") setAttr("llm.error", errorCode);
+  else if (meta.kind === "embed") setAttr("embed.error", errorCode);
+}
+
+async function trackAndRecord<T>(
   meta: KeyUsageMeta,
   call: () => Promise<T>,
   usageOf?: (result: T) => KeyUsageAmounts,
@@ -174,12 +215,15 @@ export async function trackKeyUsage<T>(
     try {
       amounts = usageOf?.(result) ?? NO_AMOUNTS;
     } catch (err) {
-      console.warn(`[keyusage] usage read failed: ${(err as Error).message}`);
+      log.warn("usage read failed", { component: "keyusage", provider: meta.provider, err });
     }
+    spanAmounts(meta, amounts);
     await recordKeyUsage(meta, true, null, amounts);
     return result;
   } catch (err) {
-    await recordKeyUsage(meta, false, errorCodeOf(err), NO_AMOUNTS);
+    const code = errorCodeOf(err);
+    spanFailure(meta, code);
+    await recordKeyUsage(meta, false, code, NO_AMOUNTS);
     throw err;
   }
 }
@@ -212,9 +256,12 @@ async function recordKeyUsage(
     // recorded nothing for guests: 744 embeddings bought on the operator's key
     // with `assertDemoEmbedBudget` reading zero. The drop is still best-effort —
     // telemetry must not fail the call — but it is no longer invisible.
-    console.warn(
-      `[keyusage] dropped a ${meta.provider}/${meta.kind} call: ${(err as Error).message}`,
-    );
+    log.warn("dropped a call with no user scope", {
+      component: "keyusage",
+      provider: meta.provider,
+      kind: meta.kind,
+      err,
+    });
     return;
   }
 
@@ -274,7 +321,10 @@ export async function flushKeyUsageEvents(events: KeyUsageEvent[]): Promise<void
     );
   } catch (err) {
     if (isMissingTable(err)) return;
-    console.warn(`[keyusage] insert of ${events.length} failed: ${(err as Error).message}`);
+    log.warn("insert failed", { component: "keyusage", events: events.length, err });
+    // Swallowed on purpose — telemetry must not fail the call — which is exactly
+    // why it is reported: a spend control that fails silently is the defect.
+    captureException(err, { tags: { site: "keyusage" } });
   }
 }
 
@@ -592,6 +642,6 @@ export async function pruneKeyUsage(): Promise<void> {
     );
   } catch (err) {
     if (isMissingTable(err)) return;
-    console.warn(`[keyusage] prune failed: ${(err as Error).message}`);
+    log.warn("prune failed", { component: "keyusage", err });
   }
 }

@@ -115,5 +115,6 @@ function llmAmounts(
     inputTokens: inTok,
     outputTokens: outTok,
     costUsd: costLlm(model, inTok, outTok),
+    cachedInputTokens: message.usage?.cache_read_input_tokens ?? 0,
   };
 }

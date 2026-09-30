@@ -1,0 +1,35 @@
+{
+  "cache-probe": {
+    "total": 15,
+    "byPrefix": {
+      "savepoint": 4,
+      "insert savings_totals": 2,
+      "begin": 1,
+      "commit": 1,
+      "insert semantic_cache_shadow": 1,
+      "select": 1,
+      "select chunks_voyage_4_lite_1024": 1,
+      "select configs": 1,
+      "select embedding_cache": 1,
+      "select semantic_cache": 1,
+      "update semantic_cache": 1
+    }
+  },
+  "fusion": {
+    "total": 14,
+    "byPrefix": {
+      "savepoint": 2,
+      "select unnest": 2,
+      "begin": 1,
+      "commit": 1,
+      "insert savings_totals": 1,
+      "select": 1,
+      "select chunks_voyage_4_lite_1024": 1,
+      "select config_chunk_overrides": 1,
+      "select configs": 1,
+      "select embedding_cache": 1,
+      "set": 1,
+      "with chunks_voyage_4_lite_1024": 1
+    }
+  }
+}

@@ -17,6 +17,8 @@
 // -in user's own address is that override ever the same thing as correct.
 import { Resend } from "resend";
 
+import { log } from "@/lib/log";
+
 let _resend: Resend | null | undefined;
 
 function client(): Resend | null {
@@ -76,7 +78,7 @@ export async function sendMail(mail: Mail): Promise<boolean> {
     await c.emails.send({ from: sender(), to, subject: mail.subject, html: mail.html });
     return true;
   } catch (e) {
-    console.warn(`[notify] email send failed: ${String(e)}`);
+    log.warn("email send failed", { component: "notify", err: e });
     return false;
   }
 }

@@ -16,6 +16,7 @@ import { serverSupabase } from "@/lib/auth/supabase";
 import { demoEnabled } from "@/lib/demo/config";
 import { provisionGuest } from "@/lib/demo/provision";
 import { clientAddress } from "@/lib/demo/rateLimit";
+import { log } from "@/lib/log";
 
 // Provisioning does real work — a Voyage verify, a Key Vault wrap, then a clone
 // of every chunk in the corpus — so it needs more than the default budget. It is
@@ -48,7 +49,7 @@ export async function POST(request: Request) {
     // The workspace exists and will be reaped on schedule; what failed is only
     // the visitor's way into it, so say so plainly rather than pretending the
     // demo is full.
-    console.error(`[demo] sign-in for a freshly minted guest failed: ${error.message}`);
+    log.error("sign-in for a freshly minted guest failed", { component: "demo", err: error });
     return Response.json(
       { error: "Something went wrong signing you in. Try again in a moment." },
       { status: 500 },

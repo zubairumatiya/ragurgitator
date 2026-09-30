@@ -14,6 +14,7 @@ import "server-only";
 import { privilegedSql } from "@/lib/db";
 import { reapExpiredGuests } from "@/lib/demo/guest";
 import { pruneProvisionLedger } from "@/lib/demo/rateLimit";
+import { log } from "@/lib/log";
 
 export type HousekeepingReport = {
   reaped: number;
@@ -54,7 +55,7 @@ async function reindexHnsw(): Promise<string[]> {
       await privilegedSql.unsafe(`reindex index concurrently "${indexname}"`);
       done.push(indexname);
     } catch (e) {
-      console.warn(`[demo] reindex of ${indexname} failed: ${String(e)}`);
+      log.warn("hnsw reindex failed", { component: "demo", index: indexname, err: e });
     }
   }
   return done;
@@ -62,7 +63,7 @@ async function reindexHnsw(): Promise<string[]> {
 
 export async function runDemoHousekeeping(): Promise<HousekeepingReport> {
   const reaped = await reapExpiredGuests().catch((e) => {
-    console.warn(`[demo] daily reap failed: ${String(e)}`);
+    log.warn("daily reap failed", { component: "demo", err: e });
     return 0;
   });
   const prunedProvisions = await pruneProvisionLedger().catch(() => 0);
