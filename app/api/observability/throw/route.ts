@@ -12,7 +12,7 @@
 // in lib/observability/sentry.test.ts instead; they need a user scope this route
 // deliberately does not open.
 import { withJobSecret } from "@/lib/http/jobSecret";
-import { setRequestTags } from "@/lib/observability/sentry";
+import { captureException, setRequestTags } from "@/lib/observability/sentry";
 
 export class ObservabilityProbeError extends Error {
   constructor() {
@@ -21,9 +21,19 @@ export class ObservabilityProbeError extends Error {
   }
 }
 
+// `?capture=1` reports the same error by hand from inside the handler and answers
+// 500 instead of throwing. The two events differ in exactly one thing — which
+// scope the capture ran on — so comparing their tags shows whether tags set in a
+// handler (setRequestTags) survive to the event Next's onRequestError produces.
+// On Vercel they did not (docs/obs-1-sentry-plan.md, Phase 4 log).
 export async function GET(request: Request) {
   return withJobSecret(request, null, async () => {
     setRequestTags({ route: "observability/throw" });
-    throw new ObservabilityProbeError();
+    const err = new ObservabilityProbeError();
+    if (new URL(request.url).searchParams.get("capture") === "1") {
+      const eventId = captureException(err);
+      return Response.json({ captured: true, eventId }, { status: 500 });
+    }
+    throw err;
   });
 }
