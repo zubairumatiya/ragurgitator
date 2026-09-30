@@ -40,7 +40,6 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 import { withUserTransaction } from "@/lib/db";
 import { withLogContext } from "@/lib/log";
-import { setRequestTags } from "@/lib/observability/sentry";
 
 // Mirrors SessionUser in lib/auth/dal.ts rather than importing it: dal.ts is
 // "server-only" and pulls in the Supabase client, while this module is imported
@@ -67,7 +66,6 @@ const store = new AsyncLocalStorage<RequestUser>();
 // the NDJSON producer's re-entry — first has the id in hand. The log context's
 // userId is entered here for the same reason.
 export function withUser<T>(user: RequestUser, fn: () => Promise<T>): Promise<T> {
-  setRequestTags({ userId: user.id });
   return withLogContext({ userId: user.id }, () =>
     store.run(user, () => withUserTransaction(user.id, fn)),
   );

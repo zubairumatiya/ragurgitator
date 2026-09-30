@@ -26,7 +26,8 @@
 // invalidates in-flight signatures, which costs one janitor sweep to recover.
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-import { log } from "@/lib/log";
+import { log, withLogContext } from "@/lib/log";
+import { capturingEscapes } from "@/lib/observability/escapes";
 
 let cached: string | undefined;
 
@@ -86,7 +87,12 @@ export async function withJobSecret(
     ? verifyJobTick(jobId, request.headers.get(JOB_SIGNATURE_HEADER))
     : verifySweepBearer(request.headers.get("authorization"));
   if (!ok) return Response.json({ error: "Unauthorized." }, { status: 401 });
-  return fn();
+  // The same request context the cookie boundaries enter, minus a user: a tick has
+  // none until the runner resolves the job's owner. An error escaping `fn` is
+  // captured here with that context, as in lib/http/configScope.ts.
+  const route = new URL(request.url).pathname;
+  const requestId = request.headers.get("x-vercel-id") ?? undefined;
+  return withLogContext({ requestId, route }, () => capturingEscapes(fn));
 }
 
 // Fire a tick at ourselves. Awaited only for the ACK — the receiving handler

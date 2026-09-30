@@ -32,6 +32,7 @@ import { type RequestUser, activeUserId, withUser } from "@/lib/auth/userScope";
 import { sql } from "@/lib/db";
 import { withDetachedQueue } from "@/lib/detached";
 import { catchingMissingKey } from "@/lib/http/configScope";
+import { capturingEscapes } from "@/lib/observability/escapes";
 import { resourceMetadataUrl } from "@/lib/mcp/metadata";
 
 // Authenticate happens BEFORE this — requireBearerAuth + mcpTokenVerifier have
@@ -39,7 +40,9 @@ import { resourceMetadataUrl } from "@/lib/mcp/metadata";
 // this takes the user rather than the request. The cookie wrappers can't do that
 // because the cookie jar is ambient; a token is not.
 export function withMcpUser<T>(user: RequestUser, fn: () => Promise<T>): Promise<T | Response> {
-  return withDetachedQueue(user, after, () => withUser(user, () => catchingMissingKey(fn)));
+  return withDetachedQueue(user, after, () =>
+    withUser(user, () => capturingEscapes(() => catchingMissingKey(fn))),
+  );
 }
 
 // The kill switch (migrations/0059_mcp_access.sql). Must be called INSIDE a

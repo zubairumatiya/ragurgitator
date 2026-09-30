@@ -16,7 +16,8 @@ import { withUser } from "../../lib/auth/userScope";
 import { fragment, privilegedSql } from "../../lib/db";
 import { ndjsonStream } from "../../lib/http/ndjson";
 import { streamError } from "../../lib/http/missingKeyServer";
-import { flushSentry, setRequestTags } from "../../lib/observability/sentry";
+import { withLogContext } from "../../lib/log";
+import { flushSentry } from "../../lib/observability/sentry";
 import { initSentryInMemory, withRequestIsolation } from "../../lib/observability/testing";
 import { adminClient, createUser, ensureAppRole, truncateAll } from "../support/harness";
 
@@ -45,13 +46,15 @@ beforeEach(async () => {
 });
 
 // withRequestConfig's shape: a request isolation scope, the user scope, then the
-// config and route tags, then a handler that returns the stream straight away.
+// config and route in the log context, then a handler that returns the stream
+// straight away.
 function request(run: Parameters<typeof ndjsonStream<{ type: string }>>[0]): Promise<Response> {
   return withRequestIsolation(() =>
-    withUser(alice, async () => {
-      setRequestTags({ configId: "cfg-itest", route: "/api/eval/process" });
-      return ndjsonStream(run);
-    }),
+    withUser(alice, () =>
+      withLogContext({ configId: "cfg-itest", route: "/api/eval/process" }, async () =>
+        ndjsonStream(run),
+      ),
+    ),
   );
 }
 

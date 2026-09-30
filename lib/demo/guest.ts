@@ -15,7 +15,6 @@ import { cache } from "react";
 import { activeUserId } from "@/lib/auth/userScope";
 import { privilegedSql, scopeMemo, sql } from "@/lib/db";
 import { annotateLogContext } from "@/lib/log";
-import { setRequestTags } from "@/lib/observability/sentry";
 
 export type GuestStatus = {
   isGuest: boolean;
@@ -40,7 +39,6 @@ export const guestStatus = cache(async (): Promise<GuestStatus> =>
     if (!row?.is_guest) return NOT_A_GUEST;
     // Tagged here, where the answer is already paid for, rather than with a
     // lookup of its own on every request.
-    setRequestTags({ guest: true });
     annotateLogContext({ guest: true });
     return { isGuest: true, expiresAt: row.expires_at?.toISOString() ?? null };
   }),

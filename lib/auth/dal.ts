@@ -22,6 +22,7 @@ import { serverSupabase } from "@/lib/auth/supabase";
 import { withUser } from "@/lib/auth/userScope";
 import { withKeyUsageBuffer } from "@/lib/auth/keyUsageStore";
 import { withDetachedQueue } from "@/lib/detached";
+import { capturingEscapes } from "@/lib/observability/escapes";
 
 // The DTO — deliberately NOT the auth.users row. Supabase's user object carries
 // app_metadata, identities, raw provider payloads and more; none of it belongs
@@ -93,6 +94,6 @@ export function unauthorizedJson(): Response {
 export async function withPageUser<T>(fn: (user: SessionUser) => Promise<T>): Promise<T> {
   const user = await requireUser();
   return withDetachedQueue(user, after, () =>
-    withKeyUsageBuffer(() => withUser(user, () => fn(user))),
+    withKeyUsageBuffer(() => withUser(user, () => capturingEscapes(() => fn(user)))),
   );
 }

@@ -1164,8 +1164,25 @@ function sweepSentryImports() {
     }
     fail(`${path} — imports @sentry/ directly; use @/lib/observability/sentry`);
   }
-  console.log(`   ${allowed} allowed importer(s), ${files.length} files swept`);
+  // And through that door, nothing writes ids onto a Sentry scope. On Vercel the
+  // isolation scope is shared between requests, so a scope tag is another
+  // request's tag (docs/obs-1-sentry-plan.md, Phase 4 follow-up). Request ids
+  // travel as explicit tags read from lib/log's context at capture time instead.
+  let scopeWrites = 0;
+  for (const file of files) {
+    const path = rel(file);
+    if (!SENTRY_ALLOWED(path) || /\.test\.tsx?$/.test(path)) continue;
+    const code = codeOnly(read(file));
+    const m = code.match(SCOPE_WRITE);
+    if (m) fail(`${path} — ${m[0].trim()} writes to a Sentry scope; pass tags to captureException`);
+    scopeWrites++;
+  }
+  console.log(`   ${allowed} allowed importer(s), ${scopeWrites} checked for scope writes, ${files.length} files swept`);
 }
+// A getter-based write lands on a scope that outlives the request; a write inside
+// a withScope callback is scoped to that one capture and is fine.
+const SCOPE_WRITE =
+  /\b(?:get(?:Isolation|Current|Global)Scope\(\)|Sentry)\s*\.\s*set(?:Tag|Tags|User|Extra|Extras|Context)\s*\(/;
 
 // 12. Server code logs through lib/log, and never logs a secret
 //

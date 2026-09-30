@@ -1,4 +1,4 @@
-import * as Sentry from "@sentry/nextjs";
+import { onRequestError as reportEscapedError } from "@/lib/observability/sentry";
 
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") await import("./sentry.server.config");
@@ -7,4 +7,6 @@ export async function register() {
 
 // Sees only errors that escape a handler. The NDJSON producer and the detached
 // queue run after the handler returns, so they capture by hand (docs/obs-1-sentry-plan.md §0).
-export const onRequestError = Sentry.captureRequestError;
+// Scope boundaries capture escaping errors themselves, with the request's ids, and
+// this skips those — see lib/observability/sentry.ts.
+export const onRequestError = reportEscapedError;
